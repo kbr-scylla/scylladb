@@ -72,6 +72,7 @@
 #include "supervisor.hh"
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
+#include "audit/audit.hh"
 
 using token = dht::token;
 using UUID = utils::UUID;
@@ -1231,6 +1232,8 @@ future<> storage_service::drain_on_shutdown() {
 
             tracing::tracing::tracing_instance().stop().get();
             slogger.info("Drain on shutdown: tracing is stopped");
+
+            audit::audit::stop_audit().get();
 
             ss.flush_column_families();
             slogger.info("Drain on shutdown: flush column_families done");

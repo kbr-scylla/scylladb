@@ -50,6 +50,7 @@
 #include <sys/resource.h>
 #include "disk-error-handler.hh"
 #include "tracing/tracing.hh"
+#include "audit/audit.hh"
 #include "core/prometheus.hh"
 #include "message/messaging_service.hh"
 #include <seastar/net/dns.hh>
@@ -426,6 +427,7 @@ int main(int ac, char** av) {
             }
             supervisor::notify("creating tracing");
             tracing::tracing::create_tracing("trace_keyspace_helper").get();
+            audit::audit::create_audit(*cfg).get();
             supervisor::notify("creating snitch");
             i_endpoint_snitch::create_snitch(cfg->endpoint_snitch()).get();
             // #293 - do not stop anything
@@ -640,6 +642,9 @@ int main(int ac, char** av) {
             cf_cache_hitrate_calculator.local().run_on(engine().cpu_id());
             gms::get_local_gossiper().wait_for_gossip_to_settle().get();
             api::set_server_gossip_settle(ctx).get();
+            supervisor::notify("starting tracing");
+            tracing::tracing::start_tracing().get();
+            audit::audit::start_audit().get();
             supervisor::notify("starting native transport");
             service::get_local_storage_service().start_native_transport().get();
             if (start_thrift) {
