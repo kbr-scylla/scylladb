@@ -50,6 +50,7 @@
 
 #include <experimental/optional>
 #include <vector>
+#include "audit/audit.hh"
 
 namespace cql3 {
 
@@ -74,6 +75,9 @@ public:
     virtual std::unique_ptr<prepared_statement> prepare(database& db, cql_stats& stats) = 0;
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const;
+
+protected:
+    virtual audit::statement_category category() const = 0;
 };
 
 }

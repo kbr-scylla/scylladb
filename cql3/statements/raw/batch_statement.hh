@@ -85,6 +85,8 @@ public:
     }
 
     virtual std::unique_ptr<prepared> prepare(database& db, cql_stats& stats) override;
+protected:
+    virtual audit::statement_category category() const override;
 };
 
 }

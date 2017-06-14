@@ -394,6 +394,10 @@ void create_table_statement::raw_statement::add_column_alias(::shared_ptr<column
     _column_aliases.emplace_back(alias);
 }
 
+audit::statement_category create_table_statement::raw_statement::category() const {
+    return audit::statement_category::DDL;
+}
+
 }
 
 }

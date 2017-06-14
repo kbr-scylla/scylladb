@@ -89,6 +89,8 @@ public:
 
     using result_row_type = std::vector<bytes_opt>;
     using ordering_comparator_type = compare_fn<result_row_type>;
+protected:
+    virtual audit::statement_category category() const override;
 private:
     ::shared_ptr<parameters> _parameters;
     std::vector<::shared_ptr<selection::raw_selector>> _select_clause;

@@ -556,6 +556,10 @@ modification_statement::prepare(database& db, ::shared_ptr<variable_specificatio
     return stmt;
 }
 
+audit::statement_category modification_statement::category() const {
+    return audit::statement_category::DML;
+}
+
 }
 
 void

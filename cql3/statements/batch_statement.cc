@@ -444,6 +444,10 @@ batch_statement::prepare(database& db, cql_stats& stats) {
                                                      std::move(partition_key_bind_indices));
 }
 
+audit::statement_category batch_statement::category() const {
+    return audit::statement_category::DML;
+}
+
 }
 
 

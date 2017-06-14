@@ -88,3 +88,7 @@ void cql3::statements::authorization_statement::mayme_correct_resource(auth::dat
     }
 }
 
+audit::statement_category cql3::statements::authorization_statement::category() const {
+    return audit::statement_category::DCL;
+}
+

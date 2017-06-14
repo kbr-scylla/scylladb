@@ -81,3 +81,7 @@ future<::shared_ptr<cql_transport::messages::result_message>> cql3::statements::
     // Internal queries are exclusively on the system keyspace and makes no sense here
     throw std::runtime_error("unsupported operation");
 }
+
+audit::statement_category cql3::statements::authentication_statement::category() const {
+    return audit::statement_category::DCL;
+}

@@ -70,6 +70,11 @@ std::unique_ptr<prepared_statement> use_statement::prepare(database& db, cql_sta
     return std::make_unique<prepared>(make_shared<cql3::statements::use_statement>(_keyspace));
 }
 
+audit::statement_category use_statement::category() const {
+    // It's not obvious why USE is a DML but that's how Origin classifies it.
+    return audit::statement_category::DML;
+}
+
 }
 
 bool use_statement::uses_function(const sstring& ks_name, const sstring& function_name) const

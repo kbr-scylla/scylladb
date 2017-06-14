@@ -20,6 +20,10 @@ class config;
 
 namespace audit {
 
+enum class statement_category {
+    QUERY, DML, DDL, DCL, AUTH, ADMIN
+};
+
 class audit final : public seastar::async_sharded_service<audit> {
 public:
     static seastar::sharded<audit>& audit_instance() {

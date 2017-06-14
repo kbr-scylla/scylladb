@@ -111,6 +111,10 @@ schema_altering_statement::execute_internal(distributed<service::storage_proxy>&
     return execute0(proxy, state, options, true);
 }
 
+audit::statement_category schema_altering_statement::category() const {
+    return audit::statement_category::DDL;
+}
+
 }
 
 }

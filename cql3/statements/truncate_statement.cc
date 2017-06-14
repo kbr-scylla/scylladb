@@ -108,6 +108,10 @@ truncate_statement::execute_internal(distributed<service::storage_proxy>& proxy,
     throw std::runtime_error("unsupported operation");
 }
 
+audit::statement_category truncate_statement::category() const {
+    return audit::statement_category::DML;
+}
+
 }
 
 }

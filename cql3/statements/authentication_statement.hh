@@ -68,6 +68,8 @@ public:
 
     future<::shared_ptr<cql_transport::messages::result_message>>
     execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) override;
+protected:
+    virtual audit::statement_category category() const override;
 };
 
 }

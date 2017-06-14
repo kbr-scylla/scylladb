@@ -566,6 +566,10 @@ indexed_table_select_statement::find_index_partition_ranges(distributed<service:
 
 namespace raw {
 
+audit::statement_category select_statement::category() const {
+    return audit::statement_category::QUERY;
+}
+
 select_statement::select_statement(::shared_ptr<cf_name> cf_name,
                                    ::shared_ptr<parameters> parameters,
                                    std::vector<::shared_ptr<selection::raw_selector>> select_clause,
