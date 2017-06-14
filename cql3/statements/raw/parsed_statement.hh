@@ -78,6 +78,7 @@ public:
 
 protected:
     virtual audit::statement_category category() const = 0;
+    virtual audit::audit_info_ptr audit_info() const = 0;
 };
 
 }

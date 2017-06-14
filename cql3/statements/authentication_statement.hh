@@ -70,6 +70,9 @@ public:
     execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) override;
 protected:
     virtual audit::statement_category category() const override;
+    virtual audit::audit_info_ptr audit_info() const override {
+        return audit::audit::create_audit_info(category(), sstring(), sstring());
+    }
 };
 
 }

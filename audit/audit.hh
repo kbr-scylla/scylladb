@@ -12,6 +12,8 @@
 #include <seastar/core/sharded.hh>
 #include "stdx.hh"
 
+#include <memory>
+
 namespace db {
 
 class config;
@@ -23,6 +25,20 @@ namespace audit {
 enum class statement_category {
     QUERY, DML, DDL, DCL, AUTH, ADMIN
 };
+
+class audit_info final {
+    statement_category _category;
+    sstring _keyspace;
+    sstring _table;
+public:
+    audit_info(statement_category cat, sstring keyspace, sstring table)
+        : _category(cat)
+        , _keyspace(std::move(keyspace))
+        , _table(std::move(table))
+    { }
+};
+
+using audit_info_ptr = std::unique_ptr<audit_info>;
 
 class audit final : public seastar::async_sharded_service<audit> {
 public:
@@ -39,6 +55,7 @@ public:
     static future<> create_audit(const db::config& cfg);
     static future<> start_audit();
     static future<> stop_audit();
+    static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
     audit(const db::config& cfg);
     future<> start();
     future<> stop();

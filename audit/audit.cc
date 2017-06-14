@@ -43,6 +43,13 @@ future<> audit::stop_audit() {
     });
 }
 
+audit_info_ptr audit::create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table) {
+    if (!audit_instance().local_is_initialized()) {
+        return nullptr;
+    }
+    return std::make_unique<audit_info>(cat, keyspace, table);
+}
+
 future<> audit::start() {
     return make_ready_future<>();
 }

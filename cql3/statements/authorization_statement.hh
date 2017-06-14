@@ -76,6 +76,9 @@ public:
 protected:
     static void mayme_correct_resource(auth::data_resource&, const service::client_state&);
     virtual audit::statement_category category() const override;
+    virtual audit::audit_info_ptr audit_info() const override {
+        return audit::audit::create_audit_info(category(), sstring(), sstring());
+    }
 };
 
 }
