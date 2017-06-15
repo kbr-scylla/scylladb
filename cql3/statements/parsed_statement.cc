@@ -67,22 +67,24 @@ bool parsed_statement::uses_function(const sstring& ks_name, const sstring& func
 
 }
 
-prepared_statement::prepared_statement(::shared_ptr<cql_statement> statement_, std::vector<::shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices)
+prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, std::vector<::shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices)
     : statement(std::move(statement_))
     , bound_names(std::move(bound_names_))
     , partition_key_bind_indices(std::move(partition_key_bind_indices))
+{
+    statement->set_audit_info(std::move(audit_info));
+}
+
+prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, const variable_specifications& names, const std::vector<uint16_t>& partition_key_bind_indices)
+    : prepared_statement(std::move(audit_info), statement_, names.get_specifications(), partition_key_bind_indices)
 { }
 
-prepared_statement::prepared_statement(::shared_ptr<cql_statement> statement_, const variable_specifications& names, const std::vector<uint16_t>& partition_key_bind_indices)
-    : prepared_statement(statement_, names.get_specifications(), partition_key_bind_indices)
+prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, variable_specifications&& names, std::vector<uint16_t>&& partition_key_bind_indices)
+    : prepared_statement(std::move(audit_info), statement_, std::move(names).get_specifications(), std::move(partition_key_bind_indices))
 { }
 
-prepared_statement::prepared_statement(::shared_ptr<cql_statement> statement_, variable_specifications&& names, std::vector<uint16_t>&& partition_key_bind_indices)
-    : prepared_statement(statement_, std::move(names).get_specifications(), std::move(partition_key_bind_indices))
-{ }
-
-prepared_statement::prepared_statement(::shared_ptr<cql_statement>&& statement_)
-    : prepared_statement(statement_, std::vector<::shared_ptr<column_specification>>(), std::vector<uint16_t>())
+prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement>&& statement_)
+    : prepared_statement(std::move(audit_info), statement_, std::vector<::shared_ptr<column_specification>>(), std::vector<uint16_t>())
 { }
 
 }

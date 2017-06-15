@@ -48,7 +48,7 @@ uint32_t cql3::statements::authentication_statement::get_bound_terms() {
 
 std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::authentication_statement::prepare(
                 database& db, cql_stats& stats) {
-    return std::make_unique<prepared>(this->shared_from_this());
+    return std::make_unique<prepared>(audit_info(), this->shared_from_this());
 }
 
 bool cql3::statements::authentication_statement::uses_function(

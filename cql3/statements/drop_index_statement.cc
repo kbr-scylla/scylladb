@@ -102,7 +102,7 @@ future<shared_ptr<cql_transport::event::schema_change>> drop_index_statement::an
 
 std::unique_ptr<cql3::statements::prepared_statement>
 drop_index_statement::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<drop_index_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<drop_index_statement>(*this));
 }
 
 schema_ptr drop_index_statement::lookup_indexed_table() const

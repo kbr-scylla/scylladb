@@ -50,6 +50,10 @@ audit_info_ptr audit::create_audit_info(statement_category cat, const sstring& k
     return std::make_unique<audit_info>(cat, keyspace, table);
 }
 
+audit_info_ptr audit::create_no_audit_info() {
+    return audit_info_ptr();
+}
+
 future<> audit::start() {
     return make_ready_future<>();
 }

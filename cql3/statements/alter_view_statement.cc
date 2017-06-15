@@ -117,7 +117,7 @@ future<shared_ptr<cql_transport::event::schema_change>> alter_view_statement::an
 
 std::unique_ptr<cql3::statements::prepared_statement>
 alter_view_statement::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<alter_view_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<alter_view_statement>(*this));
 }
 
 }

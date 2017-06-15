@@ -267,7 +267,7 @@ create_index_statement::announce_migration(distributed<service::storage_proxy>& 
 
 std::unique_ptr<cql3::statements::prepared_statement>
 create_index_statement::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<create_index_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<create_index_statement>(*this));
 }
 
 index_metadata create_index_statement::make_index_metadata(schema_ptr schema,

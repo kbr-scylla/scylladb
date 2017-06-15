@@ -45,6 +45,7 @@
 #include "service/query_state.hh"
 #include "service/storage_proxy.hh"
 #include "cql3/query_options.hh"
+#include "audit/audit.hh"
 
 namespace cql_transport {
 
@@ -62,7 +63,11 @@ class metadata;
 shared_ptr<const metadata> make_empty_metadata();
 
 class cql_statement {
+    audit::audit_info_ptr _audit_info;
 public:
+    cql_statement() {}
+    cql_statement(cql_statement&& o) = default;
+    cql_statement(const cql_statement& o) : _audit_info(o._audit_info ? std::make_unique<audit::audit_info>(*o._audit_info) : nullptr) { }
     virtual ~cql_statement()
     { }
 
@@ -107,10 +112,14 @@ public:
     virtual bool depends_on_column_family(const sstring& cf_name) const = 0;
 
     virtual shared_ptr<const metadata> get_result_metadata() const = 0;
+
+    audit::audit_info* get_audit_info() { return _audit_info.get(); }
+    void set_audit_info(audit::audit_info_ptr&& info) { _audit_info = std::move(info); }
 };
 
 class cql_statement_no_metadata : public cql_statement {
 public:
+    cql_statement_no_metadata() : cql_statement() { }
     virtual shared_ptr<const metadata> get_result_metadata() const override {
         return make_empty_metadata();
     }

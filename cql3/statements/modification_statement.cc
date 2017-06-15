@@ -504,7 +504,7 @@ modification_statement::modification_statement::prepare(database& db, cql_stats&
     auto bound_names = get_bound_variables();
     auto statement = prepare(db, bound_names, stats);
     auto partition_key_bind_indices = bound_names->get_partition_key_bind_indexes(schema);
-    return std::make_unique<prepared>(std::move(statement), *bound_names, std::move(partition_key_bind_indices));
+    return std::make_unique<prepared>(audit_info(), std::move(statement), *bound_names, std::move(partition_key_bind_indices));
 }
 
 ::shared_ptr<cql3::statements::modification_statement>

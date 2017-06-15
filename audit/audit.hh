@@ -56,6 +56,7 @@ public:
     static future<> start_audit();
     static future<> stop_audit();
     static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
+    static audit_info_ptr create_no_audit_info();
     audit(const db::config& cfg);
     future<> start();
     future<> stop();
