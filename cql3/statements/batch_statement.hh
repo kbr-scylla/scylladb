@@ -92,6 +92,8 @@ public:
                     std::unique_ptr<attributes> attrs,
                     cql_stats& stats);
 
+    const std::vector<shared_ptr<modification_statement>>& statements() const { return _statements; }
+
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override;
 
     virtual bool depends_on_keyspace(const sstring& ks_name) const override;

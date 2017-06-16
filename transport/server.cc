@@ -948,7 +948,6 @@ cql_server::connection::process_batch(uint16_t stream, bytes_view buf, service::
         if (dynamic_cast<cql3::statements::modification_statement*>(ps->statement.get()) == nullptr) {
             throw exceptions::invalid_request_exception("Invalid statement in batch: only UPDATE, INSERT and DELETE statements are allowed.");
         }
-
         ::shared_ptr<cql3::statements::modification_statement> modif_statement_ptr = static_pointer_cast<cql3::statements::modification_statement>(ps->statement);
         tracing::add_table_name(client_state.get_trace_state(), modif_statement_ptr->keyspace(), modif_statement_ptr->column_family());
 

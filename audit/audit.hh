@@ -12,6 +12,9 @@
 #include <seastar/core/sharded.hh>
 #include "stdx.hh"
 
+#include "service/query_state.hh"
+#include "cql3/query_options.hh"
+
 #include <memory>
 
 namespace db {
@@ -20,7 +23,15 @@ class config;
 
 }
 
+namespace cql3 {
+
+class cql_statement;
+
+}
+
 namespace audit {
+
+extern logging::logger logger;
 
 enum class statement_category {
     QUERY, DML, DDL, DCL, AUTH, ADMIN
@@ -40,11 +51,19 @@ public:
     void set_query_string(const std::experimental::string_view& query_string) {
         _query = query_string.to_string();
     }
+    const sstring& keyspace() const { return _keyspace; }
+    const sstring& table() const { return _table; }
+    const sstring& query() const { return _query; }
+    sstring category() const;
 };
 
 using audit_info_ptr = std::unique_ptr<audit_info>;
 
+class storage_helper;
+
 class audit final : public seastar::async_sharded_service<audit> {
+    sstring _storage_helper_class_name;
+    std::unique_ptr<storage_helper> _storage_helper_ptr;
 public:
     static seastar::sharded<audit>& audit_instance() {
         // FIXME: leaked intentionally to avoid shutdown problems, see #293
@@ -65,7 +84,12 @@ public:
     future<> start();
     future<> stop();
     future<> shutdown();
+    bool should_log(const audit_info* audit_info) const {
+        return true;
+    }
+    future<> log(const audit_info* audit_info, service::query_state& query_state, const cql3::query_options& options, bool error);
 };
 
+future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state& query_state, const cql3::query_options& options, bool error);
 
 }

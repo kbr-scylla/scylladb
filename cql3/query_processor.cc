@@ -210,7 +210,12 @@ query_processor::process_statement(
         ::shared_ptr<cql_statement> statement,
         service::query_state& query_state,
         const query_options& options) {
-    return statement->check_access(query_state.get_client_state()).then([this, statement, &query_state, &options]() {
+    return statement->check_access(query_state.get_client_state()).then_wrapped([this, statement, &query_state, &options](auto&& access_future) {
+      bool failed = access_future.failed();
+      return audit::inspect(statement, query_state, options, failed).then([this, statement, &query_state, &options, access_future = std::move(access_future)] () mutable {
+        if (access_future.failed()) {
+            std::rethrow_exception(access_future.get_exception());
+        }
         auto& client_state = query_state.get_client_state();
 
         statement->validate(_proxy, client_state);
@@ -229,6 +234,7 @@ query_processor::process_statement(
             return make_ready_future<::shared_ptr<result_message>>(
                 ::make_shared<result_message::void_message>());
         });
+      });
     });
 }
 
@@ -535,10 +541,16 @@ query_processor::process_batch(
         ::shared_ptr<statements::batch_statement> batch,
         service::query_state& query_state,
         query_options& options) {
-    return batch->check_access(query_state.get_client_state()).then([this, &query_state, &options, batch] {
+    return batch->check_access(query_state.get_client_state()).then_wrapped([this, &query_state, &options, batch] (auto&& access_future) {
+      bool failed = access_future.failed();
+      return audit::inspect(batch, query_state, options, failed).then([this, &query_state, &options, batch, access_future = std::move(access_future)] () mutable {
+        if (access_future.failed()) {
+            std::rethrow_exception(access_future.get_exception());
+        }
         batch->validate();
         batch->validate(_proxy, query_state.get_client_state());
         return batch->execute(_proxy, query_state, options);
+      });
     });
 }
 
