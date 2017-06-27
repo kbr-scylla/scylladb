@@ -71,6 +71,7 @@ class modification_statement;
 namespace raw {
 
 class modification_statement : public cf_statement {
+    sstring _raw_cql;
 public:
     using conditions_vector = std::vector<std::pair<::shared_ptr<column_identifier::raw>, ::shared_ptr<column_condition::raw>>>;
 protected:
@@ -85,6 +86,8 @@ protected:
 public:
     virtual std::unique_ptr<prepared> prepare(database& db, cql_stats& stats) override;
     ::shared_ptr<cql3::statements::modification_statement> prepare(database& db, ::shared_ptr<variable_specifications> bound_names, cql_stats& stats);
+    void add_raw(sstring&& raw) { _raw_cql = std::move(raw); }
+    const sstring& get_raw_cql() const { return _raw_cql; }
 protected:
     virtual ::shared_ptr<cql3::statements::modification_statement> prepare_internal(database& db, schema_ptr schema,
         ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs, cql_stats& stats) = 0;

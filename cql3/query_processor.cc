@@ -315,7 +315,12 @@ query_processor::get_statement(const sstring_view& query, const service::client_
         cf_stmt->prepare_keyspace(client_state);
     }
     ++_stats.prepare_invocations;
-    return statement->prepare(_db.local(), _cql_stats);
+    auto res = statement->prepare(_db.local(), _cql_stats);
+    auto audit_info = res->statement->get_audit_info();
+    if (audit_info) {
+        audit_info->set_query_string(query);
+    }
+    return std::move(res);
 }
 
 ::shared_ptr<raw::parsed_statement>

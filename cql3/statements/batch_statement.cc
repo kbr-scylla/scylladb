@@ -427,6 +427,10 @@ batch_statement::prepare(database& db, cql_stats& stats) {
             have_multiple_cfs = first_ks.value() != parsed->keyspace() || first_cf.value() != parsed->column_family();
         }
         statements.push_back(parsed->prepare(db, bound_names, stats));
+        auto audit_info = statements.back()->get_audit_info();
+        if (audit_info) {
+            audit_info->set_query_string(parsed->get_raw_cql());
+        }
     }
 
     auto&& prep_attrs = _attrs->prepare(db, "[batch]", "[batch]");

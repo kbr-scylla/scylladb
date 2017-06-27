@@ -30,12 +30,16 @@ class audit_info final {
     statement_category _category;
     sstring _keyspace;
     sstring _table;
+    sstring _query;
 public:
     audit_info(statement_category cat, sstring keyspace, sstring table)
         : _category(cat)
         , _keyspace(std::move(keyspace))
         , _table(std::move(table))
     { }
+    void set_query_string(const std::experimental::string_view& query_string) {
+        _query = query_string.to_string();
+    }
 };
 
 using audit_info_ptr = std::unique_ptr<audit_info>;
