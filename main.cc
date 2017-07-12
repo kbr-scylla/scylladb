@@ -427,7 +427,9 @@ int main(int ac, char** av) {
             }
             supervisor::notify("creating tracing");
             tracing::tracing::create_tracing("trace_keyspace_helper").get();
-            audit::audit::create_audit(*cfg).get();
+            audit::audit::create_audit(*cfg).handle_exception([&] (auto&& e) {
+                startlog.error("audit creation failed: {}", e);
+            }).get();
             supervisor::notify("creating snitch");
             i_endpoint_snitch::create_snitch(cfg->endpoint_snitch()).get();
             // #293 - do not stop anything

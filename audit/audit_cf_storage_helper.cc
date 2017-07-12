@@ -83,7 +83,7 @@ cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_i
         cql3::raw_value::make_value(timestamp_type->decompose(date)),
         cql3::raw_value::make_value(inet_addr_type->decompose(node_ip)),
         cql3::raw_value::make_value(uuid_type->decompose(time_id)),
-        cql3::raw_value::make_value(utf8_type->decompose(audit_info->category())),
+        cql3::raw_value::make_value(utf8_type->decompose(audit_info->category_string())),
         cql3::raw_value::make_value(utf8_type->decompose(sstring(consistency_level.str()))),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->table())),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->keyspace())),

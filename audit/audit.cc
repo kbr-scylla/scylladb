@@ -14,12 +14,18 @@
 #include "cql3/cql_statement.hh"
 #include "cql3/statements/batch_statement.hh"
 #include "storage_helper.hh"
+#include "audit.hh"
+
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/algorithm/string/classification.hpp>
+
 
 namespace audit {
 
 logging::logger logger("audit");
 
-sstring audit_info::category() const {
+sstring audit_info::category_string() const {
     switch (_category) {
         case statement_category::QUERY: return "QUERY";
         case statement_category::DML: return "DML";
@@ -31,15 +37,47 @@ sstring audit_info::category() const {
     return "";
 }
 
-audit::audit(const db::config& cfg)
-    : _storage_helper_class_name("audit_cf_storage_helper")
+audit::audit(category_set&& audited_categories)
+    : _audited_categories(std::move(audited_categories))
+    , _storage_helper_class_name("audit_cf_storage_helper")
 { }
+
+static category_set parse_audit_categories(const sstring& data) {
+    category_set result;
+    if (!data.empty()) {
+        std::vector<sstring> tokens;
+        boost::split(tokens, data, boost::is_any_of(","));
+        for (sstring& category : tokens) {
+            boost::trim(category);
+            if (category == "QUERY") {
+                result.set(statement_category::QUERY);
+            } else if (category == "DML") {
+                result.set(statement_category::DML);
+            } else if (category == "DDL") {
+                result.set(statement_category::DDL);
+            } else if (category == "DCL") {
+                result.set(statement_category::DCL);
+            } else if (category == "AUTH") {
+                result.set(statement_category::AUTH);
+            } else if (category == "ADMIN") {
+                result.set(statement_category::ADMIN);
+            } else {
+                throw audit_exception(sprint("Bad configuration: invalid 'audit_categories': %s", data));
+            }
+        }
+    }
+    return std::move(result);
+}
 
 future<> audit::create_audit(const db::config& cfg) {
     if (cfg.audit() != "table") {
         return make_ready_future<>();
     }
-    return audit_instance().start(cfg);
+    category_set audited_categories = parse_audit_categories(cfg.audit_categories());
+    if (!audited_categories) {
+        return make_ready_future<>();
+    }
+    return audit_instance().start(std::move(audited_categories));
 }
 
 future<> audit::start_audit() {
@@ -116,6 +154,10 @@ future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state
         }
     }
     return make_ready_future<>();
+}
+
+bool audit::should_log(const audit_info* audit_info) const {
+    return _audited_categories.contains(audit_info->category());
 }
 
 }

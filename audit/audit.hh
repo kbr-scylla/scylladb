@@ -14,6 +14,7 @@
 
 #include "service/query_state.hh"
 #include "cql3/query_options.hh"
+#include "enum_set.hh"
 
 #include <memory>
 
@@ -33,9 +34,25 @@ namespace audit {
 
 extern logging::logger logger;
 
+class audit_exception : public std::exception {
+    sstring _what;
+public:
+    explicit audit_exception(sstring&& what) : _what(std::move(what)) { }
+    const char* what() const noexcept override {
+        return _what.c_str();
+    }
+};
+
 enum class statement_category {
     QUERY, DML, DDL, DCL, AUTH, ADMIN
 };
+
+using category_set = enum_set<super_enum<statement_category, statement_category::QUERY,
+                                                             statement_category::DML,
+                                                             statement_category::DDL,
+                                                             statement_category::DCL,
+                                                             statement_category::AUTH,
+                                                             statement_category::ADMIN>>;
 
 class audit_info final {
     statement_category _category;
@@ -54,7 +71,8 @@ public:
     const sstring& keyspace() const { return _keyspace; }
     const sstring& table() const { return _table; }
     const sstring& query() const { return _query; }
-    sstring category() const;
+    sstring category_string() const;
+    statement_category category() const { return _category; }
 };
 
 using audit_info_ptr = std::unique_ptr<audit_info>;
@@ -62,6 +80,7 @@ using audit_info_ptr = std::unique_ptr<audit_info>;
 class storage_helper;
 
 class audit final : public seastar::async_sharded_service<audit> {
+    const category_set _audited_categories;
     sstring _storage_helper_class_name;
     std::unique_ptr<storage_helper> _storage_helper_ptr;
 public:
@@ -80,13 +99,11 @@ public:
     static future<> stop_audit();
     static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
     static audit_info_ptr create_no_audit_info();
-    audit(const db::config& cfg);
+    explicit audit(category_set&& audited_categories);
     future<> start();
     future<> stop();
     future<> shutdown();
-    bool should_log(const audit_info* audit_info) const {
-        return true;
-    }
+    bool should_log(const audit_info* audit_info) const;
     future<> log(const audit_info* audit_info, service::query_state& query_state, const cql3::query_options& options, bool error);
 };
 
