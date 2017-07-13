@@ -15,6 +15,7 @@
 #include "cql3/statements/batch_statement.hh"
 #include "storage_helper.hh"
 #include "audit.hh"
+#include "../db/config.hh"
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
@@ -37,8 +38,9 @@ sstring audit_info::category_string() const {
     return "";
 }
 
-audit::audit(category_set&& audited_categories)
-    : _audited_categories(std::move(audited_categories))
+audit::audit(std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories)
+    : _audited_tables(std::move(audited_tables))
+    , _audited_categories(std::move(audited_categories))
     , _storage_helper_class_name("audit_cf_storage_helper")
 { }
 
@@ -69,6 +71,25 @@ static category_set parse_audit_categories(const sstring& data) {
     return std::move(result);
 }
 
+static std::map<sstring, std::set<sstring>> parse_audit_tables(const sstring& data) {
+    std::map<sstring, std::set<sstring>> result;
+    if (!data.empty()) {
+        std::vector<sstring> tokens;
+        boost::split(tokens, data, boost::is_any_of(","));
+        for (sstring& token : tokens) {
+            std::vector<sstring> parts;
+            boost::split(parts, token, boost::is_any_of("."));
+            if (parts.size() != 2) {
+                throw audit_exception(sprint("Bad configuration: invalid 'audit_tables': %s", data));
+            }
+            boost::trim(parts[0]);
+            boost::trim(parts[1]);
+            result[parts[0]].insert(std::move(parts[1]));
+        }
+    }
+    return std::move(result);
+}
+
 future<> audit::create_audit(const db::config& cfg) {
     if (cfg.audit() != "table") {
         return make_ready_future<>();
@@ -77,7 +98,11 @@ future<> audit::create_audit(const db::config& cfg) {
     if (!audited_categories) {
         return make_ready_future<>();
     }
-    return audit_instance().start(std::move(audited_categories));
+    std::map<sstring, std::set<sstring>> audited_tables = parse_audit_tables(cfg.audit_tables());
+    if (audited_tables.empty()) {
+        return make_ready_future<>();
+    }
+    return audit_instance().start(std::move(audited_tables), std::move(audited_categories));
 }
 
 future<> audit::start_audit() {
@@ -156,8 +181,13 @@ future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state
     return make_ready_future<>();
 }
 
+bool audit::should_log_table(const sstring& keyspace, const sstring& name) const {
+    auto keyspace_it = _audited_tables.find(keyspace);
+    return keyspace_it != _audited_tables.cend() && keyspace_it->second.find(name) != keyspace_it->second.cend();
+}
+
 bool audit::should_log(const audit_info* audit_info) const {
-    return _audited_categories.contains(audit_info->category());
+    return _audited_categories.contains(audit_info->category()) && should_log_table(audit_info->keyspace(), audit_info->table());
 }
 
 }

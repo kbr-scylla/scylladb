@@ -724,6 +724,7 @@ public:
             "\ttable : Audit messages written to column family named audit.audit_log.\n"  \
     ) \
     val(audit_categories, sstring, "DCL,DDL,AUTH", Used, "Comma separated list of operation categories that should be audited.") \
+    val(audit_tables, sstring, "", Used, "Comma separated list of table names (<keyspace>.<table>) that will be audited.") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

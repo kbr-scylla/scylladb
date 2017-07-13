@@ -80,9 +80,13 @@ using audit_info_ptr = std::unique_ptr<audit_info>;
 class storage_helper;
 
 class audit final : public seastar::async_sharded_service<audit> {
+    // Maps keyspace name to set of table names in that keyspace
+    const std::map<sstring, std::set<sstring>> _audited_tables;
     const category_set _audited_categories;
     sstring _storage_helper_class_name;
     std::unique_ptr<storage_helper> _storage_helper_ptr;
+
+    bool should_log_table(const sstring& keyspace, const sstring& name) const;
 public:
     static seastar::sharded<audit>& audit_instance() {
         // FIXME: leaked intentionally to avoid shutdown problems, see #293
@@ -99,7 +103,7 @@ public:
     static future<> stop_audit();
     static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
     static audit_info_ptr create_no_audit_info();
-    explicit audit(category_set&& audited_categories);
+    audit(std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories);
     future<> start();
     future<> stop();
     future<> shutdown();
