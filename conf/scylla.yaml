@@ -819,3 +819,6 @@ murmur3_partitioner_ignore_msb_bits: 12
 # List of tables that should be audited.
 # audit-tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
 #
+# List of keyspaces that should be fully audited.
+# All tables in those keyspaces will be audited
+# audit-keyspaces: "<keyspace_name>,<keyspace_name>"

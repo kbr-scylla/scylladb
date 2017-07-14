@@ -38,8 +38,9 @@ sstring audit_info::category_string() const {
     return "";
 }
 
-audit::audit(std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories)
-    : _audited_tables(std::move(audited_tables))
+audit::audit(std::set<sstring>&& audited_keyspaces, std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories)
+    : _audited_keyspaces(std::move(audited_keyspaces))
+    , _audited_tables(std::move(audited_tables))
     , _audited_categories(std::move(audited_categories))
     , _storage_helper_class_name("audit_cf_storage_helper")
 { }
@@ -90,6 +91,19 @@ static std::map<sstring, std::set<sstring>> parse_audit_tables(const sstring& da
     return std::move(result);
 }
 
+static std::set<sstring> parse_audit_keyspaces(const sstring& data) {
+    std::set<sstring> result;
+    if (!data.empty()) {
+        std::vector<sstring> tokens;
+        boost::split(tokens, data, boost::is_any_of(","));
+        for (sstring& token : tokens) {
+            boost::trim(token);
+            result.insert(std::move(token));
+        }
+    }
+    return std::move(result);
+}
+
 future<> audit::create_audit(const db::config& cfg) {
     if (cfg.audit() != "table") {
         return make_ready_future<>();
@@ -99,10 +113,11 @@ future<> audit::create_audit(const db::config& cfg) {
         return make_ready_future<>();
     }
     std::map<sstring, std::set<sstring>> audited_tables = parse_audit_tables(cfg.audit_tables());
-    if (audited_tables.empty()) {
+    std::set<sstring> audited_keyspaces = parse_audit_keyspaces(cfg.audit_keyspaces());
+    if (audited_tables.empty() && audited_keyspaces.empty()) {
         return make_ready_future<>();
     }
-    return audit_instance().start(std::move(audited_tables), std::move(audited_categories));
+    return audit_instance().start(std::move(audited_keyspaces), std::move(audited_tables), std::move(audited_categories));
 }
 
 future<> audit::start_audit() {
@@ -187,7 +202,9 @@ bool audit::should_log_table(const sstring& keyspace, const sstring& name) const
 }
 
 bool audit::should_log(const audit_info* audit_info) const {
-    return _audited_categories.contains(audit_info->category()) && should_log_table(audit_info->keyspace(), audit_info->table());
+    return _audited_categories.contains(audit_info->category())
+           && (_audited_keyspaces.find(audit_info->keyspace()) != _audited_keyspaces.cend()
+                         || should_log_table(audit_info->keyspace(), audit_info->table()));
 }
 
 }

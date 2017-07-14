@@ -80,6 +80,7 @@ using audit_info_ptr = std::unique_ptr<audit_info>;
 class storage_helper;
 
 class audit final : public seastar::async_sharded_service<audit> {
+    const std::set<sstring> _audited_keyspaces;
     // Maps keyspace name to set of table names in that keyspace
     const std::map<sstring, std::set<sstring>> _audited_tables;
     const category_set _audited_categories;
@@ -103,7 +104,7 @@ public:
     static future<> stop_audit();
     static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
     static audit_info_ptr create_no_audit_info();
-    audit(std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories);
+    audit(std::set<sstring>&& audited_keyspaces, std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories);
     future<> start();
     future<> stop();
     future<> shutdown();
