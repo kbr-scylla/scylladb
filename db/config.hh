@@ -726,6 +726,7 @@ public:
     val(audit_categories, sstring, "DCL,DDL,AUTH", Used, "Comma separated list of operation categories that should be audited.") \
     val(audit_tables, sstring, "", Used, "Comma separated list of table names (<keyspace>.<table>) that will be audited.") \
     val(audit_keyspaces, sstring, "", Used, "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited") \
+    val(audit_syslog_write_buffer_size, size_t, 1048576, Used, "The size (in bytes) of a write buffer used when writting to syslog socket.") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

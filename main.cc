@@ -646,7 +646,7 @@ int main(int ac, char** av) {
             api::set_server_gossip_settle(ctx).get();
             supervisor::notify("starting tracing");
             tracing::tracing::start_tracing().get();
-            audit::audit::start_audit().get();
+            audit::audit::start_audit(*cfg).get();
             supervisor::notify("starting native transport");
             service::get_local_storage_service().start_native_transport().get();
             if (start_thrift) {

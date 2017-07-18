@@ -12,6 +12,7 @@
 #include "audit/audit.hh"
 #include "table_helper.hh"
 #include "storage_helper.hh"
+#include "db/config.hh"
 
 namespace audit {
 
@@ -29,7 +30,7 @@ class audit_cf_storage_helper : public storage_helper {
 public:
     audit_cf_storage_helper();
     virtual ~audit_cf_storage_helper() {}
-    virtual future<> start() override;
+    virtual future<> start(const db::config& cfg) override;
     virtual future<> stop() override;
     virtual future<> write(const audit_info* audit_info,
                            net::ipv4_address node_ip,

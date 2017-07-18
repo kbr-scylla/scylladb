@@ -38,11 +38,14 @@ sstring audit_info::category_string() const {
     return "";
 }
 
-audit::audit(std::set<sstring>&& audited_keyspaces, std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories)
+audit::audit(sstring&& storage_helper_name,
+             std::set<sstring>&& audited_keyspaces,
+             std::map<sstring, std::set<sstring>>&& audited_tables,
+             category_set&& audited_categories)
     : _audited_keyspaces(std::move(audited_keyspaces))
     , _audited_tables(std::move(audited_tables))
     , _audited_categories(std::move(audited_categories))
-    , _storage_helper_class_name("audit_cf_storage_helper")
+    , _storage_helper_class_name(std::move(storage_helper_name))
 { }
 
 static category_set parse_audit_categories(const sstring& data) {
@@ -105,8 +108,16 @@ static std::set<sstring> parse_audit_keyspaces(const sstring& data) {
 }
 
 future<> audit::create_audit(const db::config& cfg) {
-    if (cfg.audit() != "table") {
+    sstring storage_helper_name;
+    if (cfg.audit() == "table") {
+        storage_helper_name = "audit_cf_storage_helper";
+    } else if (cfg.audit() == "syslog") {
+        storage_helper_name = "audit_syslog_storage_helper";
+    } else if (cfg.audit().empty()) {
+        // Audit is off
         return make_ready_future<>();
+    } else {
+        throw audit_exception(sprint("Bad configuration: invalid 'audit': %s", cfg.audit()));
     }
     category_set audited_categories = parse_audit_categories(cfg.audit_categories());
     if (!audited_categories) {
@@ -117,15 +128,18 @@ future<> audit::create_audit(const db::config& cfg) {
     if (audited_tables.empty() && audited_keyspaces.empty()) {
         return make_ready_future<>();
     }
-    return audit_instance().start(std::move(audited_keyspaces), std::move(audited_tables), std::move(audited_categories));
+    return audit_instance().start(std::move(storage_helper_name),
+                                  std::move(audited_keyspaces),
+                                  std::move(audited_tables),
+                                  std::move(audited_categories));
 }
 
-future<> audit::start_audit() {
+future<> audit::start_audit(const db::config& cfg) {
     if (!audit_instance().local_is_initialized()) {
         return make_ready_future<>();
     }
-    return audit_instance().invoke_on_all([] (audit& local_audit) {
-        return local_audit.start();
+    return audit_instance().invoke_on_all([&cfg] (audit& local_audit) {
+        return local_audit.start(cfg);
     });
 }
 
@@ -151,7 +165,7 @@ audit_info_ptr audit::create_no_audit_info() {
     return audit_info_ptr();
 }
 
-future<> audit::start() {
+future<> audit::start(const db::config& cfg) {
     try {
         _storage_helper_ptr = create_object<storage_helper>(_storage_helper_class_name);
     } catch (no_such_class& e) {
@@ -160,7 +174,7 @@ future<> audit::start() {
     } catch (...) {
         throw;
     }
-    return _storage_helper_ptr->start();;
+    return _storage_helper_ptr->start(cfg);
 }
 
 future<> audit::stop() {

@@ -48,7 +48,7 @@ audit_cf_storage_helper::audit_cf_storage_helper()
 {
 }
 
-future<> audit_cf_storage_helper::start() {
+future<> audit_cf_storage_helper::start(const db::config&) {
     return table_helper::setup_keyspace(KEYSPACE_NAME, "1", _dummy_query_state, _table);
 }
 

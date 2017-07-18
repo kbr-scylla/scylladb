@@ -100,12 +100,15 @@ public:
         return audit_instance().local();
     }
     static future<> create_audit(const db::config& cfg);
-    static future<> start_audit();
+    static future<> start_audit(const db::config& cfg);
     static future<> stop_audit();
     static audit_info_ptr create_audit_info(statement_category cat, const sstring& keyspace, const sstring& table);
     static audit_info_ptr create_no_audit_info();
-    audit(std::set<sstring>&& audited_keyspaces, std::map<sstring, std::set<sstring>>&& audited_tables, category_set&& audited_categories);
-    future<> start();
+    audit(sstring&& storage_helper_name,
+          std::set<sstring>&& audited_keyspaces,
+          std::map<sstring, std::set<sstring>>&& audited_tables,
+          category_set&& audited_categories);
+    future<> start(const db::config& cfg);
     future<> stop();
     future<> shutdown();
     bool should_log(const audit_info* audit_info) const;

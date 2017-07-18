@@ -10,22 +10,24 @@
 #pragma once
 
 #include "audit/audit.hh"
-#include <seastar/core/future.hh>
+#include "storage_helper.hh"
+#include "db/config.hh"
 
 namespace audit {
 
-class storage_helper {
+class audit_syslog_storage_helper : public storage_helper {
+    int _syslog_fd;
 public:
-    storage_helper() {}
-    virtual ~storage_helper() {}
-    virtual future<> start(const db::config& cfg) = 0;
-    virtual future<> stop() = 0;
+    audit_syslog_storage_helper() {};
+    virtual ~audit_syslog_storage_helper();
+    virtual future<> start(const db::config& cfg) override;
+    virtual future<> stop() override;
     virtual future<> write(const audit_info* audit_info,
                            net::ipv4_address node_ip,
                            net::ipv4_address client_ip,
                            db::consistency_level cl,
                            const sstring& username,
-                           bool error) = 0;
+                           bool error) override;
 };
 
 }
