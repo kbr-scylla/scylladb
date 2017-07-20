@@ -125,7 +125,11 @@ future<> audit::create_audit(const db::config& cfg) {
     }
     std::map<sstring, std::set<sstring>> audited_tables = parse_audit_tables(cfg.audit_tables());
     std::set<sstring> audited_keyspaces = parse_audit_keyspaces(cfg.audit_keyspaces());
-    if (audited_tables.empty() && audited_keyspaces.empty()) {
+    if (audited_tables.empty()
+        && audited_keyspaces.empty()
+        && !audited_categories.contains(statement_category::AUTH)
+        && !audited_categories.contains(statement_category::ADMIN)
+        && !audited_categories.contains(statement_category::DCL)) {
         return make_ready_future<>();
     }
     return audit_instance().start(std::move(storage_helper_name),
@@ -218,7 +222,10 @@ bool audit::should_log_table(const sstring& keyspace, const sstring& name) const
 bool audit::should_log(const audit_info* audit_info) const {
     return _audited_categories.contains(audit_info->category())
            && (_audited_keyspaces.find(audit_info->keyspace()) != _audited_keyspaces.cend()
-                         || should_log_table(audit_info->keyspace(), audit_info->table()));
+                         || should_log_table(audit_info->keyspace(), audit_info->table())
+                         || audit_info->category() == statement_category::AUTH
+                         || audit_info->category() == statement_category::ADMIN
+                         || audit_info->category() == statement_category::DCL);
 }
 
 }
