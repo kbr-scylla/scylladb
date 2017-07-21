@@ -92,6 +92,30 @@ future<> audit_syslog_storage_helper::write(const audit_info* audit_info,
     return make_ready_future<>();
 }
 
+future<> audit_syslog_storage_helper::write_login(const sstring& username,
+                                                  net::ipv4_address node_ip,
+                                                  net::ipv4_address client_ip,
+                                                  bool error) {
+    if (_syslog_fd == -1) {
+        logger.error("Can't log audit message to syslog. Socket not connected.");
+    } else {
+        auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        tm time;
+        localtime_r(&now, &time);
+        sstring msg = seastar::format("<{}>{:%h %e %T} scylla-audit: \"{}\", \"AUTH\", \"\", \"\", \"\", \"\", \"{}\", \"{}\", \"{}\"",
+                                      LOG_NOTICE | LOG_USER,
+                                      time,
+                                      node_ip,
+                                      client_ip,
+                                      username,
+                                      (error ? "true" : "false"));
+        if (send(_syslog_fd, msg.c_str(), msg.size(), 0) < 0) {
+            logger.error("Can't log audit message to syslog. Send failed.");
+        }
+    }
+    return make_ready_future<>();
+}
+
 using registry = class_registrator<storage_helper, audit_syslog_storage_helper>;
 static registry registrator1("audit_syslog_storage_helper");
 

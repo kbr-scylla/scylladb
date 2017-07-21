@@ -27,6 +27,10 @@ class audit_cf_storage_helper : public storage_helper {
                                          db::consistency_level cl,
                                          const sstring& username,
                                          bool error);
+    static cql3::query_options make_login_data(net::ipv4_address node_ip,
+                                               net::ipv4_address client_ip,
+                                               const sstring& username,
+                                               bool error);
 public:
     audit_cf_storage_helper();
     virtual ~audit_cf_storage_helper() {}
@@ -38,6 +42,10 @@ public:
                            db::consistency_level cl,
                            const sstring& username,
                            bool error) override;
+    virtual future<> write_login(const sstring& username,
+                                 net::ipv4_address node_ip,
+                                 net::ipv4_address client_ip,
+                                 bool error) override;
 };
 
 }

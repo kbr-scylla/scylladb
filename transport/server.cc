@@ -764,12 +764,16 @@ future<response_type> cql_server::connection::process_auth_response(uint16_t str
 
     auto challenge = _sasl_challenge->evaluate_response(buf);
     if (_sasl_challenge->is_complete()) {
-        return _sasl_challenge->get_authenticated_user().then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)](::shared_ptr<auth::authenticated_user> user) mutable {
-            client_state.set_login(std::move(user));
-            auto f = client_state.check_user_exists();
-            return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
-                auto tr_state = client_state.get_trace_state();
-                return make_ready_future<response_type>(std::make_pair(make_auth_success(stream, std::move(challenge), tr_state), std::move(client_state)));
+        return _sasl_challenge->get_authenticated_user().then_wrapped([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)](auto&& f) mutable {
+            bool failed = f.failed();
+            return audit::inspect_login(_sasl_challenge->get_username(), client_state.get_client_address().addr(), failed).then(
+                    [this, stream, challenge = std::move(challenge), client_state = std::move(client_state), ff = std::move(f)] () mutable {
+                client_state.set_login(std::move(ff.get0()));
+                auto f = client_state.check_user_exists();
+                return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
+                    auto tr_state = client_state.get_trace_state();
+                    return make_ready_future<response_type>(std::make_pair(make_auth_success(stream, std::move(challenge), tr_state), std::move(client_state)));
+                });
             });
         });
     }

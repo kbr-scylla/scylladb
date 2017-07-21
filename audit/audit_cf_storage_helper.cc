@@ -65,6 +65,13 @@ future<> audit_cf_storage_helper::write(const audit_info* audit_info,
     return _table.insert(_dummy_query_state, make_data, audit_info, node_ip, client_ip, cl, username, error);
 }
 
+future<> audit_cf_storage_helper::write_login(const sstring& username,
+                                              net::ipv4_address node_ip,
+                                              net::ipv4_address client_ip,
+                                              bool error) {
+    return _table.insert(_dummy_query_state, make_login_data, node_ip, client_ip, username, error);
+}
+
 cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_info,
                                                        net::ipv4_address node_ip,
                                                        net::ipv4_address client_ip,
@@ -91,6 +98,32 @@ cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_i
         cql3::raw_value::make_value(inet_addr_type->decompose(client_ip)),
         cql3::raw_value::make_value(utf8_type->decompose(username)),
         cql3::raw_value::make_value(boolean_type->decompose(error)),
+    };
+    return cql3::query_options(db::consistency_level::ONE, std::experimental::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
+}
+
+cql3::query_options audit_cf_storage_helper::make_login_data(net::ipv4_address node_ip,
+                                                             net::ipv4_address client_ip,
+                                                             const sstring& username,
+                                                             bool error) {
+    auto time = std::chrono::system_clock::now();
+    auto millis_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
+    auto ticks_per_day = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours(24)).count();
+    auto date = millis_since_epoch / ticks_per_day * ticks_per_day;
+    thread_local static int64_t last_nanos = 0;
+    auto time_id = utils::UUID_gen::get_time_UUID(table_helper::make_monotonic_UUID_tp(last_nanos, time));
+    std::vector<cql3::raw_value> values {
+            cql3::raw_value::make_value(timestamp_type->decompose(date)),
+            cql3::raw_value::make_value(inet_addr_type->decompose(node_ip)),
+            cql3::raw_value::make_value(uuid_type->decompose(time_id)),
+            cql3::raw_value::make_value(utf8_type->decompose(sstring("AUTH"))),
+            cql3::raw_value::make_value(utf8_type->decompose(sstring(""))),
+            cql3::raw_value::make_value(utf8_type->decompose(sstring(""))),
+            cql3::raw_value::make_value(utf8_type->decompose(sstring(""))),
+            cql3::raw_value::make_value(utf8_type->decompose(sstring("LOGIN"))),
+            cql3::raw_value::make_value(inet_addr_type->decompose(client_ip)),
+            cql3::raw_value::make_value(utf8_type->decompose(username)),
+            cql3::raw_value::make_value(boolean_type->decompose(error)),
     };
     return cql3::query_options(db::consistency_level::ONE, std::experimental::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
 }

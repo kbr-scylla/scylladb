@@ -152,6 +152,9 @@ public:
                     });
                 });
             }
+            const sstring& get_username() override {
+                return _sasl->get_username();
+            }
         private:
             ::shared_ptr<sasl_challenge> _sasl;
             bool _complete = false;

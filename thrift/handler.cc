@@ -216,8 +216,16 @@ public:
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auth::authenticator::credentials_map creds(auth_request.credentials.begin(), auth_request.credentials.end());
             auto& auth_service = *_query_state.get_client_state().get_auth_service();
-            return auth_service.underlying_authenticator().authenticate(creds).then([this] (auto user) {
-                _query_state.get_client_state().set_login(std::move(user));
+            return auth_service.underlying_authenticator().authenticate(creds).then_wrapped([this, creds] (auto&& f) mutable {
+                bool failed = f.failed();
+                sstring username = creds.count(auth::authenticator::USERNAME_KEY) > 0
+                                   ? creds.at(auth::authenticator::USERNAME_KEY) : "unknown";
+                return audit::inspect_login(username, net::ipv4_address(), failed).then([this, f = std::move(f)] () mutable {
+                    if (f.failed()) {
+                        std::rethrow_exception(f.get_exception());
+                    }
+                    _query_state.get_client_state().set_login(std::move(f.get0()));
+                });
             });
         });
     }

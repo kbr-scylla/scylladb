@@ -26,6 +26,10 @@ public:
                            db::consistency_level cl,
                            const sstring& username,
                            bool error) = 0;
+    virtual future<> write_login(const sstring& username,
+                                 net::ipv4_address node_ip,
+                                 net::ipv4_address client_ip,
+                                 bool error) = 0;
 };
 
 }

@@ -361,6 +361,9 @@ const auth::resource_ids& auth::password_authenticator::protected_resources() co
         future<::shared_ptr<authenticated_user>> get_authenticated_user() const override {
             return _self.authenticate(_credentials);
         }
+        const sstring& get_username() override {
+            return _credentials[USERNAME_KEY];
+        }
     private:
         credentials_map _credentials;
         bool _complete = false;

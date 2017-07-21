@@ -170,6 +170,7 @@ public:
         virtual bytes evaluate_response(bytes_view client_response) = 0;
         virtual bool is_complete() const = 0;
         virtual future<::shared_ptr<authenticated_user>> get_authenticated_user() const = 0;
+        virtual const sstring& get_username() = 0;
     };
 
     /**
