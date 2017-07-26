@@ -811,7 +811,7 @@ murmur3_partitioner_ignore_msb_bits: 12
 # by default, Scylla does not audit anything.
 # It is possible to enable auditing to the following places:
 #   - audit.audit_log column family by setting the flag to "table"
-# audit: "table"
+# audit: "none"
 #
 # List of statement categories that should be audited.
 # audit-categories: "DCL,DDL,AUTH"

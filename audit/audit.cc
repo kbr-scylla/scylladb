@@ -113,7 +113,7 @@ future<> audit::create_audit(const db::config& cfg) {
         storage_helper_name = "audit_cf_storage_helper";
     } else if (cfg.audit() == "syslog") {
         storage_helper_name = "audit_syslog_storage_helper";
-    } else if (cfg.audit().empty()) {
+    } else if (cfg.audit() == "none") {
         // Audit is off
         return make_ready_future<>();
     } else {
