@@ -121,6 +121,7 @@ install -m755 seastar/dpdk/usertools/dpdk-devbind.py $RPM_BUILD_ROOT%{_prefix}/l
 install -m755 build/release/scylla $RPM_BUILD_ROOT%{_bindir}
 install -m755 build/release/iotune $RPM_BUILD_ROOT%{_bindir}
 install -m755 dist/common/bin/scyllatop $RPM_BUILD_ROOT%{_bindir}
+install -m755 dist/common/bin/scyllarepair $RPM_BUILD_ROOT%{_bindir}
 install -m755 scylla-blocktune $RPM_BUILD_ROOT%{_prefix}/lib/scylla/
 install -m755 scylla-housekeeping $RPM_BUILD_ROOT%{_prefix}/lib/scylla/
 if @@HOUSEKEEPING_CONF@@; then
@@ -143,6 +144,7 @@ cp -r swagger-ui/dist $RPM_BUILD_ROOT%{_prefix}/lib/scylla/swagger-ui
 install -d -m755 $RPM_BUILD_ROOT%{_prefix}/lib/scylla/api
 cp -r api/api-doc $RPM_BUILD_ROOT%{_prefix}/lib/scylla/api
 cp -r tools/scyllatop $RPM_BUILD_ROOT%{_prefix}/lib/scylla/scyllatop
+cp -r tools/scyllarepair $RPM_BUILD_ROOT%{_prefix}/lib/scylla/scyllarepair
 cp -r scylla-housekeeping $RPM_BUILD_ROOT%{_prefix}/lib/scylla/scylla-housekeeping
 cp -P dist/common/sbin/*  $RPM_BUILD_ROOT%{_sbindir}/
 
@@ -192,6 +194,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_bindir}/scylla
 %{_bindir}/iotune
 %{_bindir}/scyllatop
+%{_bindir}/scyllarepair
 %{_sbindir}/scylla*
 %{_prefix}/lib/scylla/scylla-blocktune
 %{_prefix}/lib/scylla/scylla-housekeeping
@@ -223,6 +226,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_prefix}/lib/scylla/swagger-ui/dist/*
 %{_prefix}/lib/scylla/api/api-doc/*
 %{_prefix}/lib/scylla/scyllatop/*
+%{_prefix}/lib/scylla/scyllarepair/*
 %{_prefix}/lib/scylla/scylla_config_get.py
 %{_prefix}/lib/scylla/scylla_lib.sh
 %{_prefix}/lib/scylla/scylla_util.py
