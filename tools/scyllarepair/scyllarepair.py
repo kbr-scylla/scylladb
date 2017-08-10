@@ -28,7 +28,7 @@ except:
     sys.exit(-1)
 
 class murmur3_partitioner:
-    def __init__(self, api_host, msb=0, nr_shards=16, timeout=3):
+    def __init__(self, api_host, msb=0, nr_shards=16, timeout=10):
         self.msb = msb
         self.nr_shards = nr_shards
         self.shard_start_list = []
@@ -37,10 +37,11 @@ class murmur3_partitioner:
         self.timeout = timeout
         self.host_id = self.get_host_id()
         self.node_ip = self.get_node_ip()
+        self.local_dc_name = self.get_local_dc_name()
 
     def get_node_ip(self):
         url = 'http://{}:10000/storage_service/host_id'.format(self.api_host)
-        text = ""
+        text = ''
         try:
             r = requests.get(url=url, timeout=self.timeout)
             text = r.text
@@ -57,6 +58,19 @@ class murmur3_partitioner:
 
     def get_host_id(self):
         url = 'http://{}:10000/storage_service/hostid/local'.format(self.api_host)
+        text = ''
+        try:
+            r = requests.get(url=url, timeout=self.timeout)
+            text = r.text
+            r.raise_for_status()
+            return text.strip('"')
+        except Exception as e:
+            print "Error: API failed: {}".format(e, text)
+            sys.exit(-1)
+
+    def get_local_dc_name(self):
+        url = 'http://{}:10000/snitch/datacenter'.format(self.api_host)
+        text = ''
         try:
             r = requests.get(url=url, timeout=self.timeout)
             text = r.text
@@ -89,7 +103,6 @@ class murmur3_partitioner:
             token = token >> self.msb
             while (self.zero_based_shard_of(token) != s):
                 token = token + 1
-                print "loop",  token
             self.shard_start_list[s] = token
 
     def get_shard_start(self, shard):
@@ -245,6 +258,7 @@ class murmur3_partitioner:
         pr_ranges = []
         npr_ranges = []
         url = 'http://{}:10000/storage_service/describe_ring/{}'.format(self.api_host, keyspace)
+        text = ''
         try:
             r = requests.get(url=url, timeout=self.timeout)
             text = r.text
@@ -286,7 +300,7 @@ def show_succeed_fail_nr(tag, cmds_ok, cmds_fail):
     print '{}: SUCCEED={}, FAIL={}'.format(tag, len(cmds_ok), len(cmds_fail))
 
 def get_db_file_name(keyspace):
-    return 'scylla_repair_results_{}.json'.format(keyspace)
+    return 'scyllarepair_results_{}.json'.format(keyspace)
 
 idx = 0
 def get_idx():
@@ -294,7 +308,7 @@ def get_idx():
     idx += 1
     return idx
 
-def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, timeout=3, target_nr_ranges=50):
+def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, ranges_per_repair, repair_local_dc_only=False, stop_on_failure=False, timeout=10, target_nr_ranges=200):
     db_file = get_db_file_name(keyspace)
     db = None
     try:
@@ -312,7 +326,6 @@ def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, m
     pr_ranges, npr_ranges = partitioner.get_local_range(keyspace, primary_range, nonprimary_range)
     node_ip = partitioner.node_ip
     shard_range_map = {}
-    print "Repair Summary: node ip={}, msb={}, nr_shards={}, primary ranges={}, non-primary ranges={}".format(node_ip, msb, nr_shards, len(pr_ranges), len(npr_ranges))
     for r in pr_ranges + npr_ranges:
         shard_range = partitioner.split_range_to_shards(r)
         for k in shard_range:
@@ -320,61 +333,91 @@ def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, m
                 shard_range_map[k] += shard_range[k]
             else:
                 shard_range_map[k] = shard_range[k]
+    shard_has_no_work = range(nr_shards)
+    nr_ranges_on_all_shards = 0
     for k in shard_range_map:
+        shard_has_no_work.remove(k)
         ranges = shard_range_map[k]
         nr_ranges = len(ranges)
         if nr_ranges < target_nr_ranges:
             shard_range_map[k] = partitioner.split_ranges(ranges, target_nr_ranges)
-        print "Repair node ip={}, shard={}, ranges={}, splitted_ranges={}".format(node_ip, k, nr_ranges, len(shard_range_map[k]))
-
-    partitioner.verify_ranges(shard_range_map)
-    partitioner.verify_merge_ragnes(pr_ranges, npr_ranges, shard_range_map)
+        nr = len(shard_range_map[k])
+        nr_ranges_on_all_shards += nr
+        print "Repair node ip={}, shard={:<3}, ranges={}, ranges_after_split={}".format(node_ip, k, nr_ranges, nr)
 
     ranges_to_repair_map = {}
-    nr_ranges_total = 0
+    nr_repair_jobs = 0
     for shard in shard_range_map:
         if shard_range_map[shard]:
-            ranges_to_repair_map[shard] = [(get_idx(),'{}:{}'.format(r[0], r[1])) for r in shard_range_map[shard]]
+            ranges = ['{}:{}'.format(r[0], r[1]) for r in shard_range_map[shard]]
+            ranges_for_shard = [','.join(ranges[i:i + ranges_per_repair]) for i in xrange(0, len(ranges), ranges_per_repair)]
+            ranges_to_repair_map[shard] = [(get_idx(), r) for r in ranges_for_shard]
             db_rows = []
             for idx, ranges in ranges_to_repair_map[shard]:
                 db_row = {'status' : 'NOT_STARTED',  "ranges" :  ranges , "idx" : idx, "shard": shard}
                 db_rows.append(db_row)
-                nr_ranges_total = nr_ranges_total +1
+                nr_repair_jobs = nr_repair_jobs + 1
             db.insert_multiple(db_rows)
+
+    print "Repair Summary: node ip={}, msb={}, nr_shards={}, nr_ranges_on_all_shards={}, nr_repair_jobs={}, ranges_per_repair_job={}, primary_ranges={}, non_primary_ranges={}, local={}, shard_has_no_work={}".format(node_ip,
+           msb, nr_shards, nr_ranges_on_all_shards, nr_repair_jobs, ranges_per_repair, len(pr_ranges), len(npr_ranges), repair_local_dc_only, shard_has_no_work)
+
+    partitioner.verify_ranges(shard_range_map)
+    partitioner.verify_merge_ragnes(pr_ranges, npr_ranges, shard_range_map)
+
     print "Start to repair ..."
-    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_ranges_total)
+    time.sleep(3)
+    local_dc_name = partitioner.local_dc_name
+    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=NORMAL     END   #############"
     sys.exit(0)
 
-def run_repair_with_shard_cont(api_host, keyspace, timeout=3):
+def run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only=False, stop_on_failure=False, timeout=10):
     print "############  SCYLLA REPAIR: MODE=CONTINUE START #############"
     db = TinyDB(get_db_file_name(keyspace))
     query = Query()
     failed = db.search(query.status != 'SUCCESSFUL')
     ranges_to_repair_map = {}
-    nr_ranges_total = 0
+    nr_repair_jobs = 0
     for f in failed:
         idx = f['idx']
         shard = f['shard']
         ranges = f['ranges']
         ranges_to_repair_map.setdefault(shard,[]).append((idx, ranges))
-        nr_ranges_total = nr_ranges_total +1
+        nr_repair_jobs = nr_repair_jobs +1
     partitioner = murmur3_partitioner(api_host)
     node_ip = partitioner.node_ip
-    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_ranges_total)
+    local_dc_name = partitioner.local_dc_name
+    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=CONTINUE END   #############"
     sys.exit(0)
 
-def do_repair_for_shard(db, keyspace, node_ip, shard, idx_ranges, timeout, nr_ranges_total, nr_ranges_done, lock, kill, cmds_ok, cmds_fail):
+def do_yield():
+    time.sleep(0)
+
+def on_failure(shard, kill, stop_on_failure):
+    if stop_on_failure:
+        print "Stop repair on shard {} because --stop-on-failure is set".format(shard)
+        kill.set()
+
+def report_status(status, repair_id, ranges, nr_repair_jobs_done, nr_repair_jobs, node_ip, keyspace, shard, cmds_ok, cmds_fail, start_time):
+    nr_repair_jobs_done[0] = nr_repair_jobs_done[0]+ 1;
+    percentage = "%.2f" % ((nr_repair_jobs_done[0]) * 100.0 / nr_repair_jobs)
+    now = datetime.datetime.now()
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    elapsed = (now - start_time).seconds
+    print "[{}] Repair id {:<5} for node {} keyspace {} on shard {:<3}: [{:4}/{:<4}], done={:5}%, status={}, seconds={}, succeeded={}, failed={}".format(ts,
+        repair_id, node_ip, keyspace, shard, nr_repair_jobs_done[0] , nr_repair_jobs, percentage, status, elapsed, len(cmds_ok), len(cmds_fail))
+
+def do_repair_for_shard(db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure):
     query = Query()
     for idx, ranges in idx_ranges:
-        with lock:
-            nr_ranges_done[0] = nr_ranges_done[0]+ 1;
-            percentage = "%.2f" % ((nr_ranges_done[0]) * 100.0 / nr_ranges_total)
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print "[{}] Repairing for node {} keyspace {} on shard {:<3}: [{:4}/{:<4}] {:5}% ranges done: {}".format(now, node_ip, keyspace, shard, nr_ranges_done[0] , nr_ranges_total, percentage, ranges)
+        do_yield()
+        start_time = datetime.datetime.now()
         url = 'http://{}:10000/storage_service/repair_async/{}?ranges={}'.format(api_host, keyspace, ranges)
-        text = ""
+        if repair_local_dc_only:
+            url = 'http://{}:10000/storage_service/repair_async/{}?ranges={}&dataCenters={}'.format(api_host, keyspace, ranges, local_dc_name)
+        text = ''
         try:
             r = requests.post(url, timeout=timeout)
             text = r.text
@@ -385,12 +428,17 @@ def do_repair_for_shard(db, keyspace, node_ip, shard, idx_ranges, timeout, nr_ra
                 cmds_fail.append(r)
                 db.update({'status' : 'API_FAILED'}, (query.idx == idx) & (query.shard == shard))
                 print "Error: API failed: {}".format(e, text)
+                on_failure(shard, kill, stop_on_failure)
             continue
+
+        do_yield()
 
         url = 'http://{}:10000/storage_service/repair_async/{}'.format(api_host, keyspace)
         payload={'id': repair_id}
         while not kill.is_set() :
+            do_yield()
             status = 'API_FAILED'
+            text = ''
             try:
                 r = requests.get(url, params=payload, timeout=timeout)
                 text = r.text
@@ -403,28 +451,31 @@ def do_repair_for_shard(db, keyspace, node_ip, shard, idx_ranges, timeout, nr_ra
                 with lock:
                     cmds_ok.append(r)
                     db.update({'status' : 'SUCCESSFUL'}, (query.idx == idx) & (query.shard == shard))
-                    print "Repair id {} status={}".format(repair_id, status)
+                    report_status(status, repair_id, ranges, nr_repair_jobs_done, nr_repair_jobs, node_ip, keyspace, shard, cmds_ok, cmds_fail, start_time)
                 break
             elif status == "FAILED" or status == "API_FAILED":
                 with lock:
                     cmds_fail.append(r)
                     db.update({'status' : status}, (query.idx == idx) & (query.shard == shard))
-                    print "Repair id {} status={}".format(repair_id, status)
+                    report_status(status, repair_id, ranges, nr_repair_jobs_done, nr_repair_jobs, node_ip, keyspace, shard, cmds_ok, cmds_fail, start_time)
+                    on_failure(shard, kill, stop_on_failure)
                 break
-            time.sleep(0.2)
+            if not kill.is_set():
+                time.sleep(0.2)
+
         if kill.is_set():
             print "Stop repair for shard {}".format(shard)
             break
 
-def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_ranges_total):
-    nr_ranges_done = [0]
+def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only=False, stop_on_failure=False):
+    nr_repair_jobs_done = [0]
     threads = []
     cmds_ok = []
     cmds_fail = []
     lock = threading.Lock()
     kill = threading.Event()
     for shard, idx_ranges in ranges_to_repair_map.iteritems():
-        t = threading.Thread(target=do_repair_for_shard, args=(db, keyspace, node_ip, shard, idx_ranges, timeout, nr_ranges_total, nr_ranges_done, lock, kill, cmds_ok, cmds_fail))
+        t = threading.Thread(target=do_repair_for_shard, args=(db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure))
         t.setDaemon(True)
         t.start()
         threads.append(t)
@@ -433,8 +484,8 @@ def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_ranges_to
         try:
             [t.join(1) for t in threads if t is not None and t.isAlive()]
         except KeyboardInterrupt:
-             print "Stop repair ..."
-             kill.set()
+            print "Stop repair ..."
+            kill.set()
 
     show_succeed_fail_nr("REPAIR SUMMARY", cmds_ok, cmds_fail)
 
@@ -442,44 +493,38 @@ def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_ranges_to
 if __name__ == '__main__':
     eg = '''
     Examples:
-    1) Run repair for both primary range and non-primary range
-    ./scylla_repair.py --keyspace ks3 --pr --npr --msb 0 --shards 32
+    1) Run repair for both primary ranges and non-primary ranges
+    ./scyllarepair.py --keyspace myks --pr --npr --msb 0 --shards 32
     2) Run with --cont option to rerun repair for the failed range
-    ./scylla_repair.py --keyspace ks3 --cont
+    ./scyllarepair.py --keyspace myks --cont
     '''
     parser = argparse.ArgumentParser(description='Scylla Repair' + eg , formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--cont', help='Rerun repair for the failed sub subranges', action='store_true')
     parser.add_argument('--keyspace', help='Keyspace to repair', required=True)
-    parser.add_argument('--apihost', help='HTTP API HOST', required=False)
+    parser.add_argument('--apihost', help='HTTP API HOST', required=False, default='127.0.0.1')
     parser.add_argument('--pr', help='Repair primary ranges', action='store_true')
     parser.add_argument('--npr', help='Repair non primary ranges', action='store_true')
-    parser.add_argument('--shards', help='Number of cpus scylla uses', required=True)
-    parser.add_argument('--msb', help='murmur3_partitioner_ignore_msb_bits', required=True)
+    parser.add_argument('--local', help='Repair only local DC', action='store_true')
+    parser.add_argument('--shards', help='Number of cpus scylla uses', required=True, type=int)
+    parser.add_argument('--msb', help='murmur3_partitioner_ignore_msb_bits', required=True, type=int)
+    parser.add_argument('--ranges-per-repair', help='Number of ranges per repair job', required=False, type=int, default=1)
+    parser.add_argument('--stop-on-failure', help='Stop when repair failure happens', action='store_true')
     args = parser.parse_args()
     keyspace = args.keyspace
     primary_range = args.pr
     nonprimary_range = args.npr
-
-    if args.apihost:
-        api_host = args.apihost
-    else:
-        api_host = '127.0.0.1'
+    repair_local_dc_only = args.local
+    stop_on_failure = args.stop_on_failure
+    ranges_per_repair = args.ranges_per_repair
+    api_host = args.apihost
+    nr_shards = args.shards
+    msb = args.msb
 
     if args.cont:
-        run_repair_with_shard_cont(api_host, keyspace)
-
-    if args.shards:
-        nr_shards = int(args.shards)
-    else:
-        nr_shards = 16
-
-    if args.msb:
-        msb = int(args.msb)
-    else:
-        msb = 0
+        run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only, stop_on_failure)
 
     if primary_range == False and nonprimary_range == False:
         print "Error: Specify --pr (PrimaryRange) and/or --npr (NonPrimaryRange) to repair"
         sys.exit(-1)
 
-    run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards)
+    run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, ranges_per_repair, repair_local_dc_only, stop_on_failure)
