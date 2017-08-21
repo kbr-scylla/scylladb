@@ -112,7 +112,7 @@ class murmur3_partitioner:
     def token_for_next_shard(self, token, shard, spans = 1):
         n = token + 2**63
         s = self.zero_based_shard_of(n)
-        if msb == 0:
+        if self.msb == 0:
             n = self.get_shard_start(shard)
             if spans > 1 or shard <= s:
                 return self.maximum_token()
@@ -125,7 +125,7 @@ class murmur3_partitioner:
             if left_part >= (1 << self.msb):
                 print "greater than 1 << msb", left_part, 1 << self.msb
                 return self.maximum_token()
-            left_part = (left_part << (64 - msb)) & (2**64-1)
+            left_part = (left_part << (64 - self.msb)) & (2**64-1)
             right_part = self.get_shard_start(shard)
             n = left_part | right_part
         return n - 2**63
@@ -138,7 +138,7 @@ class murmur3_partitioner:
             if spans > 1 or shard > s:
                 return self.minimum_token()
         else:
-            left_part = n >> (64 - msb)
+            left_part = n >> (64 - self.msb)
             if shard <= s:
                 left_part -= spans - 1
             else:
@@ -146,7 +146,7 @@ class murmur3_partitioner:
             if left_part < 0:
                 print "less than 0", left_part
                 return self.minimum_token()
-            left_part = left_part << (64 - msb)
+            left_part = left_part << (64 - self.msb)
             right_part = self.get_shard_start(shard)
             n = left_part | right_part
         return n - 2**63
@@ -287,9 +287,9 @@ class murmur3_partitioner:
                     st = int(d['start_token'])
                     et = int(d['end_token'])
                     if st > et:
-                        r = (minimum_token(), et)
+                        r = (self.minimum_token(), et)
                         npr_ranges.append(r)
-                        r = (st, maximum_token())
+                        r = (st, self.maximum_token())
                         npr_ranges.append(r)
                     else:
                         r = (st, et)
@@ -371,7 +371,7 @@ def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, m
     print "Start to repair ..."
     time.sleep(3)
     local_dc_name = partitioner.local_dc_name
-    status = do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
+    status = do_repair(api_host, db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=NORMAL     END   #############"
     return status
 
@@ -391,7 +391,7 @@ def run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only=False, s
     partitioner = murmur3_partitioner(api_host)
     node_ip = partitioner.node_ip
     local_dc_name = partitioner.local_dc_name
-    status = do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
+    status = do_repair(api_host, db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=CONTINUE END   #############"
     return status
 
@@ -412,7 +412,7 @@ def report_status(status, repair_id, ranges, nr_repair_jobs_done, nr_repair_jobs
     print "[{}] Repair id {:<5} for node {} keyspace {} on shard {:<3}: [{:4}/{:<4}], done={:5}%, status={}, seconds={}, succeeded={}, failed={}".format(ts,
         repair_id, node_ip, keyspace, shard, nr_repair_jobs_done[0] , nr_repair_jobs, percentage, status, elapsed, len(cmds_ok), len(cmds_fail))
 
-def do_repair_for_shard(db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure):
+def do_repair_for_shard(api_host, db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure):
     query = Query()
     for idx, ranges in idx_ranges:
         do_yield()
@@ -470,7 +470,7 @@ def do_repair_for_shard(db, local_dc_name, keyspace, node_ip, shard, idx_ranges,
             print "Stop repair for shard {}".format(shard)
             break
 
-def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only=False, stop_on_failure=False):
+def do_repair(api_host, db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only=False, stop_on_failure=False):
     nr_repair_jobs_done = [0]
     threads = []
     cmds_ok = []
@@ -478,7 +478,7 @@ def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jo
     lock = threading.Lock()
     kill = threading.Event()
     for shard, idx_ranges in ranges_to_repair_map.iteritems():
-        t = threading.Thread(target=do_repair_for_shard, args=(db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure))
+        t = threading.Thread(target=do_repair_for_shard, args=(api_host, db, local_dc_name, keyspace, node_ip, shard, idx_ranges, timeout, nr_repair_jobs, nr_repair_jobs_done, lock, kill, cmds_ok, cmds_fail, repair_local_dc_only, stop_on_failure))
         t.setDaemon(True)
         t.start()
         threads.append(t)
