@@ -296,8 +296,8 @@ class murmur3_partitioner:
                         npr_ranges.append(r)
         return (pr_ranges, npr_ranges)
 
-def show_succeed_fail_nr(tag, cmds_ok, cmds_fail):
-    print '{}: SUCCEED={}, FAIL={}'.format(tag, len(cmds_ok), len(cmds_fail))
+def show_succeed_fail_nr(tag, cmds_ok, cmds_fail, nr_repair_jobs):
+    print '{}: SUCCEEDED={}, FAILED={}, TOTAL={}'.format(tag, len(cmds_ok), len(cmds_fail), nr_repair_jobs)
 
 def get_db_file_name(keyspace):
     return 'scyllarepair_results_{}.json'.format(keyspace)
@@ -307,6 +307,9 @@ def get_idx():
     global idx
     idx += 1
     return idx
+
+REPAIR_STATUS_SUCCESSFUL = 'SUCCESSFUL'
+REPAIR_STATUS_FAILED = 'FAILED'
 
 def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, ranges_per_repair, repair_local_dc_only=False, stop_on_failure=False, timeout=10, target_nr_ranges=200):
     db_file = get_db_file_name(keyspace)
@@ -319,7 +322,7 @@ def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, m
         db = TinyDB(db_file)
     except Exception as e:
         print "Can not create meta file for repair: {}".format(e)
-        sys.exit(-1)
+        return REPAIR_STATUS_FAILED
 
     print "############  SCYLLA REPAIR: MODE=NORMAL     START #############"
     partitioner = murmur3_partitioner(api_host, msb, nr_shards, timeout)
@@ -368,9 +371,9 @@ def run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, m
     print "Start to repair ..."
     time.sleep(3)
     local_dc_name = partitioner.local_dc_name
-    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
+    status = do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=NORMAL     END   #############"
-    sys.exit(0)
+    return status
 
 def run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only=False, stop_on_failure=False, timeout=10):
     print "############  SCYLLA REPAIR: MODE=CONTINUE START #############"
@@ -388,9 +391,9 @@ def run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only=False, s
     partitioner = murmur3_partitioner(api_host)
     node_ip = partitioner.node_ip
     local_dc_name = partitioner.local_dc_name
-    do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
+    status = do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jobs, local_dc_name, repair_local_dc_only, stop_on_failure)
     print "############  SCYLLA REPAIR: MODE=CONTINUE END   #############"
-    sys.exit(0)
+    return status
 
 def do_yield():
     time.sleep(0)
@@ -487,8 +490,12 @@ def do_repair(db, keyspace, node_ip, ranges_to_repair_map, timeout, nr_repair_jo
             print "Stop repair ..."
             kill.set()
 
-    show_succeed_fail_nr("REPAIR SUMMARY", cmds_ok, cmds_fail)
+    show_succeed_fail_nr("REPAIR SUMMARY", cmds_ok, cmds_fail, nr_repair_jobs)
 
+    if len(cmds_fail) == 0 and len(cmds_ok) == nr_repair_jobs:
+        return REPAIR_STATUS_SUCCESSFUL
+    else:
+        return REPAIR_STATUS_FAILED
 
 if __name__ == '__main__':
     eg = '''
@@ -521,10 +528,18 @@ if __name__ == '__main__':
     msb = args.msb
 
     if args.cont:
-        run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only, stop_on_failure)
+        status = run_repair_with_shard_cont(api_host, keyspace, repair_local_dc_only, stop_on_failure)
+        if status == REPAIR_STATUS_SUCCESSFUL:
+            sys.exit(0)
+        else:
+            sys.exit(-1)
 
     if primary_range == False and nonprimary_range == False:
         print "Error: Specify --pr (PrimaryRange) and/or --npr (NonPrimaryRange) to repair"
         sys.exit(-1)
 
-    run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, ranges_per_repair, repair_local_dc_only, stop_on_failure)
+    status = run_repair_with_shard(api_host, keyspace, primary_range, nonprimary_range, msb, nr_shards, ranges_per_repair, repair_local_dc_only, stop_on_failure)
+    if status == REPAIR_STATUS_SUCCESSFUL:
+        sys.exit(0)
+    else:
+        sys.exit(-1)
