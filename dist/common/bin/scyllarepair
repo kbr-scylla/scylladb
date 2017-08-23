@@ -1,5 +1,12 @@
 #!/bin/sh -e
 #
 #  Copyright (C) 2017 ScyllaDB
+#
+
+#
+# This file is part of Scylla.
+#
+# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+#
 
 exec python /usr/lib/scylla/scyllarepair/scyllarepair.py "$@"
