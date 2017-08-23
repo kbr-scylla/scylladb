@@ -2,4 +2,4 @@
 #
 #  Copyright (C) 2017 ScyllaDB
 
-exec python /usr/lib/scylla/scyllarepair/scyllarepair.py $@
+exec python /usr/lib/scylla/scyllarepair/scyllarepair.py "$@"
