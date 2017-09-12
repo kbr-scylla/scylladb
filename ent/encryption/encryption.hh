@@ -84,6 +84,8 @@ public:
     }
 };
 
+key_info get_key_info(const options&);
+
 class encryption_context;
 
 class key_provider {
@@ -116,8 +118,8 @@ class system_key;
  */
 class encryption_context {
 public:
-    virtual ~encryption_context();
-    virtual shared_ptr<key_provider> get_provider(const options&) const = 0;
+    virtual ~encryption_context() = default;
+    virtual shared_ptr<key_provider> get_provider(const options&) = 0;
     virtual shared_ptr<system_key> get_system_key(const sstring&) = 0;
 
     virtual shared_ptr<key_provider> get_cached_provider(const sstring& id) const = 0;
@@ -125,6 +127,8 @@ public:
 
     virtual const encryption_config& config() const = 0;
 };
+
+future<> register_extensions(const db::config&, const encryption_config&, db::extensions&);
 
 }
 

@@ -16,6 +16,7 @@
 
 #include "init.hh"
 #include "encryption_config.hh"
+#include "encryption.hh"
 
 encryption::encryption_config::encryption_config()
                 : config_file( { system_key_directory, config_encryption_active,
@@ -83,7 +84,6 @@ public:
         cfg.add(values());
     }
     future<> initialize(const boost::program_options::variables_map& opts, const db::config& cfg, db::extensions& exts) override {
-        return make_ready_future();
+        return encryption::register_extensions(cfg, *this, exts);
     }
 } cfg;
-
