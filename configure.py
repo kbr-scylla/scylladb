@@ -624,6 +624,7 @@ scylla_core = (['database.cc',
                  'data/cell.cc',
                  'multishard_writer.cc',
                  'ent/encryption/encryption_config.cc',
+                 'ent/encryption/encryption.cc',
                  'ent/encryption/symmetric_key.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
