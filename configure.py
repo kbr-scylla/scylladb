@@ -627,6 +627,7 @@ scylla_core = (['database.cc',
                  'ent/encryption/encryption.cc',
                  'ent/encryption/symmetric_key.cc',
                  'ent/encryption/local_file_provider.cc',
+                 'ent/encryption/replicated_key_provider.cc',
                  'ent/encryption/system_key.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
@@ -973,7 +974,7 @@ for mode in build_modes:
 seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_restat.'
 
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
-libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-llz4', '-lz', '-lsnappy', pkg_config("--libs", "jsoncpp"),
+libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config("--libs", "jsoncpp"),
                  maybe_static(args.staticboost, '-lboost_filesystem'), ' -lcrypt', ' -lcryptopp',
                  maybe_static(args.staticboost, '-lboost_date_time'),
                 ])
