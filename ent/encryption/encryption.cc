@@ -127,9 +127,11 @@ future<> write_text_file_fully(const sstring& filename, const sstring& s) {
 
 class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<key_provider>>> _per_thread_provider_cache;
+    std::vector<std::unordered_map<sstring, shared_ptr<system_key>>> _per_thread_system_key_cache;
 public:
     encryption_context_impl()
         : _per_thread_provider_cache(smp::count)
+        , _per_thread_system_key_cache(smp::count)
     {}
 
     shared_ptr<key_provider> get_provider(const options&) const {
@@ -146,6 +148,28 @@ public:
     }
     void cache_provider(const sstring& id, shared_ptr<key_provider> p) override {
         _per_thread_provider_cache[engine().cpu_id()][id] = std::move(p);
+    }
+
+    shared_ptr<system_key> get_system_key(const sstring& name) override {
+        auto& cache = _per_thread_system_key_cache[engine().cpu_id()];
+        auto i = cache.find(name);
+        if (i != cache.end()) {
+            return i->second;
+        }
+
+        shared_ptr<encryption::system_key> k;
+
+        if (/* is kmip path */ false) {
+            ///
+        } else {
+            k = make_shared<local_system_key>(*this, name);
+        }
+
+        if (k != nullptr) {
+            cache[name] = k;
+        }
+
+        return k;
     }
 };
 

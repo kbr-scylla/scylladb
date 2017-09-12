@@ -104,6 +104,7 @@ public:
 };
 
 class encryption_config;
+class system_key;
 
 /**
  * Context is a singleton object, shared across shards. I.e. even though there are obvious mutating
@@ -117,6 +118,7 @@ class encryption_context {
 public:
     virtual ~encryption_context();
     virtual shared_ptr<key_provider> get_provider(const options&) const = 0;
+    virtual shared_ptr<system_key> get_system_key(const sstring&) = 0;
 
     virtual shared_ptr<key_provider> get_cached_provider(const sstring& id) const = 0;
     virtual void cache_provider(const sstring& id, shared_ptr<key_provider>) = 0;

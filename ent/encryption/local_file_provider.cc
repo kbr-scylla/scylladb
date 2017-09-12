@@ -34,6 +34,8 @@ namespace bfs = boost::filesystem;
 
 const sstring default_key_file_path = (bfs::path(db::config::get_conf_dir()) / "data_encryption_keys").string();
 
+static const key_info system_key_info{ "System", 0 };
+
 class local_file_provider : public key_provider {
 public:
     local_file_provider(encryption_context& ctxt, const bfs::path& path, bool must_exist = false)
@@ -107,7 +109,9 @@ shared_ptr<key_provider> local_file_provider_factory::get_provider(encryption_co
 
 future<key_ptr>
 local_file_provider::load_or_create(const key_info& info) {
-    if (engine().cpu_id() == 0) {
+    // if someone uses a system key as a table key, we could still race
+    // here. but that is a user error, so ignore
+    if (engine().cpu_id() == 0 || &info == &system_key_info) {
         return load_or_create_local(info);
     }
 
@@ -152,6 +156,15 @@ local_file_provider::load_or_create_local(const key_info& info) {
     return read_key_file().then([this, info] {
         if (_keys.count(info)) {
             return make_ready_future<key_ptr>(_keys.at(info));
+        }
+        if (info == system_key_info) {
+            if (_keys.size() != 1) {
+                return make_exception_future<key_ptr>(std::invalid_argument("System key must contain exactly one entry"));
+            }
+            auto k = _keys.begin()->second;
+            _keys.clear();
+            _keys.emplace(info, k);
+            return make_ready_future<key_ptr>(k);
         }
         // create it.
         auto k = make_shared<symmetric_key>(info);
@@ -226,6 +239,27 @@ future<> local_file_provider::write_key_file(key_info info, key_ptr k) {
             });
         });
     });
+}
+
+local_system_key::local_system_key(encryption_context& ctxt, const sstring& path)
+    : _provider(make_shared<local_file_provider>(ctxt, bfs::path(ctxt.config().system_key_directory()) / bfs::path(path), true))
+{}
+
+local_system_key::~local_system_key()
+{}
+
+future<shared_ptr<symmetric_key>> local_system_key::get_key() {
+    return _provider->key(system_key_info).then([](auto k, auto&&) {
+       return make_ready_future<shared_ptr<symmetric_key>>(std::move(k));
+    });
+}
+
+future<> local_system_key::validate() const {
+    return _provider->validate();
+}
+
+const sstring& local_system_key::name() const {
+    return _provider->path();
 }
 
 }
