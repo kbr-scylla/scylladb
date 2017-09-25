@@ -6,11 +6,15 @@
  * This file is part of Scylla.
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+ *
+ * A crc32 calculation for __PPC64__ uses the code from https://github.com/antonblanchard/crc32-vpmsum
+ * written by Anton Blanchard <anton@au.ibm.com>, IBM
  */
 
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 #include <seastar/net/byteorder.hh>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -95,6 +99,32 @@ public:
         if (size >= 1) {
             process_le(*in);
         }
+    }
+#elif defined(__PPC64__)
+    uint32_t crc32_vpmsum(uint32_t crc, const uint8_t* p, size_t len);
+
+    template <class T>
+    void process_le(T in) {
+        static_assert(std::is_integral<T>::value, "T must be integral type.");
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        switch (sizeof(T)) {
+        case 2: in = __builtin_bswap16(in); break;
+        case 4: in = __builtin_bswap32(in); break;
+        case 8: in = __builtin_bswap64(in); break;
+        }
+#endif
+        _r = crc32_vpmsum(_r, reinterpret_cast<const uint8_t*>(&in), sizeof(T));
+    }
+
+    template <class T>
+    void process_be(T in) {
+        static_assert(std::is_integral<T>::value, "T must be integral type.");
+        in = seastar::net::hton(in);
+        _r = crc32_vpmsum(_r, reinterpret_cast<const uint8_t*>(&in), sizeof(T));
+    }
+
+    void process(const uint8_t* in, size_t size) {
+        _r = crc32_vpmsum(_r, in, size);
     }
 #else
     template <class T>
