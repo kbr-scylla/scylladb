@@ -31,6 +31,8 @@ using small_vector = std::vector<T>;
 #include "streamed_mutation.hh"
 #include "mutation_partition.hh"
 
+#include "db/timeout_clock.hh"
+
 class cells_range {
     using ids_vector_type = small_vector<column_id, 5>;
 
@@ -131,11 +133,7 @@ struct cell_locker_stats {
 };
 
 class cell_locker {
-public:
-    using timeout_clock = lowres_clock;
 private:
-    using semaphore_type = basic_semaphore<default_timeout_exception_factory, timeout_clock>;
-
     class partition_entry;
 
     struct cell_address {
@@ -147,7 +145,7 @@ private:
                        public enable_lw_shared_from_this<cell_entry> {
         partition_entry& _parent;
         cell_address _address;
-        semaphore_type _semaphore { 0 };
+        db::timeout_semaphore _semaphore { 0 };
 
         friend class cell_locker;
     public:
@@ -176,7 +174,7 @@ private:
             return _address.position;
         }
 
-        future<> lock(timeout_clock::time_point _timeout) {
+        future<> lock(db::timeout_clock::time_point _timeout) {
             return _semaphore.wait(_timeout);
         }
         void unlock() {
@@ -376,7 +374,7 @@ public:
 
     // partition_cells_range is required to be in cell_locker::schema()
     future<std::vector<locked_cell>> lock_cells(const dht::decorated_key& dk, partition_cells_range&& range,
-                                                timeout_clock::time_point timeout);
+                                                db::timeout_clock::time_point timeout);
 };
 
 
@@ -405,7 +403,7 @@ struct cell_locker::locker {
     partition_cells_range::iterator _current_ck;
     cells_range::const_iterator _current_cell;
 
-    timeout_clock::time_point _timeout;
+    db::timeout_clock::time_point _timeout;
     std::vector<locked_cell> _locks;
     cell_locker_stats& _stats;
 private:
@@ -419,7 +417,7 @@ private:
 
     bool is_done() const { return _current_ck == _range.end(); }
 public:
-    explicit locker(const ::schema& s, cell_locker_stats& st, partition_entry& pe, partition_cells_range&& range, timeout_clock::time_point timeout)
+    explicit locker(const ::schema& s, cell_locker_stats& st, partition_entry& pe, partition_cells_range&& range, db::timeout_clock::time_point timeout)
         : _hasher(s)
         , _eq_cmp(s)
         , _partition_entry(pe)
@@ -447,7 +445,7 @@ public:
 };
 
 inline
-future<std::vector<locked_cell>> cell_locker::lock_cells(const dht::decorated_key& dk, partition_cells_range&& range, timeout_clock::time_point timeout) {
+future<std::vector<locked_cell>> cell_locker::lock_cells(const dht::decorated_key& dk, partition_cells_range&& range, db::timeout_clock::time_point timeout) {
     partition_entry::hasher pe_hash;
     partition_entry::equal_compare pe_eq(*_schema);
 
