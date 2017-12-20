@@ -293,6 +293,7 @@ scylla_tests = [
     'tests/partition_data_test',
     'tests/reusable_buffer_test',
     'tests/multishard_writer_test',
+    'tests/encrypted_file_test',
 ]
 
 perf_tests = [
