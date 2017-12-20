@@ -268,8 +268,8 @@ class scanning_reader final : public flat_mutation_reader::impl, private iterato
         }
     };
 
-    future<> fill_buffer_from_delegate() {
-        return _delegate->consume_pausable(consumer(this)).then([this] {
+    future<> fill_buffer_from_delegate(db::timeout_clock::time_point timeout) {
+        return _delegate->consume_pausable(consumer(this), timeout).then([this] {
             if (_delegate->is_end_of_stream() && _delegate->is_buffer_empty()) {
                 if (_delegate_range) {
                     _end_of_stream = true;
@@ -294,8 +294,8 @@ public:
          , _fwd_mr(fwd_mr)
      { }
 
-    virtual future<> fill_buffer() override {
-        return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this] {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+        return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this, timeout] {
             if (!_delegate) {
                 _delegate_range = get_delegate_range();
                 if (_delegate_range) {
@@ -334,7 +334,7 @@ public:
                 }
             }
 
-            return is_end_of_stream() ? make_ready_future<>() : fill_buffer_from_delegate();
+            return is_end_of_stream() ? make_ready_future<>() : fill_buffer_from_delegate(timeout);
         });
     }
     virtual void next_partition() override {
@@ -482,8 +482,8 @@ private:
         }
     }
 public:
-    virtual future<> fill_buffer() override {
-        return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this] {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+        return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this, timeout] {
             if (!_partition_reader) {
                 get_next_partition();
                 if (!_partition_reader) {
@@ -494,7 +494,7 @@ public:
             return _partition_reader->consume_pausable([this] (mutation_fragment mf) {
                 push_mutation_fragment(std::move(mf));
                 return stop_iteration(is_buffer_full());
-            }).then([this] {
+            }, timeout).then([this] {
                 if (_partition_reader->is_end_of_stream() && _partition_reader->is_buffer_empty()) {
                     _partition_reader = stdx::nullopt;
                 }

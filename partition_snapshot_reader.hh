@@ -190,7 +190,7 @@ private:
         push_mutation_fragment(std::move(mfopt));
     }
 
-    void do_fill_buffer() {
+    void do_fill_buffer(db::timeout_clock::time_point timeout) {
         if (!_last_entry) {
             auto mfopt = read_static_row();
             if (mfopt) {
@@ -242,17 +242,17 @@ public:
     , _range_tombstones(*s)
     , _lsa_region(region)
     , _read_section(read_section) {
-        do_fill_buffer();
+        do_fill_buffer(db::no_timeout);
     }
 
     ~partition_snapshot_reader() {
         maybe_merge_versions(_snapshot, _lsa_region, _read_section);
     }
 
-    virtual future<> fill_buffer() override {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
         return _read_section(_lsa_region, [&] {
             return with_linearized_managed_bytes([&] {
-                do_fill_buffer();
+                do_fill_buffer(timeout);
                 return make_ready_future<>();
             });
         });
@@ -506,7 +506,7 @@ private:
         _no_more_rows_in_current_range = false;
     }
 
-    void do_fill_buffer() {
+    void do_fill_buffer(db::timeout_clock::time_point timeout) {
         while (!is_end_of_stream() && !is_buffer_full()) {
             auto mfopt = read_next();
             if (mfopt) {
@@ -537,13 +537,13 @@ public:
             push_mutation_fragment(partition_start(std::move(dk), _reader.partition_tombstone()));
             push_static_row();
             on_new_range();
-            do_fill_buffer();
+            do_fill_buffer(db::no_timeout);
         });
     }
 
-    virtual future<> fill_buffer() override {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
         _reader.with_reserve([&] {
-            do_fill_buffer();
+            do_fill_buffer(timeout);
         });
         return make_ready_future<>();
     }
