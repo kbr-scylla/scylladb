@@ -163,6 +163,11 @@ public:
         , _make_queue_overloaded_exception(raise_queue_overloaded_exception) {
     }
 
+    // XXX: temporary. Will disappear in the next patch
+    timeout_clock::duration timeout() {
+        return _timeout;
+    }
+
     reader_concurrency_semaphore(const reader_concurrency_semaphore&) = delete;
     reader_concurrency_semaphore& operator=(const reader_concurrency_semaphore&) = delete;
 

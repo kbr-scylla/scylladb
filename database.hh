@@ -630,7 +630,8 @@ public:
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
-        uint64_t max_result_size);
+        uint64_t max_result_size,
+        db::timeout_clock::time_point timeout = db::no_timeout);
 
     void start();
     future<> stop();
@@ -827,6 +828,14 @@ public:
     friend class column_family_test;
 
     friend class distributed_loader;
+
+    db::timeout_clock::time_point read_request_timeout() const {
+        auto timeout = _config.read_concurrency_semaphore->timeout();
+        if (timeout.count() == 0) {
+            return db::no_timeout;
+        }
+        return db::timeout_clock::now() + timeout;
+    }
 };
 
 using sstable_reader_factory_type = std::function<flat_mutation_reader(sstables::shared_sstable&, const dht::partition_range& pr)>;

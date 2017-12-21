@@ -796,13 +796,15 @@ public:
 class reader_wrapper {
     flat_mutation_reader _reader;
     tracking_reader* _tracker{nullptr};
-
+    db::timeout_clock::time_point _timeout;
 public:
     reader_wrapper(
             reader_concurrency_semaphore& semaphore,
             schema_ptr schema,
-            lw_shared_ptr<sstables::sstable> sst)
+            lw_shared_ptr<sstables::sstable> sst,
+            db::timeout_clock::duration timeout_duration = {})
         : _reader(make_empty_flat_reader(schema))
+        , _timeout(db::timeout_clock::now() + timeout_duration)
     {
         auto ms = mutation_source([this, sst=std::move(sst)] (schema_ptr schema,
                     const dht::partition_range&,
@@ -824,7 +826,7 @@ public:
         while (!_reader.is_buffer_empty()) {
             _reader.pop_mutation_fragment();
         }
-        return _reader.fill_buffer(db::no_timeout);
+        return _reader.fill_buffer(_timeout);
     }
 
     future<> fast_forward_to(const dht::partition_range& pr) {
@@ -1046,13 +1048,14 @@ SEASTAR_TEST_CASE(restricted_reader_timeout) {
             auto tmp = make_lw_shared<tmpdir>();
             auto sst = create_sstable(s, tmp->path);
 
-            auto reader1 = reader_wrapper(semaphore, s.schema(), sst);
+            auto timeout = std::chrono::duration_cast<db::timeout_clock::time_point::duration>(std::chrono::milliseconds{10});
+            auto reader1 = reader_wrapper(semaphore, s.schema(), sst, timeout);
             reader1().get();
 
-            auto reader2 = reader_wrapper(semaphore, s.schema(), sst);
+            auto reader2 = reader_wrapper(semaphore, s.schema(), sst, timeout);
             auto read2_fut = reader2();
 
-            auto reader3 = reader_wrapper(semaphore, s.schema(), sst);
+            auto reader3 = reader_wrapper(semaphore, s.schema(), sst, timeout);
             auto read3_fut = reader3();
 
             BOOST_REQUIRE_EQUAL(semaphore.waiters(), 2);
