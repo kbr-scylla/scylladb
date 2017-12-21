@@ -790,13 +790,14 @@ commitlog_total_space_in_mb: -1
 # audit: "none"
 #
 # List of statement categories that should be audited.
-# audit-categories: "DCL,DDL,AUTH"
+# audit_categories: "DCL,DDL,AUTH"
 #
 # List of tables that should be audited.
-# audit-tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
+# audit_tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
 #
 # List of keyspaces that should be fully audited.
 # All tables in those keyspaces will be audited
+# audit_keyspaces: "<keyspace_name>,<keyspace_name>"
 # audit-keyspaces: "<keyspace_name>,<keyspace_name>"
 
 # Distribution of data among cores (shards) within a node
