@@ -4,7 +4,7 @@ Release:        @@RELEASE@@%{?dist}
 Summary:        Scylla is a highly scalable, eventually consistent, distributed, partitioned row DB.
 Group:          Applications/Databases
 
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 Source0:        %{name}-@@VERSION@@-@@RELEASE@@.tar
 Requires:       scylla-server = @@VERSION@@ scylla-jmx = @@VERSION@@ scylla-tools = @@VERSION@@ scylla-tools-core = @@VERSION@@ scylla-kernel-conf = @@VERSION@@ scylla-libgcc72 scylla-libstdc++72
@@ -48,7 +48,7 @@ scylla-server, scylla-jmx, scylla-tools, scylla-tools-core.
 %package        server
 Group:          Applications/Databases
 Summary:        The Scylla database server
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 BuildRequires:  libaio-devel libstdc++-devel cryptopp-devel hwloc-devel numactl-devel libpciaccess-devel libxml2-devel zlib-devel thrift-devel yaml-cpp-devel lz4-devel snappy-devel jsoncpp-devel systemd-devel xz-devel pcre-devel elfutils-libelf-devel bzip2-devel keyutils-libs-devel xfsprogs-devel make gnutls-devel systemd-devel lksctp-tools-devel protobuf-devel protobuf-compiler libunwind-devel systemtap-sdt-devel ninja-build cmake python ragel
 %{?fedora:BuildRequires: boost-devel antlr3-tool antlr3-C++-devel python3 gcc-c++ libasan libubsan python3-pyparsing dnf-yum}
@@ -239,7 +239,7 @@ rm -rf $RPM_BUILD_ROOT
 %package conf
 Group:          Applications/Databases
 Summary:        Scylla configuration package
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 Obsoletes:	scylla-server < 1.1
 
@@ -292,7 +292,7 @@ fi
 %package kernel-conf
 Group:          Applications/Databases
 Summary:        Scylla configuration package for the Linux kernel
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 Requires:       kmod
 
