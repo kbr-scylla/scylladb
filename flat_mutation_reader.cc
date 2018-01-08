@@ -127,11 +127,11 @@ flat_mutation_reader flat_mutation_reader::impl::reverse_partitions(flat_mutatio
             }
         }
 
-        virtual future<> fast_forward_to(const dht::partition_range&) override {
+        virtual future<> fast_forward_to(const dht::partition_range&, db::timeout_clock::time_point) override {
             throw std::bad_function_call();
         }
 
-        virtual future<> fast_forward_to(position_range) override {
+        virtual future<> fast_forward_to(position_range, db::timeout_clock::time_point) override {
             throw std::bad_function_call();
         }
     };
@@ -213,17 +213,17 @@ flat_mutation_reader flat_mutation_reader_from_mutation_reader(schema_ptr s, mut
                 }
             }
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             clear_buffer();
             _sm = { };
             _end_of_stream = false;
-            return _legacy_reader.fast_forward_to(pr);
+            return _legacy_reader.fast_forward_to(pr, timeout);
         };
-        virtual future<> fast_forward_to(position_range cr) override {
+        virtual future<> fast_forward_to(position_range cr, db::timeout_clock::time_point timeout) override {
             forward_buffer_to(cr.start());
             _end_of_stream = false;
             if (_sm) {
-                return _sm->fast_forward_to(std::move(cr));
+                return _sm->fast_forward_to(std::move(cr), timeout);
             } else {
                 _end_of_stream = true;
                 return make_ready_future<>();
@@ -243,10 +243,10 @@ flat_mutation_reader make_delegating_reader(flat_mutation_reader& r) {
                 _end_of_stream = underlying_finished;
             });
         }
-        virtual future<> fast_forward_to(position_range pr) override {
+        virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
             _end_of_stream = false;
             forward_buffer_to(pr.start());
-            return _underlying.get().fast_forward_to(std::move(pr));
+            return _underlying.get().fast_forward_to(std::move(pr), timeout);
         }
         virtual void next_partition() override {
             clear_buffer_to_next_partition();
@@ -255,10 +255,10 @@ flat_mutation_reader make_delegating_reader(flat_mutation_reader& r) {
             }
             _end_of_stream = _underlying.get().is_end_of_stream() && _underlying.get().is_buffer_empty();
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             _end_of_stream = false;
             clear_buffer();
-            return _underlying.get().fast_forward_to(pr);
+            return _underlying.get().fast_forward_to(pr, timeout);
         }
     };
     return make_flat_mutation_reader<reader>(r);
@@ -309,7 +309,7 @@ flat_mutation_reader make_forwardable(flat_mutation_reader m) {
                 });
             });
         }
-        virtual future<> fast_forward_to(position_range pr) override {
+        virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
             _current = std::move(pr);
             _end_of_stream = false;
             forward_buffer_to(_current.start());
@@ -327,7 +327,7 @@ flat_mutation_reader make_forwardable(flat_mutation_reader m) {
                 position_in_partition(position_in_partition::after_static_row_tag_t())
             };
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             _end_of_stream = false;
             clear_buffer();
             _next = {};
@@ -335,7 +335,7 @@ flat_mutation_reader make_forwardable(flat_mutation_reader m) {
                 position_in_partition(position_in_partition::partition_start_tag_t()),
                 position_in_partition(position_in_partition::after_static_row_tag_t())
             };
-            return _underlying.fast_forward_to(pr);
+            return _underlying.fast_forward_to(pr, timeout);
         }
     };
     return make_flat_mutation_reader<reader>(std::move(m));
@@ -349,10 +349,10 @@ flat_mutation_reader make_nonforwardable(flat_mutation_reader r, bool single_par
         bool is_end_end_of_underlying_stream() const {
             return _underlying.is_buffer_empty() && _underlying.is_end_of_stream();
         }
-        future<> on_end_of_underlying_stream() {
+        future<> on_end_of_underlying_stream(db::timeout_clock::time_point timeout) {
             if (!_static_row_done) {
                 _static_row_done = true;
-                return _underlying.fast_forward_to(position_range::all_clustered_rows());
+                return _underlying.fast_forward_to(position_range::all_clustered_rows(), timeout);
             }
             push_mutation_fragment(partition_end());
             if (_single_partition) {
@@ -373,15 +373,15 @@ flat_mutation_reader make_nonforwardable(flat_mutation_reader r, bool single_par
         { }
         virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
             return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this, timeout] {
-                return fill_buffer_from(_underlying, timeout).then([this] (bool underlying_finished) {
+                return fill_buffer_from(_underlying, timeout).then([this, timeout] (bool underlying_finished) {
                     if (underlying_finished) {
-                        return on_end_of_underlying_stream();
+                        return on_end_of_underlying_stream(timeout);
                     }
                     return make_ready_future<>();
                 });
             });
         }
-        virtual future<> fast_forward_to(position_range pr) override {
+        virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
             throw std::bad_function_call();
         }
         virtual void next_partition() override {
@@ -391,10 +391,10 @@ flat_mutation_reader make_nonforwardable(flat_mutation_reader r, bool single_par
             }
             _end_of_stream = is_end_end_of_underlying_stream();
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             _end_of_stream = false;
             clear_buffer();
-            return _underlying.fast_forward_to(pr);
+            return _underlying.fast_forward_to(pr, timeout);
         }
     };
     return make_flat_mutation_reader<reader>(std::move(r), single_partition);
@@ -405,8 +405,8 @@ public:
     empty_flat_reader(schema_ptr s) : impl(std::move(s)) { _end_of_stream = true; }
     virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override { return make_ready_future<>(); }
     virtual void next_partition() override {}
-    virtual future<> fast_forward_to(const dht::partition_range& pr) override { return make_ready_future<>(); };
-    virtual future<> fast_forward_to(position_range cr) override { return make_ready_future<>(); };
+    virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override { return make_ready_future<>(); };
+    virtual future<> fast_forward_to(position_range cr, db::timeout_clock::time_point timeout) override { return make_ready_future<>(); };
 };
 
 flat_mutation_reader make_empty_flat_reader(schema_ptr s) {
@@ -549,10 +549,10 @@ flat_mutation_reader_from_mutations(std::vector<mutation> mutations, streamed_mu
                 }
             }
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             throw std::runtime_error("This reader can't be fast forwarded to another partition.");
         };
-        virtual future<> fast_forward_to(position_range cr) override {
+        virtual future<> fast_forward_to(position_range cr, db::timeout_clock::time_point timeout) override {
             throw std::runtime_error("This reader can't be fast forwarded to another position.");
         };
     };
@@ -587,7 +587,7 @@ public:
 
     virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
         return do_until([this] { return is_end_of_stream() || !is_buffer_empty(); }, [this, timeout] {
-            return _reader.fill_buffer(timeout).then([this] () {
+            return _reader.fill_buffer(timeout).then([this, timeout] () {
                 while (!_reader.is_buffer_empty()) {
                     push_mutation_fragment(_reader.pop_mutation_fragment());
                 }
@@ -599,21 +599,21 @@ public:
                     _end_of_stream = true;
                     return make_ready_future<>();
                 }
-                return _reader.fast_forward_to(*_current_range);
+                return _reader.fast_forward_to(*_current_range, timeout);
             });
         });
     }
 
-    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+    virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
         clear_buffer();
         _end_of_stream = false;
         // When end of pr is reached, this reader will increment _current_range
         // and notice that it now points to _ranges.end().
         _current_range = std::prev(_ranges.end());
-        return _reader.fast_forward_to(pr);
+        return _reader.fast_forward_to(pr, timeout);
     }
 
-    virtual future<> fast_forward_to(position_range pr) override {
+    virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
         throw std::bad_function_call();
     }
 
