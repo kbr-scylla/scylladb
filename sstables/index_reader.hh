@@ -78,6 +78,9 @@ private:
 
 public:
     void verify_end_state() {
+        if (this->_remain > 0) {
+            throw std::runtime_error("index_consume_entry_context - no more data but parsing is incomplete");
+        }
     }
 
     bool non_consuming() const {
@@ -231,6 +234,7 @@ class index_reader {
     shared_index_lists::list_ptr _prev_list;
 
     const io_priority_class& _pc;
+    shared_index_lists& _index_lists;
 
     struct reader {
         index_consumer _consumer;
@@ -313,7 +317,7 @@ private:
             });
         };
 
-        return _sstable->_index_lists.get_or_load(summary_idx, loader).then([this, summary_idx] (shared_index_lists::list_ptr ref) {
+        return _index_lists.get_or_load(summary_idx, loader).then([this, summary_idx] (shared_index_lists::list_ptr ref) {
             _prev_list = std::move(_current_list);
             _current_list = std::move(ref);
             _current_summary_idx = summary_idx;
@@ -350,9 +354,10 @@ public:
         return advance_to_end();
     }
 
-    index_reader(shared_sstable sst, const io_priority_class& pc)
+    index_reader(shared_sstable sst, const io_priority_class& pc, shared_index_lists& index_lists)
         : _sstable(std::move(sst))
         , _pc(pc)
+        , _index_lists(index_lists)
     {
         sstlog.trace("index {}: index_reader for {}", this, _sstable->get_filename());
     }
@@ -362,6 +367,7 @@ public:
         , _current_list(r._current_list)
         , _prev_list(r._prev_list)
         , _pc(r._pc)
+        , _index_lists(r._index_lists)
         , _previous_summary_idx(r._previous_summary_idx)
         , _current_summary_idx(r._current_summary_idx)
         , _current_index_idx(r._current_index_idx)
@@ -678,6 +684,11 @@ public:
     }
 
     future<> close() {
+        // Explicitly reset list_ptrs so that they don't keep the index_lists cache alive.
+        // sstable_mutation_reader closes index_readers asynchronously from its destructor but it also
+        // holds the index_lists object and it should have no external pointers to be cleaned up properly
+        _current_list = {};
+        _prev_list = {};
         return close_reader();
     }
 };
