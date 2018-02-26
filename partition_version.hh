@@ -133,14 +133,12 @@ using partition_version_range = anchorless_list_base_hook<partition_version>::ra
 class partition_version_ref {
     partition_version* _version = nullptr;
     bool _unique_owner = false;
-    bool _evictable;
 
     friend class partition_version;
 public:
     partition_version_ref() = default;
-    explicit partition_version_ref(partition_version& pv, partition_version::is_evictable ev) noexcept
+    explicit partition_version_ref(partition_version& pv) noexcept
         : _version(&pv)
-        , _evictable(ev)
     {
         assert(!_version->_backref);
         _version->_backref = this;
@@ -152,7 +150,6 @@ public:
     }
     partition_version_ref(partition_version_ref&& other) noexcept
         : _version(other._version)
-        , _evictable(other._evictable)
     {
         if (_version) {
             _version->_backref = this;
@@ -188,8 +185,6 @@ public:
 
     bool is_unique_owner() const { return _unique_owner; }
     void mark_as_unique_owner() { _unique_owner = true; }
-    void make_evictable() { _evictable = true; }
-    bool evictable() const { return _evictable; }
 };
 
 class partition_entry;
