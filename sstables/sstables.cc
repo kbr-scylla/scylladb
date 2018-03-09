@@ -2057,6 +2057,7 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
     , _index_needs_close(true)
     , _max_sstable_size(cfg.max_sstable_size)
     , _tombstone_written(false)
+    , _large_partition_warning_threshold_bytes(get_config().compaction_large_partition_warning_threshold_mb()*1024*1024)
 {
     _sst._components->filter = utils::i_filter::get_filter(estimated_partitions, _schema.bloom_filter_fp_chance());
     _sst._pi_write.desired_block_size = cfg.promoted_index_block_size.value_or(get_config().column_index_size_in_kb() * 1024);
@@ -2146,6 +2147,13 @@ stop_iteration components_writer::consume(range_tombstone&& rt) {
     return stop_iteration::no;
 }
 
+static void maybe_log_large_partition_warning(const schema& s, key& key, uint64_t row_size, uint64_t large_partition_warning_threshold_bytes) {
+    if (row_size > large_partition_warning_threshold_bytes) {
+        auto dk = dht::global_partitioner().decorate_key(s, key.to_partition_key(s));
+        sstlog.warn("Writing large row {}/{}:{} ({} bytes)", s.ks_name(), s.cf_name(), dk, row_size);
+    }
+}
+
 stop_iteration components_writer::consume_end_of_partition() {
     // If there is an incomplete block in the promoted index, write it too.
     // However, if the _promoted_index is still empty, don't add a single
@@ -2169,6 +2177,9 @@ stop_iteration components_writer::consume_end_of_partition() {
 
     // compute size of the current row.
     _sst._c_stats.row_size = _out.offset() - _sst._c_stats.start_offset;
+
+    maybe_log_large_partition_warning(_schema, *_partition_key, _sst._c_stats.row_size, _large_partition_warning_threshold_bytes);
+
     // update is about merging column_stats with the data being stored by collector.
     _sst._collector.update(_schema, std::move(_sst._c_stats));
     _sst._c_stats.reset();
