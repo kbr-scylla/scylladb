@@ -636,17 +636,6 @@ std::ostream& operator<<(std::ostream& out, const partition_entry& e) {
     return out;
 }
 
-void partition_entry::evict() noexcept {
-    if (!_version) {
-        return;
-    }
-    // Must evict from all versions atomically to keep snapshots consistent.
-    for (auto&& v : versions()) {
-        v.partition().evict();
-    }
-    current_allocator().invalidate_references();
-}
-
 void partition_entry::evict_snapshots() noexcept {
     if (!_version) {
         return;

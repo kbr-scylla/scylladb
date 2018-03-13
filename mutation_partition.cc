@@ -2197,23 +2197,6 @@ void mutation_partition::make_fully_continuous() {
     }
 }
 
-void mutation_partition::evict() noexcept {
-    if (!_rows.empty()) {
-        // We need to keep the last entry to mark the range containing all evicted rows as discontinuous.
-        // No rows would mean it is continuous.
-        auto i = _rows.erase_and_dispose(_rows.begin(), std::prev(_rows.end()), current_deleter<rows_entry>());
-        rows_entry& e = *i;
-        e._flags._before_ck = false;
-        e._flags._after_ck = true;
-        e._flags._dummy = true;
-        e._flags._continuous = false;
-        e._row = {};
-    }
-    _row_tombstones.clear();
-    _static_row_continuous = false;
-    _static_row = {};
-}
-
 stop_iteration mutation_partition::clear_gently() noexcept {
     if (_row_tombstones.clear_gently() == stop_iteration::no) {
         return stop_iteration::no;

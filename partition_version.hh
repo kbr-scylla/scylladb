@@ -350,10 +350,6 @@ public:
         return *this;
     }
 
-    // Removes all data marking affected ranges as discontinuous.
-    // Includes versions referenced by snapshots.
-    void evict() noexcept;
-
     // Detaches all snapshots from this entry without transfering ownership of data.
     // Snapshots will appear as fully discontinuous.
     void evict_snapshots() noexcept;

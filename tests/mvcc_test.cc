@@ -269,45 +269,6 @@ SEASTAR_TEST_CASE(test_schema_upgrade_preserves_continuity) {
     });
 }
 
-SEASTAR_TEST_CASE(test_full_eviction_marks_affected_range_as_discontinuous) {
-    return seastar::async([] {
-        logalloc::region r;
-        with_allocator(r.allocator(), [&] {
-            logalloc::reclaim_lock l(r);
-
-            simple_schema table;
-            auto&& s = *table.schema();
-            auto ck1 = table.make_ckey(1);
-            auto ck2 = table.make_ckey(2);
-
-            auto e = partition_entry::make_evictable(s, mutation_partition(table.schema()));
-
-            auto t = table.new_tombstone();
-            auto&& p1 = e.open_version(s).partition();
-            p1.clustered_row(s, ck2);
-            p1.apply(t);
-
-            auto snap1 = e.read(r, table.schema());
-
-            auto&& p2 = e.open_version(s).partition();
-            p2.clustered_row(s, ck1);
-
-            auto snap2 = e.read(r, table.schema());
-
-            e.evict();
-
-            BOOST_REQUIRE(snap1->squashed().fully_discontinuous(s, position_range::all_clustered_rows()));
-            BOOST_REQUIRE(snap2->squashed().fully_discontinuous(s, position_range::all_clustered_rows()));
-
-            BOOST_REQUIRE(!snap1->squashed().static_row_continuous());
-            BOOST_REQUIRE(!snap2->squashed().static_row_continuous());
-
-            BOOST_REQUIRE_EQUAL(snap1->squashed().partition_tombstone(), t);
-            BOOST_REQUIRE_EQUAL(snap2->squashed().partition_tombstone(), t);
-        });
-    });
-}
-
 SEASTAR_TEST_CASE(test_eviction_with_active_reader) {
     return seastar::async([] {
         logalloc::region r;
