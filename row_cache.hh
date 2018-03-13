@@ -109,6 +109,10 @@ public:
     cache_entry(cache_entry&&) noexcept;
     ~cache_entry();
 
+    // Frees elements of the entry in batches.
+    // Returns stop_iteration::yes iff there are no more elements to free.
+    stop_iteration clear_gently() noexcept;
+
     bool is_evictable() { return _lru_link.is_linked(); }
     const dht::decorated_key& key() const { return _key; }
     dht::ring_position_view position() const {

@@ -1161,6 +1161,10 @@ cache_entry::~cache_entry() {
     _pe.evict();
 }
 
+stop_iteration cache_entry::clear_gently() noexcept {
+    return _pe.clear_gently();
+}
+
 void row_cache::set_schema(schema_ptr new_schema) noexcept {
     _schema = std::move(new_schema);
 }

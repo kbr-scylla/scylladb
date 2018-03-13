@@ -2214,6 +2214,24 @@ void mutation_partition::evict() noexcept {
     _static_row = {};
 }
 
+stop_iteration mutation_partition::clear_gently() noexcept {
+    if (_row_tombstones.clear_gently() == stop_iteration::no) {
+        return stop_iteration::no;
+    }
+
+    auto del = current_deleter<rows_entry>();
+    auto end = _rows.end();
+    auto i = _rows.begin();
+    while (i != end) {
+        i = _rows.erase_and_dispose(i, del);
+        if (need_preempt()) {
+            return stop_iteration::no;
+        }
+    }
+
+    return stop_iteration::yes;
+}
+
 bool
 mutation_partition::check_continuity(const schema& s, const position_range& r, is_continuous cont) const {
     auto less = rows_entry::compare(s);

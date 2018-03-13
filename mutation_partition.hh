@@ -892,6 +892,10 @@ public:
     bool check_continuity(const schema&, const position_range&, is_continuous) const;
     // Removes all data, marking affected ranges as discontinuous.
     void evict() noexcept;
+    // Frees elements of the partition in batches.
+    // Returns stop_iteration::yes iff there are no more elements to free.
+    // Continuity is unspecified after this.
+    stop_iteration clear_gently() noexcept;
     // Applies mutation_fragment.
     // The fragment must be goverened by the same schema as this object.
     void apply(const schema& s, const mutation_fragment&);
