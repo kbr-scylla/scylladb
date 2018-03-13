@@ -57,12 +57,28 @@ cache_tracker::cache_tracker() {
           // the rbtree, so linearize anything we read
           return with_linearized_managed_bytes([&] {
            try {
-            auto evict_last = [this](lru_type& lru) {
+            auto evict_garbage = [this] {
+                cache_entry& ce = _garbage.front();
+                if (ce.clear_gently() == stop_iteration::yes) {
+                    current_deleter<cache_entry>()(&ce);
+                }
+            };
+            auto evict_last = [this] (lru_type& lru) {
                 cache_entry& ce = lru.back();
                 auto it = row_cache::partitions_type::s_iterator_to(ce);
                 clear_continuity(*std::next(it));
-                lru.pop_back_and_dispose(current_deleter<cache_entry>());
+                ce.evict_snapshots();
+                if (ce.clear_gently() == stop_iteration::yes) {
+                    current_deleter<cache_entry>()(&ce);
+                } else {
+                    ce._cache_link.unlink();
+                    reclaim_later(ce);
+                }
             };
+            if (!_garbage.empty()) {
+                evict_garbage();
+                return memory::reclaiming_result::reclaimed_something;
+            }
             if (_lru.empty()) {
                 return memory::reclaiming_result::reclaimed_nothing;
             }
@@ -123,12 +139,14 @@ void cache_tracker::clear() {
                     cache_entry& to_remove = *it;
                     ++it;
                     to_remove._lru_link.unlink();
+                    to_remove.evict_snapshots();
                     current_deleter<cache_entry>()(&to_remove);
                 }
                 clear_continuity(*it);
             }
         };
         clear(_lru);
+        _garbage.clear_and_dispose(current_deleter<cache_entry>());
     });
     _stats.partition_removals += _stats.partitions;
     _stats.partitions = 0;
@@ -149,6 +167,11 @@ void cache_tracker::insert(cache_entry& entry) {
     // partition_range_cursor depends on this to detect invalidation of _end
     _region.allocator().invalidate_references();
     _lru.push_front(entry);
+}
+
+void cache_tracker::reclaim_later(cache_entry& e) noexcept {
+    e._lru_link.unlink();
+    _garbage.push_back(e);
 }
 
 void cache_tracker::on_erase() {
@@ -770,20 +793,22 @@ row_cache::make_flat_reader(schema_ptr s,
 
 row_cache::~row_cache() {
     with_allocator(_tracker.allocator(), [this] {
-        _partitions.clear_and_dispose([this, deleter = current_deleter<cache_entry>()] (auto&& p) mutable {
+        _partitions.clear_and_dispose([this] (auto&& p) mutable {
             if (!p->is_dummy_entry()) {
                 _tracker.on_erase();
             }
-            deleter(p);
+            p->evict_snapshots();
+            _tracker.reclaim_later(*p);
         });
     });
 }
 
 void row_cache::clear_now() noexcept {
     with_allocator(_tracker.allocator(), [this] {
-        auto it = _partitions.erase_and_dispose(_partitions.begin(), partitions_end(), [this, deleter = current_deleter<cache_entry>()] (auto&& p) mutable {
+        auto it = _partitions.erase_and_dispose(_partitions.begin(), partitions_end(), [this] (auto&& p) mutable {
             _tracker.on_erase();
-            deleter(p);
+            p->evict_snapshots();
+            _tracker.reclaim_later(*p);
         });
         _tracker.clear_continuity(*it);
     });
@@ -1040,12 +1065,12 @@ future<> row_cache::update_invalidating(external_updater eu, memtable& m) {
             partition_presence_checker& is_present) {
         if (cache_i != partitions_end() && cache_i->key().equal(*_schema, mem_e.key())) {
             // FIXME: Invalidate only affected row ranges.
-            // This invalidates all row ranges and the static row, leaving only the partition tombstone continuous,
-            // which has to always be continuous.
-            cache_entry& e = *cache_i;
-            e.partition().evict(); // FIXME: evict gradually
-            upgrade_entry(e);
-            e.partition().apply_to_incomplete(*_schema, std::move(mem_e.partition()), *mem_e.schema());
+            auto it = _partitions.erase_and_dispose(cache_i, [this] (auto&& p) mutable {
+                _tracker.on_erase();
+                p->evict_snapshots();
+                _tracker.reclaim_later(*p);
+            });
+            _tracker.clear_continuity(*it);
         } else {
             _tracker.clear_continuity(*cache_i);
         }
@@ -1073,9 +1098,10 @@ void row_cache::invalidate_locked(const dht::decorated_key& dk) {
         _tracker.clear_continuity(*pos);
     } else {
         auto it = _partitions.erase_and_dispose(pos,
-            [this, &dk, deleter = current_deleter<cache_entry>()](auto&& p) mutable {
+            [this, &dk](auto&& p) mutable {
                 _tracker.on_erase();
-                deleter(p);
+                p->evict_snapshots();
+                _tracker.reclaim_later(*p);
             });
         _tracker.clear_continuity(*it);
     }
@@ -1113,9 +1139,10 @@ void row_cache::invalidate_unwrapped(const dht::partition_range& range) {
     auto begin = _partitions.lower_bound(dht::ring_position_view::for_range_start(range), cmp);
     auto end = _partitions.lower_bound(dht::ring_position_view::for_range_end(range), cmp);
     with_allocator(_tracker.allocator(), [this, begin, end] {
-        auto it = _partitions.erase_and_dispose(begin, end, [this, deleter = current_deleter<cache_entry>()] (auto&& p) mutable {
+        auto it = _partitions.erase_and_dispose(begin, end, [this] (auto&& p) mutable {
             _tracker.on_erase();
-            deleter(p);
+            p->evict_snapshots();
+            _tracker.reclaim_later(*p);
         });
         assert(it != _partitions.end());
         _tracker.clear_continuity(*it);
@@ -1158,7 +1185,10 @@ cache_entry::cache_entry(cache_entry&& o) noexcept
 }
 
 cache_entry::~cache_entry() {
-    _pe.evict();
+}
+
+void cache_entry::evict_snapshots() noexcept {
+    _pe.evict_snapshots();
 }
 
 stop_iteration cache_entry::clear_gently() noexcept {
