@@ -646,3 +646,33 @@ void partition_entry::evict() noexcept {
     }
     current_allocator().invalidate_references();
 }
+
+void partition_entry::evict_snapshots() noexcept {
+    if (!_version) {
+        return;
+    }
+    if (_snapshot) {
+        _snapshot->_entry = nullptr;
+        _snapshot = nullptr;
+    }
+    auto v = &*_version;
+    auto head = v;
+    _version = {};
+    while (v) {
+        if (v->is_referenced()) {
+            v->back_reference().reset();
+        }
+        v = v->next();
+    }
+    _version = partition_version_ref(*head);
+    current_allocator().invalidate_references();
+}
+
+partition_version_ref partition_snapshot::make_incomplete_version() const {
+    return with_allocator(region().allocator(), [&] {
+        auto v = partition_version_ref(*current_allocator().construct<partition_version>(
+            mutation_partition::make_incomplete(*_schema, _partition_tombstone)));
+        v.mark_as_unique_owner();
+        return v;
+    });
+}

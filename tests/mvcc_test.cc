@@ -335,7 +335,7 @@ SEASTAR_TEST_CASE(test_eviction_with_active_reader) {
             BOOST_REQUIRE(cursor.continuous());
             BOOST_REQUIRE(cursor.key().equal(s, ck1));
 
-            e.evict();
+            e.evict_snapshots();
 
             cursor.maybe_refresh();
             do {
@@ -484,32 +484,27 @@ SEASTAR_TEST_CASE(test_partition_snapshot_row_cursor) {
                 BOOST_REQUIRE(cur.continuous());
             }
 
-            e.evict();
-
-            {
-                auto&& p2 = snap2->version()->partition();
-                p2.clustered_row(s, table.make_ckey(5), is_dummy::no, is_continuous::yes);
-            }
+            e.evict_snapshots();
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(!cur.maybe_refresh());
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(!cur.advance_to(table.make_ckey(4)));
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(cur.maybe_refresh());
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
         });
     });

@@ -167,6 +167,13 @@ public:
 
     explicit operator bool() const { return _version; }
 
+    void reset() noexcept {
+        if (_version) {
+            _version->_backref = nullptr;
+            _version = nullptr;
+        }
+    }
+
     partition_version& operator*() {
         assert(_version);
         return *_version;
@@ -225,13 +232,16 @@ public:
 private:
     schema_ptr _schema;
     // Either _version or _entry is non-null.
-    partition_version_ref _version;
+    // When both are null, it means the snapshot was evicted
+    // and should be considered as fully discontinuous.
+    mutable partition_version_ref _version;
     partition_entry* _entry;
     phase_type _phase;
     logalloc::region& _region;
     tombstone _partition_tombstone;
 
     friend class partition_entry;
+    partition_version_ref make_incomplete_version() const;
 public:
     explicit partition_snapshot(schema_ptr s,
                                 logalloc::region& region,
@@ -249,13 +259,14 @@ public:
 
     ~partition_snapshot();
 
-    partition_version_ref& version();
+    bool evicted() const { return !_entry && !_version; }
 
     change_mark get_change_mark() {
         return {_region.reclaim_counter(), version_count()};
     }
 
-    const partition_version_ref& version() const;
+    const partition_version_ref& version() const; // noexcept(!evicted())
+    partition_version_ref& version(); // noexcept(!evicted())
 
     partition_version_range versions() {
         return version()->elements_from_this();
@@ -273,7 +284,7 @@ public:
     tombstone partition_tombstone() const;
     row static_row() const;
     bool static_row_continuous() const noexcept {
-        return version()->partition().static_row_continuous();
+        return !evicted() && version()->partition().static_row_continuous();
     }
     mutation_partition squashed() const;
     // Returns range tombstones overlapping with [start, end)
@@ -343,6 +354,10 @@ public:
     // Includes versions referenced by snapshots.
     void evict() noexcept;
 
+    // Detaches all snapshots from this entry without transfering ownership of data.
+    // Snapshots will appear as fully discontinuous.
+    void evict_snapshots() noexcept;
+
     partition_version_ref& version() {
         return _version;
     }
@@ -408,8 +423,11 @@ inline partition_version_ref& partition_snapshot::version()
 {
     if (_version) {
         return _version;
-    } else {
+    } else if (_entry) {
         return _entry->_version;
+    } else {
+        _version = make_incomplete_version();
+        return _version;
     }
 }
 
@@ -417,7 +435,10 @@ inline const partition_version_ref& partition_snapshot::version() const
 {
     if (_version) {
         return _version;
-    } else {
+    } else if (_entry) {
         return _entry->_version;
+    } else {
+        _version = make_incomplete_version();
+        return _version;
     }
 }
