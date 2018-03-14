@@ -633,8 +633,6 @@ int main(int ac, char** av) {
             cf_cache_hitrate_calculator.local().run_on(engine().cpu_id());
             gms::get_local_gossiper().wait_for_gossip_to_settle().get();
             api::set_server_gossip_settle(ctx).get();
-            supervisor::notify("starting tracing");
-            tracing::tracing::start_tracing().get();
             audit::audit::start_audit(*cfg).get();
             supervisor::notify("starting native transport");
             service::get_local_storage_service().start_native_transport().get();
