@@ -103,6 +103,8 @@ class cache_flat_mutation_reader final : public flat_mutation_reader::impl {
     future<> read_from_underlying();
     void start_reading_from_underlying();
     bool after_current_range(position_in_partition_view position);
+    // Memory reclamation may change its result, so this check must run inside the same
+    // allocating section as the population which follows.
     bool can_populate() const;
     void maybe_update_continuity();
     void maybe_add_to_cache(const mutation_fragment& mf);
@@ -374,13 +376,15 @@ void cache_flat_mutation_reader::maybe_add_to_cache(const mutation_fragment& mf)
 
 inline
 void cache_flat_mutation_reader::maybe_add_to_cache(const clustering_row& cr) {
-    if (!can_populate()) {
-        _last_row = nullptr;
-        _read_context->cache().on_mispopulate();
-        return;
-    }
     clogger.trace("csm {}: populate({})", this, cr);
     _lsa_manager.run_in_update_section_with_allocator([this, &cr] {
+        if (!can_populate()) {
+            with_allocator(standard_allocator(), [&] {
+                _last_row = nullptr;
+                _read_context->cache().on_mispopulate();
+            });
+            return;
+        }
         mutation_partition& mp = _snp->version()->partition();
         rows_entry::compare less(*_schema);
 
@@ -587,27 +591,27 @@ void cache_flat_mutation_reader::add_to_buffer(range_tombstone&& rt) {
 
 inline
 void cache_flat_mutation_reader::maybe_add_to_cache(const range_tombstone& rt) {
-    if (can_populate()) {
-        clogger.trace("csm {}: maybe_add_to_cache({})", this, rt);
-        _lsa_manager.run_in_update_section_with_allocator([&] {
+    clogger.trace("csm {}: maybe_add_to_cache({})", this, rt);
+    _lsa_manager.run_in_update_section_with_allocator([&] {
+        if (can_populate()) {
             _snp->version()->partition().row_tombstones().apply_monotonically(*_schema, rt);
-        });
-    } else {
-        _read_context->cache().on_mispopulate();
-    }
+        } else {
+            _read_context->cache().on_mispopulate();
+        }
+    });
 }
 
 inline
 void cache_flat_mutation_reader::maybe_add_to_cache(const static_row& sr) {
-    if (can_populate()) {
-        clogger.trace("csm {}: populate({})", this, sr);
-        _read_context->cache().on_row_insert();
-        _lsa_manager.run_in_update_section_with_allocator([&] {
+    clogger.trace("csm {}: populate({})", this, sr);
+    _lsa_manager.run_in_update_section_with_allocator([&] {
+        if (can_populate()) {
+            _read_context->cache().on_row_insert();
             _snp->version()->partition().static_row().apply(*_schema, column_kind::static_column, sr.cells());
-        });
-    } else {
-        _read_context->cache().on_mispopulate();
-    }
+        } else {
+            _read_context->cache().on_mispopulate();
+        }
+    });
 }
 
 inline
