@@ -21,6 +21,7 @@
 #include <openssl/sha.h>
 
 #include <boost/range/adaptor/map.hpp>
+#include <boost/filesystem.hpp>
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/future-util.hh>
@@ -42,6 +43,7 @@
 #include "serializer_impl.hh"
 #include "schema.hh"
 #include "sstables/sstables.hh"
+#include "db/commitlog/commitlog_extensions.hh"
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
 
@@ -52,6 +54,9 @@ static const std::set<sstring> keywords = { KEY_PROVIDER,
                 CIPHER_ALGORITHM, IV_LENGTH, SECRET_KEY_STRENGTH, HOST_NAME,
                 TEMPLATE_NAME, KEY_NAMESPACE
 };
+
+static constexpr auto REPLICATED_KEY_PROVIDER_FACTORY = "ReplicatedKeyProviderFactory";
+static constexpr auto LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY = "LocalFileSystemKeyProviderFactory";
 
 bytes base64_decode(const sstring& s, size_t off, size_t len) {
     if (off >= s.size()) {
@@ -169,9 +174,6 @@ public:
     {}
 
     shared_ptr<key_provider> get_provider(const options& map) override {
-        static constexpr auto REPLICATED_KEY_PROVIDER_FACTORY = "ReplicatedKeyProviderFactory";
-        static constexpr auto LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY = "LocalFileSystemKeyProviderFactory";
-
         opt_wrapper opts(map);
 
         auto provider_class = opts(KEY_PROVIDER);
@@ -363,6 +365,72 @@ public:
     }
 };
 
+namespace bfs = boost::filesystem;
+
+class encryption_commitlog_file_extension : public db::commitlog_file_extension {
+    const ::shared_ptr<encryption_context> _ctxt;
+    const options _opts;
+
+    static const inline std::regex prop_expr = std::regex("^([^=]+)=(\\S+)$");
+    static const inline sstring id_key = "key_id";
+
+public:
+    encryption_commitlog_file_extension(::shared_ptr<encryption_context> ctxt, options opts)
+        : _ctxt(ctxt)
+        , _opts(std::move(opts))
+    {}
+    sstring config_name(const sstring& filename) const {
+        bfs::path p(filename);
+        auto dir = p.parent_path();
+        auto file = p.filename();
+        return (dir / ("." + file.string())).string();
+    }
+    future<file> wrap_file(const sstring& filename, file f, open_flags flags) override {
+        auto cfg_file = config_name(filename);
+
+        if (flags == open_flags::ro) {
+            return read_text_file_fully(cfg_file).then([f, this](temporary_buffer<char> buf) {
+                std::istringstream ss(std::string(buf.begin(), buf.end()));
+                options opts;
+                std::string line;
+                while (std::getline(ss, line)) {
+                    std::smatch m;
+                    if (std::regex_match(line, m, prop_expr)) {
+                        auto k = m[1].str();
+                        auto v = m[2].str();
+                        opts[k] = v;
+                    }
+                }
+                opt_bytes id;
+                if (opts.count(id_key)) {
+                    id = base64_decode(opts[id_key]);
+                }
+                return _ctxt->get_provider(opts)->key(get_key_info(opts), id).then([f](shared_ptr<symmetric_key> k, opt_bytes) {
+                    return make_ready_future<file>(make_encrypted_file(f, k));
+                });
+            });
+        } else {
+            return _ctxt->get_provider(_opts)->key(get_key_info(_opts)).then([f, this, cfg_file](shared_ptr<symmetric_key> k, opt_bytes id) {
+                std::ostringstream ss;
+                for (auto&p : _opts) {
+                    ss << p.first << "=" << p.second << std::endl;
+                }
+                if (id) {
+                    ss << id_key << "=" << base64_encode(*id) << std::endl;
+                }
+                return write_text_file_fully(cfg_file, ss.str()).then([f, this, k] {
+                    return make_ready_future<file>(make_encrypted_file(f, k));
+                });
+            });
+        }
+    }
+    future<> before_delete(const sstring& filename) override {
+        auto cfg_file = config_name(filename);
+        return file_exists(cfg_file).then([cfg_file](bool b) {
+            return b ? remove_file(cfg_file) : make_ready_future();
+        });
+    }
+};
 
 future<> register_extensions(const db::config&, const encryption_config& cfg, db::extensions& exts) {
     auto ctxt = ::make_shared<encryption_context_impl>(cfg);
@@ -377,9 +445,17 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
     options opts(cfg.system_info_encryption().begin(), cfg.system_info_encryption().end());
     opt_wrapper sie(opts);
     if (sie("enabled").value_or("false") == "true") {
+        // commitlog/system table encryption should not use replicated keys,
+        // We default to local keys, but KMIP should be ok as well.
+        // TODO: maybe forbid replicated.
+        opts[KEY_PROVIDER] = sie(KEY_PROVIDER).value_or(LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY);
+        if (opts[KEY_PROVIDER] == LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY && !sie(SECRET_KEY_FILE)) {
+            // system encryption uses different key folder than user tables.
+            // explicitly set the key file path
+            opts[SECRET_KEY_FILE] = (bfs::path(cfg.system_key_directory()) / bfs::path("system") / bfs::path(sie("key_name").value_or("system_table_keytab"))).string();
+        }
 
-        // TODO
-
+        exts.add_commitlog_file_extension(encryption_attribute, std::make_unique<encryption_commitlog_file_extension>(ctxt, opts));
     }
     return make_ready_future<>();
 }

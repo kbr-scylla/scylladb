@@ -24,7 +24,7 @@ public:
     named_value<sstring> system_key_directory;
     named_value<bool, value_status::Unused> config_encryption_active;
     named_value<sstring, value_status::Unused> config_encryption_key_name;
-    named_value<string_map, value_status::Unused> system_info_encryption;
+    named_value<string_map> system_info_encryption;
     // note this is defined as it is mainly for testing purposes.
     // when/if actual kmip is implemented, revisit.
     named_value<string_string_map, value_status::Unused> kmip_hosts;
