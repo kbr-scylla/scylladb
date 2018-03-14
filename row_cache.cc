@@ -58,8 +58,10 @@ cache_tracker::cache_tracker() {
           return with_linearized_managed_bytes([&] {
            try {
             auto evict_garbage = [this] {
+                ++_stats.evictions_from_garbage;
                 cache_entry& ce = _garbage.front();
                 if (ce.clear_gently() == stop_iteration::yes) {
+                    --_stats.garbage_partitions;
                     current_deleter<cache_entry>()(&ce);
                 }
             };
@@ -126,6 +128,10 @@ cache_tracker::setup_metrics() {
         sm::make_derive("sstable_partition_skips", sm::description("number of times sstable reader was fast forwarded across partitions"), _stats.underlying_partition_skips),
         sm::make_derive("sstable_row_skips", sm::description("number of times sstable reader was fast forwarded within a partition"), _stats.underlying_row_skips),
         sm::make_derive("pinned_dirty_memory_overload", sm::description("amount of pinned bytes that we tried to unpin over the limit. This should sit constantly at 0, and any number different than 0 is indicative of a bug"), _stats.pinned_dirty_memory_overload),
+        sm::make_derive("evictions_from_garbage", _stats.evictions_from_garbage,
+            sm::description("number of times memory reclamation was satisfied from garbage partitions")),
+        sm::make_derive("garbage_partitions", _stats.garbage_partitions,
+            sm::description("number of unlinked partitions whose deletion was deferred")),
     });
 }
 
@@ -150,6 +156,7 @@ void cache_tracker::clear() {
     });
     _stats.partition_removals += _stats.partitions;
     _stats.partitions = 0;
+    _stats.garbage_partitions = 0;
     allocator().invalidate_references();
 }
 
@@ -172,6 +179,7 @@ void cache_tracker::insert(cache_entry& entry) {
 void cache_tracker::reclaim_later(cache_entry& e) noexcept {
     e._lru_link.unlink();
     _garbage.push_back(e);
+    ++_stats.garbage_partitions;
 }
 
 void cache_tracker::on_erase() {

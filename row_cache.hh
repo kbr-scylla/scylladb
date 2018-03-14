@@ -190,6 +190,8 @@ public:
         uint64_t concurrent_misses_same_key;
         uint64_t partition_merges;
         uint64_t partition_evictions;
+        uint64_t evictions_from_garbage;
+        uint64_t garbage_partitions;
         uint64_t partition_removals;
         uint64_t partitions;
         uint64_t mispopulations;
