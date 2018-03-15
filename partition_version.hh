@@ -228,14 +228,14 @@ private:
     partition_entry* _entry;
     phase_type _phase;
     logalloc::region& _region;
+    tombstone _partition_tombstone;
 
     friend class partition_entry;
 public:
     explicit partition_snapshot(schema_ptr s,
                                 logalloc::region& region,
                                 partition_entry* entry,
-                                phase_type phase = default_phase)
-        : _schema(std::move(s)), _entry(entry), _phase(phase), _region(region) { }
+                                phase_type phase = default_phase);
     partition_snapshot(const partition_snapshot&) = delete;
     partition_snapshot(partition_snapshot&&) = delete;
     partition_snapshot& operator=(const partition_snapshot&) = delete;

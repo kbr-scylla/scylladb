@@ -110,9 +110,7 @@ row partition_snapshot::static_row() const {
 }
 
 tombstone partition_snapshot::partition_tombstone() const {
-    return ::squashed<tombstone>(version(),
-                               [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
-                               [] (tombstone& a, tombstone b) { a.apply(b); });
+    return _partition_tombstone;
 }
 
 mutation_partition partition_snapshot::squashed() const {
@@ -123,6 +121,14 @@ mutation_partition partition_snapshot::squashed() const {
 
 tombstone partition_entry::partition_tombstone() const {
     return ::squashed<tombstone>(_version,
+        [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
+        [] (tombstone& a, tombstone b) { a.apply(b); });
+}
+
+partition_snapshot::partition_snapshot(schema_ptr s, logalloc::region& region, partition_entry* entry, phase_type phase)
+    : _schema(std::move(s)), _entry(entry), _phase(phase), _region(region)
+{
+    _partition_tombstone = ::squashed<tombstone>(version(),
         [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
         [] (tombstone& a, tombstone b) { a.apply(b); });
 }
