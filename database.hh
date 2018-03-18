@@ -69,6 +69,7 @@
 #include "cpu_controller.hh"
 #include "dirty_memory_manager.hh"
 #include "reader_concurrency_semaphore.hh"
+#include "db/timeout_clock.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -274,8 +275,6 @@ public:
 
 class column_family : public enable_lw_shared_from_this<column_family> {
 public:
-    using timeout_clock = lowres_clock;
-
     struct config {
         sstring datadir;
         bool enable_disk_writes = true;
@@ -601,7 +600,7 @@ public:
         return _cache;
     }
 
-    future<std::vector<locked_cell>> lock_counter_cells(const mutation& m, timeout_clock::time_point timeout);
+    future<std::vector<locked_cell>> lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout);
 
     logalloc::occupancy_stats occupancy() const;
 private:
@@ -631,7 +630,8 @@ public:
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
-        uint64_t max_result_size);
+        uint64_t max_result_size,
+        db::timeout_clock::time_point timeout = db::no_timeout);
 
     void start();
     future<> stop();
@@ -1026,8 +1026,6 @@ public:
 //   use shard_of() for data
 
 class database {
-public:
-    using timeout_clock = lowres_clock;
 private:
     ::cf_stats _cf_stats;
     static const size_t max_count_concurrent_reads{100};
@@ -1082,8 +1080,8 @@ private:
     bool _enable_incremental_backups = false;
 
     future<> init_commitlog();
-    future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, timeout_clock::time_point timeout);
-    future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, timeout_clock::time_point timeout);
+    future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
+    future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
 private:
     // Unless you are an earlier boostraper or the database itself, you should
     // not be using this directly.  Go for the public create_keyspace instead.
@@ -1093,13 +1091,13 @@ private:
     void setup_metrics();
 
     friend class db_apply_executor;
-    future<> do_apply(schema_ptr, const frozen_mutation&, timeout_clock::time_point timeout);
-    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, timeout_clock::time_point timeout);
-    future<> apply_with_commitlog(column_family& cf, const mutation& m, timeout_clock::time_point timeout);
+    future<> do_apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout);
+    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout);
+    future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     query::result_memory_limiter _result_memory_limiter;
 
-    future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, timeout_clock::time_point timeout,
+    future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
                                              tracing::trace_state_ptr trace_state);
 
     template<typename Future>
@@ -1173,15 +1171,17 @@ public:
     unsigned shard_of(const dht::token& t);
     unsigned shard_of(const mutation& m);
     unsigned shard_of(const frozen_mutation& m);
-    future<lw_shared_ptr<query::result>, cache_temperature> query(schema_ptr, const query::read_command& cmd, query::result_request request, const dht::partition_range_vector& ranges,
-                                               tracing::trace_state_ptr trace_state, uint64_t max_result_size);
+    future<lw_shared_ptr<query::result>, cache_temperature> query(schema_ptr, const query::read_command& cmd, query::result_request request,
+                                                                  const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
+                                                                  uint64_t max_result_size, db::timeout_clock::time_point timeout = db::no_timeout);
     future<reconcilable_result, cache_temperature> query_mutations(schema_ptr, const query::read_command& cmd, const dht::partition_range& range,
-                                                query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state);
+                                                query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state,
+                                                db::timeout_clock::time_point timeout = db::no_timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, timeout_clock::time_point timeout = timeout_clock::time_point::max());
+    future<> apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout = db::no_timeout);
     future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
-    future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
+    future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;
     future<> clear_snapshot(sstring tag, std::vector<sstring> keyspace_names);

@@ -157,8 +157,8 @@ public:
         return _reader();
     }
 
-    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
-        return _reader.fast_forward_to(pr);
+    virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
+        return _reader.fast_forward_to(pr, timeout);
     }
 };
 
@@ -1031,8 +1031,8 @@ private:
                 });
             }
 
-            virtual future<> fast_forward_to(const dht::partition_range& pr) override {
-                return _reader.fast_forward_to(pr);
+            virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
+                return _reader.fast_forward_to(pr, timeout);
             }
         };
     public:
