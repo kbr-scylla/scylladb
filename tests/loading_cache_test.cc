@@ -68,6 +68,8 @@ static future<> prepare() {
             return f.dma_write(0, test_string.c_str(), test_string.size() + 1).then([] (size_t s) {
                 BOOST_REQUIRE_EQUAL(s, test_string.size() + 1);
                 file_prepared = true;
+            }).finally([&f] () mutable {
+                return f.close();
             });
         });
     });
@@ -81,6 +83,8 @@ static future<sstring> loader(const int& k) {
                 BOOST_REQUIRE_EQUAL(str, test_string);
                 ++load_count;
                 return make_ready_future<sstring>(std::move(str));
+            }).finally([&f] () mutable {
+                return f.close();
             });
         });
     });
