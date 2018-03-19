@@ -184,28 +184,32 @@ future<> service::create_metadata_if_missing() {
                 _migration_manager);
     }).then([this] {
         _stopped = auth::do_after_system_ready(_as, [this] {
-            return has_existing_users().then([this](bool existing) {
-                if (!existing) {
-                    //
-                    // Create default superuser.
-                    //
+            auto f = wait_for_schema_agreement(_migration_manager, _qp.db().local());
 
-                    static const sstring query = sprint(
-                            "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
-                            meta::AUTH_KS,
-                            meta::USERS_CF,
-                            meta::user_name_col_name,
-                            meta::superuser_col_name);
+            return f.then([this] {
+                return has_existing_users().then([this](bool existing) {
+                    if (!existing) {
+                        //
+                        // Create default superuser.
+                        //
 
-                    return _qp.process(
-                            query,
-                            db::consistency_level::ONE,
-                            { meta::DEFAULT_SUPERUSER_NAME, true }).then([](auto&&) {
-                        log.info("Created default superuser '{}'", meta::DEFAULT_SUPERUSER_NAME);
-                    }).discard_result();
-                }
+                        static const sstring query = sprint(
+                                "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
+                                meta::AUTH_KS,
+                                meta::USERS_CF,
+                                meta::user_name_col_name,
+                                meta::superuser_col_name);
 
-                return make_ready_future<>();
+                        return _qp.process(
+                                query,
+                                db::consistency_level::ONE,
+                                { meta::DEFAULT_SUPERUSER_NAME, true }).then([](auto&&) {
+                            log.info("Created default superuser '{}'", meta::DEFAULT_SUPERUSER_NAME);
+                        }).discard_result();
+                    }
+
+                    return make_ready_future<>();
+                });
             });
         });
 

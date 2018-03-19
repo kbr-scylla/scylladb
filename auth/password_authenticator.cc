@@ -164,21 +164,25 @@ future<> auth::password_authenticator::start() {
                 create_table,
                 _migration_manager).then([this] {
             _stopped = auth::do_after_system_ready(_as, [this] {
-                return has_existing_users().then([this](bool existing) {
-                    if (!existing) {
-                        return _qp.process(
-                                sprint(
-                                        "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
-                                        meta::AUTH_KS,
-                                        CREDENTIALS_CF,
-                                        USER_NAME, SALTED_HASH),
-                                db::consistency_level::ONE,
-                                { DEFAULT_USER_NAME, hashpw(DEFAULT_USER_PASSWORD) }).then([](auto) {
-                            plogger.info("Created default user '{}'", DEFAULT_USER_NAME);
-                        });
-                    }
+                auto f = wait_for_schema_agreement(_migration_manager, _qp.db().local());
 
-                    return make_ready_future<>();
+                return f.then([this] {
+                    return has_existing_users().then([this](bool existing) {
+                        if (!existing) {
+                            return _qp.process(
+                                    sprint(
+                                            "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
+                                            meta::AUTH_KS,
+                                            CREDENTIALS_CF,
+                                            USER_NAME, SALTED_HASH),
+                                    db::consistency_level::ONE,
+                                    { DEFAULT_USER_NAME, hashpw(DEFAULT_USER_PASSWORD) }).then([](auto) {
+                                plogger.info("Created default user '{}'", DEFAULT_USER_NAME);
+                            });
+                        }
+
+                        return make_ready_future<>();
+                    });
                 });
             });
         });
