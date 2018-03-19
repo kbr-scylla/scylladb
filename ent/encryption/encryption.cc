@@ -38,6 +38,7 @@
 #include "stdx.hh"
 #include "utils/class_registrator.hh"
 #include "db/extensions.hh"
+#include "db/system_keyspace.hh"
 #include "utils/class_registrator.hh"
 #include "serializer.hh"
 #include "serializer_impl.hh"
@@ -456,6 +457,18 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
         }
 
         exts.add_commitlog_file_extension(encryption_attribute, std::make_unique<encryption_commitlog_file_extension>(ctxt, opts));
+
+        // modify schemas for tables holding sensitive data to use encryption w. key described
+        // by the opts.
+        // since schemas are duplicated across shards, we must call to each shard and augument
+        // them all.
+        // Since we are in pre-init phase, this should be safe.
+        return smp::invoke_on_all([opts, &exts] {
+            auto& f = exts.schema_extensions().at(encryption_attribute);
+            for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
+                exts.add_extension_to_schema(s, encryption_attribute, f(opts));
+            }
+        });
     }
     return make_ready_future<>();
 }
