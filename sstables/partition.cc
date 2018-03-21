@@ -731,62 +731,6 @@ public:
     stdx::optional<position_in_partition_view> maybe_skip();
 };
 
-static inline void ensure_len(bytes_view v, size_t len) {
-    if (v.size() < len) {
-        throw malformed_sstable_exception(sprint("Expected {} bytes, but remaining is {}", len, v.size()));
-    }
-}
-
-template <typename T>
-static inline T read_be(const signed char* p) {
-    return ::read_be<T>(reinterpret_cast<const char*>(p));
-}
-
-template<typename T>
-static inline T consume_be(bytes_view& p) {
-    ensure_len(p, sizeof(T));
-    T i = read_be<T>(p.data());
-    p.remove_prefix(sizeof(T));
-    return i;
-}
-
-static inline bytes_view consume_bytes(bytes_view& p, size_t len) {
-    ensure_len(p, len);
-    auto ret = bytes_view(p.data(), len);
-    p.remove_prefix(len);
-    return ret;
-}
-
-promoted_index promoted_index_view::parse(const schema& s) const {
-    bytes_view data = _bytes;
-
-    sstables::deletion_time del_time;
-    del_time.local_deletion_time = consume_be<uint32_t>(data);
-    del_time.marked_for_delete_at = consume_be<uint64_t>(data);
-
-    auto num_blocks = consume_be<uint32_t>(data);
-    std::deque<promoted_index::entry> entries;
-    while (num_blocks--) {
-        uint16_t len = consume_be<uint16_t>(data);
-        auto start_ck = composite_view(consume_bytes(data, len), s.is_compound());
-        len = consume_be<uint16_t>(data);
-        auto end_ck = composite_view(consume_bytes(data, len), s.is_compound());
-        uint64_t offset = consume_be<uint64_t>(data);
-        uint64_t width = consume_be<uint64_t>(data);
-        entries.emplace_back(promoted_index::entry{start_ck, end_ck, offset, width});
-    }
-
-    return promoted_index{del_time, std::move(entries)};
-}
-
-sstables::deletion_time promoted_index_view::get_deletion_time() const {
-    bytes_view data = _bytes;
-    sstables::deletion_time del_time;
-    del_time.local_deletion_time = consume_be<uint32_t>(data);
-    del_time.marked_for_delete_at = consume_be<uint64_t>(data);
-    return del_time;
-}
-
 static
 future<> advance_to_upper_bound(index_reader& ix, const schema& s, const query::partition_slice& slice, dht::ring_position_view key) {
     auto& ranges = slice.row_ranges(s, *key.key());
@@ -797,9 +741,16 @@ future<> advance_to_upper_bound(index_reader& ix, const schema& s, const query::
     }
 }
 
+static
+std::unique_ptr<index_reader> get_index_reader(shared_sstable sst,
+        const io_priority_class& pc, shared_index_lists& index_lists) {
+    return std::make_unique<index_reader>(sst, pc, index_lists);
+}
+
 class sstable_mutation_reader : public flat_mutation_reader::impl {
     friend class mp_row_consumer;
     shared_sstable _sst;
+    lw_shared_ptr<shared_index_lists> _index_lists;
     mp_row_consumer _consumer;
     bool _index_in_current_partition = false; // Whether _lh_index is in current partition
     bool _will_likely_slice = false;
@@ -820,6 +771,7 @@ public:
          streamed_mutation::forwarding fwd)
         : impl(std::move(schema))
         , _sst(std::move(sst))
+        , _index_lists(make_lw_shared<shared_index_lists>())
         , _consumer(this, _schema, _schema->full_slice(), pc, std::move(resource_tracker), fwd, _sst)
         , _initialize([this] {
             _context = _sst->data_consume_rows(_consumer);
@@ -836,10 +788,11 @@ public:
          mutation_reader::forwarding fwd_mr)
         : impl(std::move(schema))
         , _sst(std::move(sst))
+        , _index_lists(make_lw_shared<shared_index_lists>())
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd, _sst)
         , _initialize([this, pr, &pc, &slice, resource_tracker = std::move(resource_tracker), fwd_mr] () mutable {
-            _lh_index = _sst->get_index_reader(pc); // lh = left hand
-            _rh_index = _sst->get_index_reader(pc);
+            _lh_index = get_index_reader(_sst, pc, *_index_lists); // lh = left hand
+            _rh_index = get_index_reader(_sst, pc, *_index_lists);
             auto f = seastar::when_all_succeed(_lh_index->advance_to_start(pr), _rh_index->advance_to_end(pr));
             return f.then([this, &pc, &slice, fwd_mr] () mutable {
                 sstable::disk_read_range drr{_lh_index->data_file_position(),
@@ -862,10 +815,11 @@ public:
                             mutation_reader::forwarding fwd_mr)
         : impl(std::move(schema))
         , _sst(std::move(sst))
+        , _index_lists(make_lw_shared<shared_index_lists>())
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd, _sst)
         , _single_partition_read(true)
         , _initialize([this, key = std::move(key), &pc, &slice, fwd_mr] () mutable {
-            _lh_index = _sst->get_index_reader(pc);
+            _lh_index = get_index_reader(_sst, pc, *_index_lists);
             auto f = _lh_index->advance_and_check_if_present(key);
             return f.then([this, &slice, &pc, key] (bool present) mutable {
                 if (!present) {
@@ -892,10 +846,10 @@ public:
     sstable_mutation_reader(sstable_mutation_reader&&) = delete;
     sstable_mutation_reader(const sstable_mutation_reader&) = delete;
     ~sstable_mutation_reader() {
-        auto close = [] (std::unique_ptr<index_reader>& ptr) {
+        auto close = [this] (std::unique_ptr<index_reader>& ptr) {
             if (ptr) {
                 auto f = ptr->close();
-                f.handle_exception([index = std::move(ptr)] (auto&&) { });
+                f.handle_exception([index = std::move(ptr), index_lists = _index_lists] (auto&&) { });
             }
         };
         close(_lh_index);
@@ -908,7 +862,7 @@ private:
     }
     index_reader& lh_index() {
         if (!_lh_index) {
-            _lh_index = _sst->get_index_reader(_consumer.io_priority());
+            _lh_index = get_index_reader(_sst, _consumer.io_priority(), *_index_lists);
         }
         return *_lh_index;
     }
