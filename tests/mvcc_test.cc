@@ -269,45 +269,6 @@ SEASTAR_TEST_CASE(test_schema_upgrade_preserves_continuity) {
     });
 }
 
-SEASTAR_TEST_CASE(test_full_eviction_marks_affected_range_as_discontinuous) {
-    return seastar::async([] {
-        logalloc::region r;
-        with_allocator(r.allocator(), [&] {
-            logalloc::reclaim_lock l(r);
-
-            simple_schema table;
-            auto&& s = *table.schema();
-            auto ck1 = table.make_ckey(1);
-            auto ck2 = table.make_ckey(2);
-
-            auto e = partition_entry::make_evictable(s, mutation_partition(table.schema()));
-
-            auto t = table.new_tombstone();
-            auto&& p1 = e.open_version(s).partition();
-            p1.clustered_row(s, ck2);
-            p1.apply(t);
-
-            auto snap1 = e.read(r, table.schema());
-
-            auto&& p2 = e.open_version(s).partition();
-            p2.clustered_row(s, ck1);
-
-            auto snap2 = e.read(r, table.schema());
-
-            e.evict();
-
-            BOOST_REQUIRE(snap1->squashed().fully_discontinuous(s, position_range::all_clustered_rows()));
-            BOOST_REQUIRE(snap2->squashed().fully_discontinuous(s, position_range::all_clustered_rows()));
-
-            BOOST_REQUIRE(!snap1->squashed().static_row_continuous());
-            BOOST_REQUIRE(!snap2->squashed().static_row_continuous());
-
-            BOOST_REQUIRE_EQUAL(snap1->squashed().partition_tombstone(), t);
-            BOOST_REQUIRE_EQUAL(snap2->squashed().partition_tombstone(), t);
-        });
-    });
-}
-
 SEASTAR_TEST_CASE(test_eviction_with_active_reader) {
     return seastar::async([] {
         logalloc::region r;
@@ -335,7 +296,7 @@ SEASTAR_TEST_CASE(test_eviction_with_active_reader) {
             BOOST_REQUIRE(cursor.continuous());
             BOOST_REQUIRE(cursor.key().equal(s, ck1));
 
-            e.evict();
+            e.evict_snapshots();
 
             cursor.maybe_refresh();
             do {
@@ -484,32 +445,27 @@ SEASTAR_TEST_CASE(test_partition_snapshot_row_cursor) {
                 BOOST_REQUIRE(cur.continuous());
             }
 
-            e.evict();
-
-            {
-                auto&& p2 = snap2->version()->partition();
-                p2.clustered_row(s, table.make_ckey(5), is_dummy::no, is_continuous::yes);
-            }
+            e.evict_snapshots();
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(!cur.maybe_refresh());
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(!cur.advance_to(table.make_ckey(4)));
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
 
             {
                 logalloc::reclaim_lock rl(r);
                 BOOST_REQUIRE(cur.maybe_refresh());
-                BOOST_REQUIRE(eq(cur.position(), table.make_ckey(5)));
-                BOOST_REQUIRE(cur.continuous());
+                BOOST_REQUIRE(eq(cur.position(), position_in_partition::after_all_clustered_rows()));
+                BOOST_REQUIRE(!cur.continuous());
             }
         });
     });

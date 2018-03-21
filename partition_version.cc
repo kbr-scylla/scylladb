@@ -52,6 +52,10 @@ partition_version::~partition_version()
     }
 }
 
+stop_iteration partition_version::clear_gently() noexcept {
+    return _partition.clear_gently();
+}
+
 size_t partition_version::size_in_allocator(allocation_strategy& allocator) const {
     return allocator.object_memory_size_in_allocator(this) +
            partition().external_memory_usage();
@@ -106,9 +110,7 @@ row partition_snapshot::static_row() const {
 }
 
 tombstone partition_snapshot::partition_tombstone() const {
-    return ::squashed<tombstone>(version(),
-                               [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
-                               [] (tombstone& a, tombstone b) { a.apply(b); });
+    return _partition_tombstone;
 }
 
 mutation_partition partition_snapshot::squashed() const {
@@ -119,6 +121,14 @@ mutation_partition partition_snapshot::squashed() const {
 
 tombstone partition_entry::partition_tombstone() const {
     return ::squashed<tombstone>(_version,
+        [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
+        [] (tombstone& a, tombstone b) { a.apply(b); });
+}
+
+partition_snapshot::partition_snapshot(schema_ptr s, logalloc::region& region, partition_entry* entry, phase_type phase)
+    : _schema(std::move(s)), _entry(entry), _phase(phase), _region(region)
+{
+    _partition_tombstone = ::squashed<tombstone>(version(),
         [] (const mutation_partition& mp) { return mp.partition_tombstone(); },
         [] (tombstone& a, tombstone b) { a.apply(b); });
 }
@@ -167,14 +177,13 @@ unsigned partition_snapshot::version_count()
 partition_entry::partition_entry(mutation_partition mp)
 {
     auto new_version = current_allocator().construct<partition_version>(std::move(mp));
-    _version = partition_version_ref(*new_version, partition_version::is_evictable::no);
+    _version = partition_version_ref(*new_version);
 }
 
 partition_entry::partition_entry(partition_entry::evictable_tag, const schema& s, mutation_partition&& mp)
     : partition_entry(std::move(mp))
 {
     _version->partition().ensure_last_dummy(s);
-    _version.make_evictable();
 }
 
 partition_entry partition_entry::make_evictable(const schema& s, mutation_partition&& mp) {
@@ -200,17 +209,45 @@ partition_entry::~partition_entry() {
     }
 }
 
+stop_iteration partition_entry::clear_gently() noexcept {
+    if (!_version) {
+        return stop_iteration::yes;
+    }
+
+    if (_snapshot) {
+        _snapshot->_version = std::move(_version);
+        _snapshot->_version.mark_as_unique_owner();
+        _snapshot->_entry = nullptr;
+        return stop_iteration::yes;
+    }
+
+    partition_version* v = &*_version;
+    _version = {};
+    while (v) {
+        if (v->is_referenced()) {
+            v->back_reference().mark_as_unique_owner();
+            break;
+        }
+        auto next = v->next();
+        if (v->clear_gently() == stop_iteration::no) {
+            _version = partition_version_ref(*v);
+            return stop_iteration::no;
+        }
+        current_allocator().destroy(&*v);
+        v = next;
+    }
+    return stop_iteration::yes;
+}
+
 void partition_entry::set_version(partition_version* new_version)
 {
-    bool evictable = _version.evictable();
-
     if (_snapshot) {
         _snapshot->_version = std::move(_version);
         _snapshot->_entry = nullptr;
     }
 
     _snapshot = nullptr;
-    _version = partition_version_ref(*new_version, partition_version::is_evictable(evictable));
+    _version = partition_version_ref(*new_version);
 }
 
 partition_version& partition_entry::add_version(const schema& s) {
@@ -599,13 +636,32 @@ std::ostream& operator<<(std::ostream& out, const partition_entry& e) {
     return out;
 }
 
-void partition_entry::evict() noexcept {
+void partition_entry::evict_snapshots() noexcept {
     if (!_version) {
         return;
     }
-    // Must evict from all versions atomically to keep snapshots consistent.
-    for (auto&& v : versions()) {
-        v.partition().evict();
+    if (_snapshot) {
+        _snapshot->_entry = nullptr;
+        _snapshot = nullptr;
     }
+    auto v = &*_version;
+    auto head = v;
+    _version = {};
+    while (v) {
+        if (v->is_referenced()) {
+            v->back_reference().reset();
+        }
+        v = v->next();
+    }
+    _version = partition_version_ref(*head);
     current_allocator().invalidate_references();
+}
+
+partition_version_ref partition_snapshot::make_incomplete_version() const {
+    return with_allocator(region().allocator(), [&] {
+        auto v = partition_version_ref(*current_allocator().construct<partition_version>(
+            mutation_partition::make_incomplete(*_schema, _partition_tombstone)));
+        v.mark_as_unique_owner();
+        return v;
+    });
 }

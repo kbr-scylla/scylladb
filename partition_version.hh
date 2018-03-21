@@ -115,6 +115,9 @@ public:
     partition_version(partition_version&& pv) noexcept;
     partition_version& operator=(partition_version&& pv) noexcept;
     ~partition_version();
+    // Frees elements of this version in batches.
+    // Returns stop_iteration::yes iff there are no more elements to free.
+    stop_iteration clear_gently() noexcept;
 
     mutation_partition& partition() { return _partition; }
     const mutation_partition& partition() const { return _partition; }
@@ -130,14 +133,12 @@ using partition_version_range = anchorless_list_base_hook<partition_version>::ra
 class partition_version_ref {
     partition_version* _version = nullptr;
     bool _unique_owner = false;
-    bool _evictable;
 
     friend class partition_version;
 public:
     partition_version_ref() = default;
-    explicit partition_version_ref(partition_version& pv, partition_version::is_evictable ev) noexcept
+    explicit partition_version_ref(partition_version& pv) noexcept
         : _version(&pv)
-        , _evictable(ev)
     {
         assert(!_version->_backref);
         _version->_backref = this;
@@ -149,7 +150,7 @@ public:
     }
     partition_version_ref(partition_version_ref&& other) noexcept
         : _version(other._version)
-        , _evictable(other._evictable)
+        , _unique_owner(other._unique_owner)
     {
         if (_version) {
             _version->_backref = this;
@@ -165,6 +166,13 @@ public:
     }
 
     explicit operator bool() const { return _version; }
+
+    void reset() noexcept {
+        if (_version) {
+            _version->_backref = nullptr;
+            _version = nullptr;
+        }
+    }
 
     partition_version& operator*() {
         assert(_version);
@@ -185,8 +193,6 @@ public:
 
     bool is_unique_owner() const { return _unique_owner; }
     void mark_as_unique_owner() { _unique_owner = true; }
-    void make_evictable() { _evictable = true; }
-    bool evictable() const { return _evictable; }
 };
 
 class partition_entry;
@@ -226,18 +232,21 @@ public:
 private:
     schema_ptr _schema;
     // Either _version or _entry is non-null.
-    partition_version_ref _version;
+    // When both are null, it means the snapshot was evicted
+    // and should be considered as fully discontinuous.
+    mutable partition_version_ref _version;
     partition_entry* _entry;
     phase_type _phase;
     logalloc::region& _region;
+    tombstone _partition_tombstone;
 
     friend class partition_entry;
+    partition_version_ref make_incomplete_version() const;
 public:
     explicit partition_snapshot(schema_ptr s,
                                 logalloc::region& region,
                                 partition_entry* entry,
-                                phase_type phase = default_phase)
-        : _schema(std::move(s)), _entry(entry), _phase(phase), _region(region) { }
+                                phase_type phase = default_phase);
     partition_snapshot(const partition_snapshot&) = delete;
     partition_snapshot(partition_snapshot&&) = delete;
     partition_snapshot& operator=(const partition_snapshot&) = delete;
@@ -250,13 +259,14 @@ public:
 
     ~partition_snapshot();
 
-    partition_version_ref& version();
+    bool evicted() const { return !_entry && !_version; }
 
     change_mark get_change_mark() {
         return {_region.reclaim_counter(), version_count()};
     }
 
-    const partition_version_ref& version() const;
+    const partition_version_ref& version() const; // noexcept(!evicted())
+    partition_version_ref& version(); // noexcept(!evicted())
 
     partition_version_range versions() {
         return version()->elements_from_this();
@@ -273,6 +283,9 @@ public:
 
     tombstone partition_tombstone() const;
     row static_row() const;
+    bool static_row_continuous() const noexcept {
+        return !evicted() && version()->partition().static_row_continuous();
+    }
     mutation_partition squashed() const;
     // Returns range tombstones overlapping with [start, end)
     std::vector<range_tombstone> range_tombstones(const ::schema& s, position_in_partition_view start, position_in_partition_view end);
@@ -314,7 +327,10 @@ public:
     // Constructs an evictable entry
     partition_entry(evictable_tag, const schema& s, mutation_partition&& mp);
     ~partition_entry();
-
+    // Frees elements of this entry in batches.
+    // Active snapshots are detached, data referenced by them is not cleared.
+    // Returns stop_iteration::yes iff there are no more elements to free.
+    stop_iteration clear_gently() noexcept;
     static partition_entry make_evictable(const schema& s, mutation_partition&& mp);
     static partition_entry make_evictable(const schema& s, const mutation_partition& mp);
 
@@ -334,9 +350,9 @@ public:
         return *this;
     }
 
-    // Removes all data marking affected ranges as discontinuous.
-    // Includes versions referenced by snapshots.
-    void evict() noexcept;
+    // Detaches all snapshots from this entry without transfering ownership of data.
+    // Snapshots will appear as fully discontinuous.
+    void evict_snapshots() noexcept;
 
     partition_version_ref& version() {
         return _version;
@@ -403,8 +419,11 @@ inline partition_version_ref& partition_snapshot::version()
 {
     if (_version) {
         return _version;
-    } else {
+    } else if (_entry) {
         return _entry->_version;
+    } else {
+        _version = make_incomplete_version();
+        return _version;
     }
 }
 
@@ -412,7 +431,10 @@ inline const partition_version_ref& partition_snapshot::version() const
 {
     if (_version) {
         return _version;
-    } else {
+    } else if (_entry) {
         return _entry->_version;
+    } else {
+        _version = make_incomplete_version();
+        return _version;
     }
 }

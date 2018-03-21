@@ -109,7 +109,12 @@ public:
     cache_entry(cache_entry&&) noexcept;
     ~cache_entry();
 
+    // Frees elements of the entry in batches.
+    // Returns stop_iteration::yes iff there are no more elements to free.
+    stop_iteration clear_gently() noexcept;
+
     bool is_evictable() { return _lru_link.is_linked(); }
+    void evict_snapshots() noexcept;
     const dht::decorated_key& key() const { return _key; }
     dht::ring_position_view position() const {
         if (is_dummy_entry()) {
@@ -185,6 +190,8 @@ public:
         uint64_t concurrent_misses_same_key;
         uint64_t partition_merges;
         uint64_t partition_evictions;
+        uint64_t evictions_from_garbage;
+        uint64_t garbage_partitions;
         uint64_t partition_removals;
         uint64_t partitions;
         uint64_t mispopulations;
@@ -205,6 +212,7 @@ private:
     seastar::metrics::metric_groups _metrics;
     logalloc::region _region;
     lru_type _lru;
+    lru_type _garbage;
 private:
     void setup_metrics();
 public:
@@ -213,6 +221,10 @@ public:
     void clear();
     void touch(cache_entry&);
     void insert(cache_entry&);
+    // Enqueues the entry for removal on memory reclamation.
+    // The entry must not be linked to any row_cache and
+    // must have all snapshots detached.
+    void reclaim_later(cache_entry&) noexcept;
     void clear_continuity(cache_entry& ce);
     void on_erase();
     void on_merge();
