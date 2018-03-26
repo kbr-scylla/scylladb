@@ -1,4 +1,4 @@
-scylla-server (@@VERSION@@-@@RELEASE@@-@@REVISION@@) @@CODENAME@@; urgency=medium
+scylla-enterprise-server (@@VERSION@@-@@RELEASE@@-@@REVISION@@) @@CODENAME@@; urgency=medium
 
   * Initial release.
 

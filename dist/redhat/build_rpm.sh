@@ -88,25 +88,24 @@ VERSION=$(./SCYLLA-VERSION-GEN)
 SCYLLA_VERSION=$(cat build/SCYLLA-VERSION-FILE)
 SCYLLA_RELEASE=$(cat build/SCYLLA-RELEASE-FILE)
 echo $VERSION >version
-./scripts/git-archive-all --extra version --force-submodules --prefix scylla-$SCYLLA_VERSION build/scylla-$VERSION.tar
+./scripts/git-archive-all --extra version --force-submodules --prefix scylla-enterprise-$SCYLLA_VERSION build/scylla-enterprise-$VERSION.tar
 rm -f version
-cp dist/redhat/scylla.spec.in build/scylla.spec
-sed -i -e "s/@@VERSION@@/$SCYLLA_VERSION/g" build/scylla.spec
-sed -i -e "s/@@RELEASE@@/$SCYLLA_RELEASE/g" build/scylla.spec
+cp dist/redhat/scylla.spec.in build/scylla-enterprise.spec
+sed -i -e "s/@@VERSION@@/$SCYLLA_VERSION/g" build/scylla-enterprise.spec
+sed -i -e "s/@@RELEASE@@/$SCYLLA_RELEASE/g" build/scylla-enterprise.spec
 
 if [ $DIST -gt 0 ]; then
-  sed -i -e "s/@@HOUSEKEEPING_CONF@@/true/g" build/scylla.spec
+  sed -i -e "s/@@HOUSEKEEPING_CONF@@/true/g" build/scylla-enterprise.spec
 else
-  sed -i -e "s/@@HOUSEKEEPING_CONF@@/false/g" build/scylla.spec
+  sed -i -e "s/@@HOUSEKEEPING_CONF@@/false/g" build/scylla-enterprise.spec
 fi
-
 
 if [ $JOBS -gt 0 ]; then
     SRPM_OPTS="$SRPM_OPTS --define='_smp_mflags -j$JOBS'"
 fi
-sudo mock --buildsrpm --root=$TARGET --resultdir=`pwd`/build/srpms --spec=build/scylla.spec --sources=build/scylla-$VERSION.tar $SRPM_OPTS
+sudo mock --buildsrpm --root=$TARGET --resultdir=`pwd`/build/srpms --spec=build/scylla-enterprise.spec --sources=build/scylla-enterprise-$VERSION.tar $SRPM_OPTS
 if [ "$TARGET" = "epel-7-x86_64" ]; then
     TARGET=scylla-$TARGET
     RPM_OPTS="$RPM_OPTS --configdir=dist/redhat/mock"
 fi
-sudo mock --rebuild --root=$TARGET --resultdir=`pwd`/build/rpms $RPM_OPTS build/srpms/scylla-$VERSION*.src.rpm
+sudo mock --rebuild --root=$TARGET --resultdir=`pwd`/build/rpms $RPM_OPTS build/srpms/scylla-enterprise-$VERSION*.src.rpm

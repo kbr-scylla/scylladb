@@ -1,4 +1,4 @@
-Source: scylla-server
+Source: scylla-enterprise-server
 Maintainer: Takuya ASADA <syuu@scylladb.com>
 Homepage: http://scylladb.com
 Section: database
@@ -7,41 +7,49 @@ X-Python3-Version: >= 3.4
 Standards-Version: 3.9.5
 Build-Depends: python3-setuptools, python3-all, python3-all-dev, debhelper (>= 9), libyaml-cpp-dev, liblz4-dev, libsnappy-dev, libcrypto++-dev, libjsoncpp-dev, libaio-dev, thrift-compiler, ragel, ninja-build, git, libgnutls28-dev, libhwloc-dev, libnuma-dev, libpciaccess-dev, xfslibs-dev, python3-pyparsing, libxml2-dev, libsctp-dev, python-urwid, pciutils, libprotobuf-dev, protobuf-compiler, systemtap-sdt-dev, cmake, libssl-dev, @@BUILD_DEPENDS@@
 
-Package: scylla-conf
+Package: scylla-enterprise-conf
 Architecture: any
 Description: Scylla database main configuration file
  Scylla is a highly scalable, eventually consistent, distributed,
  partitioned row DB.
-Replaces: scylla-server (<< 1.1)
-Conflicts: scylla-server (<< 1.1)
+Conflicts: scylla-conf (<< 2.2)
+Replaces: scylla-conf (<< 2.2)
 
-Package: scylla-server
+Package: scylla-enterprise-server
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, hwloc-nox, collectd-core, scylla-conf, python-yaml, python-urwid, python-requests, curl, util-linux, realpath, python3-yaml, python3, uuid-runtime, pciutils, python3-pyudev, gzip, @@DEPENDS@@
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, hwloc-nox, collectd-core, scylla-enterprise-conf, python-yaml, python-urwid, python-requests, curl, util-linux, realpath, python3-yaml, python3, uuid-runtime, pciutils, python3-pyudev, gzip, @@DEPENDS@@
+Conflicts: scylla-server (<< 2.2)
+Replaces: scylla-server (<< 2.2)
 Description: Scylla database server binaries 
  Scylla is a highly scalable, eventually consistent, distributed,
  partitioned row DB.
 
-Package: scylla-server-dbg
+Package: scylla-enterprise-server-dbg
 Section: debug
 Priority: extra
 Architecture: amd64
-Depends: scylla-server (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
-Description: debugging symbols for scylla-server
+Conflicts: scylla-server-dbg (<< 2.2)
+Replaces: scylla-server-dbg (<< 2.2)
+Depends: scylla-enterprise-server (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends}
+Description: debugging symbols for scylla-enterprise-server
  Scylla is a highly scalable, eventually consistent, distributed,
  partitioned row DB.
- This package contains the debugging symbols for scylla-server.
+ This package contains the debugging symbols for scylla-enterprise-server.
 
-Package: scylla-kernel-conf
+Package: scylla-enterprise-kernel-conf
 Architecture: any
+Conflicts: scylla-kernel-conf (<< 2.2)
+Replaces: scylla-kernel-conf (<< 2.2)
 Description: Scylla kernel tuning configuration
  Scylla is a highly scalable, eventually consistent, distributed,
  partitioned row DB.
 
-Package: scylla
+Package: scylla-enterprise
 Section: metapackages
 Architecture: any
-Depends: scylla-server, scylla-jmx, scylla-tools, scylla-tools-core, scylla-kernel-conf
+Depends: scylla-enterprise-server, scylla-enterprise-jmx, scylla-enterprise-tools, scylla-enterprise-tools-core, scylla-enterprise-kernel-conf
+Conflicts: scylla (<< 2.2)
+Replaces: scylla (<< 2.2)
 Description: Scylla database metapackage
  Scylla is a highly scalable, eventually consistent, distributed,
  partitioned row DB.
