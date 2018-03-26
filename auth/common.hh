@@ -55,7 +55,7 @@ future<> once_among_shards(Task&& f) {
 
 inline future<> delay_until_system_ready(seastar::abort_source& as) {
     using namespace std::chrono_literals;
-    return sleep_abortable(10s, as);
+    return sleep_abortable(15s, as);
 }
 
 // Func must support being invoked more than once.
