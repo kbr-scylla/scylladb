@@ -226,12 +226,12 @@ else
 fi
 cp dist/common/systemd/scylla-server.service.in debian/scylla-enterprise-server.scylla-server.service
 sed -i -e "s#@@SYSCONFDIR@@#/etc/default#g" debian/scylla-enterprise-server.scylla-server.service
-cp dist/common/systemd/scylla-housekeeping-daily.service.in debian/scylla-server.scylla-housekeeping-daily.service
-sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-server.scylla-housekeeping-daily.service
-cp dist/common/systemd/scylla-housekeeping-restart.service.in debian/scylla-server.scylla-housekeeping-restart.service
-sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-server.scylla-housekeeping-restart.service
-cp dist/common/systemd/scylla-fstrim.service debian/scylla-server.scylla-fstrim.service
-cp dist/common/systemd/node-exporter.service debian/scylla-server.node-exporter.service
+cp dist/common/systemd/scylla-housekeeping-daily.service.in debian/scylla-enterprise-server.scylla-housekeeping-daily.service
+sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-enterprise-server.scylla-housekeeping-daily.service
+cp dist/common/systemd/scylla-housekeeping-restart.service.in debian/scylla-enterprise-server.scylla-housekeeping-restart.service
+sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-enterprise-server.scylla-housekeeping-restart.service
+cp dist/common/systemd/scylla-fstrim.service debian/scylla-enterprise-server.scylla-fstrim.service
+cp dist/common/systemd/node-exporter.service debian/scylla-enterprise-server.node-exporter.service
 
 cp ./dist/debian/pbuilderrc ~/.pbuilderrc
 if [ $NO_CLEAN -eq 0 ]; then
