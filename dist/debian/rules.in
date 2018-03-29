@@ -14,7 +14,7 @@ override_dh_auto_clean:
 	rm -rf build.ninja seastar/build.ninja
 
 override_dh_installinit:
-	dh_installinit --no-start @@DH_INSTALLINIT@@
+	dh_installinit --no-start --name scylla-server @@DH_INSTALLINIT@@
 	@@INSTALL_HK_DAILY_INIT@@
 	@@INSTALL_HK_RESTART_INIT@@
 	dh_installinit --no-start --name scylla-fstrim @@DH_INSTALLINIT@@

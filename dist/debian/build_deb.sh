@@ -113,7 +113,7 @@ echo $VERSION > version
 ./scripts/git-archive-all --extra version --force-submodules --prefix scylla-enterprise-server ../scylla-enterprise-server_$SCYLLA_VERSION-$SCYLLA_RELEASE.orig.tar.gz
 
 cp -a dist/debian/debian debian
-cp dist/common/sysconfig/scylla-server debian/scylla-server.default
+cp dist/common/sysconfig/scylla-server debian/scylla-enterprise-server.scylla-server.default
 cp dist/debian/changelog.in debian/changelog
 sed -i -e "s/@@VERSION@@/$SCYLLA_VERSION/g" debian/changelog
 sed -i -e "s/@@RELEASE@@/$SCYLLA_RELEASE/g" debian/changelog
@@ -224,8 +224,8 @@ if [ $DIST -gt 0 ]; then
 else
     sed -i -e "s#@@ADDHKCFG@@##g" debian/scylla-enterprise-server.install
 fi
-cp dist/common/systemd/scylla-server.service.in debian/scylla-server.service
-sed -i -e "s#@@SYSCONFDIR@@#/etc/default#g" debian/scylla-server.service
+cp dist/common/systemd/scylla-server.service.in debian/scylla-enterprise-server.scylla-server.service
+sed -i -e "s#@@SYSCONFDIR@@#/etc/default#g" debian/scylla-enterprise-server.scylla-server.service
 cp dist/common/systemd/scylla-housekeeping-daily.service.in debian/scylla-server.scylla-housekeeping-daily.service
 sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-server.scylla-housekeeping-daily.service
 cp dist/common/systemd/scylla-housekeeping-restart.service.in debian/scylla-server.scylla-housekeeping-restart.service
