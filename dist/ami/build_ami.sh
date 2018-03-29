@@ -86,7 +86,7 @@ if [ $LOCALRPM -eq 1 ]; then
         if [ ! -f dist/ami/files/scylla-enterprise.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-kernel-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-server.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-debuginfo.x86_64.rpm ]; then
             dist/redhat/build_rpm.sh
             cp build/rpms/scylla-enterprise-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise.x86_64.rpm
-            cp build/rpms/scylla-enterprise-kernel-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scyllaenterprise-kernel-conf.x86_64.rpm
+            cp build/rpms/scylla-enterprise-kernel-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-kernel-conf.x86_64.rpm
             cp build/rpms/scylla-enterprise-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-conf.x86_64.rpm
             cp build/rpms/scylla-enterprise-server-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-server.x86_64.rpm
             cp build/rpms/scylla-enterprise-debuginfo-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-debuginfo.x86_64.rpm
