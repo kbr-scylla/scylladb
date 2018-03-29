@@ -9,8 +9,10 @@
 # See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
 #
 
-import os, os.path, textwrap, argparse, sys, shlex, subprocess, tempfile, re
+import os, os.path, textwrap, argparse, sys, shlex, subprocess, tempfile, re, platform
 from distutils.spawn import find_executable
+
+tempfile.tempdir = "./build/tmp"
 
 configure_args = str.join(' ', [shlex.quote(x) for x in sys.argv[1:]])
 
@@ -72,12 +74,27 @@ def pkg_config(option, package):
     return output.decode('utf-8').strip()
 
 def try_compile(compiler, source = '', flags = []):
+    return try_compile_and_link(compiler, source, flags = flags + ['-c'])
+
+def ensure_tmp_dir_exists():
+    if not os.path.exists(tempfile.tempdir):
+        os.makedirs(tempfile.tempdir)
+
+def try_compile_and_link(compiler, source = '', flags = []):
+    ensure_tmp_dir_exists()
     with tempfile.NamedTemporaryFile() as sfile:
-        sfile.file.write(bytes(source, 'utf-8'))
-        sfile.file.flush()
-        return subprocess.call([compiler, '-x', 'c++', '-o', '/dev/null', '-c', sfile.name] + args.user_cflags.split() + flags,
-                               stdout = subprocess.DEVNULL,
-                               stderr = subprocess.DEVNULL) == 0
+        ofile = tempfile.mktemp()
+        try:
+            sfile.file.write(bytes(source, 'utf-8'))
+            sfile.file.flush()
+            # We can't write to /dev/null, since in some cases (-ftest-coverage) gcc will create an auxiliary
+            # output file based on the name of the output file, and "/dev/null.gcsa" is not a good name
+            return subprocess.call([compiler, '-x', 'c++', '-o', ofile, sfile.name] + args.user_cflags.split() + flags,
+                                   stdout = subprocess.DEVNULL,
+                                   stderr = subprocess.DEVNULL) == 0
+        finally:
+            if os.path.exists(ofile):
+                os.unlink(ofile)
 
 def warning_supported(warning, compiler):
     # gcc ignores -Wno-x even if it is not supported
@@ -95,6 +112,14 @@ def debug_flag(compiler):
         return '-g'
     else:
         print('Note: debug information disabled; upgrade your compiler')
+        return ''
+
+def gold_supported(compiler):
+    src_main = 'int main(int argc, char **argv) { return 0; }'
+    if try_compile_and_link(source = src_main, flags = ['-fuse-ld=gold'], compiler = compiler):
+        return '-fuse-ld=gold'
+    else:
+        print('Note: gold not found; using default system linker')
         return ''
 
 def maybe_static(flag, libs):
@@ -121,6 +146,13 @@ class Thrift(object):
         return [x.replace('.cpp', '.o') for x in self.sources(gen_dir)]
     def endswith(self, end):
         return self.source.endswith(end)
+
+def default_target_arch():
+    mach = platform.machine()
+    if platform.machine() in ['i386', 'i686', 'x86_64']:
+        return 'nehalem'
+    else:
+        return ''
 
 class Antlr3Grammar(object):
     def __init__(self, source):
@@ -267,6 +299,8 @@ arg_parser.add_argument('--cflags', action = 'store', dest = 'user_cflags', defa
                         help = 'Extra flags for the C++ compiler')
 arg_parser.add_argument('--ldflags', action = 'store', dest = 'user_ldflags', default = '',
                         help = 'Extra flags for the linker')
+arg_parser.add_argument('--target', action = 'store', dest = 'target', default = default_target_arch(),
+                        help = 'Target architecture (-march)')
 arg_parser.add_argument('--compiler', action = 'store', dest = 'cxx', default = 'g++',
                         help = 'C++ compiler path')
 arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='gcc',
@@ -539,6 +573,7 @@ scylla_core = (['database.cc',
                  'disk-error-handler.cc',
                  'duration.cc',
                  'vint-serialization.cc',
+                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
                 + [Thrift('interface/cassandra.thrift', 'Cassandra')]
@@ -706,6 +741,8 @@ warnings = [w
 
 warnings = ' '.join(warnings + ['-Wno-error=deprecated-declarations'])
 
+gold_linker_flag = gold_supported(compiler = args.cxx)
+
 dbgflag = debug_flag(args.cxx) if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
 
@@ -798,7 +835,9 @@ if args.gcc6_concepts:
 if args.alloc_failure_injector:
     seastar_flags += ['--enable-alloc-failure-injector']
 
-seastar_cflags = args.user_cflags + " -march=nehalem"
+seastar_cflags = args.user_cflags
+if args.target != '':
+    seastar_cflags += ' -march=' + args.target
 seastar_ldflags = args.user_ldflags
 seastar_flags += ['--compiler', args.cxx, '--c-compiler', args.cc, '--cflags=%s' % (seastar_cflags), '--ldflags=%s' %(seastar_ldflags)]
 
@@ -832,7 +871,7 @@ seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_re
 
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
 libs = ' '.join(['-lyaml-cpp', '-llz4', '-lz', '-lsnappy', pkg_config("--libs", "jsoncpp"),
-                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lcrypt',
+                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lcrypt', ' -lcryptopp',
                  maybe_static(args.staticboost, '-lboost_date_time'),
                 ])
 
@@ -858,13 +897,14 @@ os.makedirs(outdir, exist_ok = True)
 do_sanitize = True
 if args.static:
     do_sanitize = False
+
 with open(buildfile, 'w') as f:
     f.write(textwrap.dedent('''\
         configure_args = {configure_args}
         builddir = {outdir}
         cxx = {cxx}
         cxxflags = {user_cflags} {warnings} {defines}
-        ldflags = -fuse-ld=gold {user_ldflags}
+        ldflags = {gold_linker_flag} {user_ldflags}
         libs = {libs}
         pool link_pool
             depth = {link_pool_depth}
@@ -941,6 +981,7 @@ with open(buildfile, 'w') as f:
             objs = ['$builddir/' + mode + '/' + src.replace('.cc', '.o')
                     for src in srcs
                     if src.endswith('.cc')]
+            objs.append('$builddir/../utils/arch/powerpc/crc32-vpmsum/crc32.S')
             has_thrift = False
             for dep in deps[binary]:
                 if isinstance(dep, Thrift):
