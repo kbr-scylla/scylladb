@@ -496,6 +496,17 @@ query_processor::execute_internal(
     });
 }
 
+future<::shared_ptr<cql_transport::messages::result_message>>
+query_processor::process_internal(
+        statements::prepared_statement::checked_weak_ptr p,
+        db::consistency_level cl,
+        const std::initializer_list<data_value>& values) {
+    auto opts = make_internal_options(p, values, cl);
+    return do_with(std::move(opts), [this, p = std::move(p)](auto & opts) {
+        return p->statement->execute(_proxy, *_internal_state, opts);
+    });
+}
+
 future<::shared_ptr<untyped_result_set>>
 query_processor::process(
         const sstring& query_string,
@@ -517,11 +528,8 @@ query_processor::process(
         statements::prepared_statement::checked_weak_ptr p,
         db::consistency_level cl,
         const std::initializer_list<data_value>& values) {
-    auto opts = make_internal_options(p, values, cl);
-    return do_with(std::move(opts), [this, p = std::move(p)](auto & opts) {
-        return p->statement->execute(_proxy, *_internal_state, opts).then([](auto msg) {
-            return make_ready_future<::shared_ptr<untyped_result_set>>(::make_shared<untyped_result_set>(msg));
-        });
+    return process_internal(std::move(p), cl, values).then([](auto msg) {
+        return make_ready_future<::shared_ptr<untyped_result_set>>(::make_shared<untyped_result_set>(std::move(msg)));
     });
 }
 
