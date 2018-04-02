@@ -43,10 +43,7 @@ future<> cql3::statements::list_users_statement::check_access(const service::cli
 
 future<::shared_ptr<cql_transport::messages::result_message>>
 cql3::statements::list_users_statement::execute(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) {
-    auto is = std::make_unique<service::query_state>(service::client_state::for_internal_calls());
-    auto io = std::make_unique<query_options>(db::consistency_level::QUORUM, std::vector<cql3::raw_value>{});
-    auto f = get_local_query_processor().process(
-                    sprint("SELECT * FROM %s.%s", auth::meta::AUTH_KS,
-                                    auth::meta::USERS_CF), *is, *io);
-    return f.finally([is = std::move(is), io = std::move(io)] {});
+    static const sstring query = sprint("SELECT * FROM %s.%s", auth::meta::AUTH_KS, auth::meta::USERS_CF);
+    auto& qp = get_local_query_processor();
+    return qp.process_internal(qp.prepare_internal(query), db::consistency_level::QUORUM, {});
 }
