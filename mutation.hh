@@ -17,8 +17,9 @@
 #include "schema.hh"
 #include "dht/i_partitioner.hh"
 #include "hashing.hh"
-#include "utils/optimized_optional.hh"
 #include "streamed_mutation.hh"
+
+#include <seastar/util/optimized_optional.hh>
 
 class mutation final {
 private:
@@ -135,10 +136,6 @@ struct mutation_decorated_key_less_comparator {
     bool operator()(const mutation& m1, const mutation& m2) const;
 };
 
-template<>
-struct move_constructor_disengages<mutation> {
-    enum { value = true };
-};
 using mutation_opt = optimized_optional<mutation>;
 
 // Consistent with operator==()

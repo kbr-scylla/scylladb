@@ -14,7 +14,6 @@
 
 #include "mutation_reader.hh"
 #include "core/future-util.hh"
-#include "utils/move.hh"
 #include "stdx.hh"
 #include "flat_mutation_reader.hh"
 

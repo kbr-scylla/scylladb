@@ -14,7 +14,6 @@
 
 #include "mutation.hh"
 #include "streamed_mutation.hh"
-#include "utils/move.hh"
 
 std::ostream&
 operator<<(std::ostream& os, const clustering_row& row) {
@@ -218,11 +217,11 @@ streamed_mutation streamed_mutation_from_mutation(mutation m, streamed_mutation:
         }
         mutation_fragment_opt read_next() {
             if (_cr && (!_rt || _cmp(_cr->position(), _rt->position()))) {
-                auto cr = move_and_disengage(_cr);
+                auto cr = std::exchange(_cr, { });
                 prepare_next_clustering_row();
                 return cr;
             } else if (_rt) {
-                auto rt = move_and_disengage(_rt);
+                auto rt = std::exchange(_rt, { });
                 prepare_next_range_tombstone();
                 return rt;
             }

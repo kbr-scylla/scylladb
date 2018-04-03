@@ -11,11 +11,11 @@
 #pragma once
 
 #include "mutation_partition.hh"
-#include "utils/optimized_optional.hh"
 #include "position_in_partition.hh"
 
 #include <experimental/optional>
 #include <seastar/util/gcc6-concepts.hh>
+#include <seastar/util/optimized_optional.hh>
 
 #include "stdx.hh"
 #include "seastar/core/future-util.hh"
@@ -521,10 +521,6 @@ std::ostream& operator<<(std::ostream&, mutation_fragment::kind);
 
 std::ostream& operator<<(std::ostream&, const mutation_fragment& mf);
 
-template<>
-struct move_constructor_disengages<mutation_fragment> {
-    enum { value = true };
-};
 using mutation_fragment_opt = optimized_optional<mutation_fragment>;
 
 // streamed_mutation represents a mutation in a form of a stream of
@@ -682,10 +678,6 @@ streamed_mutation make_streamed_mutation(Args&&... args) {
     return streamed_mutation(std::make_unique<Impl>(std::forward<Args>(args)...));
 }
 
-template<>
-struct move_constructor_disengages<streamed_mutation> {
-    enum { value = true };
-};
 using streamed_mutation_opt = optimized_optional<streamed_mutation>;
 
 template<typename Consumer>
