@@ -32,7 +32,7 @@
 
 #include "authenticator.hh"
 #include "cql3/query_processor.hh"
-#include "delayed_tasks.hh"
+#include <seastar/core/abort_source.hh>
 
 namespace service {
 class migration_manager;
@@ -44,10 +44,9 @@ const sstring& password_authenticator_name();
 
 class password_authenticator : public authenticator {
     cql3::query_processor& _qp;
-
     ::service::migration_manager& _migration_manager;
-
-    delayed_tasks<> _delayed{};
+    future<> _stopped;
+    seastar::abort_source _as;
 
 public:
     password_authenticator(cql3::query_processor&, ::service::migration_manager&);

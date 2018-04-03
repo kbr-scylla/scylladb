@@ -14,6 +14,7 @@
 
 #include "cql3/query_processor.hh"
 #include "cql3/statements/create_table_statement.hh"
+#include "database.hh"
 #include "schema_builder.hh"
 #include "service/migration_manager.hh"
 
@@ -26,6 +27,25 @@ const sstring AUTH_KS("system_auth");
 const sstring USERS_CF("users");
 const sstring AUTH_PACKAGE_NAME("org.apache.cassandra.auth.");
 
+}
+
+static logging::logger auth_log("auth");
+
+// Func must support being invoked more than once.
+future<> do_after_system_ready(seastar::abort_source& as, seastar::noncopyable_function<future<>()> func) {
+    using namespace std::chrono_literals;
+    struct empty_state { };
+    return delay_until_system_ready(as).then([&as, func = std::move(func)] () mutable {
+        return exponential_backoff_retry::do_until_value(1s, 1min, as, [func = std::move(func)] {
+            return func().then_wrapped([] (auto&& f) -> stdx::optional<empty_state> {
+                if (f.failed()) {
+                    auth_log.info("Auth task failed with error, rescheduling: {}", f.get_exception());
+                    return { };
+                }
+                return { empty_state() };
+            });
+        });
+    }).discard_result();
 }
 
 future<> create_metadata_table_if_missing(
@@ -54,6 +74,14 @@ future<> create_metadata_table_if_missing(
     b.set_uuid(uuid);
 
     return mm.announce_new_column_family(b.build(), false);
+}
+
+future<> wait_for_schema_agreement(::service::migration_manager& mm, const database& db) {
+    static const auto pause = [] { return sleep(std::chrono::milliseconds(500)); };
+
+    return do_until([&db] { return db.get_version() != database::empty_version; }, pause).then([&mm] {
+        return do_until([&mm] { return mm.have_schema_agreement(); }, pause);
+    });
 }
 
 }

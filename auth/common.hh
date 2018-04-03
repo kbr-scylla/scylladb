@@ -13,12 +13,17 @@
 #include <chrono>
 
 #include <seastar/core/future.hh>
+#include <seastar/core/abort_source.hh>
+#include <seastar/util/noncopyable_function.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/resource.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/core/sstring.hh>
 
-#include "delayed_tasks.hh"
+#include "log.hh"
 #include "seastarx.hh"
+
+class database;
 
 namespace service {
 class migration_manager;
@@ -48,16 +53,20 @@ future<> once_among_shards(Task&& f) {
     return make_ready_future<>();
 }
 
-template <class Task, class Clock>
-void delay_until_system_ready(delayed_tasks<Clock>& ts, Task&& f) {
-    static const typename std::chrono::milliseconds delay_duration(10000);
-    ts.schedule_after(delay_duration, std::forward<Task>(f));
+inline future<> delay_until_system_ready(seastar::abort_source& as) {
+    using namespace std::chrono_literals;
+    return sleep_abortable(15s, as);
 }
+
+// Func must support being invoked more than once.
+future<> do_after_system_ready(seastar::abort_source& as, seastar::noncopyable_function<future<>()> func);
 
 future<> create_metadata_table_if_missing(
         const sstring& table_name,
         cql3::query_processor&,
         const sstring& cql,
         ::service::migration_manager&);
+
+future<> wait_for_schema_agreement(::service::migration_manager&, const database&);
 
 }

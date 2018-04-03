@@ -122,7 +122,8 @@ service::service(
             , _migration_manager(mm)
             , _authorizer(std::move(a))
             , _authenticator(std::move(b))
-            , _migration_listener(std::make_unique<auth_migration_listener>(*_authorizer)) {
+            , _migration_listener(std::make_unique<auth_migration_listener>(*_authorizer))
+            , _stopped(make_ready_future<>()) {
 }
 
 service::service(
@@ -182,35 +183,33 @@ future<> service::create_metadata_if_missing() {
                 users_table_query,
                 _migration_manager);
     }).then([this] {
-        delay_until_system_ready(_delayed, [this] {
-            return has_existing_users().then([this](bool existing) {
-                if (!existing) {
-                    //
-                    // Create default superuser.
-                    //
+        _stopped = auth::do_after_system_ready(_as, [this] {
+            auto f = wait_for_schema_agreement(_migration_manager, _qp.db().local());
 
-                    static const sstring query = sprint(
-                            "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
-                            meta::AUTH_KS,
-                            meta::USERS_CF,
-                            meta::user_name_col_name,
-                            meta::superuser_col_name);
+            return f.then([this] {
+                return has_existing_users().then([this](bool existing) {
+                    if (!existing) {
+                        //
+                        // Create default superuser.
+                        //
 
-                    return _qp.process(
-                            query,
-                            db::consistency_level::ONE,
-                            { meta::DEFAULT_SUPERUSER_NAME, true }).then([](auto&&) {
-                        log.info("Created default superuser '{}'", meta::DEFAULT_SUPERUSER_NAME);
-                    }).handle_exception([](auto exn) {
-                        try {
-                            std::rethrow_exception(exn);
-                        } catch (const exceptions::request_execution_exception&) {
-                            log.warn("Skipped default superuser setup: some nodes were not ready");
-                        }
-                    }).discard_result();
-                }
+                        static const sstring query = sprint(
+                                "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
+                                meta::AUTH_KS,
+                                meta::USERS_CF,
+                                meta::user_name_col_name,
+                                meta::superuser_col_name);
 
-                return make_ready_future<>();
+                        return _qp.process(
+                                query,
+                                db::consistency_level::QUORUM,
+                                { meta::DEFAULT_SUPERUSER_NAME, true }).then([](auto&&) {
+                            log.info("Created default superuser '{}'", meta::DEFAULT_SUPERUSER_NAME);
+                        }).discard_result();
+                    }
+
+                    return make_ready_future<>();
+                });
             });
         });
 
@@ -238,13 +237,11 @@ future<> service::start() {
 }
 
 future<> service::stop() {
-    return once_among_shards([this] {
-        _delayed.cancel_all();
-        return make_ready_future<>();
-    }).then([this] {
-        return _permissions_cache->stop();
-    }).then([this] {
-        return when_all_succeed(_authorizer->stop(), _authenticator->stop());
+    _as.request_abort();
+
+    return _permissions_cache->stop().then([this] {
+        auto s = _stopped.handle_exception_type([](const sleep_aborted&) { });
+        return when_all_succeed(std::move(s), _authorizer->stop(), _authenticator->stop());
     });
 }
 

@@ -69,7 +69,8 @@ auth::password_authenticator::~password_authenticator()
 
 auth::password_authenticator::password_authenticator(cql3::query_processor& qp, ::service::migration_manager& mm)
     : _qp(qp)
-    , _migration_manager(mm) {
+    , _migration_manager(mm)
+    , _stopped(make_ready_future<>()) {
 }
 
 // TODO: blowfish
@@ -162,22 +163,26 @@ future<> auth::password_authenticator::start() {
                 _qp,
                 create_table,
                 _migration_manager).then([this] {
-            auth::delay_until_system_ready(_delayed, [this] {
-                return has_existing_users().then([this](bool existing) {
-                    if (!existing) {
-                        return _qp.process(
-                                sprint(
-                                        "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
-                                        meta::AUTH_KS,
-                                        CREDENTIALS_CF,
-                                        USER_NAME, SALTED_HASH),
-                                db::consistency_level::ONE,
-                                { DEFAULT_USER_NAME, hashpw(DEFAULT_USER_PASSWORD) }).then([](auto) {
-                            plogger.info("Created default user '{}'", DEFAULT_USER_NAME);
-                        });
-                    }
+            _stopped = auth::do_after_system_ready(_as, [this] {
+                auto f = wait_for_schema_agreement(_migration_manager, _qp.db().local());
 
-                    return make_ready_future<>();
+                return f.then([this] {
+                    return has_existing_users().then([this](bool existing) {
+                        if (!existing) {
+                            return _qp.process(
+                                    sprint(
+                                            "INSERT INTO %s.%s (%s, %s) VALUES (?, ?) USING TIMESTAMP 0",
+                                            meta::AUTH_KS,
+                                            CREDENTIALS_CF,
+                                            USER_NAME, SALTED_HASH),
+                                    db::consistency_level::QUORUM,
+                                    { DEFAULT_USER_NAME, hashpw(DEFAULT_USER_PASSWORD) }).then([](auto) {
+                                plogger.info("Created default user '{}'", DEFAULT_USER_NAME);
+                            });
+                        }
+
+                        return make_ready_future<>();
+                    });
                 });
             });
         });
@@ -185,7 +190,8 @@ future<> auth::password_authenticator::start() {
 }
 
 future<> auth::password_authenticator::stop() {
-    return make_ready_future<>();
+    _as.request_abort();
+    return _stopped.handle_exception_type([] (const sleep_aborted&) { });
 }
 
 db::consistency_level auth::password_authenticator::consistency_for_user(const sstring& username) {
