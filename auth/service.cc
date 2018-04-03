@@ -202,7 +202,7 @@ future<> service::create_metadata_if_missing() {
 
                         return _qp.process(
                                 query,
-                                db::consistency_level::ONE,
+                                db::consistency_level::QUORUM,
                                 { meta::DEFAULT_SUPERUSER_NAME, true }).then([](auto&&) {
                             log.info("Created default superuser '{}'", meta::DEFAULT_SUPERUSER_NAME);
                         }).discard_result();

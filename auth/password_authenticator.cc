@@ -175,7 +175,7 @@ future<> auth::password_authenticator::start() {
                                             meta::AUTH_KS,
                                             CREDENTIALS_CF,
                                             USER_NAME, SALTED_HASH),
-                                    db::consistency_level::ONE,
+                                    db::consistency_level::QUORUM,
                                     { DEFAULT_USER_NAME, hashpw(DEFAULT_USER_PASSWORD) }).then([](auto) {
                                 plogger.info("Created default user '{}'", DEFAULT_USER_NAME);
                             });
