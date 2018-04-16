@@ -8,7 +8,7 @@ License:        Proprietary
 URL:            http://www.scylladb.com/
 Source0:        %{name}-@@VERSION@@-@@RELEASE@@.tar
 Requires:       scylla-enterprise-server = @@VERSION@@ scylla-enterprise-jmx = @@VERSION@@ scylla-enterprise-tools = @@VERSION@@ scylla-enterprise-tools-core = @@VERSION@@ scylla-enterprise-kernel-conf = @@VERSION@@ scylla-libgcc72 scylla-libstdc++72
-Obsoletes:	scylla-server < 2.2
+Obsoletes:	scylla < 2.2
 
 %description
 Scylla is a highly scalable, eventually consistent, distributed,
