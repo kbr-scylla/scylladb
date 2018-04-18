@@ -23,6 +23,8 @@ for line in open('/etc/os-release'):
         os_ids = [value]
     if key == 'ID_LIKE':
         os_ids += value.split(' ')
+    if key == 'VERSION_ID':
+        os_version = value
 
 # distribution "internationalization", converting package names.
 # Fedora name is key, values is distro -> package name dict. 
@@ -631,6 +633,7 @@ scylla_core = (['database.cc',
                  'ent/encryption/replicated_key_provider.cc',
                  'ent/encryption/system_key.cc',
                  'ent/encryption/encrypted_file_impl.cc',
+                 'ent/encryption/kmip_host.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
                 + [Thrift('interface/cassandra.thrift', 'Cassandra')]
@@ -1000,6 +1003,34 @@ if args.staticthrift:
     thrift_libs = "-Wl,-Bstatic -lthrift -Wl,-Bdynamic"
 else:
     thrift_libs = "-lthrift"
+
+kmip_lib_ver = '1.9.2a';
+
+def kmiplib():
+    for id in os_ids:
+        if id in { 'centos', 'fedora', 'rhel' }:
+            return 'centos70'
+        if id in { 'ubuntu', 'debian' }:
+            ver = os_version.replace('.', '')
+            return id + ver;
+    print('Could not resolve libkmip.a for platform {}'.format(os_ids))
+    sys.exit(1)
+
+def target_cpu():
+    cpu, _, _ = subprocess.check_output([cxx, '-dumpmachine']).decode('utf-8').partition('-')
+    return cpu    
+    
+def kmip_arch():
+    arch = target_cpu()
+    if arch == 'x86_64':
+        return '64'
+    if 'ppc64' in arch:
+        return 'ppc64' 
+    print('Could not resolve kmip arch for platform {}'.format(arch))
+    sys.exit(1)
+        
+libs += ' kmipc/lib/kmipc-' + kmip_lib_ver + '-' + kmiplib() + '_' + kmip_arch() + '/libkmip.a'
+user_cflags += ' -Ikmipc/include -DHAVE_KMIP'
 
 outdir = 'build'
 buildfile = 'build.ninja'

@@ -68,14 +68,18 @@ using key_ptr = shared_ptr<symmetric_key>;
  * in the system, but for now we are firmly
  * entrenched in map<string, string>
  */
-class opt_wrapper {
-    const options& _options;
+template<typename Map>
+class map_wrapper {
+    const Map& _options;
 public:
-    opt_wrapper(const options& opts)
+    using mapped_type = typename Map::mapped_type;
+    using key_type = typename Map::key_type;
+
+    map_wrapper(const Map& opts)
         : _options(opts)
     {}
 
-    stdx::optional<sstring> operator()(const sstring& k) const {
+    stdx::optional<mapped_type> operator()(const key_type& k) const {
         auto i = _options.find(k);
         if (i != _options.end()) {
             return i->second;
@@ -83,6 +87,8 @@ public:
         return stdx::nullopt;
     }
 };
+
+using opt_wrapper = map_wrapper<options>;
 
 key_info get_key_info(const options&);
 
