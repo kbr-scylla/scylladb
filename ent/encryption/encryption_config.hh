@@ -27,7 +27,7 @@ public:
     named_value<string_map> system_info_encryption;
     // note this is defined as it is mainly for testing purposes.
     // when/if actual kmip is implemented, revisit.
-    named_value<string_string_map, value_status::Unused> kmip_hosts;
+    named_value<string_string_map, value_status::Used> kmip_hosts;
 };
 
 }

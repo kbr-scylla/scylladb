@@ -34,6 +34,8 @@
 #include "symmetric_key.hh"
 #include "local_file_provider.hh"
 #include "replicated_key_provider.hh"
+#include "kmip_key_provider.hh"
+#include "kmip_host.hh"
 #include "bytes.hh"
 #include "stdx.hh"
 #include "utils/class_registrator.hh"
@@ -58,6 +60,7 @@ static const std::set<sstring> keywords = { KEY_PROVIDER,
 
 static constexpr auto REPLICATED_KEY_PROVIDER_FACTORY = "ReplicatedKeyProviderFactory";
 static constexpr auto LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY = "LocalFileSystemKeyProviderFactory";
+static constexpr auto KMIP_KEY_PROVIDER_FACTORY = "KmipKeyProviderFactory";
 
 bytes base64_decode(const sstring& s, size_t off, size_t len) {
     if (off >= s.size()) {
@@ -166,11 +169,13 @@ class encryption_context_impl : public encryption_context {
     // objects in the maps.
     std::vector<std::unordered_map<sstring, shared_ptr<key_provider>>> _per_thread_provider_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<system_key>>> _per_thread_system_key_cache;
+    std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
     const encryption_config& _cfg;
 public:
     encryption_context_impl(const encryption_config& cfg)
         : _per_thread_provider_cache(smp::count)
         , _per_thread_system_key_cache(smp::count)
+        , _per_thread_kmip_host_cache(smp::count)
         , _cfg(cfg)
     {}
 
@@ -187,7 +192,7 @@ public:
 
             map[REPLICATED_KEY_PROVIDER_FACTORY] = std::make_unique<replicated_key_provider_factory>();
             map[LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY] = std::make_unique<local_file_provider_factory>();
-            /* todo map[KMIP_KEY_PROVIDER_FACTORY] = nullptr */;
+            map[KMIP_KEY_PROVIDER_FACTORY] = std::make_unique<kmip_key_provider_factory>();
 
             return map;
         }();
@@ -221,8 +226,8 @@ public:
 
         shared_ptr<encryption::system_key> k;
 
-        if (/* is kmip path */ false) {
-            ///
+        if (kmip_system_key::is_kmip_path(name)) {
+            k = make_shared<kmip_system_key>(*this, name);
         } else {
             k = make_shared<local_system_key>(*this, name);
         }
@@ -235,8 +240,22 @@ public:
     }
 
     shared_ptr<kmip_host> get_kmip_host(const sstring& host) override {
-		return nullptr;
-	}
+        auto& cache = _per_thread_kmip_host_cache[engine().cpu_id()];
+        auto i = cache.find(host);
+        if (i != cache.end()) {
+            return i->second;
+        }
+
+        auto j = _cfg.kmip_hosts().find(host);
+        if (j != _cfg.kmip_hosts().end()) {
+            auto result = ::make_shared<kmip_host>(*this, host, j->second);
+            cache.emplace(host, result);
+            return result;
+        }
+
+        throw std::invalid_argument("No such host: "+ host);
+    }
+
     const encryption_config& config() const override {
         return _cfg;
     }
@@ -473,6 +492,15 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
             }
         });
     }
+
+    if (!cfg.kmip_hosts().empty()) {
+        // only pre-create on shard 0.
+        return parallel_for_each(cfg.kmip_hosts(), [ctxt](auto& p) {
+            auto host = ctxt->get_kmip_host(p.first);
+            return host->connect();
+        });
+    }
+
     return make_ready_future<>();
 }
 
