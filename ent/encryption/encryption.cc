@@ -234,6 +234,9 @@ public:
         return k;
     }
 
+    shared_ptr<kmip_host> get_kmip_host(const sstring& host) override {
+		return nullptr;
+	}
     const encryption_config& config() const override {
         return _cfg;
     }
