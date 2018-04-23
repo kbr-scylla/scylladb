@@ -225,6 +225,9 @@ else
     sed -i -e "s#@@ADDHKCFG@@##g" debian/scylla-enterprise-server.install
 fi
 cp dist/common/systemd/scylla-server.service.in debian/scylla-enterprise-server.scylla-server.service
+if [ "$TARGET" = "jessie" ]; then
+    sed -i -e "s#AmbientCapabilities=CAP_SYS_NICE##g" debian/scylla-server.service
+fi
 sed -i -e "s#@@SYSCONFDIR@@#/etc/default#g" debian/scylla-enterprise-server.scylla-server.service
 cp dist/common/systemd/scylla-housekeeping-daily.service.in debian/scylla-enterprise-server.scylla-housekeeping-daily.service
 sed -i -e "s#@@REPOFILES@@#'/etc/apt/sources.list.d/scylla*.list'#g" debian/scylla-enterprise-server.scylla-housekeeping-daily.service
