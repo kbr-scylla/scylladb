@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=2018.1.rc0
+VERSION=2018.1.0
 
 if test -f version
 then
