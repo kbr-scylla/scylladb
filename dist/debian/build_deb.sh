@@ -226,7 +226,7 @@ else
 fi
 cp dist/common/systemd/scylla-server.service.in debian/scylla-enterprise-server.scylla-server.service
 if [ "$TARGET" = "jessie" ]; then
-    sed -i -e "s#AmbientCapabilities=CAP_SYS_NICE##g" debian/scylla-server.service
+    sed -i -e "s#AmbientCapabilities=CAP_SYS_NICE##g" debian/scylla-enterprise-server.scylla-server.service
 fi
 sed -i -e "s#@@SYSCONFDIR@@#/etc/default#g" debian/scylla-enterprise-server.scylla-server.service
 cp dist/common/systemd/scylla-housekeeping-daily.service.in debian/scylla-enterprise-server.scylla-housekeeping-daily.service
