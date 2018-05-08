@@ -23,6 +23,48 @@
 
 static const bool inited = [] { OpenSSL_add_all_ciphers(); return true; }();
 
+std::ostream& encryption::operator<<(std::ostream& os, const key_info& info) {
+    return os << info.alg << ":" << info.len;
+}
+
+bool encryption::key_info::compatible(const key_info& rhs) const {
+    if (len != rhs.len) {
+        return false;
+    }
+    sstring malg, halg;
+    std::tie(malg, std::ignore, std::ignore) = parse_key_spec(alg);
+    std::tie(halg, std::ignore, std::ignore) = parse_key_spec(rhs.alg);
+    if (malg != halg) {
+        return false;
+    }
+    return true;
+}
+
+std::tuple<sstring, sstring, sstring>
+encryption::parse_key_spec(const sstring& alg) {
+    static const std::regex alg_exp(R"foo(^(\w+)(?:\/(\w+))?(?:\/(\w+))?$)foo");
+
+    std::cmatch m;
+    if (!std::regex_match(alg.begin(), alg.end(), m, alg_exp)) {
+        throw std::invalid_argument("Invalid algorithm string: " + alg);
+    }
+
+    auto type = m[1].str();
+    auto mode = m[2].str();
+    auto padd = m[3].str();
+
+    std::transform(type.begin(), type.end(), type.begin(), ::tolower);
+    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+    std::transform(padd.begin(), padd.end(), padd.begin(), ::tolower);
+
+    static const std::string padding = "padding";
+    if (padd.size() > padding.size() && std::equal(padding.rbegin(), padding.rend(), padd.rbegin())) {
+        padd.resize(padd.size() - padding.size());
+    }
+
+    return std::make_tuple<sstring, sstring, sstring>(type, mode, padd);
+}
+
 encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
     : _ctxt(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free)
     , _info(info)
@@ -32,23 +74,16 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         throw std::bad_alloc();
     }
 
-    static const std::regex alg_exp(R"foo(^(\w+)\/(\w+)(?:\/(\w+))?$)foo");
-
-    std::cmatch m;
-    if (!std::regex_match(info.alg.begin(), info.alg.end(), m, alg_exp)) {
-        throw std::invalid_argument("Invalid algorithm string: " + _info.alg);
-    }
-
-    auto type = m[1].str();
-    auto mode = m[2].str();
-    auto padd = m[3].str();
+    sstring type, mode, padd;
+    std::tie(type, mode, padd) = parse_key_spec(info.alg);
 
     // Note: we are using some types here that are explicitly marked as "unsupported - placeholder"
     // in gnutls.
 
-    std::transform(type.begin(), type.end(), type.begin(), ::tolower);
-    std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
-    std::transform(padd.begin(), padd.end(), padd.begin(), ::tolower);
+    // openssl does not allow missing block mode. so default one.
+    if (mode.empty()) {
+        mode = "cbc";
+    }
 
     auto str = sprint("%s-%d-%s", type, info.len, mode);
     auto cipher = EVP_get_cipherbyname(str.c_str());

@@ -12,6 +12,8 @@
 #pragma once
 
 #include <memory>
+#include <tuple>
+#include <iosfwd>
 
 #include "../../stdx.hh"
 #include "../../bytes.hh"
@@ -26,14 +28,19 @@ namespace encryption {
 struct key_info {
     sstring alg;
     unsigned len;
+
+    bool compatible(const key_info&) const;
 };
 
 bool operator==(const key_info& k1, const key_info& k2);
 bool operator!=(const key_info& k1, const key_info& k2);
+std::ostream& operator<<(std::ostream&, const key_info&);
 
 struct key_info_hash {
     size_t operator()(const key_info& e) const;
 };
+
+std::tuple<sstring, sstring, sstring> parse_key_spec(const sstring&);
 
 class symmetric_key {
     std::unique_ptr<evp_cipher_ctx_st, void (*)(evp_cipher_ctx_st*)> _ctxt;
