@@ -28,6 +28,7 @@ enum class compaction_strategy_type {
     leveled,
     date_tiered,
     time_window,
+    in_memory,
 };
 
 class compaction_strategy_impl;
@@ -79,6 +80,8 @@ public:
             return "DateTieredCompactionStrategy";
         case compaction_strategy_type::time_window:
             return "TimeWindowCompactionStrategy";
+        case compaction_strategy_type::in_memory:
+            return "InMemoryCompactionStrategy";
         default:
             throw std::runtime_error("Invalid Compaction Strategy");
         }
@@ -99,6 +102,8 @@ public:
             return compaction_strategy_type::date_tiered;
         } else if (short_name == "TimeWindowCompactionStrategy") {
             return compaction_strategy_type::time_window;
+        } else if (short_name == "InMemoryCompactionStrategy") {
+            return compaction_strategy_type::in_memory;
         } else {
             throw exceptions::configuration_exception(sprint("Unable to find compaction strategy class '%s'", name));
         }
