@@ -263,6 +263,7 @@ schema_ptr tables() {
          {"min_index_interval", int32_type},
          {"read_repair_chance", double_type},
          {"speculative_retry", utf8_type},
+         {"in_memory", boolean_type},
         },
         // static columns
         {},
@@ -402,6 +403,7 @@ schema_ptr views() {
          {"min_index_interval", int32_type},
          {"read_repair_chance", double_type},
          {"speculative_retry", utf8_type},
+         {"in_memory", boolean_type},
         },
         // static columns
         {},
@@ -1470,6 +1472,7 @@ static void add_table_params_to_mutations(mutation& m, const clustering_key& cke
     m.set_clustered_cell(ckey, "read_repair_chance", table->read_repair_chance(), timestamp);
     m.set_clustered_cell(ckey, "speculative_retry", table->speculative_retry().to_sstring(), timestamp);
     m.set_clustered_cell(ckey, "crc_check_chance", table->crc_check_chance(), timestamp);
+    m.set_clustered_cell(ckey, "in_memory", table->is_in_memory(), timestamp);
 
     store_map(m, ckey, "caching", timestamp, table->caching_options().to_map());
 
@@ -1975,6 +1978,10 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
 
     if (table_row.has("speculative_retry")) {
         builder.set_speculative_retry(table_row.get_nonnull<sstring>("speculative_retry"));
+    }
+
+    if (table_row.has("in_memory")) {
+        builder.set_in_memory(table_row.get_nonnull<bool>("in_memory"));
     }
 }
 

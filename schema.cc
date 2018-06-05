@@ -428,6 +428,7 @@ bool operator==(const schema& x, const schema& y)
         && indirect_equal_to<std::unique_ptr<::view_info>>()(x._view_info, y._view_info)
         && x._raw._indices_by_name == y._raw._indices_by_name
         && x._raw._is_counter == y._raw._is_counter
+        && x._raw._in_memory == y._raw._in_memory
         ;
 #if 0
         && Objects.equal(triggers, other.triggers)
@@ -563,6 +564,7 @@ std::ostream& operator<<(std::ostream& os, const schema& s) {
     os << ",speculativeRetry=" << s._raw._speculative_retry.to_sstring();
     os << ",triggers=[]";
     os << ",isDense=" << std::boolalpha << s._raw._is_dense;
+    os << ",in_memory=" << std::boolalpha << s._raw._in_memory;
     os << ",version=" << s.version();
     os << ",droppedColumns={";
     n = 0;

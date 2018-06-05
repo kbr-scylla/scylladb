@@ -57,6 +57,8 @@ const sstring cf_prop_defs::KW_CRC_CHECK_CHANCE = "crc_check_chance";
 
 const sstring cf_prop_defs::KW_ID = "id";
 
+const sstring cf_prop_defs::KW_IN_MEMORY = "in_memory";
+
 const sstring cf_prop_defs::COMPACTION_STRATEGY_CLASS_KEY = "class";
 
 const sstring cf_prop_defs::COMPACTION_ENABLED_KEY = "enabled";
@@ -73,7 +75,7 @@ void cf_prop_defs::validate(const db::extensions& exts) {
         KW_GCGRACESECONDS, KW_CACHING, KW_DEFAULT_TIME_TO_LIVE,
         KW_MIN_INDEX_INTERVAL, KW_MAX_INDEX_INTERVAL, KW_SPECULATIVE_RETRY,
         KW_BF_FP_CHANCE, KW_MEMTABLE_FLUSH_PERIOD, KW_COMPACTION,
-        KW_COMPRESSION, KW_CRC_CHECK_CHANCE, KW_ID
+        KW_COMPRESSION, KW_CRC_CHECK_CHANCE, KW_ID, KW_IN_MEMORY
     });
     static std::set<sstring> obsolete_keywords({
         sstring("index_interval"),
@@ -233,6 +235,10 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, const db::extension
     auto compression_options = get_compression_options();
     if (compression_options) {
         builder.set_compressor_params(compression_parameters(*compression_options));
+    }
+
+    if (has_property(KW_IN_MEMORY)) {
+        builder.set_in_memory(get_boolean(KW_IN_MEMORY, builder.get_in_memory()));
     }
 #if 0
     CachingOptions cachingOptions = getCachingOptions();

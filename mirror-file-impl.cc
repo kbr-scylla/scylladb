@@ -270,7 +270,7 @@ public:
         class in_memory_file_ext : public sstables::file_io_extension {
         public:
             future<file> wrap_file(sstables::sstable& sstable, sstables::component_type type, file f, open_flags flags) {
-                if (type == sstables::component_type::Index || type == sstables::component_type::Data) {
+                if ((type == sstables::component_type::Index || type == sstables::component_type::Data) && sstable.get_schema()->is_in_memory()) {
                     return make_in_memory_mirror_file(std::move(f), sstable.filename(type));
                 } else {
                     return make_ready_future<file>(std::move(f));
