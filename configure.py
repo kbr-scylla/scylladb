@@ -638,6 +638,7 @@ scylla_core = (['database.cc',
                  'ent/encryption/kmip_host.cc',
                  'ent/encryption/kmip_key_provider.cc',
                  'in-memory-file-impl.cc',
+                 'mirror-file-impl.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
                 + [Thrift('interface/cassandra.thrift', 'Cassandra')]
