@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #define CRYPTOPP_ENABLE_NAMESPACE_WEAK 1
@@ -259,8 +248,14 @@ query_processor::process_statement_unprepared(
         ::shared_ptr<cql_statement> statement,
         service::query_state& query_state,
         const query_options& options) {
-    return statement->check_access(query_state.get_client_state()).then([this, statement, &query_state, &options] () mutable {
+    return statement->check_access(query_state.get_client_state()).then_wrapped([this, statement, &query_state, &options](auto&& access_future) mutable {
+      bool failed = access_future.failed();
+      return audit::inspect(statement, query_state, options, failed).then([this, statement, &query_state, &options, access_future = std::move(access_future)] () mutable {
+        if (access_future.failed()) {
+            std::rethrow_exception(access_future.get_exception());
+        }
         return process_authorized_statement(std::move(statement), query_state, options);
+      });
     });
 }
 
@@ -386,7 +381,12 @@ query_processor::get_statement(const sstring_view& query, const service::client_
         cf_stmt->prepare_keyspace(client_state);
     }
     ++_stats.prepare_invocations;
-    return statement->prepare(_db.local(), _cql_stats);
+    auto res = statement->prepare(_db.local(), _cql_stats);
+    auto audit_info = res->statement->get_audit_info();
+    if (audit_info) {
+        audit_info->set_query_string(query);
+    }
+    return std::move(res);
 }
 
 ::shared_ptr<raw::parsed_statement>
@@ -569,6 +569,18 @@ query_processor::execute_internal(
     });
 }
 
+future<::shared_ptr<cql_transport::messages::result_message>>
+query_processor::process_internal(
+        statements::prepared_statement::checked_weak_ptr p,
+        db::consistency_level cl,
+        const timeout_config& timeout_config,
+        const std::initializer_list<data_value>& values) {
+    auto opts = make_internal_options(p, values, cl, timeout_config);
+    return do_with(std::move(opts), [this, p = std::move(p)](auto & opts) {
+        return p->statement->execute(_proxy, *_internal_state, opts);
+    });
+}
+
 future<::shared_ptr<untyped_result_set>>
 query_processor::process(
         const sstring& query_string,
@@ -606,15 +618,21 @@ query_processor::process_batch(
         service::query_state& query_state,
         query_options& options,
         std::unordered_map<prepared_cache_key_type, authorized_prepared_statements_cache::value_type> pending_authorization_entries) {
-    return batch->check_access(query_state.get_client_state()).then([this, &query_state, &options, batch, pending_authorization_entries = std::move(pending_authorization_entries)] () mutable {
+    return batch->check_access(query_state.get_client_state()).then_wrapped([this, &query_state, &options, batch, pending_authorization_entries = std::move(pending_authorization_entries)] (future<> access_future) mutable {
         return parallel_for_each(pending_authorization_entries, [this, &query_state] (auto& e) {
             return _authorized_prepared_cache.insert(*query_state.get_client_state().user(), e.first, std::move(e.second)).handle_exception([this] (auto eptr) {
                 log.error("failed to cache the entry", eptr);
             });
-        }).then([this, &query_state, &options, batch] {
+        }).then([this, &query_state, &options, batch, access_future = std::move(access_future)] () mutable {
+          bool failed = access_future.failed();
+          return audit::inspect(batch, query_state, options, failed).then([this, &query_state, &options, batch, access_future = std::move(access_future)] () mutable {
+            if (access_future.failed()) {
+                std::rethrow_exception(access_future.get_exception());
+            }
             batch->validate();
             batch->validate(_proxy, query_state.get_client_state());
             return batch->execute(_proxy, query_state, options);
+	  });
         });
     });
 }

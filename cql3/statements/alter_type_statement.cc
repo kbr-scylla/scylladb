@@ -23,18 +23,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/statements/alter_type_statement.hh"
@@ -230,12 +219,12 @@ user_type alter_type_statement::renames::make_updated_type(database& db, user_ty
 
 std::unique_ptr<cql3::statements::prepared_statement>
 alter_type_statement::add_or_alter::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<alter_type_statement::add_or_alter>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<alter_type_statement::add_or_alter>(*this));
 }
 
 std::unique_ptr<cql3::statements::prepared_statement>
 alter_type_statement::renames::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(make_shared<alter_type_statement::renames>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<alter_type_statement::renames>(*this));
 }
 
 }

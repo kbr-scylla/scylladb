@@ -5,18 +5,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "server.hh"
@@ -819,12 +808,16 @@ future<response_type> cql_server::connection::process_auth_response(uint16_t str
     auto sasl_challenge = client_state.get_auth_service()->underlying_authenticator().new_sasl_challenge();
     auto challenge = sasl_challenge->evaluate_response(buf);
     if (sasl_challenge->is_complete()) {
-        return sasl_challenge->get_authenticated_user().then([this, sasl_challenge, stream, client_state = std::move(client_state), challenge = std::move(challenge)](auth::authenticated_user user) mutable {
-            client_state.set_login(::make_shared<auth::authenticated_user>(std::move(user)));
-            auto f = client_state.check_user_exists();
-            return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
-                auto tr_state = client_state.get_trace_state();
-                return make_ready_future<response_type>(std::make_pair(make_auth_success(stream, std::move(challenge), tr_state), std::move(client_state)));
+        return sasl_challenge->get_authenticated_user().then_wrapped([this, sasl_challenge, stream, client_state = std::move(client_state), challenge = std::move(challenge)](future<auth::authenticated_user> f) mutable {
+            bool failed = f.failed();
+            return audit::inspect_login(sasl_challenge->get_username(), client_state.get_client_address().addr(), failed).then(
+                    [this, stream, challenge = std::move(challenge), client_state = std::move(client_state), sasl_challenge, ff = std::move(f)] () mutable {
+                client_state.set_login(make_shared<auth::authenticated_user>(std::move(ff.get0())));
+                auto f = client_state.check_user_exists();
+                return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
+                    auto tr_state = client_state.get_trace_state();
+                    return make_ready_future<response_type>(std::make_pair(make_auth_success(stream, std::move(challenge), tr_state), std::move(client_state)));
+                });
             });
         });
     }
@@ -1023,7 +1016,6 @@ cql_server::connection::process_batch(uint16_t stream, bytes_view buf, service::
         if (dynamic_cast<cql3::statements::modification_statement*>(ps->statement.get()) == nullptr) {
             throw exceptions::invalid_request_exception("Invalid statement in batch: only UPDATE, INSERT and DELETE statements are allowed.");
         }
-
         ::shared_ptr<cql3::statements::modification_statement> modif_statement_ptr = static_pointer_cast<cql3::statements::modification_statement>(ps->statement);
         tracing::add_table_name(client_state.get_trace_state(), modif_statement_ptr->keyspace(), modif_statement_ptr->column_family());
 

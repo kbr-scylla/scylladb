@@ -66,13 +66,13 @@ if [ -f /etc/debian_version ]; then
         if [ ! -f /usr/bin/gdebi ]; then
             apt-get install -y --force-yes gdebi-core
         fi
-        echo Y | gdebi $LOCAL_PKG/scylla-kernel-conf*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla-conf*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla-server_*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla-server-dbg*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla-jmx*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla-tools*.deb
-        echo Y | gdebi $LOCAL_PKG/scylla_*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-kernel-conf*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-conf*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-server_*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-server-dbg*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-jmx*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise-tools*.deb
+        echo Y | gdebi $LOCAL_PKG/scylla-enterprise_*.deb
     fi
     mv /etc/hosts.orig /etc/hosts
     rm /usr/sbin/policy-rc.d
@@ -97,9 +97,9 @@ else
     fi
 
     if [ "$LOCAL_PKG" = "" ]; then
-        yum install -y scylla
+        yum install -y scylla-enterprise
     else
-        yum install -y $LOCAL_PKG/scylla*.*.rpm
+        yum install -y $LOCAL_PKG/scylla-enterprise*.*.rpm
     fi
 
     rm /etc/yum.repos.d/scylla_install.repo

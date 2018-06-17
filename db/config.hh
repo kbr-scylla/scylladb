@@ -6,18 +6,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -736,6 +725,16 @@ public:
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.") \
     val(cpu_scheduler, bool, true, Used, "Enable cpu scheduling") \
     val(view_building, bool, true, Used, "Enable view building; should only be set to false when the node is experience issues due to view building") \
+    val(audit, sstring, "none", Used,     \
+            "Controls the audit feature:\n"   \
+            "\n"    \
+            "\tnone : No auditing enabled.\n"   \
+            "\ttable : Audit messages written to column family named audit.audit_log.\n"  \
+    ) \
+    val(audit_categories, sstring, "DCL,DDL,AUTH", Used, "Comma separated list of operation categories that should be audited.") \
+    val(audit_tables, sstring, "", Used, "Comma separated list of table names (<keyspace>.<table>) that will be audited.") \
+    val(audit_keyspaces, sstring, "", Used, "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited") \
+    val(audit_syslog_write_buffer_size, size_t, 1048576, Used, "The size (in bytes) of a write buffer used when writting to syslog socket.") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \

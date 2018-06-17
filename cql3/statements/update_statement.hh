@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -65,7 +54,7 @@ public:
     private static final Constants.Value EMPTY = new Constants.Value(ByteBufferUtil.EMPTY_BYTE_BUFFER);
 #endif
 
-    update_statement(statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr);
+    update_statement(audit::audit_info_ptr&& audit_info, statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr);
 private:
     virtual bool require_full_clustering_key() const override;
 
@@ -83,8 +72,8 @@ private:
 class insert_prepared_json_statement : public update_statement {
     ::shared_ptr<term> _term;
 public:
-    insert_prepared_json_statement(uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr, ::shared_ptr<term> t)
-        : update_statement(statement_type::INSERT, bound_terms, s, std::move(attrs), cql_stats_counter_ptr), _term(t) {
+    insert_prepared_json_statement(audit::audit_info_ptr&& audit_info, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr, ::shared_ptr<term> t)
+        : update_statement(std::move(audit_info), statement_type::INSERT, bound_terms, s, std::move(attrs), cql_stats_counter_ptr), _term(t) {
         _restrictions = ::make_shared<restrictions::statement_restrictions>(s, false);
     }
 private:

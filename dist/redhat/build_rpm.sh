@@ -93,7 +93,7 @@ VERSION=$(./SCYLLA-VERSION-GEN)
 SCYLLA_VERSION=$(cat build/SCYLLA-VERSION-FILE)
 SCYLLA_RELEASE=$(cat build/SCYLLA-RELEASE-FILE)
 echo $VERSION >version
-./scripts/git-archive-all --extra version --force-submodules --prefix scylla-$SCYLLA_VERSION build/scylla-$VERSION.tar
+./scripts/git-archive-all --extra version --force-submodules --prefix scylla-enterprise-$SCYLLA_VERSION build/scylla-enterprise-$VERSION.tar
 rm -f version
 
 pystache dist/redhat/scylla.spec.mustache "{ \"version\": \"$SCYLLA_VERSION\", \"release\": \"$SCYLLA_RELEASE\", \"housekeeping\": $DIST }" > build/scylla.spec

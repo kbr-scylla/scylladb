@@ -5,18 +5,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "supervisor.hh"
@@ -54,6 +43,7 @@
 #include <sys/resource.h>
 #include "disk-error-handler.hh"
 #include "tracing/tracing.hh"
+#include "audit/audit.hh"
 #include "core/prometheus.hh"
 #include "message/messaging_service.hh"
 #include <seastar/net/dns.hh>
@@ -308,6 +298,10 @@ int main(int ac, char** av) {
         print("%s\n", scylla_version());
         return 0;
     }
+    cfg->add_options(init);
+    for (configurable& c : configurable::configurables()) {
+        c.append_options(*cfg, init);
+    }
 
     bpo::options_description deprecated("Deprecated options - ignored");
     deprecated.add_options()
@@ -462,6 +456,9 @@ int main(int ac, char** av) {
             }
             supervisor::notify("creating tracing");
             tracing::tracing::create_tracing("trace_keyspace_helper").get();
+            audit::audit::create_audit(*cfg).handle_exception([&] (auto&& e) {
+                startlog.error("audit creation failed: {}", e);
+            }).get();
             supervisor::notify("creating snitch");
             i_endpoint_snitch::create_snitch(cfg->endpoint_snitch()).get();
             // #293 - do not stop anything
@@ -729,6 +726,7 @@ int main(int ac, char** av) {
                 view_builder.invoke_on_all(&db::view::view_builder::start).get();
             }
 
+            audit::audit::start_audit(*cfg).get();
             supervisor::notify("starting native transport");
             service::get_local_storage_service().start_native_transport().get();
             if (start_thrift) {

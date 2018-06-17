@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -241,6 +230,22 @@ public:
                 create_paged_state(query_string, { data_value(std::forward<Args>(args))... }), std::move(f));
     }
 
+    /*
+     * Invokes `execute` (not `execute_internal`!) of the CQL statement with internal `client_state` and without
+     * invoking `check_access` of the statement. This side-steps access-control for the statement being executed.
+     *
+     * Yes, this is a misnomer and yes, this is questionable.
+     */
+    future<::shared_ptr<cql_transport::messages::result_message>>
+    process_internal(
+            statements::prepared_statement::checked_weak_ptr,
+            db::consistency_level,
+            const timeout_config& timeout_config,
+            const std::initializer_list<data_value>& = { });
+
+    /*
+     * See \ref process_internal.
+     */
     future<::shared_ptr<untyped_result_set>> process(
             const sstring& query_string,
             db::consistency_level,
@@ -248,6 +253,9 @@ public:
             const std::initializer_list<data_value>& = { },
             bool cache = false);
 
+    /*
+     * See \ref process_internal .
+     */
     future<::shared_ptr<untyped_result_set>> process(
             statements::prepared_statement::checked_weak_ptr p,
             db::consistency_level,

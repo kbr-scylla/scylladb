@@ -23,18 +23,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/cql_statement.hh"
@@ -85,6 +74,12 @@ public:
     }
 
     virtual std::unique_ptr<prepared> prepare(database& db, cql_stats& stats) override;
+protected:
+    virtual audit::statement_category category() const override;
+    virtual audit::audit_info_ptr audit_info() const override {
+        // We don't audit batch statements. Instead we audit statements that are inside the batch.
+        return audit::audit::create_no_audit_info();
+    }
 };
 
 }

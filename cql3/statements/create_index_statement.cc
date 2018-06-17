@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "create_index_statement.hh"
@@ -269,7 +258,7 @@ create_index_statement::announce_migration(service::storage_proxy& proxy, bool i
 std::unique_ptr<cql3::statements::prepared_statement>
 create_index_statement::prepare(database& db, cql_stats& stats) {
     _cql_stats = &stats;
-    return std::make_unique<prepared_statement>(make_shared<create_index_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<create_index_statement>(*this));
 }
 
 index_metadata create_index_statement::make_index_metadata(schema_ptr schema,

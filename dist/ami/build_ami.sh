@@ -23,15 +23,15 @@ while [ $# -gt 0 ]; do
             shift 1
             ;;
         "--repo")
-            INSTALL_ARGS="$INSTALL_ARGS --repo $2"
+            REPO=$2
             shift 2
             ;;
         "--repo-for-install")
-            INSTALL_ARGS="$INSTALL_ARGS --repo-for-install $2"
+            REPO_FOR_INSTALL=$2
             shift 2
             ;;
         "--repo-for-update")
-            INSTALL_ARGS="$INSTALL_ARGS --repo-for-update $2"
+            REPO_FOR_UPDATE=$2
             shift 2
             ;;
         "--target")
@@ -93,30 +93,30 @@ if [ $LOCALRPM -eq 1 ]; then
     fi
 
     if [ "$TARGET" = "centos" ]; then
-        if [ ! -f dist/ami/files/scylla.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-kernel-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-server.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-debuginfo.x86_64.rpm ]; then
+        if [ ! -f dist/ami/files/scylla-enterprise.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-kernel-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-conf.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-server.x86_64.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-debuginfo.x86_64.rpm ]; then
             dist/redhat/build_rpm.sh --dist --target epel-7-x86_64
-            cp build/rpms/scylla-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla.x86_64.rpm
-            cp build/rpms/scylla-kernel-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-kernel-conf.x86_64.rpm
-            cp build/rpms/scylla-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-conf.x86_64.rpm
-            cp build/rpms/scylla-server-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-server.x86_64.rpm
-            cp build/rpms/scylla-debuginfo-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-debuginfo.x86_64.rpm
+            cp build/rpms/scylla-enterprise-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise.x86_64.rpm
+            cp build/rpms/scylla-enterprise-kernel-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-kernel-conf.x86_64.rpm
+            cp build/rpms/scylla-enterprise-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-conf.x86_64.rpm
+            cp build/rpms/scylla-enterprise-server-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-server.x86_64.rpm
+            cp build/rpms/scylla-enterprise-debuginfo-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/scylla-enterprise-debuginfo.x86_64.rpm
         fi
-        if [ ! -f dist/ami/files/scylla-jmx.noarch.rpm ]; then
+        if [ ! -f dist/ami/files/scylla-enterprise-jmx.noarch.rpm ]; then
             cd build
-            git clone --depth 1 https://github.com/scylladb/scylla-jmx.git
+            git clone --depth 1 https://github.com/scylladb/scylla-enterprise-jmx.git
             cd scylla-jmx
             dist/redhat/build_rpm.sh --target epel-7-x86_64
             cd ../..
-            cp build/scylla-jmx/build/rpms/scylla-jmx-`cat build/scylla-jmx/build/SCYLLA-VERSION-FILE`-`cat build/scylla-jmx/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-jmx.noarch.rpm
+            cp build/scylla-enterprise-jmx/build/rpms/scylla-enterprise-jmx-`cat build/scylla-enterprise-jmx/build/SCYLLA-VERSION-FILE`-`cat build/scylla-enterprise-jmx/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-enterprise-jmx.noarch.rpm
         fi
-        if [ ! -f dist/ami/files/scylla-tools.noarch.rpm ] || [ ! -f dist/ami/files/scylla-tools-core.noarch.rpm ]; then
+        if [ ! -f dist/ami/files/scylla-enterprise-tools.noarch.rpm ] || [ ! -f dist/ami/files/scylla-enterprise-tools-core.noarch.rpm ]; then
             cd build
-            git clone --depth 1 https://github.com/scylladb/scylla-tools-java.git
-            cd scylla-tools-java
+            git clone --depth 1 https://github.com/scylladb/scylla-enterprise-tools-java.git
+            cd scylla-enterprise-tools-java
             dist/redhat/build_rpm.sh --target epel-7-x86_64
             cd ../..
-            cp build/scylla-tools-java/build/rpms/scylla-tools-`cat build/scylla-tools-java/build/SCYLLA-VERSION-FILE`-`cat build/scylla-tools-java/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-tools.noarch.rpm
-            cp build/scylla-tools-java/build/rpms/scylla-tools-core-`cat build/scylla-tools-java/build/SCYLLA-VERSION-FILE`-`cat build/scylla-tools-java/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-tools-core.noarch.rpm
+            cp build/scylla-enterprise-tools-java/build/rpms/scylla-enterprise-tools-`cat build/scylla-enterprise-tools-java/build/SCYLLA-VERSION-FILE`-`cat build/scylla-enterprise-tools-java/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-enterprise-tools.noarch.rpm
+            cp build/scylla-enterprise-tools-java/build/rpms/scylla-enterprise-tools-core-`cat build/scylla-enterprise-tools-java/build/SCYLLA-VERSION-FILE`-`cat build/scylla-enterprise-tools-java/build/SCYLLA-RELEASE-FILE`.*.noarch.rpm dist/ami/files/scylla-enterprise-tools-core.noarch.rpm
         fi
     else
         if [ ! -f dist/ami/files/scylla-server_amd64.deb ]; then
@@ -130,22 +130,33 @@ if [ $LOCALRPM -eq 1 ]; then
             cp build/scylla/build/debs/scylla-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-conf_amd64.deb
             cp build/scylla/build/debs/scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-server_amd64.deb
             cp build/scylla/build/debs/scylla-server-dbg_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-server-dbg_amd64.deb
-        fi
-        if [ ! -f dist/ami/files/scylla-jmx_all.deb ]; then
+||||||| merged common ancestors
+        sudo apt-get install -y git
+        if [ ! -f dist/ami/files/scylla-server_amd64.deb ]; then
+            if [ ! -f ../scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb ]; then
+                echo "Build .deb before running build_ami.sh"
+                exit 1
+            fi
+            cp ../scylla_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla_amd64.deb
+            cp ../scylla-kernel-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-kernel-conf_amd64.deb
+            cp ../scylla-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-conf_amd64.deb
+            cp ../scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-server_amd64.deb
+            cp ../scylla-server-dbg_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/am        fi
+        if [ ! -f dist/ami/files/scylla-enterprise-jmx_all.deb ]; then
             cd build
-            git clone --depth 1 https://github.com/scylladb/scylla-jmx.git
-            cd scylla-jmx
+            git clone --depth 1 https://github.com/scylladb/scylla-enterprise-jmx.git
+            cd scylla-enterprise-jmx
             dist/debian/build_deb.sh --target $TARGET
             cd ../..
-            cp build/scylla-jmx/build/debs/scylla-jmx_`cat build/scylla-jmx/build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/scylla-jmx/build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_all.deb dist/ami/files/scylla-jmx_all.deb
+            cp build/scylla-enterprise-jmx/build/debs/scylla-jmx_`cat build/scylla-enterprise-jmx/build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/scylla-jmx/build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_all.deb dist/ami/files/scylla-enterprise-jmx_all.deb
         fi
-        if [ ! -f dist/ami/files/scylla-tools_all.deb ]; then
+        if [ ! -f dist/ami/files/scylla-enterprise-tools_all.deb ]; then
             cd build
-            git clone --depth 1 https://github.com/scylladb/scylla-tools-java.git
-            cd scylla-tools-java
+            git clone --depth 1 https://github.com/scylladb/scylla-enterprise-tools-java.git
+            cd scylla-enterprise-tools-java
             dist/debian/build_deb.sh --target $TARGET
             cd ../..
-            cp build/scylla-tools-java/build/debs/scylla-tools_`cat build/scylla-tools-java/build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/scylla-tools-java/build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_all.deb dist/ami/files/scylla-tools_all.deb
+            cp build/scylla-enterprise-tools-java/build/debs/scylla-tools_`cat build/scylla-enterprise-tools-java/build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/scylla-enterprise-tools-java/build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_all.deb dist/ami/files/scylla-enterprise-tools_all.deb
         fi
     fi
 fi

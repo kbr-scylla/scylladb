@@ -23,18 +23,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/cql_statement.hh"
@@ -105,6 +94,8 @@ public:
                     std::vector<single_statement> statements,
                     std::unique_ptr<attributes> attrs,
                     cql_stats& stats);
+
+    const std::vector<single_statement>& statements() const { return _statements; }
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override;
 

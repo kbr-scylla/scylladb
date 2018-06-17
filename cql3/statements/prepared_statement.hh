@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -46,12 +35,15 @@
 #include "cql3/column_identifier.hh"
 #include "cql3/cql_statement.hh"
 
+#include "audit/audit.hh"
+
 #include "core/shared_ptr.hh"
 
 #include <seastar/core/weak_ptr.hh>
 #include <seastar/core/checked_ptr.hh>
 #include <experimental/optional>
 #include <vector>
+#include <memory>
 
 namespace cql3 {
 
@@ -73,13 +65,13 @@ public:
     const std::vector<::shared_ptr<column_specification>> bound_names;
     std::vector<uint16_t> partition_key_bind_indices;
 
-    prepared_statement(::shared_ptr<cql_statement> statement_, std::vector<::shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices);
+    prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, std::vector<::shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices);
 
-    prepared_statement(::shared_ptr<cql_statement> statement_, const variable_specifications& names, const std::vector<uint16_t>& partition_key_bind_indices);
+    prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, const variable_specifications& names, const std::vector<uint16_t>& partition_key_bind_indices);
 
-    prepared_statement(::shared_ptr<cql_statement> statement_, variable_specifications&& names, std::vector<uint16_t>&& partition_key_bind_indices);
+    prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, variable_specifications&& names, std::vector<uint16_t>&& partition_key_bind_indices);
 
-    prepared_statement(::shared_ptr<cql_statement>&& statement_);
+    prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement>&& statement_);
 
     checked_weak_ptr checked_weak_from_this() {
         return checked_weak_ptr(this->weak_from_this());

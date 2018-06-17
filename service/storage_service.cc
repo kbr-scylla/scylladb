@@ -23,18 +23,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "storage_service.hh"
@@ -74,6 +63,7 @@
 #include "supervisor.hh"
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
+#include "audit/audit.hh"
 
 using token = dht::token;
 using UUID = utils::UUID;
@@ -1289,6 +1279,8 @@ future<> storage_service::drain_on_shutdown() {
                 return local_proxy.stop_hints_manager();
             }).get();
             slogger.info("Drain on shutdown: hints manager is stopped");
+
+            audit::audit::stop_audit().get();
 
             ss.flush_column_families();
             slogger.info("Drain on shutdown: flush column_families done");

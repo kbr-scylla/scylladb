@@ -5,18 +5,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "auth/service.hh"
@@ -25,7 +14,6 @@
 #include <map>
 
 #include <seastar/core/future-util.hh>
-#include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 
 #include "auth/allow_all_authenticator.hh"
@@ -185,6 +173,8 @@ future<> service::start() {
         return create_keyspace_if_missing();
     }).then([this] {
         return when_all_succeed(_role_manager->start(), _authorizer->start(), _authenticator->start());
+    }).then([this] {
+        _permissions_cache = std::make_unique<permissions_cache>(_permissions_cache_config, *this, log);
     }).then([this] {
         _permissions_cache = std::make_unique<permissions_cache>(_permissions_cache_config, *this, log);
     }).then([this] {

@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/statements/modification_statement.hh"
@@ -498,7 +487,7 @@ modification_statement::prepare(database& db, cql_stats& stats) {
     auto bound_names = get_bound_variables();
     auto statement = prepare(db, bound_names, stats);
     auto partition_key_bind_indices = bound_names->get_partition_key_bind_indexes(schema);
-    return std::make_unique<prepared>(std::move(statement), *bound_names, std::move(partition_key_bind_indices));
+    return std::make_unique<prepared>(audit_info(), std::move(statement), *bound_names, std::move(partition_key_bind_indices));
 }
 
 ::shared_ptr<cql3::statements::modification_statement>
@@ -547,6 +536,10 @@ modification_statement::prepare(database& db, ::shared_ptr<variable_specificatio
         stmt->validate_where_clause_for_conditions();
     }
     return stmt;
+}
+
+audit::statement_category modification_statement::category() const {
+    return audit::statement_category::DML;
 }
 
 }

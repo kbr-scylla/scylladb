@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -50,6 +39,7 @@
 
 #include <experimental/optional>
 #include <vector>
+#include "audit/audit.hh"
 
 namespace cql3 {
 
@@ -74,6 +64,10 @@ public:
     virtual std::unique_ptr<prepared_statement> prepare(database& db, cql_stats& stats) = 0;
 
     virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const;
+
+protected:
+    virtual audit::statement_category category() const = 0;
+    virtual audit::audit_info_ptr audit_info() const = 0;
 };
 
 }

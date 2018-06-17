@@ -23,18 +23,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "batch_statement.hh"
@@ -424,6 +413,10 @@ batch_statement::prepare(database& db, cql_stats& stats) {
             have_multiple_cfs = first_ks.value() != parsed->keyspace() || first_cf.value() != parsed->column_family();
         }
         statements.emplace_back(parsed->prepare(db, bound_names, stats));
+        auto audit_info = statements.back().statement->get_audit_info();
+        if (audit_info) {
+            audit_info->set_query_string(parsed->get_raw_cql());
+        }
     }
 
     auto&& prep_attrs = _attrs->prepare(db, "[batch]", "[batch]");
@@ -436,9 +429,13 @@ batch_statement::prepare(database& db, cql_stats& stats) {
     if (!have_multiple_cfs && batch_statement_.get_statements().size() > 0) {
         partition_key_bind_indices = bound_names->get_partition_key_bind_indexes(batch_statement_.get_statements()[0].statement->s);
     }
-    return std::make_unique<prepared>(make_shared(std::move(batch_statement_)),
+    return std::make_unique<prepared>(audit_info(), make_shared(std::move(batch_statement_)),
                                                      bound_names->get_specifications(),
                                                      std::move(partition_key_bind_indices));
+}
+
+audit::statement_category batch_statement::category() const {
+    return audit::statement_category::DML;
 }
 
 }

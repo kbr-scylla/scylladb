@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 
@@ -375,7 +364,7 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
         }
     }
 
-    return std::make_unique<prepared>(stmt);
+    return std::make_unique<prepared>(audit_info(), stmt);
 }
 
 data_type create_table_statement::raw_statement::get_type_and_remove(column_map_type& columns, ::shared_ptr<column_identifier> t)
@@ -407,6 +396,10 @@ void create_table_statement::raw_statement::add_key_aliases(const std::vector<::
 
 void create_table_statement::raw_statement::add_column_alias(::shared_ptr<column_identifier> alias) {
     _column_aliases.emplace_back(alias);
+}
+
+audit::statement_category create_table_statement::raw_statement::category() const {
+    return audit::statement_category::DDL;
 }
 
 }

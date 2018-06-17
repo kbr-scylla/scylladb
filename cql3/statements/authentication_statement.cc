@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "authentication_statement.hh"
@@ -48,7 +37,7 @@ uint32_t cql3::statements::authentication_statement::get_bound_terms() {
 
 std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::authentication_statement::prepare(
                 database& db, cql_stats& stats) {
-    return std::make_unique<prepared>(this->shared_from_this());
+    return std::make_unique<prepared>(audit_info(), this->shared_from_this());
 }
 
 bool cql3::statements::authentication_statement::uses_function(
@@ -73,4 +62,8 @@ void cql3::statements::authentication_statement::validate(
 
 future<> cql3::statements::authentication_statement::check_access(const service::client_state& state) {
     return make_ready_future<>();
+}
+
+audit::statement_category cql3::statements::authentication_statement::category() const {
+    return audit::statement_category::DCL;
 }

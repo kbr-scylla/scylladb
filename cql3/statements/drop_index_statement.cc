@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/statements/drop_index_statement.hh"
@@ -104,7 +93,7 @@ future<shared_ptr<cql_transport::event::schema_change>> drop_index_statement::an
 std::unique_ptr<cql3::statements::prepared_statement>
 drop_index_statement::prepare(database& db, cql_stats& stats) {
     _cql_stats = &stats;
-    return std::make_unique<prepared_statement>(make_shared<drop_index_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<drop_index_statement>(*this));
 }
 
 schema_ptr drop_index_statement::lookup_indexed_table() const

@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/statements/select_statement.hh"
@@ -870,6 +859,10 @@ indexed_table_select_statement::find_index_clustering_rows(service::storage_prox
 
 namespace raw {
 
+audit::statement_category select_statement::category() const {
+    return audit::statement_category::QUERY;
+}
+
 select_statement::select_statement(::shared_ptr<cf_name> cf_name,
                                    ::shared_ptr<parameters> parameters,
                                    std::vector<::shared_ptr<selection::raw_selector>> select_clause,
@@ -976,7 +969,7 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
 
     auto partition_key_bind_indices = bound_names->get_partition_key_bind_indexes(schema);
 
-    return std::make_unique<prepared>(std::move(stmt), std::move(*bound_names), std::move(partition_key_bind_indices));
+    return std::make_unique<prepared>(audit_info(), std::move(stmt), std::move(*bound_names), std::move(partition_key_bind_indices));
 }
 
 ::shared_ptr<restrictions::statement_restrictions>

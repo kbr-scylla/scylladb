@@ -283,8 +283,8 @@ if [ $INTERACTIVE -eq 1 ]; then
 fi
 
 if [ $VERIFY_PACKAGE -eq 1 ]; then
-    verify_package scylla-jmx
-    verify_package scylla-tools
+    verify_package scylla-enterprise-jmx
+    verify_package scylla-enterprise-tools
 fi
 
 if [ $INTERACTIVE -eq 1 ]; then

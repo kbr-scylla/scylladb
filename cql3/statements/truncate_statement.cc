@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #include "cql3/statements/truncate_statement.hh"
@@ -62,7 +51,7 @@ uint32_t truncate_statement::get_bound_terms()
 
 std::unique_ptr<prepared_statement> truncate_statement::prepare(database& db,cql_stats& stats)
 {
-    return std::make_unique<prepared>(this->shared_from_this());
+    return std::make_unique<prepared>(audit_info(), this->shared_from_this());
 }
 
 bool truncate_statement::uses_function(const sstring& ks_name, const sstring& function_name) const
@@ -104,6 +93,10 @@ truncate_statement::execute(service::storage_proxy& proxy, service::query_state&
     }).then([] {
         return ::shared_ptr<cql_transport::messages::result_message>{};
     });
+}
+
+audit::statement_category truncate_statement::category() const {
+    return audit::statement_category::DML;
 }
 
 }

@@ -801,3 +801,20 @@ commitlog_total_space_in_mb: -1
 #
 # Keep at 12 for new clusters.
 murmur3_partitioner_ignore_msb_bits: 12
+
+#
+# audit setting
+# by default, Scylla does not audit anything.
+# It is possible to enable auditing to the following places:
+#   - audit.audit_log column family by setting the flag to "table"
+# audit: "none"
+#
+# List of statement categories that should be audited.
+# audit-categories: "DCL,DDL,AUTH"
+#
+# List of tables that should be audited.
+# audit-tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
+#
+# List of keyspaces that should be fully audited.
+# All tables in those keyspaces will be audited
+# audit-keyspaces: "<keyspace_name>,<keyspace_name>"

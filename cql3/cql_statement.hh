@@ -25,18 +25,7 @@
 /*
  * This file is part of Scylla.
  *
- * Scylla is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * Scylla is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
 #pragma once
@@ -46,6 +35,7 @@
 #include "service/storage_proxy.hh"
 #include "cql3/query_options.hh"
 #include "timeout_config.hh"
+#include "audit/audit.hh"
 
 namespace cql_transport {
 
@@ -64,9 +54,11 @@ shared_ptr<const metadata> make_empty_metadata();
 
 class cql_statement {
     timeout_config_selector _timeout_config_selector;
+    audit::audit_info_ptr _audit_info;
 public:
     explicit cql_statement(timeout_config_selector timeout_selector) : _timeout_config_selector(timeout_selector) {}
-
+    cql_statement(cql_statement&& o) = default;
+    cql_statement(const cql_statement& o) : _timeout_config_selector(o._timeout_config_selector), _audit_info(o._audit_info ? std::make_unique<audit::audit_info>(*o._audit_info) : nullptr) { }
     virtual ~cql_statement()
     { }
 
@@ -105,6 +97,9 @@ public:
     virtual bool depends_on_column_family(const sstring& cf_name) const = 0;
 
     virtual shared_ptr<const metadata> get_result_metadata() const = 0;
+
+    audit::audit_info* get_audit_info() { return _audit_info.get(); }
+    void set_audit_info(audit::audit_info_ptr&& info) { _audit_info = std::move(info); }
 };
 
 class cql_statement_no_metadata : public cql_statement {

@@ -1,10 +1,10 @@
-Name:           scylla
+Name:           scylla-enterprise
 Version:        {{version}}
 Release:        {{release}}%{?dist}
 Summary:        Scylla is a highly scalable, eventually consistent, distributed, partitioned row DB.
 Group:          Applications/Databases
 
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 Source0:        %{name}-{{version}}-{{release}}.tar
 Requires:       scylla-server = {{version}} scylla-jmx = {{version}} scylla-tools = {{version}} scylla-tools-core = {{version}} scylla-kernel-conf = {{version}} scylla-libgcc73 scylla-libstdc++73
@@ -18,7 +18,7 @@ Provides:      scylla-libstdc++72
 Scylla is a highly scalable, eventually consistent, distributed,
 partitioned row DB.
 This package installs all required packages for ScyllaDB,  including
-scylla-server, scylla-jmx, scylla-tools, scylla-tools-core.
+scylla-enterprise-server, scylla-enterprise-jmx, scylla-enterprise-tools, scylla-enterprise-tools-core.
 
 # this is needed to prevent python compilation error on CentOS (#2235)
 %if 0%{?rhel}
@@ -52,7 +52,7 @@ scylla-server, scylla-jmx, scylla-tools, scylla-tools-core.
 %package        server
 Group:          Applications/Databases
 Summary:        The Scylla database server
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 BuildRequires:  libaio-devel libstdc++-devel cryptopp-devel hwloc-devel numactl-devel libpciaccess-devel libxml2-devel zlib-devel thrift-devel yaml-cpp-devel lz4-devel snappy-devel jsoncpp-devel systemd-devel xz-devel pcre-devel elfutils-libelf-devel bzip2-devel keyutils-libs-devel xfsprogs-devel make gnutls-devel systemd-devel lksctp-tools-devel protobuf-devel protobuf-compiler systemtap-sdt-devel ninja-build cmake python ragel grep kernel-headers
 %{?fedora:BuildRequires: boost-devel antlr3-tool antlr3-C++-devel python3 gcc-c++ libasan libubsan python3-pyparsing dnf-yum python2-pystache}
@@ -133,10 +133,10 @@ AmbientCapabilities=CAP_SYS_NICE
 EOS
     fi
 fi
-%systemd_post scylla-server.service
+%systemd_post scylla-enterprise-server.service
 
 %preun server
-%systemd_preun scylla-server.service
+%systemd_preun scylla-enterprise-server.service
 
 %postun server
 %systemd_postun
@@ -154,7 +154,7 @@ rm -rf $RPM_BUILD_ROOT
 %files server
 %defattr(-,root,root)
 
-%config(noreplace) %{_sysconfdir}/sysconfig/scylla-server
+%config(noreplace) %{_sysconfdir}/sysconfig/scylla-enterprise-server
 %{_sysconfdir}/security/limits.d/scylla.conf
 %attr(0755,root,root) %dir %{_sysconfdir}/scylla.d
 %config(noreplace) %{_sysconfdir}/scylla.d/*.conf
@@ -168,6 +168,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_bindir}/scylla
 %{_bindir}/iotune
 %{_bindir}/scyllatop
+%{_bindir}/scyllarepair
 %{_sbindir}/scylla*
 %{_prefix}/lib/scylla/scylla-blocktune
 %{_prefix}/lib/scylla/scylla_blocktune.py
@@ -200,6 +201,7 @@ rm -rf $RPM_BUILD_ROOT
 %{_prefix}/lib/scylla/swagger-ui/dist/*
 %{_prefix}/lib/scylla/api/api-doc/*
 %{_prefix}/lib/scylla/scyllatop/*
+%{_prefix}/lib/scylla/scyllarepair/*
 %{_prefix}/lib/scylla/scylla_config_get.py
 %{_prefix}/lib/scylla/scylla_lib.sh
 %{_prefix}/lib/scylla/scylla_util.py
@@ -212,15 +214,16 @@ rm -rf $RPM_BUILD_ROOT
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla/hints
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla/coredump
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla-housekeeping
-%ghost /etc/systemd/system/scylla-server.service.d/
-%ghost /etc/systemd/system/scylla-server.service.d/capabilities.conf
+%ghost /etc/systemd/system/scylla-enterprise-server.service.d/
+%ghost /etc/systemd/system/scylla-enterprise-server.service.d/capabilities.conf
 
 %package conf
 Group:          Applications/Databases
 Summary:        Scylla configuration package
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
-Obsoletes:	scylla-server < 1.1
+Obsoletes:	scylla-enterprise-server < 1.1
+Obsoletes:      scylla-enterprise-conf < 2.2
 
 %description conf
 This package contains the main scylla configuration file.
@@ -233,7 +236,7 @@ mv /tmp/scylla.yaml /etc/scylla/scylla.yaml
 
 # we need to refuse upgrade if current scylla < 1.7.3 && commitlog remains
 %pretrans conf
-ver=$(rpm -qi scylla-server | grep Version | awk '{print $3}')
+ver=$(rpm -qi scylla-enterprise-server | grep Version | awk '{print $3}')
 if [ -n "$ver" ]; then
     ver_fmt=$(echo $ver | awk -F. '{printf "%d%02d%02d", $1,$2,$3}')
     if [ $ver_fmt -lt 10703 ]; then
@@ -271,9 +274,10 @@ fi
 %package kernel-conf
 Group:          Applications/Databases
 Summary:        Scylla configuration package for the Linux kernel
-License:        AGPLv3
+License:        Proprietary
 URL:            http://www.scylladb.com/
 Requires:       kmod
+Obsoletes:      scylla-enterprise-kernel-conf < 2.2
 
 %description kernel-conf
 This package contains Linux kernel configuration changes for the Scylla database.  Install this package
