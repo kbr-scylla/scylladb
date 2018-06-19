@@ -141,6 +141,7 @@ public:
     void init_messaging_service();
 private:
     void uninit_messaging_service();
+    future<> validate(schema_ptr);
 };
 
 extern distributed<migration_manager> _the_migration_manager;

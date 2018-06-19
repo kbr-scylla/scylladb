@@ -406,6 +406,8 @@ namespace query {
 class partition_slice;
 }
 
+class schema;
+
 /**
  * Schema extension. An opaque type representing
  * entries in the "extensions" part of a table/view (see schema_tables).
@@ -426,6 +428,9 @@ class partition_slice;
 class schema_extension {
 public:
     virtual ~schema_extension() {};
+    virtual future<> validate(const schema&) const {
+        return make_ready_future<>();
+    }
     virtual bytes serialize() const = 0;
     virtual bool is_placeholder() const {
         return false;

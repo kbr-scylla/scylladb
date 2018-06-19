@@ -503,24 +503,32 @@ future<> migration_manager::announce_new_keyspace(lw_shared_ptr<keyspace_metadat
     return announce(std::move(mutations), announce_locally);
 }
 
+future<> migration_manager::validate(schema_ptr schema) {
+    return do_for_each(schema->extensions(), [schema](auto & p) {
+        return p.second->validate(*schema);
+    });
+}
+
 future<> migration_manager::announce_new_column_family(schema_ptr cfm, bool announce_locally) {
 #if 0
     cfm.validate();
 #endif
-    try {
-        auto& db = get_local_storage_proxy().get_db().local();
-        auto&& keyspace = db.find_keyspace(cfm->ks_name());
-        if (db.has_schema(cfm->ks_name(), cfm->cf_name())) {
-            throw exceptions::already_exists_exception(cfm->ks_name(), cfm->cf_name());
+    return validate(cfm).then([this, cfm, announce_locally] {
+        try {
+            auto& db = get_local_storage_proxy().get_db().local();
+            auto&& keyspace = db.find_keyspace(cfm->ks_name());
+            if (db.has_schema(cfm->ks_name(), cfm->cf_name())) {
+                throw exceptions::already_exists_exception(cfm->ks_name(), cfm->cf_name());
+            }
+            mlogger.info("Create new ColumnFamily: {}", cfm);
+            return db::schema_tables::make_create_table_mutations(keyspace.metadata(), cfm, api::new_timestamp())
+                .then([announce_locally, this] (auto&& mutations) {
+                    return announce(std::move(mutations), announce_locally);
+                });
+        } catch (const no_such_keyspace& e) {
+            throw exceptions::configuration_exception(sprint("Cannot add table '%s' to non existing keyspace '%s'.", cfm->cf_name(), cfm->ks_name()));
         }
-        mlogger.info("Create new ColumnFamily: {}", cfm);
-        return db::schema_tables::make_create_table_mutations(keyspace.metadata(), cfm, api::new_timestamp())
-            .then([announce_locally, this] (auto&& mutations) {
-                return announce(std::move(mutations), announce_locally);
-            });
-    } catch (const no_such_keyspace& e) {
-        throw exceptions::configuration_exception(sprint("Cannot add table '%s' to non existing keyspace '%s'.", cfm->cf_name(), cfm->ks_name()));
-    }
+    });
 }
 
 future<> migration_manager::announce_column_family_update(schema_ptr cfm, bool from_thrift, std::vector<view_ptr>&& view_updates, bool announce_locally) {
@@ -528,35 +536,37 @@ future<> migration_manager::announce_column_family_update(schema_ptr cfm, bool f
 #if 0
     cfm.validate();
 #endif
-    try {
-        auto ts = api::new_timestamp();
-        auto& db = get_local_storage_proxy().get_db().local();
-        auto&& old_schema = db.find_column_family(cfm->ks_name(), cfm->cf_name()).schema(); // FIXME: Should we lookup by id?
-#if 0
-        oldCfm.validateCompatility(cfm);
-#endif
-        mlogger.info("Update table '{}.{}' From {} To {}", cfm->ks_name(), cfm->cf_name(), *old_schema, *cfm);
-        auto&& keyspace = db.find_keyspace(cfm->ks_name()).metadata();
-        return db::schema_tables::make_update_table_mutations(keyspace, old_schema, cfm, ts, from_thrift)
-            .then([announce_locally, keyspace, ts, view_updates = std::move(view_updates)] (auto&& mutations) {
-                return map_reduce(view_updates,
-                    [keyspace = std::move(keyspace), ts] (auto&& view) {
-                        auto& old_view = keyspace->cf_meta_data().at(view->cf_name());
-                        mlogger.info("Update view '{}.{}' From {} To {}", view->ks_name(), view->cf_name(), *old_view, *view);
-                        return db::schema_tables::make_update_view_mutations(keyspace, view_ptr(old_view), std::move(view), ts, false);
-                    }, std::move(mutations),
-                    [] (auto&& result, auto&& view_mutations) {
-                        std::move(view_mutations.begin(), view_mutations.end(), std::back_inserter(result));
-                        return std::move(result);
-                    })
-                .then([announce_locally] (auto&& mutations) {
-                    return announce(std::move(mutations), announce_locally);
+    return validate(cfm).then([this, cfm, from_thrift, view_updates, announce_locally] {
+        try {
+            auto ts = api::new_timestamp();
+            auto& db = get_local_storage_proxy().get_db().local();
+            auto&& old_schema = db.find_column_family(cfm->ks_name(), cfm->cf_name()).schema(); // FIXME: Should we lookup by id?
+    #if 0
+            oldCfm.validateCompatility(cfm);
+    #endif
+            mlogger.info("Update table '{}.{}' From {} To {}", cfm->ks_name(), cfm->cf_name(), *old_schema, *cfm);
+            auto&& keyspace = db.find_keyspace(cfm->ks_name()).metadata();
+            return db::schema_tables::make_update_table_mutations(keyspace, old_schema, cfm, ts, from_thrift)
+                .then([announce_locally, keyspace, ts, view_updates = std::move(view_updates)] (auto&& mutations) {
+                    return map_reduce(view_updates,
+                        [keyspace = std::move(keyspace), ts] (auto&& view) {
+                            auto& old_view = keyspace->cf_meta_data().at(view->cf_name());
+                            mlogger.info("Update view '{}.{}' From {} To {}", view->ks_name(), view->cf_name(), *old_view, *view);
+                            return db::schema_tables::make_update_view_mutations(keyspace, view_ptr(old_view), std::move(view), ts, false);
+                        }, std::move(mutations),
+                        [] (auto&& result, auto&& view_mutations) {
+                            std::move(view_mutations.begin(), view_mutations.end(), std::back_inserter(result));
+                            return std::move(result);
+                        })
+                    .then([announce_locally] (auto&& mutations) {
+                        return announce(std::move(mutations), announce_locally);
+                    });
                 });
-            });
-    } catch (const no_such_column_family& e) {
-        throw exceptions::configuration_exception(sprint("Cannot update non existing table '%s' in keyspace '%s'.",
-                                                         cfm->cf_name(), cfm->ks_name()));
-    }
+        } catch (const no_such_column_family& e) {
+            throw exceptions::configuration_exception(sprint("Cannot update non existing table '%s' in keyspace '%s'.",
+                                                             cfm->cf_name(), cfm->ks_name()));
+        }
+    });
 }
 
 static future<> do_announce_new_type(user_type new_type, bool announce_locally) {
@@ -700,20 +710,22 @@ future<> migration_manager::announce_new_view(view_ptr view, bool announce_local
 #if 0
     view.metadata.validate();
 #endif
-    auto& db = get_local_storage_proxy().get_db().local();
-    try {
-        auto&& keyspace = db.find_keyspace(view->ks_name()).metadata();
-        if (keyspace->cf_meta_data().find(view->cf_name()) != keyspace->cf_meta_data().end()) {
-            throw exceptions::already_exists_exception(view->ks_name(), view->cf_name());
+    return validate(view).then([this, view, announce_locally] {
+        auto& db = get_local_storage_proxy().get_db().local();
+        try {
+            auto&& keyspace = db.find_keyspace(view->ks_name()).metadata();
+            if (keyspace->cf_meta_data().find(view->cf_name()) != keyspace->cf_meta_data().end()) {
+                throw exceptions::already_exists_exception(view->ks_name(), view->cf_name());
+            }
+            mlogger.info("Create new view: {}", view);
+            return db::schema_tables::make_create_view_mutations(keyspace, std::move(view), api::new_timestamp())
+                .then([announce_locally] (auto&& mutations) {
+                    return announce(std::move(mutations), announce_locally);
+                });
+        } catch (const no_such_keyspace& e) {
+            throw exceptions::configuration_exception(sprint("Cannot add view '%s' to non existing keyspace '%s'.", view->cf_name(), view->ks_name()));
         }
-        mlogger.info("Create new view: {}", view);
-        return db::schema_tables::make_create_view_mutations(keyspace, std::move(view), api::new_timestamp())
-            .then([announce_locally] (auto&& mutations) {
-                return announce(std::move(mutations), announce_locally);
-            });
-    } catch (const no_such_keyspace& e) {
-        throw exceptions::configuration_exception(sprint("Cannot add view '%s' to non existing keyspace '%s'.", view->cf_name(), view->ks_name()));
-    }
+    });
 }
 
 future<> migration_manager::announce_view_update(view_ptr view, bool announce_locally)
@@ -721,25 +733,27 @@ future<> migration_manager::announce_view_update(view_ptr view, bool announce_lo
 #if 0
     view.metadata.validate();
 #endif
-    auto& db = get_local_storage_proxy().get_db().local();
-    try {
-        auto&& keyspace = db.find_keyspace(view->ks_name()).metadata();
-        auto& old_view = keyspace->cf_meta_data().at(view->cf_name());
-        if (!old_view->is_view()) {
-            throw exceptions::invalid_request_exception("Cannot use ALTER MATERIALIZED VIEW on Table");
+    return validate(view).then([this, view, announce_locally] {
+        auto& db = get_local_storage_proxy().get_db().local();
+        try {
+            auto&& keyspace = db.find_keyspace(view->ks_name()).metadata();
+            auto& old_view = keyspace->cf_meta_data().at(view->cf_name());
+            if (!old_view->is_view()) {
+                throw exceptions::invalid_request_exception("Cannot use ALTER MATERIALIZED VIEW on Table");
+            }
+    #if 0
+            oldCfm.validateCompatility(cfm);
+    #endif
+            mlogger.info("Update view '{}.{}' From {} To {}", view->ks_name(), view->cf_name(), *old_view, *view);
+            return db::schema_tables::make_update_view_mutations(std::move(keyspace), view_ptr(old_view), std::move(view), api::new_timestamp(), true)
+                .then([announce_locally] (auto&& mutations) {
+                    return announce(std::move(mutations), announce_locally);
+                });
+        } catch (const std::out_of_range& e) {
+            throw exceptions::configuration_exception(sprint("Cannot update non existing materialized view '%s' in keyspace '%s'.",
+                                                             view->cf_name(), view->ks_name()));
         }
-#if 0
-        oldCfm.validateCompatility(cfm);
-#endif
-        mlogger.info("Update view '{}.{}' From {} To {}", view->ks_name(), view->cf_name(), *old_view, *view);
-        return db::schema_tables::make_update_view_mutations(std::move(keyspace), view_ptr(old_view), std::move(view), api::new_timestamp(), true)
-            .then([announce_locally] (auto&& mutations) {
-                return announce(std::move(mutations), announce_locally);
-            });
-    } catch (const std::out_of_range& e) {
-        throw exceptions::configuration_exception(sprint("Cannot update non existing materialized view '%s' in keyspace '%s'.",
-                                                         view->cf_name(), view->ks_name()));
-    }
+    });
 }
 
 future<> migration_manager::announce_view_drop(const sstring& ks_name,
