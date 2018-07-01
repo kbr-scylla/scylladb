@@ -659,6 +659,46 @@ void test_mutation_reader_fragments_have_monotonic_positions(populate_fn populat
     });
 }
 
+static void test_date_tiered_clustering_slicing(populate_fn populate) {
+    BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
+
+    simple_schema ss;
+
+    auto s = schema_builder(ss.schema())
+        .set_compaction_strategy(sstables::compaction_strategy_type::date_tiered)
+        .build();
+
+    auto pkey = ss.make_pkey();
+
+    mutation m1(s, pkey);
+    ss.add_static_row(m1, "s");
+    m1.partition().apply(ss.new_tombstone());
+    ss.add_row(m1, ss.make_ckey(0), "v1");
+
+    mutation_source ms = populate(s, {m1});
+
+    // query row outside the range of existing rows to exercise sstable clustering key filter
+    {
+        auto slice = partition_slice_builder(*s)
+            .with_range(ss.make_ckey_range(1, 2))
+            .build();
+        auto prange = dht::partition_range::make_singular(pkey);
+        assert_that(ms.make_reader(s, prange, slice))
+            .produces(m1, slice.row_ranges(*s, pkey.key()))
+            .produces_end_of_stream();
+    }
+
+    {
+        auto slice = partition_slice_builder(*s)
+            .with_range(query::clustering_range::make_singular(ss.make_ckey(0)))
+            .build();
+        auto prange = dht::partition_range::make_singular(pkey);
+        assert_that(ms.make_reader(s, prange, slice))
+            .produces(m1)
+            .produces_end_of_stream();
+    }
+}
+
 static void test_clustering_slices(populate_fn populate) {
     BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
     auto s = schema_builder("ks", "cf")
@@ -1012,6 +1052,7 @@ void test_slicing_with_overlapping_range_tombstones(populate_fn populate) {
 }
 
 void run_mutation_reader_tests(populate_fn populate) {
+    test_date_tiered_clustering_slicing(populate);
     test_fast_forwarding_across_partitions_to_empty_range(populate);
     test_clustering_slices(populate);
     test_mutation_reader_fragments_have_monotonic_positions(populate);
@@ -1284,6 +1325,7 @@ bytes make_blob(size_t blob_size) {
 class random_mutation_generator::impl {
     friend class random_mutation_generator;
     generate_counters _generate_counters;
+    local_shard_only _local_shard_only;
     const size_t _external_blob_size = 128; // Should be enough to force use of external bytes storage
     const size_t n_blobs = 1024;
     const column_id column_count = row::max_vector_size * 2;
@@ -1327,7 +1369,7 @@ class random_mutation_generator::impl {
                                   : do_make_schema(bytes_type);
     }
 public:
-    explicit impl(generate_counters counters) : _generate_counters(counters) {
+    explicit impl(generate_counters counters, local_shard_only lso = local_shard_only::yes) : _generate_counters(counters), _local_shard_only(lso) {
         std::random_device rd;
         // In case of errors, replace the seed with a fixed value to get a deterministic run.
         auto seed = rd();
@@ -1336,7 +1378,7 @@ public:
 
         _schema = make_schema();
 
-        auto keys = make_local_keys(n_blobs, _schema, _external_blob_size);
+        auto keys = _local_shard_only ? make_local_keys(n_blobs, _schema, _external_blob_size) : make_keys(n_blobs, _schema, _external_blob_size);
         _blobs =  boost::copy_range<std::vector<bytes>>(keys | boost::adaptors::transformed([this] (sstring& k) { return to_bytes(k); }));
     }
 
@@ -1555,7 +1597,7 @@ public:
     }
 
     std::vector<dht::decorated_key> make_partition_keys(size_t n) {
-        auto local_keys = make_local_keys(n, _schema);
+        auto local_keys = _local_shard_only ? make_local_keys(n, _schema) : make_keys(n, _schema);
         return boost::copy_range<std::vector<dht::decorated_key>>(local_keys | boost::adaptors::transformed([this] (sstring& key) {
             auto pkey = partition_key::from_single_value(*_schema, to_bytes(key));
             return dht::global_partitioner().decorate_key(*_schema, std::move(pkey));
@@ -1575,8 +1617,8 @@ public:
 
 random_mutation_generator::~random_mutation_generator() {}
 
-random_mutation_generator::random_mutation_generator(generate_counters counters)
-    : _impl(std::make_unique<random_mutation_generator::impl>(counters))
+random_mutation_generator::random_mutation_generator(generate_counters counters, local_shard_only lso)
+    : _impl(std::make_unique<random_mutation_generator::impl>(counters, lso))
 { }
 
 mutation random_mutation_generator::operator()() {

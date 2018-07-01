@@ -36,6 +36,8 @@ reactor::io_stats s;
 
 static bool errors_found = false;
 
+cql_test_env* cql_env;
+
 static void print_error(const sstring& msg) {
     std::cerr << "^^^ ERROR: " << msg << "\n";
     errors_found = true;
@@ -56,7 +58,7 @@ struct metrics_snapshot {
         idle_time = r.total_idle_time();
         hr_clock = std::chrono::high_resolution_clock::now();
         index = sstables::shared_index_lists::shard_stats();
-        cache = global_cache_tracker().get_stats();
+        cache = cql_env->local_db().row_cache_tracker().get_stats();
     }
 };
 
@@ -736,10 +738,11 @@ static
 table_config read_config(cql_test_env& env, const sstring& name) {
     auto msg = env.execute_cql(sprint("select n_rows, value_size from ks.config where name = '%s'", name)).get0();
     auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(msg);
-    if (rows->rs().size() < 1) {
+    auto rs = rows->rs().result_set();
+    if (rs.size() < 1) {
         throw std::runtime_error("config not found. Did you run --populate ?");
     }
-    const std::vector<bytes_opt>& config_row = rows->rs().rows()[0];
+    const std::vector<bytes_opt>& config_row = rs.rows()[0];
     if (config_row.size() != 2) {
         throw std::runtime_error("config row has invalid size");
     }
@@ -846,7 +849,7 @@ int_range live_range;
 std::unique_ptr<output_manager> output_mgr;
 
 void clear_cache() {
-    global_cache_tracker().clear();
+    cql_env->local_db().row_cache_tracker().clear();
 }
 
 void on_test_group() {
@@ -1280,6 +1283,7 @@ int main(int argc, char** argv) {
 
         return do_with_cql_env([] (cql_test_env& env) {
             return seastar::async([&env] {
+                cql_env = &env;
                 sstring name = app.configuration()["name"].as<std::string>();
 
                 if (app.configuration().count("populate")) {

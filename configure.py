@@ -291,11 +291,14 @@ scylla_tests = [
     'tests/meta_test',
     'tests/imr_test',
     'tests/partition_data_test',
+    'tests/reusable_buffer_test',
+    'tests/multishard_writer_test',
 ]
 
 perf_tests = [
     'tests/perf/perf_mutation_readers',
     'tests/perf/perf_mutation_fragment',
+    'tests/perf/perf_idl',
 ]
 
 apps = [
@@ -619,6 +622,7 @@ scylla_core = (['database.cc',
                  'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
                  'querier.cc',
                  'data/cell.cc',
+                 'multishard_writer.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
                 + [Thrift('interface/cassandra.thrift', 'Cassandra')]
@@ -729,6 +733,7 @@ pure_boost_tests = set([
     'tests/meta_test',
     'tests/imr_test',
     'tests/partition_data_test',
+    'tests/reusable_buffer_test',
 ])
 
 tests_not_using_seastar_test_framework = set([
@@ -781,6 +786,7 @@ deps['tests/anchorless_list_test'] = ['tests/anchorless_list_test.cc']
 deps['tests/perf/perf_fast_forward'] += ['release.cc']
 deps['tests/meta_test'] = ['tests/meta_test.cc']
 deps['tests/imr_test'] = ['tests/imr_test.cc']
+deps['tests/reusable_buffer_test'] = ['tests/reusable_buffer_test.cc']
 
 warnings = [
     '-Wno-mismatched-tags',  # clang-only

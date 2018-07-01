@@ -280,7 +280,10 @@ public:
     friend struct ser::serializer<cache_temperature>;
 };
 
-class column_family : public enable_lw_shared_from_this<column_family> {
+class table;
+using column_family = table;
+
+class table : public enable_lw_shared_from_this<table> {
 public:
     struct config {
         sstring datadir;
@@ -289,6 +292,7 @@ public:
         bool enable_cache = true;
         bool enable_commitlog = true;
         bool enable_incremental_backups = false;
+        bool compaction_enforce_min_threshold = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* read_concurrency_semaphore;
@@ -460,6 +464,8 @@ private:
     // after some modification, needs to ensure that news writes will see it before
     // it can proceed, such as the view building code.
     utils::phased_barrier _pending_writes_phaser;
+    // Corresponding phaser for in-progress reads.
+    utils::phased_barrier _pending_reads_phaser;
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, const std::vector<unsigned>& shards_for_the_sstable) noexcept;
     // Adds new sstable to the set of sstables
@@ -632,14 +638,14 @@ public:
 
     logalloc::occupancy_stats occupancy() const;
 private:
-    column_family(schema_ptr schema, config cfg, db::commitlog* cl, compaction_manager&, cell_locker_stats& cl_stats);
+    table(schema_ptr schema, config cfg, db::commitlog* cl, compaction_manager&, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker);
 public:
-    column_family(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager& cm, cell_locker_stats& cl_stats)
-        : column_family(schema, std::move(cfg), &cl, cm, cl_stats) {}
-    column_family(schema_ptr schema, config cfg, no_commitlog, compaction_manager& cm, cell_locker_stats& cl_stats)
-        : column_family(schema, std::move(cfg), nullptr, cm, cl_stats) {}
-    column_family(column_family&&) = delete; // 'this' is being captured during construction
-    ~column_family();
+    table(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
+        : table(schema, std::move(cfg), &cl, cm, cl_stats, row_cache_tracker) {}
+    table(schema_ptr schema, config cfg, no_commitlog, compaction_manager& cm, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
+        : table(schema, std::move(cfg), nullptr, cm, cl_stats, row_cache_tracker) {}
+    table(column_family&&) = delete; // 'this' is being captured during construction
+    ~table();
     const schema_ptr& schema() const { return _schema; }
     void set_schema(schema_ptr);
     db::commitlog* commitlog() { return _commitlog; }
@@ -733,6 +739,10 @@ public:
         _config.enable_incremental_backups = val;
     }
 
+    bool compaction_enforce_min_threshold() const {
+        return _config.compaction_enforce_min_threshold;
+    }
+
     /*!
      * \brief get sstables by key
      * Return a set of the sstables names that contain the given
@@ -796,6 +806,14 @@ public:
 
     future<> await_pending_writes() {
         return _pending_writes_phaser.advance_and_await();
+    }
+
+    utils::phased_barrier::operation read_in_progress() {
+        return _pending_reads_phaser.start();
+    }
+
+    future<> await_pending_reads() {
+        return _pending_reads_phaser.advance_and_await();
     }
 
     void add_or_update_view(view_ptr v);
@@ -1001,6 +1019,7 @@ public:
         bool enable_disk_writes = true;
         bool enable_cache = true;
         bool enable_incremental_backups = false;
+        bool compaction_enforce_min_threshold = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* read_concurrency_semaphore;
@@ -1145,6 +1164,8 @@ private:
 
     db::timeout_semaphore _view_update_concurrency_sem{100}; // Stand-in hack for #2538
 
+    cache_tracker _row_cache_tracker;
+
     concrete_execution_stage<future<lw_shared_ptr<query::result>>,
         column_family*,
         schema_ptr,
@@ -1210,6 +1231,8 @@ public:
     database(const db::config&, database_config dbcfg);
     database(database&&) = delete;
     ~database();
+
+    cache_tracker& row_cache_tracker() { return _row_cache_tracker; }
 
     void update_version(const utils::UUID& version);
 
