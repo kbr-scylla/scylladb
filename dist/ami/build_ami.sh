@@ -23,15 +23,15 @@ while [ $# -gt 0 ]; do
             shift 1
             ;;
         "--repo")
-            REPO=$2
+            INSTALL_ARGS="$INSTALL_ARGS --repo $2"
             shift 2
             ;;
         "--repo-for-install")
-            REPO_FOR_INSTALL=$2
+            INSTALL_ARGS="$INSTALL_ARGS --repo-for-install $2"
             shift 2
             ;;
         "--repo-for-update")
-            REPO_FOR_UPDATE=$2
+            INSTALL_ARGS="$INSTALL_ARGS --repo-for-update $2"
             shift 2
             ;;
         "--target")
@@ -130,7 +130,7 @@ if [ $LOCALRPM -eq 1 ]; then
             cp build/scylla/build/debs/scylla-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-conf_amd64.deb
             cp build/scylla/build/debs/scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-server_amd64.deb
             cp build/scylla/build/debs/scylla-server-dbg_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-0ubuntu1~${TARGET}_amd64.deb dist/ami/files/scylla-server-dbg_amd64.deb
-||||||| merged common ancestors
+        fi
         sudo apt-get install -y git
         if [ ! -f dist/ami/files/scylla-server_amd64.deb ]; then
             if [ ! -f ../scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb ]; then
@@ -141,7 +141,8 @@ if [ $LOCALRPM -eq 1 ]; then
             cp ../scylla-kernel-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-kernel-conf_amd64.deb
             cp ../scylla-conf_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-conf_amd64.deb
             cp ../scylla-server_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-server_amd64.deb
-            cp ../scylla-server-dbg_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/am        fi
+            cp ../scylla-server-dbg_`cat build/SCYLLA-VERSION-FILE | sed 's/\.rc/~rc/'`-`cat build/SCYLLA-RELEASE-FILE`-ubuntu1_amd64.deb dist/ami/files/scylla-server-dbg_amd64.deb
+        fi
         if [ ! -f dist/ami/files/scylla-enterprise-jmx_all.deb ]; then
             cd build
             git clone --depth 1 https://github.com/scylladb/scylla-enterprise-jmx.git
