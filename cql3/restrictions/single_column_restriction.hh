@@ -82,6 +82,8 @@ public:
     }
 
     virtual bool is_supported_by(const secondary_index::index& index) const = 0;
+    using abstract_restriction::is_satisfied_by;
+    virtual bool is_satisfied_by(bytes_view data, const query_options& options) const = 0;
 #if 0
     /**
      * Check if this type of restriction is supported by the specified index.
@@ -155,6 +157,7 @@ public:
                                  const row& cells,
                                  const query_options& options,
                                  gc_clock::time_point now) const override;
+    virtual bool is_satisfied_by(bytes_view data, const query_options& options) const override;
 
 #if 0
         @Override
@@ -190,6 +193,7 @@ public:
                                  const row& cells,
                                  const query_options& options,
                                  gc_clock::time_point now) const override;
+    virtual bool is_satisfied_by(bytes_view data, const query_options& options) const override;
 
 #if 0
     @Override
@@ -345,6 +349,7 @@ public:
                                  const row& cells,
                                  const query_options& options,
                                  gc_clock::time_point now) const override;
+    virtual bool is_satisfied_by(bytes_view data, const query_options& options) const override;
 };
 
 // This holds CONTAINS, CONTAINS_KEY, and map[key] = value restrictions because we might want to have any combination of them.
@@ -466,6 +471,7 @@ public:
                                  const row& cells,
                                  const query_options& options,
                                  gc_clock::time_point now) const override;
+    virtual bool is_satisfied_by(bytes_view data, const query_options& options) const override;
 
 #if 0
         private List<ByteBuffer> keys(const query_options& options) {

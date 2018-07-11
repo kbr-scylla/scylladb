@@ -211,7 +211,7 @@ protected:
 
 protected:
     virtual bool waited_for(gms::inet_address from) = 0;
-    virtual void signal(gms::inet_address from) {
+    void signal(gms::inet_address from) {
         if (waited_for(from)) {
             signal();
         }
@@ -221,7 +221,7 @@ public:
     abstract_write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl, db::write_type type,
             std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets, tracing::trace_state_ptr trace_state,
             storage_proxy::write_stats& stats, size_t pending_endpoints = 0, std::vector<gms::inet_address> dead_endpoints = {})
-            : _id(p->_next_response_id++), _proxy(std::move(p)), _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
+            : _id(p->get_next_response_id()), _proxy(std::move(p)), _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
               _dead_endpoints(std::move(dead_endpoints)), _stats(stats) {
         // original comment from cassandra:
         // during bootstrap, include pending endpoints in the count
@@ -285,10 +285,13 @@ public:
     }
     // return true on last ack
     bool response(gms::inet_address from) {
-        signal(from);
         auto it = _targets.find(from);
-        assert(it != _targets.end());
-        _targets.erase(it);
+        if (it != _targets.end()) {
+            signal(from);
+            _targets.erase(it);
+        } else {
+            slogger.warn("Receive outdated write ack from {}", from);
+        }
         return _targets.size() == 0;
     }
     future<> wait() {
@@ -632,9 +635,12 @@ void storage_proxy_stats::split_stats::register_metrics_for(gms::inet_address ep
     }
 }
 
+using namespace std::literals::chrono_literals;
+
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg)
     : _db(db)
+    , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
     , _hints_resource_manager(cfg.available_memory / 10)
     , _hints_for_views_manager(_db.local().get_config().data_file_directories()[0] + "/view_pending_updates", {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _background_write_throttle_threahsold(cfg.available_memory / 10) {
@@ -1378,7 +1384,7 @@ gms::inet_address storage_proxy::find_leader_for_counter_update(const mutation& 
 }
 
 template<typename Range>
-future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state) {
+future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state, clock_type::time_point timeout) {
     if (boost::empty(mutations)) {
         return make_ready_future<>();
     }
@@ -1396,7 +1402,6 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
     }
 
     // Forward mutations to the leaders chosen for them
-    auto timeout = clock_type::now() + std::chrono::milliseconds(_db.local().get_config().counter_write_request_timeout_in_ms());
     auto my_address = utils::fb_utilities::get_broadcast_address();
     return parallel_for_each(leaders, [this, cl, timeout, tr_state = std::move(tr_state), my_address] (auto& endpoint_and_mutations) {
         auto endpoint = endpoint_and_mutations.first;
@@ -1449,17 +1454,17 @@ static thread_local auto mutate_stage = seastar::make_execution_stage("storage_p
  * @param consistency_level the consistency level for the operation
  * @param tr_state trace state handle
  */
-future<> storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state, bool raw_counters) {
-    return mutate_stage(this, std::move(mutations), cl, std::move(tr_state), raw_counters);
+future<> storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, bool raw_counters) {
+    return mutate_stage(this, std::move(mutations), cl, timeout, std::move(tr_state), raw_counters);
 }
 
-future<> storage_proxy::do_mutate(std::vector<mutation> mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state, bool raw_counters) {
+future<> storage_proxy::do_mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, bool raw_counters) {
     auto mid = raw_counters ? mutations.begin() : boost::range::partition(mutations, [] (auto&& m) {
         return m.schema()->is_counter();
     });
     return seastar::when_all_succeed(
-        mutate_counters(boost::make_iterator_range(mutations.begin(), mid), cl, tr_state),
-        mutate_internal(boost::make_iterator_range(mid, mutations.end()), cl, false, tr_state)
+        mutate_counters(boost::make_iterator_range(mutations.begin(), mid), cl, tr_state, timeout),
+        mutate_internal(boost::make_iterator_range(mid, mutations.end()), cl, false, tr_state, timeout)
     );
 }
 
@@ -1503,6 +1508,7 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
 
 future<>
 storage_proxy::mutate_with_triggers(std::vector<mutation> mutations, db::consistency_level cl,
+    clock_type::time_point timeout,
     bool should_mutate_atomically, tracing::trace_state_ptr tr_state, bool raw_counters) {
     warn(unimplemented::cause::TRIGGERS);
 #if 0
@@ -1513,9 +1519,9 @@ storage_proxy::mutate_with_triggers(std::vector<mutation> mutations, db::consist
 #endif
     if (should_mutate_atomically) {
         assert(!raw_counters);
-        return mutate_atomically(std::move(mutations), cl, std::move(tr_state));
+        return mutate_atomically(std::move(mutations), cl, timeout, std::move(tr_state));
     }
-    return mutate(std::move(mutations), cl, std::move(tr_state), raw_counters);
+    return mutate(std::move(mutations), cl, timeout, std::move(tr_state), raw_counters);
 #if 0
     }
 #endif
@@ -1531,7 +1537,7 @@ storage_proxy::mutate_with_triggers(std::vector<mutation> mutations, db::consist
  * @param consistency_level the consistency level for the operation
  */
 future<>
-storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state) {
+storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state) {
 
     utils::latency_counter lc;
     lc.start();
@@ -1540,6 +1546,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
         storage_proxy& _p;
         std::vector<mutation> _mutations;
         db::consistency_level _cl;
+        clock_type::time_point _timeout;
         tracing::trace_state_ptr _trace_state;
         storage_proxy::stats& _stats;
 
@@ -1547,10 +1554,11 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
         const std::unordered_set<gms::inet_address> _batchlog_endpoints;
 
     public:
-        context(storage_proxy & p, std::vector<mutation>&& mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state)
+        context(storage_proxy & p, std::vector<mutation>&& mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state)
                 : _p(p)
                 , _mutations(std::move(mutations))
                 , _cl(cl)
+                , _timeout(timeout)
                 , _trace_state(std::move(tr_state))
                 , _stats(p._stats)
                 , _batch_uuid(utils::UUID_gen::get_time_UUID())
@@ -1579,7 +1587,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                 auto& ks = _p._db.local().find_keyspace(m.schema()->ks_name());
                 return _p.create_write_response_handler(ks, cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats);
             }).then([this, cl] (std::vector<unique_response_handler> ids) {
-                return _p.mutate_begin(std::move(ids), cl, _stats);
+                return _p.mutate_begin(std::move(ids), cl, _stats, _timeout);
             });
         }
         future<> sync_write_to_batchlog() {
@@ -1605,15 +1613,15 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
             return _p.mutate_prepare(_mutations, _cl, db::write_type::BATCH, _trace_state).then([this] (std::vector<unique_response_handler> ids) {
                 return sync_write_to_batchlog().then([this, ids = std::move(ids)] () mutable {
                     tracing::trace(_trace_state, "Sending batch mutations");
-                    return _p.mutate_begin(std::move(ids), _cl, _stats);
+                    return _p.mutate_begin(std::move(ids), _cl, _stats, _timeout);
                 }).then(std::bind(&context::async_remove_from_batchlog, this));
             });
         }
     };
 
-    auto mk_ctxt = [this, tr_state] (std::vector<mutation> mutations, db::consistency_level cl) mutable {
+    auto mk_ctxt = [this, tr_state, timeout] (std::vector<mutation> mutations, db::consistency_level cl) mutable {
       try {
-          return make_ready_future<lw_shared_ptr<context>>(make_lw_shared<context>(*this, std::move(mutations), cl, std::move(tr_state)));
+          return make_ready_future<lw_shared_ptr<context>>(make_lw_shared<context>(*this, std::move(mutations), cl, timeout, std::move(tr_state)));
       } catch(...) {
           return make_exception_future<lw_shared_ptr<context>>(std::current_exception());
       }
@@ -1983,20 +1991,17 @@ public:
         try {
             std::rethrow_exception(eptr);
         } catch (rpc::closed_error&) {
-            return; // do not report connection closed exception, gossiper does that
+            // do not report connection closed exception, gossiper does that
         } catch (rpc::timeout_error&) {
-            return; // do not report timeouts, the whole operation will timeout and be reported
-        } catch(std::exception& e) {
-            why = e.what();
+            // do not report timeouts, the whole operation will timeout and be reported
+            return; // also do not report timeout as replica failure for the same reason
         } catch(...) {
-            why = "Unknown exception";
+            slogger.error("Exception when communicating with {}: {}", ep, eptr);
         }
 
         if (!_request_failed) { // request may fail only once.
             on_error(ep);
         }
-
-        slogger.error("Exception when communicating with {}: {}", ep, why);
     }
 };
 

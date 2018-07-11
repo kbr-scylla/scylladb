@@ -49,6 +49,7 @@ private:
         exponential_backoff_retry compaction_retry = exponential_backoff_retry(std::chrono::seconds(5), std::chrono::seconds(300));
         bool stopping = false;
         bool cleanup = false;
+        bool compaction_running = false;
     };
 
     // compaction manager may have N fibers to allow parallel compaction per shard.
@@ -123,7 +124,7 @@ private:
     inline bool maybe_stop_on_error(future<> f);
 
     void postponed_compactions_reevaluation();
-    void reevalute_postponed_compactions();
+    void reevaluate_postponed_compactions();
     // Postpone compaction for a column family that couldn't be executed due to ongoing
     // similar-sized compaction.
     void postpone_compaction_for_column_family(column_family* cf);

@@ -16,6 +16,7 @@ import platform
 import configparser
 import io
 import shlex
+import shutil
 
 def curl(url):
     max_retries = 5
@@ -295,17 +296,38 @@ def makedirs(name):
     if not os.path.isdir(name):
         os.makedirs(name)
 
+def rmtree(path):
+    if not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+
 def dist_name():
     return platform.dist()[0]
 
 def dist_ver():
     return platform.dist()[1]
 
+def is_unused_disk(dev):
+    # dev is not in /sys/class/block/, like /dev/nvme[0-9]+
+    if not os.path.isdir('/sys/class/block/{dev}'.format(dev=dev.replace('/dev/',''))):
+        return False
+    try:
+        fd = os.open(dev, os.O_EXCL)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
 class SystemdException(Exception):
     pass
 
 class systemd_unit:
     def __init__(self, unit):
+        try:
+            run('systemctl cat {}'.format(unit), silent=True)
+        except subprocess.CalledProcessError:
+            raise SystemdException('unit {} not found'.format(unit))
         self._unit = unit
 
     def start(self):
@@ -357,7 +379,7 @@ class sysconfig_parser:
         self.__load()
 
     def get(self, key):
-        return self._cfg.get('global', key)
+        return self._cfg.get('global', key).strip('"')
 
     def set(self, key, val):
         if not self._cfg.has_option('global', key):

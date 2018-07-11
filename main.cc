@@ -381,8 +381,14 @@ int main(int ac, char** av) {
             sstring api_address = cfg->api_address() != "" ? cfg->api_address() : rpc_address;
             sstring broadcast_address = cfg->broadcast_address();
             sstring broadcast_rpc_address = cfg->broadcast_rpc_address();
-            stdx::optional<std::vector<sstring>> hinted_handoff_enabled = cfg->experimental() ? parse_hinted_handoff_enabled(cfg->hinted_handoff_enabled()) : stdx::nullopt;
-            auto prom_addr = seastar::net::dns::get_host_by_name(cfg->prometheus_address()).get0();
+            stdx::optional<std::vector<sstring>> hinted_handoff_enabled = parse_hinted_handoff_enabled(cfg->hinted_handoff_enabled());
+            auto prom_addr = [&] {
+                try {
+                    return seastar::net::dns::get_host_by_name(cfg->prometheus_address()).get0();
+                } catch (...) {
+                    std::throw_with_nested(std::runtime_error(fmt::format("Unable to resolve prometheus_address {}", cfg->prometheus_address())));
+                }
+            }();
             supervisor::notify("starting prometheus API server");
             uint16_t pport = cfg->prometheus_port();
             if (pport) {
@@ -463,7 +469,13 @@ int main(int ac, char** av) {
             // #293 - do not stop anything
             // engine().at_exit([] { return i_endpoint_snitch::stop_snitch(); });
             supervisor::notify("determining DNS name");
-            auto e = seastar::net::dns::get_host_by_name(api_address).get0();
+            auto e = [&] {
+                try {
+                    return seastar::net::dns::get_host_by_name(api_address).get0();
+                } catch (...) {
+                    std::throw_with_nested(std::runtime_error(fmt::format("Unable to resolve api_address {}", api_address)));
+                }
+            }();
             supervisor::notify("starting API server");
             auto ip = e.addr_list.front();
             ctx.http_server.start("API").get();
@@ -486,6 +498,7 @@ int main(int ac, char** av) {
                 }
             };
             dbcfg.compaction_scheduling_group = make_sched_group("compaction", 1000);
+            dbcfg.memory_compaction_scheduling_group = make_sched_group("mem_compaction", 1000);
             dbcfg.streaming_scheduling_group = make_sched_group("streaming", 200);
             dbcfg.statement_scheduling_group = make_sched_group("statement", 1000);
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
@@ -713,7 +726,11 @@ int main(int ac, char** av) {
             api::set_server_gossip_settle(ctx).get();
 
             supervisor::notify("starting hinted handoff manager");
-            db::hints::manager::rebalance().get();
+            if (hinted_handoff_enabled) {
+                db::hints::manager::rebalance(cfg->hints_directory()).get();
+            }
+            db::hints::manager::rebalance(cfg->data_file_directories()[0] + "/view_pending_updates").get();
+
             proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {
                 local_proxy.start_hints_manager(gms::get_local_gossiper().shared_from_this(), service::get_local_storage_service().shared_from_this());
             }).get();
