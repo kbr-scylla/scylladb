@@ -102,6 +102,7 @@ boost_tests = [
     'meta_test',
     'reusable_buffer_test',
     'multishard_writer_test',
+    'encrypted_file_test',
 ]
 
 other_tests = [

@@ -12,3 +12,7 @@
 [submodule "xxHash"]
 	path = xxHash
 	url = ../xxHash
+[submodule "kmipc"]
+	path = kmipc
+	url = ../cryptsoft-kmipc
+
