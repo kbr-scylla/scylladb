@@ -52,6 +52,7 @@
 #include "service/cache_hitrate_calculator.hh"
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
+#include "utils/memory.hh"
 
 seastar::metrics::metric_groups app_metrics;
 
@@ -227,7 +228,7 @@ verify_seastar_io_scheduler(bool has_max_io_requests, bool has_properties, bool 
 static
 void
 verify_adequate_memory_per_shard(bool developer_mode) {
-    auto shard_mem = memory::stats().total_memory();
+    auto shard_mem = get_available_memory();
     if (shard_mem >= (1 << 30)) {
         return;
     }
@@ -355,7 +356,7 @@ int main(int ac, char** av) {
             read_config(opts, *cfg).get();
             configurable::init_all(opts, *cfg, *ext).get();
 
-            logalloc::prime_segment_pool(memory::stats().total_memory(), memory::min_free_memory()).get();
+            logalloc::prime_segment_pool(get_available_memory(), memory::min_free_memory()).get();
             logging::apply_settings(cfg->logging_settings(opts));
 
             verify_rlimit(cfg->developer_mode());
@@ -503,7 +504,7 @@ int main(int ac, char** av) {
             dbcfg.statement_scheduling_group = make_sched_group("statement", 1000);
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
-            dbcfg.available_memory = memory::stats().total_memory();
+            dbcfg.available_memory = get_available_memory();
             db.start(std::ref(*cfg), dbcfg).get();
             engine().at_exit([&db, &return_value] {
                 // #293 - do not stop anything - not even db (for real)
@@ -596,14 +597,14 @@ int main(int ac, char** av) {
                     , clauth
                     , cfg->internode_compression()
                     , seed_provider
-                    , memory::stats().total_memory()
+                    , get_available_memory()
                     , cluster_name
                     , phi
                     , cfg->listen_on_broadcast_address());
             supervisor::notify("starting storage proxy");
             service::storage_proxy::config spcfg;
             spcfg.hinted_handoff_enabled = hinted_handoff_enabled;
-            spcfg.available_memory = memory::stats().total_memory();
+            spcfg.available_memory = get_available_memory();
             proxy.start(std::ref(db), spcfg).get();
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
@@ -612,7 +613,7 @@ int main(int ac, char** av) {
             // #293 - do not stop anything
             // engine().at_exit([&mm] { return mm.stop(); });
             supervisor::notify("starting query processor");
-            cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
+            cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             qp.start(std::ref(proxy), std::ref(db), qp_mcfg).get();
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });

@@ -495,6 +495,7 @@ private:
         std::unordered_map<sstring, dropped_column> _dropped_columns;
         std::map<bytes, data_type> _collections;
         std::unordered_map<sstring, index_metadata> _indices_by_name;
+        bool _in_memory = false;
     };
     raw_schema _raw;
     thrift_schema _thrift;
@@ -668,6 +669,9 @@ public:
         return _raw._caching_options;
     }
 
+    bool is_in_memory() const {
+        return _raw._in_memory;
+    }
     const column_definition* get_column_definition(const bytes& name) const;
     const column_definition& column_at(column_kind, column_id) const;
     const_iterator regular_begin() const;

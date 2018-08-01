@@ -45,6 +45,7 @@
 #include "date_tiered_compaction_strategy.hh"
 #include "leveled_compaction_strategy.hh"
 #include "time_window_compaction_strategy.hh"
+#include "in_memory_compaction_strategy.hh"
 #include "sstables/compaction_backlog_manager.hh"
 #include "sstables/size_tiered_backlog_tracker.hh"
 
@@ -701,6 +702,9 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
         break;
     case compaction_strategy_type::time_window:
         impl = make_shared<time_window_compaction_strategy>(time_window_compaction_strategy(options));
+        break;
+    case compaction_strategy_type::in_memory:
+        impl = make_shared<in_memory_compaction_strategy>(in_memory_compaction_strategy(options));
         break;
     default:
         throw std::runtime_error("strategy not supported");

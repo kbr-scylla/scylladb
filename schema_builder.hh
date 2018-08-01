@@ -211,6 +211,15 @@ public:
         return *this;
     }
 
+    schema_builder& set_in_memory(bool in_memory) {
+        _raw._in_memory = in_memory;
+        return *this;
+    }
+
+    bool get_in_memory() const {
+        return _raw._in_memory;
+    }
+
     class default_names {
     public:
         default_names(const schema_builder&);

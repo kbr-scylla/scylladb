@@ -69,6 +69,7 @@
 #include "vint-serialization.hh"
 #include "db/large_partition_handler.hh"
 #include "sstables/random_access_reader.hh"
+#include "mirror-file-impl.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -1044,7 +1045,7 @@ void sstable::write_toc(const io_priority_class& pc) {
         // TOC will exist at this point if write_components() was called with
         // the generation of a sstable that exists.
         f.close().get();
-        remove_file(file_path).get();
+        remove_mirrored_file(file_path).get();
         throw std::runtime_error(sprint("SSTable write failed due to existence of TOC file for generation %ld of %s.%s", _generation, _schema->ks_name(), _schema->cf_name()));
     }
 
@@ -1079,7 +1080,7 @@ future<> sstable::seal_sstable() {
         return sstable_write_io_check([&] { return dir_f.flush(); }).then([this] {
             // Rename TOC because it's no longer temporary.
             return sstable_write_io_check([&] {
-                return engine().rename_file(filename(component_type::TemporaryTOC), filename(component_type::TOC));
+                return rename_mirrored_file(filename(component_type::TemporaryTOC), filename(component_type::TOC));
             });
         }).then([this, dir_f] () mutable {
             // Guarantee that the changes above reached the disk.
@@ -1309,7 +1310,7 @@ void sstable::rewrite_statistics(const io_priority_class& pc) {
     w.flush().get();
     w.close().get();
     // rename() guarantees atomicity when renaming a file into place.
-    sstable_write_io_check(rename_file, file_path, filename(component_type::Statistics)).get();
+    sstable_write_io_check(rename_mirrored_file, file_path, filename(component_type::Statistics)).get();
 }
 
 future<> sstable::read_summary(const io_priority_class& pc) {
@@ -3727,7 +3728,7 @@ std::vector<std::pair<component_type, sstring>> sstable::all_components() const 
 future<> sstable::create_links(sstring dir, int64_t generation) const {
     // TemporaryTOC is always first, TOC is always last
     auto dst = sstable::filename(dir, _schema->ks_name(), _schema->cf_name(), _version, generation, _format, component_type::TemporaryTOC);
-    return sstable_write_io_check(::link_file, filename(component_type::TOC), dst).then([this, dir] {
+    return sstable_write_io_check(::link_mirrored_file, filename(component_type::TOC), dst).then([this, dir] {
         return sstable_write_io_check(sync_directory, dir);
     }).then([this, dir, generation] {
         // FIXME: Should clean already-created links if we failed midway.
@@ -3737,7 +3738,7 @@ future<> sstable::create_links(sstring dir, int64_t generation) const {
             }
             auto src = sstable::filename(_dir, _schema->ks_name(), _schema->cf_name(), _version, _generation, _format, p.second);
             auto dst = sstable::filename(dir, _schema->ks_name(), _schema->cf_name(), _version, generation, _format, p.second);
-            return this->sstable_write_io_check(::link_file, std::move(src), std::move(dst));
+            return this->sstable_write_io_check(::link_mirrored_file, std::move(src), std::move(dst));
         });
     }).then([this, dir] {
         return sstable_write_io_check(sync_directory, dir);
@@ -3745,7 +3746,7 @@ future<> sstable::create_links(sstring dir, int64_t generation) const {
         auto src = sstable::filename(dir, _schema->ks_name(), _schema->cf_name(), _version, generation, _format, component_type::TemporaryTOC);
         auto dst = sstable::filename(dir, _schema->ks_name(), _schema->cf_name(), _version, generation, _format, component_type::TOC);
         return sstable_write_io_check([&] {
-            return engine().rename_file(src, dst);
+            return rename_mirrored_file(src, dst);
         });
     }).then([this, dir] {
         return sstable_write_io_check(sync_directory, dir);
@@ -3754,14 +3755,14 @@ future<> sstable::create_links(sstring dir, int64_t generation) const {
 
 future<> sstable::set_generation(int64_t new_generation) {
     return create_links(_dir, new_generation).then([this] {
-        return remove_file(filename(component_type::TOC)).then([this] {
+        return remove_mirrored_file(filename(component_type::TOC)).then([this] {
             return sstable_write_io_check(sync_directory, _dir);
         }).then([this] {
             return parallel_for_each(all_components(), [this] (auto p) {
                 if (p.first == component_type::TOC) {
                     return make_ready_future<>();
                 }
-                return remove_file(sstable::filename(_dir, _schema->ks_name(), _schema->cf_name(), _version, _generation, _format, p.second));
+                return remove_mirrored_file(sstable::filename(_dir, _schema->ks_name(), _schema->cf_name(), _version, _generation, _format, p.second));
             });
         });
     }).then([this, new_generation] {
@@ -4044,7 +4045,7 @@ remove_by_toc_name(sstring sstable_toc_name, const io_error_handler& error_handl
 
         if (sstable_io_check(error_handler, file_exists, sstable_toc_name).get0()) {
             dir = dirname(sstable_toc_name);
-            sstable_io_check(error_handler, rename_file, sstable_toc_name, new_toc_name).get();
+            sstable_io_check(error_handler, rename_mirrored_file, sstable_toc_name, new_toc_name).get();
             fsync_directory(error_handler, dir).get();
         } else if (sstable_io_check(error_handler, file_exists, new_toc_name).get0()) {
             dir = dirname(new_toc_name);
@@ -4071,7 +4072,7 @@ remove_by_toc_name(sstring sstable_toc_name, const io_error_handler& error_handl
                 return make_ready_future<>();
             }
             auto fname = prefix + component;
-            return sstable_io_check(error_handler, remove_file, prefix + component).then_wrapped([fname = std::move(fname)] (future<> f) {
+            return sstable_io_check(error_handler, remove_mirrored_file, prefix + component).then_wrapped([fname = std::move(fname)] (future<> f) {
                 // forgive ENOENT, since the component may not have been written;
                 try {
                     f.get();
@@ -4085,7 +4086,7 @@ remove_by_toc_name(sstring sstable_toc_name, const io_error_handler& error_handl
             });
         }).get();
         fsync_directory(error_handler, dir).get();
-        sstable_io_check(error_handler, remove_file, new_toc_name).get();
+        sstable_io_check(error_handler, remove_mirrored_file, new_toc_name).get();
     });
 }
 
@@ -4122,11 +4123,11 @@ sstable::remove_sstable_with_temp_toc(sstring ks, sstring cf, sstring dir, int64
             if (!exists) {
                 continue;
             }
-            sstable_io_check(error_handler, remove_file, file_path).get();
+            sstable_io_check(error_handler, remove_mirrored_file, file_path).get();
         }
         fsync_directory(error_handler, dir).get();
         // Removing temporary
-        sstable_io_check(error_handler, remove_file, filename(dir, ks, cf, v, generation, f, component_type::TemporaryTOC)).get();
+        sstable_io_check(error_handler, remove_mirrored_file, filename(dir, ks, cf, v, generation, f, component_type::TemporaryTOC)).get();
         // Fsync'ing column family dir to guarantee that deletion completed.
         fsync_directory(error_handler, dir).get();
     });
