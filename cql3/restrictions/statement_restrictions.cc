@@ -61,6 +61,9 @@ public:
         // throw? should not reach?
         return {};
     }
+    bytes_opt value_for(const column_definition& cdef, const query_options& options) const override {
+        return {};
+    }
     std::vector<T> values_as_keys(const query_options& options) const override {
         // throw? should not reach?
         return {};
@@ -201,12 +204,13 @@ statement_restrictions::statement_restrictions(database& db,
     auto& cf = db.find_column_family(schema);
     auto& sim = cf.get_index_manager();
     bool has_queriable_clustering_column_index = _clustering_columns_restrictions->has_supporting_index(sim);
+    bool has_queriable_pk_index = _partition_key_restrictions->has_supporting_index(sim);
     bool has_queriable_index = has_queriable_clustering_column_index
-            || _partition_key_restrictions->has_supporting_index(sim)
+            || has_queriable_pk_index
             || _nonprimary_key_restrictions->has_supporting_index(sim);
 
     // At this point, the select statement if fully constructed, but we still have a few things to validate
-    process_partition_key_restrictions(has_queriable_index, for_view, allow_filtering);
+    process_partition_key_restrictions(has_queriable_pk_index, for_view, allow_filtering);
 
     // Some but not all of the partition key columns have been specified;
     // hence we need turn these restrictions into index expressions.
@@ -226,7 +230,7 @@ statement_restrictions::statement_restrictions(database& db,
         }
     }
 
-    process_clustering_columns_restrictions(has_queriable_index, select_a_collection, for_view, allow_filtering);
+    process_clustering_columns_restrictions(has_queriable_clustering_column_index, select_a_collection, for_view, allow_filtering);
 
     // Covers indexes on the first clustering column (among others).
     if (_is_key_range && has_queriable_clustering_column_index) {
@@ -402,18 +406,28 @@ std::vector<query::clustering_range> statement_restrictions::get_clustering_boun
     if (_clustering_columns_restrictions->empty()) {
         return {query::clustering_range::make_open_ended_both_sides()};
     }
-    // TODO(sarna): For filtering to work, clustering range is not bounded at all. For filtering to work faster,
-    // the biggest clustering prefix restriction should be used here.
     if (_clustering_columns_restrictions->needs_filtering(*_schema)) {
+        if (auto single_ck_restrictions = dynamic_pointer_cast<single_column_primary_key_restrictions<clustering_key>>(_clustering_columns_restrictions)) {
+            return single_ck_restrictions->get_longest_prefix_restrictions()->bounds_ranges(options);
+        }
         return {query::clustering_range::make_open_ended_both_sides()};
     }
     return _clustering_columns_restrictions->bounds_ranges(options);
 }
 
 bool statement_restrictions::need_filtering() const {
-    uint32_t number_of_restricted_columns = 0;
+    uint32_t number_of_restricted_columns_for_indexing = 0;
     for (auto&& restrictions : _index_restrictions) {
-        number_of_restricted_columns += restrictions->size();
+        number_of_restricted_columns_for_indexing += restrictions->size();
+    }
+
+    int number_of_filtering_restrictions = _nonprimary_key_restrictions->size();
+    // If the whole partition key is restricted, it does not imply filtering
+    if (_partition_key_restrictions->has_unrestricted_components(*_schema) || !_partition_key_restrictions->is_all_eq()) {
+        number_of_filtering_restrictions += _partition_key_restrictions->size();
+        if (_clustering_columns_restrictions->has_unrestricted_components(*_schema)) {
+            number_of_filtering_restrictions += _clustering_columns_restrictions->size() - _clustering_columns_restrictions->prefix_size();
+        }
     }
 
     if (_partition_key_restrictions->is_multi_column() || _clustering_columns_restrictions->is_multi_column()) {
@@ -422,10 +436,11 @@ bool statement_restrictions::need_filtering() const {
         return false;
     }
 
-    return number_of_restricted_columns > 1
-            || (number_of_restricted_columns == 0 && _partition_key_restrictions->empty() && !_clustering_columns_restrictions->empty())
-            || (number_of_restricted_columns != 0 && _nonprimary_key_restrictions->has_multiple_contains())
-            || (number_of_restricted_columns != 0 && !_uses_secondary_indexing);
+    return number_of_restricted_columns_for_indexing > 1
+            || (number_of_restricted_columns_for_indexing == 0 && _partition_key_restrictions->empty() && !_clustering_columns_restrictions->empty())
+            || (number_of_restricted_columns_for_indexing != 0 && _nonprimary_key_restrictions->has_multiple_contains())
+            || (number_of_restricted_columns_for_indexing != 0 && !_uses_secondary_indexing)
+            || (_uses_secondary_indexing && number_of_filtering_restrictions > 1);
 }
 
 void statement_restrictions::validate_secondary_index_selections(bool selects_only_static_columns) {
@@ -571,7 +586,8 @@ static query::range<bytes_view> to_range(const term_slice& slice, const query_op
         if (!value) {
             return { };
         }
-        return { range_type::bound(*value, slice.is_inclusive(bound)) };
+        auto value_view = options.linearize(*value);
+        return { range_type::bound(value_view, slice.is_inclusive(bound)) };
     };
     return range_type(
         extract_bound(statements::bound::START),
@@ -636,10 +652,12 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
             if (!val) {
                 continue;
             }
-            auto found = std::find_if(elements.begin(), end, [&] (auto&& element) {
+            auto found = with_linearized(*val, [&] (bytes_view bv) {
+              return std::find_if(elements.begin(), end, [&] (auto&& element) {
                 return element.second.value().with_linearized([&] (bytes_view value_bv) {
-                    return element_type->compare(value_bv, *val) == 0;
+                    return element_type->compare(value_bv, bv) == 0;
                 });
+              });
             });
             if (found == end) {
                 return false;
@@ -650,8 +668,10 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
             if (!k) {
                 continue;
             }
-            auto found = std::find_if(elements.begin(), end, [&] (auto&& element) {
-                return map_key_type->compare(element.first, *k) == 0;
+            auto found = with_linearized(*k, [&] (bytes_view bv) {
+              return std::find_if(elements.begin(), end, [&] (auto&& element) {
+                return map_key_type->compare(element.first, bv) == 0;
+              });
             });
             if (found == end) {
                 return false;
@@ -663,14 +683,18 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
             if (!map_key || !map_value) {
                 continue;
             }
-            auto found = std::find_if(elements.begin(), end, [&] (auto&& element) {
-                return map_key_type->compare(element.first, *map_key) == 0;
+            auto found = with_linearized(*map_key, [&] (bytes_view map_key_bv) {
+              return std::find_if(elements.begin(), end, [&] (auto&& element) {
+                return map_key_type->compare(element.first, map_key_bv) == 0;
+              });
             });
             if (found == end) {
                 return false;
             }
-            auto cmp = found->second.value().with_linearized([&] (bytes_view value_bv) {
-                return element_type->compare(value_bv, *map_value);
+            auto cmp = with_linearized(*map_value, [&] (bytes_view map_value_bv) {
+              return found->second.value().with_linearized([&] (bytes_view value_bv) {
+                return element_type->compare(value_bv, map_value_bv);
+              });
             });
             if (cmp != 0) {
                 return false;
@@ -687,13 +711,14 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
             return _column_def.type->deserialize(cell_value_bv);
         });
         for (auto&& value : _values) {
-            auto val = value->bind_and_get(options);
-            if (!val) {
+            auto fragmented_val = value->bind_and_get(options);
+            if (!fragmented_val) {
                 continue;
             }
+          return with_linearized(*fragmented_val, [&] (bytes_view val) {
             auto exists_in = [&](auto&& range) {
                 auto found = std::find_if(range.begin(), range.end(), [&] (auto&& element) {
-                    return element_type->compare(element.serialize(), *val) == 0;
+                    return element_type->compare(element.serialize(), val) == 0;
                 });
                 return found != range.end();
             };
@@ -711,6 +736,8 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
                     return false;
                 }
             }
+            return true;
+          });
         }
         if (col_type->is_map()) {
             auto& data_map = value_cast<map_type_impl::native_type>(deserialized);
@@ -719,8 +746,10 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
                 if (!k) {
                     continue;
                 }
-                auto found = std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
-                    return map_key_type->compare(element.first.serialize(), *k) == 0;
+                auto found = with_linearized(*k, [&] (bytes_view k_bv) {
+                  return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
+                    return map_key_type->compare(element.first.serialize(), k_bv) == 0;
+                  });
                 });
                 if (found == data_map.end()) {
                     return false;
@@ -732,10 +761,15 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
                 if (!map_key || !map_value) {
                     continue;
                 }
-                auto found = std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
-                    return map_key_type->compare(element.first.serialize(), *map_key) == 0;
+                auto found = with_linearized(*map_key, [&] (bytes_view map_key_bv) {
+                  return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
+                    return map_key_type->compare(element.first.serialize(), map_key_bv) == 0;
+                  });
                 });
-                if (found == data_map.end() || element_type->compare(found->second.serialize(), *map_value) != 0) {
+                if (found == data_map.end()
+                    || with_linearized(*map_value, [&] (bytes_view map_value_bv) {
+                         return element_type->compare(found->second.serialize(), map_value_bv);
+                       }) != 0) {
                     return false;
                 }
             }

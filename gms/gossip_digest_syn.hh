@@ -30,6 +30,7 @@
 #include "core/sstring.hh"
 #include "utils/serialization.hh"
 #include "gms/gossip_digest.hh"
+#include "utils/chunked_vector.hh"
 
 namespace gms {
 
@@ -41,15 +42,15 @@ class gossip_digest_syn {
 private:
     sstring _cluster_id;
     sstring _partioner;
-    std::vector<gossip_digest> _digests;
+    utils::chunked_vector<gossip_digest> _digests;
 public:
     gossip_digest_syn() {
     }
 
-    gossip_digest_syn(sstring id, sstring p, std::vector<gossip_digest> digests)
-        : _cluster_id(id)
-        , _partioner(p)
-        , _digests(digests) {
+    gossip_digest_syn(sstring id, sstring p, utils::chunked_vector<gossip_digest> digests)
+        : _cluster_id(std::move(id))
+        , _partioner(std::move(p))
+        , _digests(std::move(digests)) {
     }
 
     sstring cluster_id() const {
@@ -68,7 +69,7 @@ public:
         return partioner();
     }
 
-    std::vector<gossip_digest> get_gossip_digests() const {
+    const utils::chunked_vector<gossip_digest>& get_gossip_digests() const {
         return _digests;
     }
 

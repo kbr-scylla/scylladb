@@ -12,9 +12,12 @@
 
 #include <chrono>
 #include <unordered_map>
+
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/unordered_set.hpp>
 #include <boost/intrusive/parent_from_member.hpp>
+#include <boost/range/adaptor/filtered.hpp>
+#include <boost/range/adaptor/transformed.hpp>
 
 #include <seastar/core/reactor.hh>
 #include <seastar/core/timer.hh>
@@ -349,9 +352,7 @@ public:
 
         // If caching is disabled - always load in the foreground
         if (!caching_enabled()) {
-            return _load(k).then([] (Tp val) {
-                return make_ready_future<Tp>(std::move(val));
-            });
+            return _load(k);
         }
 
         return get_ptr(k).then([] (value_ptr v_ptr) {
@@ -457,7 +458,8 @@ private:
     }
 
     future<> reload(ts_value_lru_entry& lru_entry) {
-        return _load(lru_entry.key()).then_wrapped([this, key = lru_entry.key()] (auto&& f) mutable {
+        Key key = lru_entry.key();
+        return _load(lru_entry.key()).then_wrapped([this, key = std::move(key)] (auto&& f) mutable {
             // if the entry has been evicted by now - simply end here
             set_iterator it = this->set_find(key);
             if (it == this->set_end()) {
@@ -529,21 +531,25 @@ private:
         // check if rehashing is needed and do it if it is.
         periodic_rehash();
 
-        if (ReloadEnabled == loading_cache_reload_enabled::no) {
+        if constexpr (ReloadEnabled == loading_cache_reload_enabled::no) {
             _logger.trace("on_timer(): rearming");
             _timer.arm(loading_cache_clock_type::now() + _timer_period);
             return;
         }
 
-        // Reload all those which vlaue needs to be reloaded.
+        // Reload all those which value needs to be reloaded.
         with_gate(_timer_reads_gate, [this] {
-            return parallel_for_each(_lru_list.begin(), _lru_list.end(), [this] (ts_value_lru_entry& lru_entry) {
-                _logger.trace("on_timer(): {}: checking the value age", lru_entry.key());
-                if (lru_entry.timestamped_value().loaded() + _refresh < loading_cache_clock_type::now()) {
-                    _logger.trace("on_timer(): {}: reloading the value", lru_entry.key());
-                    return this->reload(lru_entry);
-                }
-                return now();
+            auto to_reload = boost::copy_range<std::vector<ts_value_lru_entry*>>(_lru_list
+                    | boost::adaptors::filtered([this] (ts_value_lru_entry& lru_entry) {
+                        return lru_entry.timestamped_value().loaded() + _refresh < loading_cache_clock_type::now();
+                    })
+                    | boost::adaptors::transformed([this] (ts_value_lru_entry& lru_entry) {
+                        return &lru_entry;
+                    }));
+
+            return parallel_for_each(std::move(to_reload), [this] (ts_value_lru_entry* lru_entry) {
+                _logger.trace("on_timer(): {}: reloading the value", lru_entry->key());
+                return this->reload(*lru_entry);
             }).finally([this] {
                 _logger.trace("on_timer(): rearming");
                 _timer.arm(loading_cache_clock_type::now() + _timer_period);

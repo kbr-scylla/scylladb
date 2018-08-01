@@ -110,7 +110,8 @@ enum class messaging_verb : int32_t {
     SCHEMA_CHECK = 22,
     COUNTER_MUTATION = 23,
     MUTATION_FAILED = 24,
-    LAST = 25,
+    STREAM_MUTATION_FRAGMENTS = 25,
+    LAST = 26,
 };
 
 } // namespace netw
@@ -184,6 +185,12 @@ public:
         size_t rpc_memory_limit = 1'000'000;
     };
 
+    struct scheduling_config {
+        scheduling_group statement;
+        scheduling_group streaming;
+        scheduling_group gossip;
+    };
+
 private:
     gms::inet_address _listen_address;
     uint16_t _port;
@@ -203,7 +210,7 @@ private:
     bool _stopping = false;
     std::list<std::function<void(gms::inet_address ep)>> _connection_drop_notifiers;
     memory_config _mcfg;
-
+    scheduling_config _scheduling_config;
 public:
     using clock_type = lowres_clock;
 public:
@@ -211,7 +218,7 @@ public:
             uint16_t port = 7000, bool listen_now = true);
     messaging_service(gms::inet_address ip, uint16_t port, encrypt_what, compress_what, tcp_nodelay_what,
             uint16_t ssl_port, std::shared_ptr<seastar::tls::credentials_builder>,
-            memory_config mcfg, bool sltba = false, bool listen_now = true);
+            memory_config mcfg, scheduling_config scfg, bool sltba = false, bool listen_now = true);
     ~messaging_service();
 public:
     void start_listen();
@@ -241,6 +248,12 @@ public:
     // Wrapper for STREAM_MUTATION verb
     void register_stream_mutation(std::function<future<> (const rpc::client_info& cinfo, UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id, rpc::optional<bool>)>&& func);
     future<> send_stream_mutation(msg_addr id, UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id, bool fragmented);
+
+    // Wrapper for STREAM_MUTATION_FRAGMENTS
+    // The receiver of STREAM_MUTATION_FRAGMENTS sends status code to the sender to notify any error on the receiver side. The status code is of type int32_t. 0 means successful, -1 means error, other status code value are reserved for future use.
+    void register_stream_mutation_fragments(std::function<future<rpc::sink<int32_t>> (const rpc::client_info& cinfo, UUID plan_id, UUID schema_id, UUID cf_id, uint64_t estimated_partitions, rpc::source<frozen_mutation_fragment> source)>&& func);
+    rpc::sink<int32_t> make_sink_for_stream_mutation_fragments(rpc::source<frozen_mutation_fragment>& source);
+    future<rpc::sink<frozen_mutation_fragment>, rpc::source<int32_t>> make_sink_and_source_for_stream_mutation_fragments(utils::UUID schema_id, utils::UUID plan_id, utils::UUID cf_id, uint64_t estimated_partitions, msg_addr id);
 
     void register_stream_mutation_done(std::function<future<> (const rpc::client_info& cinfo, UUID plan_id, dht::token_range_vector ranges, UUID cf_id, unsigned dst_cpu_id)>&& func);
     future<> send_stream_mutation_done(msg_addr id, UUID plan_id, dht::token_range_vector ranges, UUID cf_id, unsigned dst_cpu_id);
@@ -360,6 +373,7 @@ public:
     void unregister_connection_drop_notifier(drop_notifier_handler h);
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
+    scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
 };
 
 extern distributed<messaging_service> _the_messaging_service;

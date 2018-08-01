@@ -38,6 +38,7 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/adaptor/filtered.hpp>
+#include <boost/range/adaptor/map.hpp>
 
 namespace cql3 {
 
@@ -51,6 +52,8 @@ class single_column_primary_key_restrictions : public primary_key_restrictions<V
     using range_type = query::range<ValueType>;
     using range_bound = typename range_type::bound;
     using bounds_range_type = typename primary_key_restrictions<ValueType>::bounds_range_type;
+    template<typename OtherValueType>
+    friend class single_column_primary_key_restrictions;
 private:
     schema_ptr _schema;
     bool _allow_filtering;
@@ -67,6 +70,27 @@ public:
         , _contains(false)
         , _in(false)
     { }
+
+    // Convert another primary key restrictions type into this type, possibly using different schema
+    template<typename OtherValueType>
+    explicit single_column_primary_key_restrictions(schema_ptr schema, const single_column_primary_key_restrictions<OtherValueType>& other)
+        : _schema(schema)
+        , _allow_filtering(other._allow_filtering)
+        , _restrictions(::make_shared<single_column_restrictions>(schema))
+        , _slice(other._slice)
+        , _contains(other._contains)
+        , _in(other._in)
+    {
+        for (const auto& entry : other._restrictions->restrictions()) {
+            const column_definition* other_cdef = entry.first;
+            const column_definition* this_cdef = _schema->get_column_definition(other_cdef->name());
+            if (!this_cdef) {
+                throw exceptions::invalid_request_exception(sprint("Base column %s not found in view index schema", other_cdef->name_as_text()));
+            }
+            ::shared_ptr<single_column_restriction> restriction = entry.second;
+            _restrictions->add_restriction(restriction->apply_to(*this_cdef));
+        }
+    }
 
     virtual bool is_on_token() const override {
         return false;
@@ -86,6 +110,10 @@ public:
 
     virtual bool is_IN() const override {
         return _in;
+    }
+
+    virtual bool is_all_eq() const override {
+        return _restrictions->is_all_eq();
     }
 
     virtual bool has_bound(statements::bound b) const override {
@@ -124,6 +152,37 @@ public:
         _in |= restriction->is_IN();
         _contains |= restriction->is_contains();
         _restrictions->add_restriction(restriction);
+    }
+
+    virtual size_t prefix_size() const override {
+        size_t count = 0;
+        if (_schema->clustering_key_columns().empty()) {
+            return count;
+        }
+        column_id expected_column_id = _schema->clustering_key_columns().begin()->id;
+        for (const auto& restriction_entry : _restrictions->restrictions()) {
+            if (_schema->position(*restriction_entry.first) != expected_column_id) {
+                return count;
+            }
+            expected_column_id++;
+            count++;
+        }
+        return count;
+    }
+
+    ::shared_ptr<single_column_primary_key_restrictions<clustering_key>> get_longest_prefix_restrictions() {
+        static_assert(std::is_same_v<ValueType, clustering_key>, "Only clustering key can produce longest prefix restrictions");
+        size_t current_prefix_size = prefix_size();
+        if (current_prefix_size == _restrictions->restrictions().size()) {
+            return dynamic_pointer_cast<single_column_primary_key_restrictions<clustering_key>>(this->shared_from_this());
+        }
+
+        auto longest_prefix_restrictions = ::make_shared<single_column_primary_key_restrictions<clustering_key>>(_schema, _allow_filtering);
+        auto restriction_it = _restrictions->restrictions().begin();
+        for (size_t i = 0; i < current_prefix_size; ++i) {
+            longest_prefix_restrictions->merge_with((restriction_it++)->second);
+        }
+        return longest_prefix_restrictions;
     }
 
     virtual void merge_with(::shared_ptr<restriction> restriction) override {
@@ -298,6 +357,11 @@ public:
         }
         return res;
     }
+
+    virtual bytes_opt value_for(const column_definition& cdef, const query_options& options) const override {
+        return _restrictions->value_for(cdef, options);
+    }
+
     std::vector<bytes_opt> bounds(statements::bound b, const query_options& options) const override {
         // TODO: if this proved to be required.
         fail(unimplemented::cause::LEGACY_COMPOSITE_KEYS); // not 100% correct...
@@ -347,7 +411,7 @@ public:
 };
 
 template<>
-dht::partition_range_vector
+inline dht::partition_range_vector
 single_column_primary_key_restrictions<partition_key>::bounds_ranges(const query_options& options) const {
     dht::partition_range_vector ranges;
     ranges.reserve(size());
@@ -365,7 +429,7 @@ single_column_primary_key_restrictions<partition_key>::bounds_ranges(const query
 }
 
 template<>
-std::vector<query::clustering_range>
+inline std::vector<query::clustering_range>
 single_column_primary_key_restrictions<clustering_key_prefix>::bounds_ranges(const query_options& options) const {
     auto wrapping_bounds = compute_bounds(options);
     auto bounds = boost::copy_range<query::clustering_row_ranges>(wrapping_bounds
@@ -402,12 +466,12 @@ single_column_primary_key_restrictions<clustering_key_prefix>::bounds_ranges(con
 }
 
 template<>
-bool single_column_primary_key_restrictions<partition_key>::needs_filtering(const schema& schema) const {
+inline bool single_column_primary_key_restrictions<partition_key>::needs_filtering(const schema& schema) const {
     return primary_key_restrictions<partition_key>::needs_filtering(schema);
 }
 
 template<>
-bool single_column_primary_key_restrictions<clustering_key>::needs_filtering(const schema& schema) const {
+inline bool single_column_primary_key_restrictions<clustering_key>::needs_filtering(const schema& schema) const {
     // Restrictions currently need filtering in three cases:
     // 1. any of them is a CONTAINS restriction
     // 2. restrictions do not form a contiguous prefix (i.e. there are gaps in it)

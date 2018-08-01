@@ -18,6 +18,7 @@
 #include <experimental/optional>
 
 #include "seastarx.hh"
+#include "utils/chunked_vector.hh"
 
 template<typename Iterator>
 static inline
@@ -102,6 +103,18 @@ std::ostream& operator<<(std::ostream& os, const std::unordered_map<K, V, Args..
 template <typename K, typename V, typename... Args>
 std::ostream& operator<<(std::ostream& os, const std::map<K, V, Args...>& items) {
     os << "{" << join(", ", items) << "}";
+    return os;
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const utils::chunked_vector<T>& items) {
+    os << "[" << join(", ", items) << "]";
+    return os;
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::list<T>& items) {
+    os << "[" << join(", ", items) << "]";
     return os;
 }
 

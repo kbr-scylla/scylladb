@@ -2772,7 +2772,7 @@ SEASTAR_TEST_CASE(test_insert_json_types) {
 
         e.require_table_exists("ks", "all_types").get();
         e.execute_cql(
-            "INSERT INTO all_types (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, u) JSON '"
+            "INSERT INTO all_types JSON '"
                 "{\"a\": \"ascii\", "
                 "\"b\": 123456789, "
                 "\"c\": \"0xdeadbeef\", "
@@ -2852,7 +2852,7 @@ SEASTAR_TEST_CASE(test_insert_json_collections) {
         e.require_table_exists("ks", "collections").get();
 
         e.execute_cql(
-            "INSERT INTO collections (a, b, c, d) JSON '"
+            "INSERT INTO collections JSON '"
                 "{\"a\": \"key\", "
                 "\"b\": {\"1\": \"abc\", \"2\": \"!\", \"3\": \"de\"}, "
                 "\"c\": [0, 1.125, 2.25, 4.5], "
@@ -2887,10 +2887,10 @@ SEASTAR_TEST_CASE(test_prepared_json) {
 
         cql3::prepared_cache_key_type prepared_id = e.prepare(
             "begin batch \n"
-                "  insert into json_data (k, v) json :named_bound0; \n"
-                "  insert into json_data (k, v) json ?; \n"
-                "  insert into json_data (k, v) json :named_bound1; \n"
-                "  insert into json_data (k, v) json ?; \n"
+                "  insert into json_data json :named_bound0; \n"
+                "  insert into json_data json ?; \n"
+                "  insert into json_data json :named_bound1; \n"
+                "  insert into json_data json ?; \n"
                 "apply batch;").get0();
 
         std::vector<cql3::raw_value> raw_values;
@@ -3228,28 +3228,234 @@ SEASTAR_TEST_CASE(test_allow_filtering_static_column) {
         e.execute_cql("INSERT INTO t (a, s) VALUES (3, 3)").get();
         e.execute_cql("INSERT INTO t (a, b, c, s) VALUES (2, 1, 1, 2)").get();
 
-        auto msg = e.execute_cql("SELECT * FROM t WHERE c = 1 AND s = 2 ALLOW FILTERING").get0();
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t WHERE c = 1 AND s = 2 ALLOW FILTERING").get0();
+            assert_that(msg).is_rows().with_rows({{
+                int32_type->decompose(2),
+                int32_type->decompose(1),
+                int32_type->decompose(2),
+                int32_type->decompose(1)
+            }});
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t WHERE c = 1 AND s = 1 ALLOW FILTERING").get0();
+            assert_that(msg).is_rows().with_rows({
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(1)
+                },
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(2),
+                    int32_type->decompose(1),
+                    int32_type->decompose(1)
+               }
+            });
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_allow_filtering_multiple_regular) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE t (a int, b int, c int, d int, e int, f list<int>, g set<int>, PRIMARY KEY(a, b));").get();
+        e.require_table_exists("ks", "t").get();
+
+        e.execute_cql("INSERT INTO t (a, b, c, d, e, f, g) VALUES (1, 1, 1, 1, 1, [1], {})").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e, f, g) VALUES (1, 2, 3, 4, 5, [1, 2], {1, 2, 3})").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e, f, g) VALUES (1, 3, 5, 1, 9, [1, 2, 3], {1, 2})").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e, f, g) VALUES (1, 4, 5, 7, 5, [], {1})").get();
+
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE c = 5").get(), exceptions::invalid_request_exception);
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE d = 1").get(), exceptions::invalid_request_exception);
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE e = 5").get(), exceptions::invalid_request_exception);
+
+        // Collection filtering queries are not supported yet
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE f contains 2").get(), exceptions::invalid_request_exception);
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE g contains 1").get(), exceptions::invalid_request_exception);
+
+        auto msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 3 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({{
-            int32_type->decompose(2),
             int32_type->decompose(1),
             int32_type->decompose(2),
-            int32_type->decompose(1)
+            int32_type->decompose(3),
+            int32_type->decompose(4),
+            int32_type->decompose(5)
         }});
 
-        msg = e.execute_cql("SELECT * FROM t WHERE c = 1 AND s = 1 ALLOW FILTERING").get0();
+        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE e >= 5 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 int32_type->decompose(1),
-                int32_type->decompose(1),
-                int32_type->decompose(1),
-                int32_type->decompose(1)
+                int32_type->decompose(2),
+                int32_type->decompose(3),
+                int32_type->decompose(4),
+                int32_type->decompose(5)
             },
             {
                 int32_type->decompose(1),
-                int32_type->decompose(2),
+                int32_type->decompose(3),
+                int32_type->decompose(5),
                 int32_type->decompose(1),
-                int32_type->decompose(1)
+                int32_type->decompose(9)
+           },
+           {
+                int32_type->decompose(1),
+                int32_type->decompose(4),
+                int32_type->decompose(5),
+                int32_type->decompose(7),
+                int32_type->decompose(5)
            }
+        });
+
+        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 5 and e = 9 and d = 1 ALLOW FILTERING").get0();
+        assert_that(msg).is_rows().with_rows({{
+            int32_type->decompose(1),
+            int32_type->decompose(3),
+            int32_type->decompose(5),
+            int32_type->decompose(1),
+            int32_type->decompose(9)
+        }});
+    });
+}
+
+SEASTAR_TEST_CASE(test_allow_filtering_with_secondary_index) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE t (a int, b int, c int, d int, e int, PRIMARY KEY(a, b));").get();
+        e.require_table_exists("ks", "t").get();
+        e.execute_cql("CREATE INDEX ON t(c)").get();
+
+        e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 1, 1, 1, 1)").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 2, 3, 4, 5)").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 3, 5, 1, 9)").get();
+        e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 4, 5, 7, 5)").get();
+
+        auto msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 3").get0();
+        assert_that(msg).is_rows().with_rows({{
+            int32_type->decompose(1),
+            int32_type->decompose(2),
+            int32_type->decompose(3),
+            int32_type->decompose(4),
+            int32_type->decompose(5)
+        }});
+
+        BOOST_CHECK_THROW(e.execute_cql("SELECT * FROM t WHERE c = 5 and d = 1").get(), exceptions::invalid_request_exception);
+
+        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 5 and d = 1 ALLOW FILTERING").get0();
+        assert_that(msg).is_rows().with_rows({{
+                int32_type->decompose(1),
+                int32_type->decompose(3),
+                int32_type->decompose(5),
+                int32_type->decompose(1),
+                int32_type->decompose(9)
+        }});
+
+        e.execute_cql("CREATE TABLE t2 (pk1 int, pk2 int, c1 int, c2 int, v int, PRIMARY KEY ((pk1, pk2), c1, c2));").get();
+        e.execute_cql("CREATE INDEX ON t2(v)").get();
+        for (int i = 1; i <= 5; ++i) {
+            for (int j = 1; j <= 2; ++j) {
+                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, 1, 1, i)).get();
+                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, 1, i, i)).get();
+                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, i, i, i)).get();
+                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, i, i, i, i)).get();
+            }
+        }
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 = 1 AND c1 > 0 AND c1 < 5 AND c2 = 1 AND v = 3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({});
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 = 1 AND  c1 > 0 AND c1 < 5 AND c2 = 3 AND v = 3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+                },
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+                },
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+                }
+            });
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 = 1 AND  c2 > 1 AND c2 < 5 AND v = 1 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({});
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 = 1 AND  c1 > 1 AND c2 > 2 AND v = 3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+                },
+                {
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+                }
+            });
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 = 1 AND  pk2 > 1 AND c2 > 2 AND v = 3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({{
+                    int32_type->decompose(1),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3),
+                    int32_type->decompose(3)
+            }});
+        });
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t2 WHERE pk1 >= 2 AND pk2 <=3 AND  c1 IN(0,1,2) AND c2 IN(0,1,2) AND v < 3  ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_rows({
+                {
+                    int32_type->decompose(2),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2)
+                },
+                {
+                    int32_type->decompose(2),
+                    int32_type->decompose(1),
+                    int32_type->decompose(1),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2)
+                },
+                {
+                    int32_type->decompose(2),
+                    int32_type->decompose(1),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2),
+                    int32_type->decompose(2)
+                }
+            });
         });
     });
 }

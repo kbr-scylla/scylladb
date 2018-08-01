@@ -290,6 +290,7 @@ using column_family = table;
 class table : public enable_lw_shared_from_this<table> {
 public:
     struct config {
+        std::vector<sstring> all_datadirs;
         sstring datadir;
         bool enable_disk_writes = true;
         bool enable_disk_reads = true;
@@ -471,6 +472,8 @@ private:
     utils::phased_barrier _pending_writes_phaser;
     // Corresponding phaser for in-progress reads.
     utils::phased_barrier _pending_reads_phaser;
+public:
+    future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, const std::vector<unsigned>& shards_for_the_sstable) noexcept;
     // Adds new sstable to the set of sstables
@@ -617,6 +620,8 @@ public:
     // Requires ranges to be sorted and disjoint.
     flat_mutation_reader make_streaming_reader(schema_ptr schema,
             const dht::partition_range_vector& ranges) const;
+
+    sstables::shared_sstable make_streaming_sstable_for_write();
 
     mutation_source as_mutation_source() const;
 
@@ -1018,6 +1023,7 @@ public:
 class keyspace {
 public:
     struct config {
+        std::vector<sstring> all_datadirs;
         sstring datadir;
         bool enable_commitlog = true;
         bool enable_disk_reads = true;
@@ -1095,6 +1101,7 @@ public:
         return _config.datadir;
     }
 
+    sstring column_family_directory(const sstring& base_path, const sstring& name, utils::UUID uuid) const;
     sstring column_family_directory(const sstring& name, utils::UUID uuid) const;
 };
 

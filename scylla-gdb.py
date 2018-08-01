@@ -151,6 +151,26 @@ class std_vector:
     def __bool__(self):
         return self.__nonzero__()
 
+class static_vector:
+    def __init__(self, ref):
+        self.ref = ref
+
+    def __len__(self):
+        return int(self.ref['m_holder']['m_size'])
+
+    def __iter__(self):
+        t = self.ref.type.strip_typedefs()
+        value_type = t.template_argument(0)
+        data = self.ref['m_holder']['storage']['dummy'].cast(value_type.pointer())
+        for i in range(self.__len__()):
+            yield data[i]
+
+    def __nonzero__(self):
+        return self.__len__() > 0
+
+    def __bool__(self):
+        return self.__nonzero__()
+
 def uint64_t(val):
     val = int(val)
     if val < 0:
@@ -684,7 +704,7 @@ class scylla_heapprof(gdb.Command):
                 n.size += size
                 n.count += count
                 bt = site['backtrace']
-                addresses = list(map(int, std_vector(bt['_frames'])))
+                addresses = list(int(f['addr']) for f in static_vector(bt['_frames']))
                 addresses.pop(0) # drop memory::get_backtrace()
                 if args.inverted:
                     seq = reversed(addresses)
@@ -741,7 +761,7 @@ def get_seastar_memory_start_and_size():
     cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
     page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
     total_mem = int(cpu_mem['nr_pages']) * page_size
-    start = long(cpu_mem['memory'])
+    start = int(cpu_mem['memory'])
     return start, total_mem
 
 def seastar_memory_layout():
@@ -761,7 +781,7 @@ class scylla_ptr(gdb.Command):
     def __init__(self):
         gdb.Command.__init__(self, 'scylla ptr', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
     def invoke(self, arg, from_tty):
-        ptr = long(arg, 0)
+        ptr = int(arg, 0)
 
         owning_thread = None
         for t, start, size in seastar_memory_layout():
@@ -779,7 +799,7 @@ class scylla_ptr(gdb.Command):
 
         cpu_mem = gdb.parse_and_eval('\'seastar::memory::cpu_mem\'')
         page_size = int(gdb.parse_and_eval('\'seastar::memory::page_size\''))
-        offset = ptr - long(cpu_mem['memory'])
+        offset = ptr - int(cpu_mem['memory'])
         ptr_page_idx = offset / page_size
         pages = cpu_mem['pages']
         page = pages[ptr_page_idx];
@@ -911,20 +931,17 @@ def resolve(addr):
 class lsa_object_descriptor(object):
     @staticmethod
     def decode(pos):
-        def next():
-            global pos
-            byte = pos.dereference() & 0xff
-            pos = pos + 1
-            return byte
         start_pos = pos
-        b = next()
+        b = pos.dereference() & 0xff
+        pos += 1
         if not (b & 0x40):
             raise Exception('object descriptor at 0x%x does not start with 0x40: 0x%x' % (int(start_pos), int(b)))
         value = b & 0x3f
         shift = 0
         while not (b & 0x80):
             shift += 6
-            b = next()
+            b = pos.dereference() & 0xff
+            pos += 1
             value |= (b & 0x3f) << shift
         return lsa_object_descriptor(value, start_pos, pos)
     mig_re = re.compile(r'.* standard_migrator<(.*)>\+16>,')
@@ -1309,7 +1326,7 @@ def find_in_live(mem_start, mem_size, value, size_selector='g'):
             if 'live' in ptr_info:
                 m = re.search('live \((0x[0-9a-f]+)', ptr_info)
                 if m:
-                    obj_start = long(m.group(1), 0)
+                    obj_start = int(m.group(1), 0)
                     addr = int(line, 0)
                     offset = addr - obj_start
                     yield obj_start, offset

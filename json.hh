@@ -84,6 +84,8 @@ inline std::map<sstring, sstring> to_map(const sstring& raw) {
     return to_map(raw, std::map<sstring, sstring>());
 }
 
+sstring value_to_quoted_string(const sstring& value);
+
 }
 
 }

@@ -2630,35 +2630,6 @@ enum class row_extended_flags : uint8_t {
     has_shadowable_deletion = 0x02,
 };
 
-// This enum corresponds to Origin's ClusteringPrefix.Kind.
-// It is a superset of values of the bound_kind enum
-// declared in clustering_bounds_comparator.hh
-enum class bound_kind_m : uint8_t {
-    excl_end = 0,
-    incl_start = 1,
-    excl_end_incl_start = 2,
-    static_clustering = 3,
-    clustering = 4,
-    incl_end_excl_start = 5,
-    incl_end = 6,
-    excl_start = 7,
-};
-
-static bound_kind to_bound_kind(bound_kind_m kind) {
-    assert (kind == bound_kind_m::incl_start ||
-            kind == bound_kind_m::incl_end ||
-            kind == bound_kind_m::excl_start ||
-            kind == bound_kind_m::excl_end);
-
-    using underlying_type = std::underlying_type_t<bound_kind_m>;
-    return bound_kind{static_cast<underlying_type>(kind)};
-}
-
-static bound_kind_m to_bound_kind_m(bound_kind kind) {
-    using underlying_type = std::underlying_type_t<bound_kind>;
-    return bound_kind_m{static_cast<underlying_type>(kind)};
-}
-
 // A range tombstone marker (RT marker) represents a bound of a range tombstone
 // in a SSTables 3.x ('m') data file.
 // RT markers can be of two types called "bounds" and "boundaries" in Origin nomenclature.
@@ -3627,7 +3598,10 @@ future<> sstable::generate_summary(const io_priority_class& pc) {
                 return do_with(summary_generator(_components->summary),
                         [this, &pc, options = std::move(options), index_file, index_size] (summary_generator& s) mutable {
                     auto ctx = make_lw_shared<index_consume_entry_context<summary_generator>>(
-                            s, trust_promoted_index::yes, *_schema, index_file, std::move(options), 0, index_size);
+                            s, trust_promoted_index::yes, *_schema, index_file, std::move(options), 0, index_size,
+                            (_version == sstable_version_types::mc
+                                ? std::make_optional(get_clustering_values_fixed_lengths(get_serialization_header()))
+                                : std::optional<column_values_fixed_lengths>{}));
                     return ctx->consume_input().finally([ctx] {
                         return ctx->close();
                     }).then([this, ctx, &s] {
@@ -3700,7 +3674,7 @@ const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_typ
         },
     };
 
-    return dir + "/" + strmap[version](entry_descriptor(ks, cf, version, generation, format, component));
+    return dir + "/" + strmap[version](entry_descriptor(dir, ks, cf, version, generation, format, component));
 }
 
 const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_types version, int64_t generation,
@@ -3776,7 +3750,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
     static std::regex la("la-(\\d+)-(\\w+)-(.*)");
     static std::regex ka("(\\w+)-(\\w+)-ka-(\\d+)-(.*)");
 
-    static std::regex dir(".*/([^/]*)/(\\w+)-[\\da-fA-F]+(?:/upload)?/?");
+    static std::regex dir(".*/([^/]*)/(\\w+)-[\\da-fA-F]+(?:/upload|/snapshots/[^/]+)?/?");
 
     std::smatch match;
 
@@ -3813,7 +3787,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
     } else {
         throw malformed_sstable_exception(seastar::sprint("invalid version for file %s. Name doesn't match any known version.", fname));
     }
-    return entry_descriptor(ks, cf, version, boost::lexical_cast<unsigned long>(generation), sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
+    return entry_descriptor(sstdir, ks, cf, version, boost::lexical_cast<unsigned long>(generation), sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
 }
 
 sstable::version_types sstable::version_from_sstring(sstring &s) {

@@ -204,6 +204,8 @@ public:
         : _type(partition_region::clustered), _bound_weight(-1), _ck(std::move(ck)) { }
     position_in_partition(range_tag_t, bound_view bv)
         : _type(partition_region::clustered), _bound_weight(position_weight(bv.kind())), _ck(bv.prefix()) { }
+    position_in_partition(range_tag_t, bound_kind kind, clustering_key_prefix&& prefix)
+        : _type(partition_region::clustered), _bound_weight(position_weight(kind)), _ck(std::move(prefix)) { }
     position_in_partition(after_static_row_tag_t) :
         position_in_partition(range_tag_t(), bound_view::bottom()) { }
     explicit position_in_partition(position_in_partition_view view)
@@ -260,6 +262,11 @@ public:
 
     bool is_after_all_clustered_rows(const schema& s) const {
         return is_partition_end() || (_ck && _ck->is_empty(s) && _bound_weight > 0);
+    }
+
+    bool is_before_all_clustered_rows(const schema& s) const {
+        return _type < partition_region::clustered
+               || (_type == partition_region::clustered && _ck->is_empty(s) && _bound_weight < 0);
     }
 
     template<typename Hasher>
@@ -605,6 +612,10 @@ public:
         // FIXME: Avoid copy
         return _set.find(position_in_partition_with_schema(s.shared_from_this(), position_in_partition(pos))) != _set.end();
     }
+    // Returns true iff this set is fully contained in the other set.
+    bool contained_in(clustering_interval_set& other) const {
+        return boost::icl::within(_set, other._set);
+    }
     bool overlaps(const schema& s, const position_range& range) const {
         // FIXME: Avoid copy
         auto r = _set.equal_range(make_interval(s, range));
@@ -614,6 +625,11 @@ public:
     // The range may overlap with this set.
     void add(const schema& s, const position_range& r) {
         _set += make_interval(s, r);
+    }
+    void add(const schema& s, const clustering_interval_set& other) {
+        for (auto&& r : other) {
+            add(s, r);
+        }
     }
     position_range_iterator begin() const { return {_set.begin()}; }
     position_range_iterator end() const { return {_set.end()}; }

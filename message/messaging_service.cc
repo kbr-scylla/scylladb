@@ -81,6 +81,9 @@
 #include "stdx.hh"
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/indirected.hpp>
+#include "frozen_mutation.hh"
+#include "flat_mutation_reader.hh"
+#include "streaming/stream_manager.hh"
 
 namespace netw {
 
@@ -236,11 +239,12 @@ bool messaging_service::knows_version(const gms::inet_address& endpoint) const {
 // Register a handler (a callback lambda) for verb
 template <typename Func>
 void register_handler(messaging_service* ms, messaging_verb verb, Func&& func) {
-    ms->rpc()->register_handler(verb, std::move(func));
+    ms->rpc()->register_handler(verb, ms->scheduling_group_for_verb(verb), std::move(func));
 }
 
 messaging_service::messaging_service(gms::inet_address ip, uint16_t port, bool listen_now)
-    : messaging_service(std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000}, false, listen_now)
+    : messaging_service(std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
+            scheduling_config{}, false, listen_now)
 {}
 
 static
@@ -259,6 +263,7 @@ void messaging_service::start_listen() {
     if (_compress_what != compress_what::none) {
         so.compressor_factory = &compressor_factory;
     }
+    so.streaming_domain = rpc::streaming_domain_type(0x55AA);
     // FIXME: we don't set so.tcp_nodelay, because we can't tell at this point whether the connection will come from a
     //        local or remote datacenter, and whether or not the connection will be used for gossip. We can fix
     //        the first by wrapping its server_socket, but not the second.
@@ -310,6 +315,7 @@ messaging_service::messaging_service(gms::inet_address ip
         , uint16_t ssl_port
         , std::shared_ptr<seastar::tls::credentials_builder> credentials
         , messaging_service::memory_config mcfg
+        , scheduling_config scfg
         , bool sltba
         , bool listen_now)
     : _listen_address(ip)
@@ -322,6 +328,7 @@ messaging_service::messaging_service(gms::inet_address ip
     , _rpc(new rpc_protocol_wrapper(serializer { }))
     , _credentials(credentials ? credentials->build_server_credentials() : nullptr)
     , _mcfg(mcfg)
+    , _scheduling_config(scfg)
 {
     _rpc->set_logger([] (const sstring& log) {
             rpc_logger.info("{}", log);
@@ -386,28 +393,71 @@ rpc::no_wait_type messaging_service::no_wait() {
     return rpc::no_wait;
 }
 
-static unsigned get_rpc_client_idx(messaging_verb verb) {
-    unsigned idx = 0;
+
+static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
+    switch (verb) {
+    case messaging_verb::CLIENT_ID:
+    case messaging_verb::MUTATION:
+    case messaging_verb::READ_DATA:
+    case messaging_verb::READ_MUTATION_DATA:
+    case messaging_verb::READ_DIGEST:
+    case messaging_verb::GOSSIP_DIGEST_ACK:
+    case messaging_verb::DEFINITIONS_UPDATE:
+    case messaging_verb::TRUNCATE:
+    case messaging_verb::MIGRATION_REQUEST:
+    case messaging_verb::SCHEMA_CHECK:
+    case messaging_verb::COUNTER_MUTATION:
+        return 0;
     // GET_SCHEMA_VERSION is sent from read/mutate verbs so should be
     // sent on a different connection to avoid potential deadlocks
     // as well as reduce latency as there are potentially many requests
     // blocked on schema version request.
-    if (verb == messaging_verb::GOSSIP_DIGEST_SYN ||
-        verb == messaging_verb::GOSSIP_DIGEST_ACK2 ||
-        verb == messaging_verb::GOSSIP_SHUTDOWN ||
-        verb == messaging_verb::GOSSIP_ECHO ||
-        verb == messaging_verb::GET_SCHEMA_VERSION) {
-        idx = 1;
-    } else if (verb == messaging_verb::PREPARE_MESSAGE ||
-               verb == messaging_verb::PREPARE_DONE_MESSAGE ||
-               verb == messaging_verb::STREAM_MUTATION ||
-               verb == messaging_verb::STREAM_MUTATION_DONE ||
-               verb == messaging_verb::COMPLETE_MESSAGE) {
-        idx = 2;
-    } else if (verb == messaging_verb::MUTATION_DONE || verb == messaging_verb::MUTATION_FAILED) {
-        idx = 3;
+    case messaging_verb::GOSSIP_DIGEST_SYN:
+    case messaging_verb::GOSSIP_DIGEST_ACK2:
+    case messaging_verb::GOSSIP_SHUTDOWN:
+    case messaging_verb::GOSSIP_ECHO:
+    case messaging_verb::GET_SCHEMA_VERSION:
+        return 1;
+    case messaging_verb::PREPARE_MESSAGE:
+    case messaging_verb::PREPARE_DONE_MESSAGE:
+    case messaging_verb::STREAM_MUTATION:
+    case messaging_verb::STREAM_MUTATION_DONE:
+    case messaging_verb::COMPLETE_MESSAGE:
+    case messaging_verb::REPLICATION_FINISHED:
+    case messaging_verb::REPAIR_CHECKSUM_RANGE:
+    case messaging_verb::STREAM_MUTATION_FRAGMENTS:
+        return 2;
+    case messaging_verb::MUTATION_DONE:
+    case messaging_verb::MUTATION_FAILED:
+        return 3;
+    case messaging_verb::LAST:
+        return -1; // should never happen
     }
-    return idx;
+}
+
+static constexpr std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> make_rpc_client_idx_table() {
+    std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> tab{};
+    for (size_t i = 0; i < tab.size(); ++i) {
+        tab[i] = do_get_rpc_client_idx(messaging_verb(i));
+    }
+    return tab;
+}
+
+static std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> s_rpc_client_idx_table = make_rpc_client_idx_table();
+
+static unsigned get_rpc_client_idx(messaging_verb verb) {
+    return s_rpc_client_idx_table[static_cast<size_t>(verb)];
+}
+
+scheduling_group
+messaging_service::scheduling_group_for_verb(messaging_verb verb) const {
+    static const scheduling_group scheduling_config::*idx_to_group[] = {
+        &scheduling_config::statement,
+        &scheduling_config::gossip,
+        &scheduling_config::streaming,
+        &scheduling_config::statement,
+    };
+    return _scheduling_config.*(idx_to_group[get_rpc_client_idx(verb)]);
 }
 
 /**
@@ -580,6 +630,25 @@ void messaging_service::remove_rpc_client(msg_addr id) {
 
 std::unique_ptr<messaging_service::rpc_protocol_wrapper>& messaging_service::rpc() {
     return _rpc;
+}
+
+rpc::sink<int32_t> messaging_service::make_sink_for_stream_mutation_fragments(rpc::source<frozen_mutation_fragment>& source) {
+    return source.make_sink<netw::serializer, int32_t>();
+}
+
+future<rpc::sink<frozen_mutation_fragment>, rpc::source<int32_t>>
+messaging_service::make_sink_and_source_for_stream_mutation_fragments(utils::UUID schema_id, utils::UUID plan_id, utils::UUID cf_id, uint64_t estimated_partitions, msg_addr id) {
+    rpc_protocol::client& rpc_client = *get_rpc_client(messaging_verb::STREAM_MUTATION_FRAGMENTS, id);
+    return rpc_client.make_stream_sink<netw::serializer, frozen_mutation_fragment>().then([this, plan_id, schema_id, cf_id, estimated_partitions, &rpc_client] (rpc::sink<frozen_mutation_fragment> sink) mutable {
+        auto rpc_handler = rpc()->make_client<rpc::source<int32_t> (utils::UUID, utils::UUID, utils::UUID, uint64_t, rpc::sink<frozen_mutation_fragment>)>(messaging_verb::STREAM_MUTATION_FRAGMENTS);
+        return rpc_handler(rpc_client , plan_id, schema_id, cf_id, estimated_partitions, sink).then([sink] (rpc::source<int32_t> source) mutable {
+            return make_ready_future<rpc::sink<frozen_mutation_fragment>, rpc::source<int32_t>>(std::move(sink), std::move(source));
+        });
+    });
+}
+
+void messaging_service::register_stream_mutation_fragments(std::function<future<rpc::sink<int32_t>> (const rpc::client_info& cinfo, UUID plan_id, UUID schema_id, UUID cf_id, uint64_t estimated_partitions, rpc::source<frozen_mutation_fragment> source)>&& func) {
+    register_handler(this, messaging_verb::STREAM_MUTATION_FRAGMENTS, std::move(func));
 }
 
 // Send a message for verb

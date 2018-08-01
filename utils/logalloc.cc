@@ -178,6 +178,7 @@ private:
 private:
     template<typename Function>
     void run_and_handle_errors(Function&& fn) noexcept {
+        memory::disable_failure_guard dfg;
         if (_broken) {
             return;
         }
@@ -2150,34 +2151,37 @@ region_group::execution_permitted() noexcept {
 }
 
 future<>
-region_group::start_releaser() {
-    return later().then([this] {
-        return repeat([this] () noexcept {
-            if (_shutdown_requested) {
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
-            }
+region_group::start_releaser(scheduling_group deferred_work_sg) {
+    return with_scheduling_group(deferred_work_sg, [this] {
+        return later().then([this] {
+            return repeat([this] () noexcept {
+                if (_shutdown_requested) {
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
+                }
 
-            if (!_blocked_requests.empty() && execution_permitted()) {
-                auto req = std::move(_blocked_requests.front());
-                _blocked_requests.pop_front();
-                req->allocate();
-                return make_ready_future<stop_iteration>(stop_iteration::no);
-            } else {
-                // Block reclaiming to prevent signal() from being called by reclaimer inside wait()
-                // FIXME: handle allocation failures (not very likely) like allocating_section does
-                tracker_reclaimer_lock rl;
-                return _relief.wait().then([] {
-                    return stop_iteration::no;
-                });
-            }
+                if (!_blocked_requests.empty() && execution_permitted()) {
+                    auto req = std::move(_blocked_requests.front());
+                    _blocked_requests.pop_front();
+                    req->allocate();
+                    return make_ready_future<stop_iteration>(stop_iteration::no);
+                } else {
+                    // Block reclaiming to prevent signal() from being called by reclaimer inside wait()
+                    // FIXME: handle allocation failures (not very likely) like allocating_section does
+                    tracker_reclaimer_lock rl;
+                    return _relief.wait().then([] {
+                        return stop_iteration::no;
+                    });
+                }
+            });
         });
     });
 }
 
-region_group::region_group(region_group *parent, region_group_reclaimer& reclaimer)
+region_group::region_group(region_group *parent, region_group_reclaimer& reclaimer,
+        scheduling_group deferred_work_sg)
     : _parent(parent)
     , _reclaimer(reclaimer)
-    , _releaser(reclaimer_can_block() ? start_releaser() : make_ready_future<>())
+    , _releaser(reclaimer_can_block() ? start_releaser(deferred_work_sg) : make_ready_future<>())
 {
     if (_parent) {
         _parent->add(this);

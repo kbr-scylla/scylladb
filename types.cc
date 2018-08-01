@@ -389,6 +389,7 @@ struct bytes_type_impl final : public concrete_type<bytes> {
     virtual data_value deserialize(bytes_view v) const override {
         return make_value(std::make_unique<native_type>(v.begin(), v.end()));
     }
+    virtual void validate(const fragmented_temporary_buffer::view&) const override { }
     virtual bool less(bytes_view v1, bytes_view v2) const override {
         return less_unsigned(v1, v2);
     }
@@ -2155,7 +2156,7 @@ void write_collection_value(bytes::iterator& out, cql_serialization_format sf, b
 }
 
 sstring abstract_type::quote_json_string(const sstring& s) {
-    return Json::valueToQuotedString(s.c_str());
+    return json::value_to_quoted_string(s);
 }
 
 void write_collection_value(bytes::iterator& out, cql_serialization_format sf, data_type type, const data_value& value) {
