@@ -2065,10 +2065,9 @@ SEASTAR_TEST_CASE(test_in_restriction) {
             assert_that(msg).is_rows().with_size(0);
             return e.execute_cql("select r1 from tir where p1 in (2, 0, 2, 1);");
         }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
-            assert_that(msg).is_rows().with_rows({
+            assert_that(msg).is_rows().with_rows_ignore_order({
                 {int32_type->decompose(4)},
                 {int32_type->decompose(0)},
-                {int32_type->decompose(4)},
                 {int32_type->decompose(1)},
                 {int32_type->decompose(2)},
                 {int32_type->decompose(3)},
@@ -2089,6 +2088,42 @@ SEASTAR_TEST_CASE(test_in_restriction) {
                 {int32_type->decompose(3)},
                 {int32_type->decompose(2)},
                 {int32_type->decompose(1)},
+            });
+            return e.prepare("select r1 from tir where p1 in ?");
+        }).then([&e] (cql3::prepared_cache_key_type prepared_id){
+            auto my_list_type = list_type_impl::get_instance(int32_type, true);
+            std::vector<cql3::raw_value> raw_values;
+            auto in_values_list = my_list_type->decompose(make_list_value(my_list_type,
+                    list_type_impl::native_type{{int(2), int(0), int(2), int(1)}}));
+            raw_values.emplace_back(cql3::raw_value::make_value(in_values_list));
+            return e.execute_prepared(prepared_id,raw_values);
+        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+            assert_that(msg).is_rows().with_rows_ignore_order({
+                {int32_type->decompose(4)},
+                {int32_type->decompose(0)},
+                {int32_type->decompose(1)},
+                {int32_type->decompose(2)},
+                {int32_type->decompose(3)},
+            });
+        }).then([&e]{
+            return e.execute_cql("create table tir2 (p1 int, c1 int, r1 int, PRIMARY KEY (p1, c1,r1));").discard_result();
+        }).then([&e] {
+            e.require_table_exists("ks", "tir2");
+            return e.execute_cql("insert into tir2 (p1, c1, r1) values (0, 0, 0);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir2 (p1, c1, r1) values (1, 0, 1);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir2 (p1, c1, r1) values (1, 1, 2);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir2 (p1, c1, r1) values (1, 2, 3);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir2 (p1, c1, r1) values (2, 3, 4);").discard_result();
+        }).then([&e]{
+            return e.execute_cql("select r1 from tir2 where (c1,r1) in ((0, 1),(1,2),(0,1),(1,2),(3,3));");
+        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+            assert_that(msg).is_rows().with_rows_ignore_order({
+                {int32_type->decompose(1)},
+                {int32_type->decompose(2)},
             });
         });
     });
@@ -2602,6 +2637,7 @@ SEASTAR_TEST_CASE(test_select_json_types) {
                 "    r date,"
                 "    s time,"
                 "    u duration,"
+                "    w int,"
                 ");").get();
 
         e.require_table_exists("ks", "all_types").get();
@@ -2629,7 +2665,7 @@ SEASTAR_TEST_CASE(test_select_json_types) {
                 "    1y2mo3w4d5h6m7s8ms9us10ns"
                 ");").get();
 
-        auto msg = e.execute_cql("SELECT JSON a, b, c, d, e, f, \"G\", \"H\", \"I\", j, k, l, m, n, o, p, q, r, s, u, unixtimestampof(k) FROM all_types WHERE a = 'ascii'").get0();
+        auto msg = e.execute_cql("SELECT JSON a, b, c, d, e, f, \"G\", \"H\", \"I\", j, k, l, m, n, o, p, q, r, s, u, w, unixtimestampof(k) FROM all_types WHERE a = 'ascii'").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 utf8_type->decompose(
@@ -2653,6 +2689,7 @@ SEASTAR_TEST_CASE(test_select_json_types) {
                     "\"r\": \"1970-01-02\", "
                     "\"s\": 00:00:00.000000001, "
                     "\"u\": \"1y2mo25d5h6m7s8ms9us10ns\", "
+                    "\"w\": null, "
                     "\"unixtimestampof(k)\": 1261009589805}"
                 )
             }
@@ -2660,7 +2697,7 @@ SEASTAR_TEST_CASE(test_select_json_types) {
 
         msg = e.execute_cql("SELECT toJson(a), toJson(b), toJson(c), toJson(d), toJson(e), toJson(f),"
                 "toJson(\"G\"), toJson(\"H\"), toJson(\"I\"), toJson(j), toJson(k), toJson(l), toJson(m), toJson(n),"
-                "toJson(o), toJson(p), toJson(q), toJson(r), toJson(s), toJson(u),"
+                "toJson(o), toJson(p), toJson(q), toJson(r), toJson(s), toJson(u), toJson(w),"
                 "toJson(unixtimestampof(k)), toJson(toJson(toJson(p))) FROM all_types WHERE a = 'ascii'").get0();
         assert_that(msg).is_rows().with_rows({
             {
@@ -2684,6 +2721,7 @@ SEASTAR_TEST_CASE(test_select_json_types) {
                 utf8_type->decompose("\"1970-01-02\""),
                 utf8_type->decompose("00:00:00.000000001"),
                 utf8_type->decompose("\"1y2mo25d5h6m7s8ms9us10ns\""),
+                utf8_type->decompose("null"),
                 utf8_type->decompose("1261009589805"),
                 utf8_type->decompose("\"\\\"3\\\"\"")
             }
@@ -2778,7 +2816,7 @@ SEASTAR_TEST_CASE(test_insert_json_types) {
                 "\"c\": \"0xdeadbeef\", "
                 "\"d\": true, "
                 "\"e\": 3.14, "
-                "\"f\": 3.14, "
+                "\"f\": \"3.14\", "
                 "\"\\\"G\\\"\": \"127.0.0.1\", "
                 "\"\\\"H\\\"\": 3, "
                 "\"\\\"I\\\"\": \"zażółć gęślą jaźń\", "
@@ -2788,7 +2826,7 @@ SEASTAR_TEST_CASE(test_insert_json_types) {
                 "\"m\": \"varchar\", "
                 "\"n\": 123, "
                 "\"o\": 1.23, "
-                "\"p\": 3, "
+                "\"p\": \"3\", "
                 "\"q\": 3, "
                 "\"r\": \"1970-01-02\", "
                 "\"s\": \"00:00:00.000000001\", "
@@ -2827,13 +2865,15 @@ SEASTAR_TEST_CASE(test_insert_json_types) {
 
         e.execute_cql("UPDATE all_types SET b = fromJson('42') WHERE a = fromJson('\"ascii\"');").get();
         e.execute_cql("UPDATE all_types SET \"I\" = fromJson('\"zażółć gęślą jaźń\"') WHERE a = fromJson('\"ascii\"');").get();
+        e.execute_cql("UPDATE all_types SET o = fromJson('\"3.45\"') WHERE a = fromJson('\"ascii\"');").get();
 
-        msg = e.execute_cql("SELECT a, b, \"I\" FROM all_types WHERE a = 'ascii'").get0();
+        msg = e.execute_cql("SELECT a, b, \"I\", o FROM all_types WHERE a = 'ascii'").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 ascii_type->decompose(sstring("ascii")),
                 long_type->decompose(42l),
                 utf8_type->decompose(sstring("zażółć gęślą jaźń")),
+                decimal_type->decompose(big_decimal { 2, boost::multiprecision::cpp_int(345) }),
             }
         });
     });
@@ -3318,6 +3358,36 @@ SEASTAR_TEST_CASE(test_allow_filtering_multiple_regular) {
             int32_type->decompose(1),
             int32_type->decompose(9)
         }});
+
+        cql3::prepared_cache_key_type prepared_id = e.prepare("SELECT a, b, c, d, e FROM t WHERE a = ? and d = ? ALLOW FILTERING").get0();
+        std::vector<cql3::raw_value> raw_values {
+                cql3::raw_value::make_value(int32_type->decompose(1)),
+                cql3::raw_value::make_value(int32_type->decompose(1))
+        };
+        msg = e.execute_prepared(prepared_id, raw_values).get0();
+        assert_that(msg).is_rows().with_rows({
+            {
+                int32_type->decompose(1),
+                int32_type->decompose(1),
+                int32_type->decompose(1),
+                int32_type->decompose(1),
+                int32_type->decompose(1)
+            },
+            {
+                int32_type->decompose(1),
+                int32_type->decompose(3),
+                int32_type->decompose(5),
+                int32_type->decompose(1),
+                int32_type->decompose(9)
+           }
+        });
+
+        prepared_id = e.prepare("SELECT a, b, c, d, e FROM t WHERE a = ? and d = ? ALLOW FILTERING").get0();
+        raw_values[1] = cql3::raw_value::make_value(int32_type->decompose(9));
+        msg = e.execute_prepared(prepared_id, raw_values).get0();
+        assert_that(msg).is_rows().with_size(0);
+
+
     });
 }
 
@@ -3457,5 +3527,71 @@ SEASTAR_TEST_CASE(test_allow_filtering_with_secondary_index) {
                 }
             });
         });
+    });
+}
+
+SEASTAR_TEST_CASE(test_in_restriction_on_not_last_partition_key) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE t (a int,b int,c int,d int,PRIMARY KEY ((a, b), c));").get();
+        e.require_table_exists("ks", "t").get();
+
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,1,1,100); ").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,1,2,200); ").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,1,3,300); ").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,2,1,300); ").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,3,1,1300);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (1,3,2,1400);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (2,3,2,1400);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (2,1,2,1400);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (2,1,3,1300);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (2,2,3,1300);").get();
+        e.execute_cql("INSERT INTO t (a,b,c,d) VALUES (3,1,3,1300);").get();
+
+        {
+            auto msg = e.execute_cql("SELECT * FROM t WHERE a IN (1,2) AND b IN (2,3) AND c>=2 AND c<=3;").get0();
+            assert_that(msg).is_rows().with_rows_ignore_order({
+               {
+                   int32_type->decompose(1),
+                   int32_type->decompose(3),
+                   int32_type->decompose(2),
+                   int32_type->decompose(1400),
+               },
+               {
+                   int32_type->decompose(2),
+                   int32_type->decompose(2),
+                   int32_type->decompose(3),
+                   int32_type->decompose(1300),
+               },
+               {
+                   int32_type->decompose(2),
+                   int32_type->decompose(3),
+                   int32_type->decompose(2),
+                   int32_type->decompose(1400),
+               }
+            });
+        }
+        {
+           auto msg = e.execute_cql("SELECT * FROM t WHERE a IN (1,3) AND b=1 AND c>=2 AND c<=3;").get0();
+           assert_that(msg).is_rows().with_rows_ignore_order({
+              {
+                  int32_type->decompose(1),
+                  int32_type->decompose(1),
+                  int32_type->decompose(2),
+                  int32_type->decompose(200),
+              },
+              {
+                  int32_type->decompose(1),
+                  int32_type->decompose(1),
+                  int32_type->decompose(3),
+                  int32_type->decompose(300),
+              },
+              {
+                  int32_type->decompose(3),
+                  int32_type->decompose(1),
+                  int32_type->decompose(3),
+                  int32_type->decompose(1300),
+              }
+           });
+       }
     });
 }

@@ -60,6 +60,7 @@
 #include <seastar/core/distributed.hh>
 #include "disk-error-handler.hh"
 #include "gms/feature.hh"
+#include <seastar/core/metrics_registration.hh>
 
 namespace cql_transport {
     class cql_server;
@@ -136,6 +137,7 @@ private:
     bool _force_remove_completion = false;
     bool _ms_stopped = false;
     bool _stream_manager_stopped = false;
+    seastar::metrics::metric_groups _metrics;
 public:
     storage_service(distributed<database>& db, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&);
     void isolate_on_error();
@@ -148,6 +150,7 @@ public:
 
 private:
     future<> do_update_pending_ranges();
+    void register_metrics();
 
 public:
     future<> keyspace_changed(const sstring& ks_name);
@@ -1804,30 +1807,6 @@ private:
     future<> move(token new_token);
 public:
 
-    class range_relocator {
-    private:
-        streaming::stream_plan _stream_plan;
-
-    public:
-        range_relocator(std::unordered_set<token> tokens, std::vector<sstring> keyspace_names)
-            : _stream_plan("Relocation") {
-            calculate_to_from_streams(std::move(tokens), std::move(keyspace_names));
-        }
-
-    private:
-        void calculate_to_from_streams(std::unordered_set<token> new_tokens, std::vector<sstring> keyspace_names);
-
-    public:
-        future<> stream() {
-            return _stream_plan.execute().discard_result();
-        }
-
-        bool streams_needed() {
-            return !_stream_plan.is_empty();
-        }
-    };
-
-
     /**
      * Get the status of a token removal.
      */
@@ -2045,16 +2024,6 @@ private:
     future<> stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, inet_address>> ranges_to_stream_by_keyspace);
 
 public:
-    /**
-     * Calculate pair of ranges to stream/fetch for given two range collections
-     * (current ranges for keyspace and ranges after move to new token)
-     *
-     * @param current collection of the ranges by current token
-     * @param updated collection of the ranges after token is changed
-     * @return pair of ranges to stream/fetch for given current and updated range collections
-     */
-    std::pair<std::unordered_set<dht::token_range>, std::unordered_set<dht::token_range>>
-    calculate_stream_and_fetch_ranges(const dht::token_range_vector& current, const dht::token_range_vector& updated);
 #if 0
     public void bulkLoad(String directory)
     {

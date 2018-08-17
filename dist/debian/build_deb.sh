@@ -160,8 +160,8 @@ chmod a+rx debian/rules
 
 if [ "$TARGET" != "trusty" ]; then
     pystache dist/common/systemd/scylla-server.service.mustache "{ $MUSTACHE_DIST }" > debian/scylla-server.service
-    pystache dist/common/systemd/scylla-housekeeping-daily.service.mustache "{ $MUSTACHE_DIST }" > debian/scylla-housekeeping-daily.service
-    pystache dist/common/systemd/scylla-housekeeping-restart.service.mustache "{ $MUSTACHE_DIST }" > debian/scylla-housekeeping-restart.service
+    pystache dist/common/systemd/scylla-housekeeping-daily.service.mustache "{ $MUSTACHE_DIST }" > debian/scylla-server.scylla-housekeeping-daily.service
+    pystache dist/common/systemd/scylla-housekeeping-restart.service.mustache "{ $MUSTACHE_DIST }" > debian/scylla-server.scylla-housekeeping-restart.service
     cp dist/common/systemd/scylla-fstrim.service debian/scylla-server.scylla-fstrim.service
     cp dist/common/systemd/node-exporter.service debian/scylla-server.node-exporter.service
 fi

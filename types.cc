@@ -225,12 +225,12 @@ struct integer_type_impl : simple_type_impl<T> {
         return to_sstring(compose_value(b));
     }
     virtual sstring to_json_string(const bytes& b) const override {
-        if (b.empty()) {
-            return "null";
-        }
         return to_sstring(compose_value(b));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
+        if (value.isString()) {
+            return from_string(value.asString());
+        }
         return this->decompose(T(json::to_int64_t(value)));
     }
 };
@@ -496,9 +496,6 @@ struct boolean_type_impl : public simple_type_impl<bool> {
         return boolean_to_string(*b.begin());
     }
     virtual sstring to_json_string(const bytes& b) const override {
-        if (b.empty()) {
-            return "null";
-        }
         return to_string(b);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
@@ -1402,7 +1399,7 @@ struct floating_type_impl : public simple_type_impl<T> {
     virtual sstring to_json_string(const bytes& b) const override {
         auto v = deserialize(b);
         if (v.is_null()) {
-            return "null";
+            throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
         T d = this->from_value(v);
         if (std::isnan(d) || std::isinf(d)) {
@@ -1411,8 +1408,11 @@ struct floating_type_impl : public simple_type_impl<T> {
         return to_sstring(this->from_value(v));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
+        if (value.isString()) {
+            return from_string(value.asString());
+        }
         if (!value.isDouble()) {
-            throw marshal_exception("JSON value must be represented as double");
+            throw marshal_exception("JSON value must be represented as double or string");
         }
         if constexpr (std::is_same<T, float>::value) {
             return this->decompose(value.asFloat());
@@ -1530,7 +1530,7 @@ public:
     virtual sstring to_json_string(const bytes& b) const override {
         auto v = deserialize(b);
         if (v.is_null()) {
-            return "null";
+            throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
         return from_value(v).get().str();
         return to_string(b);
@@ -1638,13 +1638,15 @@ public:
     virtual sstring to_json_string(const bytes& b) const override {
         auto v = deserialize(b);
         if (v.is_null()) {
-            return "null";
+            throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
         return from_value(v).get().to_string();
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
-        if (!value.isNumeric()) {
-            throw marshal_exception(sprint("%s must be represented as numeric in JSON", value.toStyledString()));
+        if (value.isString()) {
+            return from_string(value.asString());
+        } else if (!value.isNumeric()) {
+            throw marshal_exception(sprint("%s must be represented as numeric or string in JSON", value.toStyledString()));
         }
 
         return from_string(json::to_sstring(value));
@@ -1861,7 +1863,7 @@ public:
     virtual sstring to_json_string(const bytes& b) const override {
         auto v = deserialize(b);
         if (v.is_null()) {
-            return "null";
+            throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
         return quote_json_string(to_string(b));
     }

@@ -86,12 +86,8 @@ public:
                 encoded_row.write("\\\"", 2);
             }
             encoded_row.write("\": ", 3);
-            if (parameters[i]) {
-                sstring row_sstring = _selector_types[i]->to_json_string(parameters[i].value());
-                encoded_row.write(row_sstring.c_str(), row_sstring.size());
-            } else {
-                encoded_row.write("null", 4);
-            }
+            sstring row_sstring = _selector_types[i]->to_json_string(parameters[i]);
+            encoded_row.write(row_sstring.c_str(), row_sstring.size());
         }
         encoded_row.write("}", 1);
         return encoded_row.linearize().to_string();
@@ -313,7 +309,7 @@ select_statement::make_partition_slice(const query_options& options)
 }
 
 int32_t select_statement::get_limit(const query_options& options) const {
-    if (!_limit) {
+    if (!_limit || _selection->is_aggregate()) {
         return std::numeric_limits<int32_t>::max();
     }
 
@@ -383,6 +379,8 @@ select_statement::do_execute(service::storage_proxy& proxy,
         make_partition_slice(options), limit, now, tracing::make_trace_info(state.get_trace_state()), query::max_partitions, utils::UUID(), options.get_timestamp(state));
 
     int32_t page_size = options.get_page_size();
+
+    _stats.unpaged_select_queries += page_size <= 0;
 
     // An aggregation query will never be paged for the user, but we always page it internally to avoid OOM.
     // If we user provided a page_size we'll use that to page internally (because why not), otherwise we use our default
@@ -570,7 +568,7 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
         _stats.filtered_rows_read_total += *results->row_count();
         query::result_view::consume(*results, cmd->slice,
                 cql3::selection::result_set_builder::visitor(builder, *_schema,
-                        *_selection, cql3::selection::result_set_builder::restrictions_filter(_restrictions)));
+                        *_selection, cql3::selection::result_set_builder::restrictions_filter(_restrictions, options)));
     } else {
         query::result_view::consume(*results, cmd->slice,
                 cql3::selection::result_set_builder::visitor(builder, *_schema,
@@ -681,6 +679,8 @@ indexed_table_select_statement::do_execute(service::storage_proxy& proxy,
     ++_stats.secondary_index_reads;
 
     assert(_restrictions->uses_secondary_indexing());
+
+    _stats.unpaged_select_queries += options.get_page_size() <= 0;
 
     // Secondary index search has two steps: 1. use the index table to find a
     // list of primary keys matching the query. 2. read the rows matching

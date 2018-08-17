@@ -61,7 +61,7 @@ def interactive_choose_nic():
             print(nics)
             n = input('> ')
             if is_valid_nic(n):
-                return nic
+                return n
 
 def do_verify_package(pkg):
     if is_debian_variant():
@@ -102,7 +102,7 @@ def run_setup_script(name, script):
     res = run(script, exception=False)
     if res != 0:
         if interactive:
-            colorprint('{red}{name} setup failed. Press any key to continue...{nocolor}'.format(name=name))
+            colorprint('{red}{name} setup failed. Press any key to continue...{nocolor}', name=name)
             input()
         else:
             print('{} setup failed.'.format(name))
@@ -192,11 +192,12 @@ if __name__ == '__main__':
     fstrim_setup = not args.no_fstrim_setup
     selinux_reboot_required = False
 
-    colorprint('{green}Skip any of the following steps by answering \'no\'{nocolor}')
+    if interactive:
+        colorprint('{green}Skip any of the following steps by answering \'no\'{nocolor}')
 
     if is_ec2():
         if interactive:
-            ec2_check = interactive_ask_service('Do you want to run Amazon EC2 configuration check?', 'Yes - runs a script to verify that this instance is optimized for running Scylls. No - skips the configuration check.', 'yes')
+            ec2_check = interactive_ask_service('Do you want to run Amazon EC2 configuration check?', 'Yes - runs a script to verify that this instance is optimized for running Scylla. No - skips the configuration check.', 'yes')
             if ec2_check:
                 nic = interactive_choose_nic()
         if ec2_check:
@@ -221,7 +222,7 @@ if __name__ == '__main__':
         elif is_gentoo_variant():
             run('rc-update add scylla-server default')
 
-    if interactive:
+    if interactive and not os.path.exists('/etc/scylla.d/housekeeping.cfg'):
         version_check = interactive_ask_service('Do you want to enable Scylla to check if there is a newer version of Scylla available?', 'Yes - start the Scylla-housekeeping service to check for a newer version. This check runs periodically. No - skips this step.', 'yes')
     if version_check:
         with open('/etc/scylla.d/housekeeping.cfg', 'w') as f:
@@ -293,7 +294,7 @@ if __name__ == '__main__':
                 print('Please select unmounted disks from the following list: {}'.format(devices))
             selected = []
             dsklist = []
-            while len(devices):
+            while True:
                 print('type \'cancel\' to cancel RAID/XFS setup.')
                 print('type \'done\' to finish selection. Selected: {}'.format(selected))
                 if len(dsklist) > 0:

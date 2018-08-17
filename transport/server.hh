@@ -116,7 +116,6 @@ private:
     uint64_t _connects = 0;
     uint64_t _connections = 0;
     uint64_t _requests_served = 0;
-    uint64_t _unpaged_queries = 0;
     uint64_t _requests_serving = 0;
     uint64_t _requests_blocked_memory = 0;
     cql_load_balance _lb;
@@ -279,7 +278,6 @@ public:
     virtual void on_leave_cluster(const gms::inet_address& endpoint) override;
     virtual void on_up(const gms::inet_address& endpoint) override;
     virtual void on_down(const gms::inet_address& endpoint) override;
-    virtual void on_move(const gms::inet_address& endpoint) override;
 };
 
 using response_type = cql_server::response_type;

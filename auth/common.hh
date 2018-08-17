@@ -28,6 +28,7 @@
 using namespace std::chrono_literals;
 
 class database;
+class timeout_config;
 
 class database;
 
@@ -73,5 +74,10 @@ future<> create_metadata_table_if_missing(
         ::service::migration_manager&);
 
 future<> wait_for_schema_agreement(::service::migration_manager&, const database&);
+
+///
+/// Time-outs for internal, non-local CQL queries.
+///
+const timeout_config& internal_distributed_timeout_config() noexcept;
 
 }

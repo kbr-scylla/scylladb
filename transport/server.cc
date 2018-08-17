@@ -168,9 +168,6 @@ cql_server::cql_server(distributed<service::storage_proxy>& proxy, distributed<c
         sm::make_gauge("requests_serving", _requests_serving,
                         sm::description("Holds a number of requests that are being processed right now.")),
 
-        sm::make_counter("unpaged_queries", _unpaged_queries,
-                        sm::description("The number of unpaged queries served.")),
-
         sm::make_gauge("requests_blocked_memory_current", [this] { return _memory_available.waiters(); },
                         sm::description(
                             seastar::format("Holds the number of requests that are currently blocked due to reaching the memory quota limit ({}B). "
@@ -353,6 +350,8 @@ future<cql_server::connection::processing_result>
         }
     }
 
+    tracing::set_request_size(client_state.get_trace_state(), fbuf.bytes_left());
+
     auto linearization_buffer = std::make_unique<bytes_ostream>();
     auto linearization_buffer_ptr = linearization_buffer.get();
     return futurize_apply([this, cqlop, stream, &fbuf, client_state, linearization_buffer_ptr] () mutable {
@@ -432,6 +431,7 @@ future<cql_server::connection::processing_result>
                 case auth_state::READY:
                     break;
             }
+            tracing::set_response_size(client_state.get_trace_state(), response.first->size());
             return processing_result(std::move(response));
         } catch (const exceptions::unavailable_exception& ex) {
             return processing_result(std::make_pair(make_unavailable_error(stream, ex.code(), ex.what(), ex.consistency, ex.required, ex.alive, client_state.get_trace_state()), client_state));
@@ -765,15 +765,10 @@ future<response_type> cql_server::connection::process_query(uint16_t stream, req
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
 
-    // Count the number of unpaged queries
-    if (options.get_page_size() <= 0) {
-        _server._unpaged_queries += 1;
-    }
-
     tracing::set_page_size(query_state.get_trace_state(), options.get_page_size());
     tracing::set_consistency_level(query_state.get_trace_state(), options.get_consistency());
     tracing::set_optional_serial_consistency_level(query_state.get_trace_state(), options.get_serial_consistency());
-    tracing::add_query(query_state.get_trace_state(), query.to_string());
+    tracing::add_query(query_state.get_trace_state(), query);
     tracing::set_user_timestamp(query_state.get_trace_state(), options.get_specific_options().timestamp);
 
     tracing::begin(query_state.get_trace_state(), "Execute CQL3 query", query_state.get_client_state().get_client_address());
@@ -851,7 +846,6 @@ future<response_type> cql_server::connection::process_execute(uint16_t stream, r
     }
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
-    options.prepare(prepared->bound_names);
 
     tracing::set_page_size(client_state.get_trace_state(), options.get_page_size());
     tracing::set_consistency_level(client_state.get_trace_state(), options.get_consistency());
@@ -868,6 +862,9 @@ future<response_type> cql_server::connection::process_execute(uint16_t stream, r
         tracing::trace(query_state.get_trace_state(), "Invalid amount of bind variables: expected {:d} received {:d}", stmt->get_bound_terms(), options.get_values_count());
         throw exceptions::invalid_request_exception("Invalid amount of bind variables");
     }
+
+    options.prepare(prepared->bound_names);
+
     tracing::trace(query_state.get_trace_state(), "Processing a statement");
     return _server._query_processor.local().process_statement_prepared(std::move(prepared), std::move(cache_key), query_state, options, needs_authorization).then([this, stream, &query_state, skip_metadata] (auto msg) {
         tracing::trace(query_state.get_trace_state(), "Done processing - preparing a result");
@@ -907,7 +904,7 @@ cql_server::connection::process_batch(uint16_t stream, request_reader in, servic
 
         switch (kind) {
         case 0: {
-            auto query = in.read_long_string_view().to_string();
+            auto query = in.read_long_string_view();
             stmt_ptr = _server._query_processor.local().get_statement(query, client_state);
             ps = stmt_ptr->checked_weak_from_this();
             tracing::add_query(client_state.get_trace_state(), query);
