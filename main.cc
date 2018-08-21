@@ -299,10 +299,6 @@ int main(int ac, char** av) {
         print("%s\n", scylla_version());
         return 0;
     }
-    cfg->add_options(init);
-    for (configurable& c : configurable::configurables()) {
-        c.append_options(*cfg, init);
-    }
 
     bpo::options_description deprecated("Deprecated options - ignored");
     deprecated.add_options()
@@ -314,6 +310,7 @@ int main(int ac, char** av) {
     init("options-file", bpo::value<sstring>(), "configuration file (i.e. <SCYLLA_HOME>/conf/scylla.yaml)");
 
     configurable::append_all(*cfg, init);
+    cfg->add_options(init);
 
     distributed<database> db;
     seastar::sharded<service::cache_hitrate_calculator> cf_cache_hitrate_calculator;
