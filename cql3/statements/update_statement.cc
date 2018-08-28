@@ -172,6 +172,19 @@ modification_statement::json_cache_opt insert_prepared_json_statement::maybe_pre
 void
 insert_prepared_json_statement::execute_set_value(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const column_definition& column, const bytes_opt& value) {
     if (!value) {
+        if (column.type->is_collection()) {
+            auto& k = static_pointer_cast<const collection_type_impl>(column.type)->_kind;
+            if (&k == &collection_type_impl::kind::list) {
+                lists::setter::execute(m, prefix, params, column, make_shared<lists::value>(lists::value(std::vector<bytes_opt>())));
+            } else if (&k == &collection_type_impl::kind::set) {
+                sets::setter::execute(m, prefix, params, column, make_shared<sets::value>(sets::value(std::set<bytes, serialized_compare>(serialized_compare(empty_type)))));
+            } else if (&k == &collection_type_impl::kind::map) {
+                maps::setter::execute(m, prefix, params, column, make_shared<maps::value>(maps::value(std::map<bytes, bytes, serialized_compare>(serialized_compare(empty_type)))));
+            } else {
+                throw exceptions::invalid_request_exception("Incorrect value kind in JSON INSERT statement");
+            }
+            return;
+        }
         m.set_cell(prefix, column, std::move(operation::make_dead_cell(params)));
         return;
     } else if (!column.type->is_collection()) {
@@ -198,18 +211,17 @@ insert_prepared_json_statement::execute_set_value(mutation& m, const clustering_
 dht::partition_range_vector
 insert_prepared_json_statement::build_partition_keys(const query_options& options, const json_cache_opt& json_cache) {
     dht::partition_range_vector ranges;
+    std::vector<bytes_opt> exploded;
     for (const auto& def : s->partition_key_columns()) {
         auto json_value = json_cache->at(def.name_as_text());
         if (!json_value) {
             throw exceptions::invalid_request_exception(sprint("Missing mandatory PRIMARY KEY part %s", def.name_as_text()));
         }
-        auto k = query::range<partition_key>::make_singular(partition_key::from_single_value(*s, *json_value));
-        ranges.emplace_back(std::move(k).transform(
-                    [this] (partition_key&& k) -> query::ring_position {
-                        auto token = dht::global_partitioner().get_token(*s, k);
-                        return { std::move(token), std::move(k) };
-                    }));
+        exploded.emplace_back(*json_value);
     }
+    auto pkey = partition_key::from_optional_exploded(*s, std::move(exploded));
+    auto k = query::range<query::ring_position>::make_singular(dht::global_partitioner().decorate_key(*s, std::move(pkey)));
+    ranges.emplace_back(std::move(k));
     return ranges;
 }
 

@@ -107,6 +107,7 @@ boost_tests = [
     'transport_test',
     'fragmented_temporary_buffer_test',
     'encrypted_file_test',
+    'auth_passwords_test',
 ]
 
 other_tests = [
