@@ -8,11 +8,12 @@ dist/common/scripts/* usr/lib/scylla
 scylla-blocktune usr/lib/scylla
 scylla-housekeeping usr/lib/scylla
 tools/scyllatop usr/lib/scylla
+tools/scyllarepair usr/lib/scylla
 swagger-ui/dist usr/lib/scylla/swagger-ui
 api/api-doc usr/lib/scylla/api
 build/release/scylla usr/bin
 build/release/iotune usr/bin
-dist/common/bin/scyllatop usr/bin
+dist/common/bin/* usr/bin
 dist/common/sbin/* usr/sbin
 @@ADDHKCFG@@
 @@HKDOTTIMER_D@@
