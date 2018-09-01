@@ -20,14 +20,16 @@
 class schema_mutations {
     mutation _columnfamilies;
     mutation _columns;
+    mutation_opt _view_virtual_columns;
     mutation_opt _indices;
     mutation_opt _dropped_columns;
     mutation_opt _scylla_tables;
 public:
-    schema_mutations(mutation columnfamilies, mutation columns, mutation_opt indices, mutation_opt dropped_columns,
+    schema_mutations(mutation columnfamilies, mutation columns, mutation_opt view_virtual_columns, mutation_opt indices, mutation_opt dropped_columns,
         mutation_opt scylla_tables)
             : _columnfamilies(std::move(columnfamilies))
             , _columns(std::move(columns))
+            , _view_virtual_columns(std::move(view_virtual_columns))
             , _indices(std::move(indices))
             , _dropped_columns(std::move(dropped_columns))
             , _scylla_tables(std::move(scylla_tables))
@@ -37,7 +39,8 @@ public:
                      bool is_view,
                      stdx::optional<canonical_mutation> indices,
                      stdx::optional<canonical_mutation> dropped_columns,
-                     stdx::optional<canonical_mutation> scylla_tables);
+                     stdx::optional<canonical_mutation> scylla_tables,
+                     stdx::optional<canonical_mutation> view_virtual_columns);
 
     schema_mutations(schema_mutations&&) = default;
     schema_mutations& operator=(schema_mutations&&) = default;
@@ -52,6 +55,10 @@ public:
 
     const mutation& columns_mutation() const {
         return _columns;
+    }
+
+    const mutation_opt& view_virtual_columns_mutation() const {
+        return _view_virtual_columns;
     }
 
     const mutation_opt& scylla_tables() const {
@@ -75,6 +82,13 @@ public:
 
     canonical_mutation columns_canonical_mutation() const {
         return canonical_mutation(_columns);
+    }
+
+    stdx::optional<canonical_mutation> view_virtual_columns_canonical_mutation() const {
+        if (_view_virtual_columns) {
+            return canonical_mutation(*_view_virtual_columns);
+        }
+        return {};
     }
 
     stdx::optional<canonical_mutation> indices_canonical_mutation() const {
