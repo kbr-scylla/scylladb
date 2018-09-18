@@ -134,10 +134,10 @@ AmbientCapabilities=CAP_SYS_NICE
 EOS
     fi
 fi
-%systemd_post scylla-enterprise-server.service
+%systemd_post scylla-server.service
 
 %preun server
-%systemd_preun scylla-enterprise-server.service
+%systemd_preun scylla-server.service
 
 %postun server
 %systemd_postun
@@ -155,7 +155,7 @@ rm -rf $RPM_BUILD_ROOT
 %files server
 %defattr(-,root,root)
 
-%config(noreplace) %{_sysconfdir}/sysconfig/scylla-enterprise-server
+%config(noreplace) %{_sysconfdir}/sysconfig/scylla-server
 %{_sysconfdir}/security/limits.d/scylla.conf
 %attr(0755,root,root) %dir %{_sysconfdir}/scylla.d
 %config(noreplace) %{_sysconfdir}/scylla.d/*.conf
@@ -214,9 +214,9 @@ rm -rf $RPM_BUILD_ROOT
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla/hints
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla/coredump
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla-housekeeping
-%ghost /etc/systemd/system/scylla-enterprise-server.service.d/
-%ghost /etc/systemd/system/scylla-enterprise-server.service.d/capabilities.conf
-%ghost /etc/systemd/system/scylla-enterprise-server.service.d/mounts.conf
+%ghost /etc/systemd/system/scylla-server.service.d/
+%ghost /etc/systemd/system/scylla-server.service.d/capabilities.conf
+%ghost /etc/systemd/system/scylla-server.service.d/mounts.conf
 
 %package conf
 Group:          Applications/Databases
