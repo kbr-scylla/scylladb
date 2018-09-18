@@ -67,6 +67,9 @@ public:
         constexpr size_t size() {
             return chunk_size;
         }
+        explicit operator bool() {
+            return bool(_buf);
+        }
     };
 
 private:
@@ -146,15 +149,19 @@ void in_memory_data_store::resize(size_t newsize) {
     auto oldchunknr = _data.size();
     auto chunks = align_up(newsize, chunk_size) / chunk_size;
 
-    _size = newsize;
     if (oldchunknr == chunks) {
         return;
     }
     _data.resize(chunks);
     for (auto i = oldchunknr; i < chunks; i++) {
         _data[i] = in_memory_store_buffer::alloc();
+        if (!_data[i]) {
+            _data.resize(oldchunknr);
+            throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "In-Memory disk is out of space");
+        }
         std::memset(_data[i].get_write(), 0, chunk_size);
     }
+    _size = newsize;
 }
 
 auto in_memory_data_store::to_output_memory_stream(size_t off) {
@@ -312,7 +319,7 @@ future<> init_in_memory_file_store(size_t memory_reserve_in_mb) {
 
 static uint8_t* alloc_file_block() {
     if (free_file_blocks.empty()) {
-        throw std::bad_alloc();
+        return nullptr;
     }
     uint8_t* p = reinterpret_cast<uint8_t*>(&free_file_blocks.front());
     free_file_blocks.pop_front();
@@ -321,7 +328,9 @@ static uint8_t* alloc_file_block() {
 }
 
 static void free_file_block(uint8_t* p) {
-    used_memory -= in_memory_data_store::chunk_size;
-    free_file_blocks.push_front(*reinterpret_cast<file_block*>(p));
+    if (p) {
+        used_memory -= in_memory_data_store::chunk_size;
+        free_file_blocks.push_front(*reinterpret_cast<file_block*>(p));
+    }
 }
 
