@@ -106,6 +106,9 @@ public:
                 _buffer.reserve(_buffer.size() * 2 + 1);
             }
         }
+        const circular_buffer<mutation_fragment>& buffer() const {
+            return _buffer;
+        }
     private:
         static flat_mutation_reader reverse_partitions(flat_mutation_reader::impl&);
     public:
@@ -125,12 +128,18 @@ public:
             return mf;
         }
 
-        future<mutation_fragment_opt> operator()() {
+        void unpop_mutation_fragment(mutation_fragment mf) {
+            const auto memory_usage = mf.memory_usage(*_schema);
+            _buffer.emplace_front(std::move(mf));
+            _buffer_size += memory_usage;
+        }
+
+        future<mutation_fragment_opt> operator()(db::timeout_clock::time_point timeout) {
             if (is_buffer_empty()) {
                 if (is_end_of_stream()) {
                     return make_ready_future<mutation_fragment_opt>();
                 }
-                return fill_buffer(db::no_timeout).then([this] { return operator()(); });
+                return fill_buffer(timeout).then([this, timeout] { return operator()(timeout); });
             }
             return make_ready_future<mutation_fragment_opt>(pop_mutation_fragment());
         }
@@ -300,8 +309,8 @@ public:
 
     flat_mutation_reader(std::unique_ptr<impl> impl) noexcept : _impl(std::move(impl)) {}
 
-    future<mutation_fragment_opt> operator()() {
-        return _impl->operator()();
+    future<mutation_fragment_opt> operator()(db::timeout_clock::time_point timeout = db::no_timeout) {
+        return _impl->operator()(timeout);
     }
 
     template <typename Consumer>
@@ -384,6 +393,7 @@ public:
     bool is_buffer_empty() const { return _impl->is_buffer_empty(); }
     bool is_buffer_full() const { return _impl->is_buffer_full(); }
     mutation_fragment pop_mutation_fragment() { return _impl->pop_mutation_fragment(); }
+    void unpop_mutation_fragment(mutation_fragment mf) { _impl->unpop_mutation_fragment(std::move(mf)); }
     const schema_ptr& schema() const { return _impl->_schema; }
     void set_max_buffer_size(size_t size) {
         _impl->max_buffer_size_in_bytes = size;

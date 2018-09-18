@@ -589,6 +589,566 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_skip_using_index_rows) {
     }
 }
 
+/*
+ * Test file are generated using the following script (Python):
+     session.execute("""
+        CREATE TABLE IF NOT EXISTS filtering_and_ff_rt (
+            pk int,
+            ck1 int,
+            ck2 int,
+            st int static,
+            rc int,
+            PRIMARY KEY (pk, ck1, ck2)
+        )
+        WITH compression = { 'sstable_compression' : '' }
+        AND caching = {'keys': 'NONE', 'rows_per_partition': 'NONE'}
+        """)
+
+    query_static = SimpleStatement("""
+        INSERT INTO filtering_and_ff_rt (pk, st)
+        VALUES (%s, %s) USING TIMESTAMP 1525385507816568
+	""", consistency_level=ConsistencyLevel.ONE)
+
+    query = SimpleStatement("""
+        INSERT INTO filtering_and_ff_rt (pk, ck1, ck2, rc)
+        VALUES (%s, %s, %s, %s) USING TIMESTAMP 1525385507816568
+        """, consistency_level=ConsistencyLevel.ONE)
+
+    query_del = SimpleStatement("""
+	DELETE FROM filtering_and_ff_rt USING TIMESTAMP 1525385507816568
+	WHERE pk = %s AND ck1 >= %s AND ck1 <= %s
+        """, consistency_level=ConsistencyLevel.ONE)
+
+    session.execute(query_static, [1, 777])
+
+    for i in range(1, 1024 * 128, 3):
+        log.info("inserting row %d" % i)
+        session.execute(query, [1, i, i, i])
+	session.execute(query_del, [1, i + 1, i + 2])
+
+    session.execute(query_static, [2, 999])
+
+    for i in range(1, 1024 * 128, 3):
+        log.info("inserting row %d" % i)
+        session.execute(query, [2, i, i, i])
+	session.execute(query_del, [2, i + 1, i + 2])
+ *
+ * Bounds of promoted index blocks:
+ * (1, 1) - (4469) <incl_start>, end_open_marker set
+ * (4470) <incl_end> - (8938, 8938), end_open_marker empty
+ * (8939) <incl_start> - (13407) <incl_end>, end_open_marker empty
+ * (13408, 13408) - (17876) <incl_start>, end_open_marker set
+ * (17877) <incl_end> - (22345, 22345), end_open_marker empty
+ * ...
+ */
+static thread_local const sstring UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_PATH =
+    "tests/sstables/3.x/uncompressed/filtering_and_forwarding_range_tombstones";
+static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA =
+    schema_builder("test_ks", "test_table")
+        .with_column("pk", int32_type, column_kind::partition_key)
+        .with_column("ck1", int32_type, column_kind::clustering_key)
+        .with_column("ck2", int32_type, column_kind::clustering_key)
+        .with_column("st", int32_type, column_kind::static_column)
+        .with_column("rc", int32_type)
+        .build();
+
+SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_range_tombstones_read) {
+    sstable_assertions sst(UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA,
+                           UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_PATH);
+    sst.load();
+
+    auto to_pkey = [] (int key) {
+        auto bytes = int32_type->decompose(int32_t(key));
+        auto pk = partition_key::from_single_value(*UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA, bytes);
+        return dht::global_partitioner().decorate_key(*UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA, pk);
+    };
+    auto to_non_full_ck = [] (int ck) {
+        return clustering_key_prefix::from_single_value(
+                *UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA,
+                int32_type->decompose(ck));
+    };
+    auto to_full_ck = [] (int ck1, int ck2) {
+        return clustering_key::from_deeply_exploded(
+                *UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA,
+                { data_value{ck1}, data_value{ck2} });
+    };
+    auto make_tombstone = [] (int64_t ts, int32_t tp) {
+        return tombstone{api::timestamp_type{ts}, gc_clock::time_point(gc_clock::duration(tp))};
+    };
+    auto make_range_tombstone = [] (clustering_key_prefix start, clustering_key_prefix end, tombstone t) {
+        return range_tombstone {
+            std::move(start),
+            bound_kind::incl_start,
+            std::move(end),
+            bound_kind::incl_end,
+            t};
+    };
+
+    auto make_clustering_range = [] (clustering_key_prefix&& start, clustering_key_prefix&& end) {
+        return query::clustering_range::make(
+            query::clustering_range::bound(std::move(start), true),
+            query::clustering_range::bound(std::move(end), true));
+    };
+
+    auto make_assertions = [] (flat_mutation_reader rd) {
+        rd.set_max_buffer_size(1);
+        return assert_that(std::move(rd));
+    };
+
+    std::array<int32_t, 2> static_row_values {777, 999};
+    auto st_cdef = UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA->get_column_definition(to_bytes("st"));
+    BOOST_REQUIRE(st_cdef);
+    auto rc_cdef = UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA->get_column_definition(to_bytes("rc"));
+    BOOST_REQUIRE(rc_cdef);
+
+    auto to_expected = [rc_cdef] (int val) {
+        return std::vector<flat_reader_assertions::expected_column>{{rc_cdef, int32_type->decompose(int32_t(val))}};
+    };
+
+    // Sequential read
+    {
+        auto r = make_assertions(sst.read_rows_flat());
+        tombstone tomb = make_tombstone(1525385507816568, 1534898526);
+        for (auto pkey : boost::irange(1, 3)) {
+            r.produces_partition_start(to_pkey(pkey))
+            .produces_static_row({{st_cdef, int32_type->decompose(static_row_values[pkey - 1])}});
+
+            for (auto idx : boost::irange(1, 1024 * 128, 3)) {
+                range_tombstone rt =
+                        make_range_tombstone( to_non_full_ck(idx + 1), to_non_full_ck(idx + 2), tomb);
+
+                r.produces_row(to_full_ck(idx, idx), to_expected(idx))
+                .produces_range_tombstone(rt);
+            }
+            r.produces_partition_end();
+        }
+        r.produces_end_of_stream();
+    }
+
+    // forwarding read
+    {
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range,
+                                           UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA->full_slice(),
+                                           default_priority_class(),
+                                           no_resource_tracking(),
+                                           streamed_mutation::forwarding::yes));
+        std::array<int32_t, 2> rt_deletion_times {1534898600, 1534899416};
+        for (auto pkey : boost::irange(1, 3)) {
+            const tombstone tomb = make_tombstone(1525385507816568, rt_deletion_times[pkey - 1]);
+            r.produces_partition_start(to_pkey(pkey));
+            // First, fast-forward to a block that start with an end open marker set
+            // and step over it so that it doesn't get emitted
+            r.fast_forward_to(to_full_ck(4471, 4471), to_full_ck(4653, 4653));
+            for (const auto idx : boost::irange(4471, 4652, 3)) {
+                r.produces_row(to_full_ck(idx, idx), to_expected(idx))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(idx + 1), to_non_full_ck(idx + 2), tomb));
+            }
+            r.produces_end_of_stream();
+
+            // We have a range tombstone start read, now make sure we reset it properly
+            // when we fast-forward to a block that doesn't have an end open marker.
+            {
+                r.fast_forward_to(to_full_ck(13413, 13413), to_non_full_ck(13417));
+                auto slice = make_clustering_range(to_non_full_ck(13412), to_non_full_ck(13417));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13412), to_non_full_ck(13413), tomb),
+                    {slice})
+                .produces_row(to_full_ck(13414, 13414), to_expected(13414))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13415), to_non_full_ck(13416), tomb),
+                    {slice})
+                .produces_end_of_stream();
+            }
+
+            {
+                r.fast_forward_to(to_non_full_ck(13417), to_non_full_ck(13420));
+                auto slice = make_clustering_range(to_non_full_ck(13419), to_non_full_ck(13420));
+                r.produces_row(to_full_ck(13417, 13417), to_expected(13417))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13418), to_non_full_ck(13419), tomb),
+                    {slice})
+                .produces_end_of_stream();
+
+                r.fast_forward_to(to_non_full_ck(13420), to_full_ck(13420, 13421));
+                r.produces_row(to_full_ck(13420, 13420), to_expected(13420))
+                        .produces_end_of_stream();
+
+                r.fast_forward_to(to_non_full_ck(13423), to_full_ck(13423, 13424));
+                r.produces_row(to_full_ck(13423, 13423), to_expected(13423))
+                        .produces_end_of_stream();
+            }
+
+            {
+                r.fast_forward_to(to_non_full_ck(13425), to_non_full_ck(13426));
+                auto slice = make_clustering_range(to_non_full_ck(13425), to_non_full_ck(13426));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13424), to_non_full_ck(13425), tomb),
+                    {slice})
+                .produces_end_of_stream();
+            }
+
+            r.fast_forward_to(to_full_ck(13429, 13428), to_full_ck(13429, 13429));
+            r.produces_end_of_stream();
+            r.next_partition();
+        }
+        r.produces_end_of_stream();
+    }
+
+    // filtering read
+    {
+        auto slice = partition_slice_builder(*UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA)
+            .with_range(query::clustering_range::make({to_full_ck(4471, 4471), true}, {to_full_ck(4653, 4653), false}))
+            .with_range(query::clustering_range::make({to_full_ck(13413, 13413), true}, {to_non_full_ck(13417), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13417), true}, {to_non_full_ck(13420), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13420), true}, {to_full_ck(13420, 13421), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13423), true}, {to_full_ck(13423, 13424), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13425), true}, {to_non_full_ck(13426), false}))
+            .with_range(query::clustering_range::make({to_full_ck(13429, 13428), true}, {to_full_ck(13429, 13429), false}))
+            .build();
+
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range, slice));
+        std::array<int32_t, 2> rt_deletion_times {1534898600, 1534899416};
+        for (auto pkey : boost::irange(1, 3)) {
+            const tombstone tomb = make_tombstone(1525385507816568, rt_deletion_times[pkey - 1]);
+            r.produces_partition_start(to_pkey(pkey))
+            .produces_static_row({{st_cdef, int32_type->decompose(static_row_values[pkey - 1])}});
+            for (const auto idx : boost::irange(4471, 4652, 3)) {
+                r.produces_row(to_full_ck(idx, idx), to_expected(idx))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(idx + 1), to_non_full_ck(idx + 2), tomb));
+            }
+
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13412), to_non_full_ck(13417));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13412), to_non_full_ck(13413), tomb),
+                    {slice})
+                .produces_row(to_full_ck(13414, 13414), to_expected(13414))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13415), to_non_full_ck(13416), tomb),
+                    {slice});
+            }
+
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13419), to_non_full_ck(13420));
+                r.produces_row(to_full_ck(13417, 13417), to_expected(13417))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13418), to_non_full_ck(13419), tomb),
+                    {slice})
+                .produces_row(to_full_ck(13420, 13420), to_expected(13420))
+                .produces_row(to_full_ck(13423, 13423), to_expected(13423));
+            }
+
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13425), to_non_full_ck(13426));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13424), to_non_full_ck(13425), tomb),
+                    {slice});
+            }
+
+            r.next_partition();
+        }
+        r.produces_end_of_stream();
+    }
+
+    // filtering and forwarding read
+    {
+        auto slice = partition_slice_builder(*UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA)
+            .with_range(query::clustering_range::make({to_full_ck(4471, 4471), true}, {to_full_ck(4653, 4653), false}))
+            .with_range(query::clustering_range::make({to_full_ck(13413, 13413), true}, {to_non_full_ck(13417), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13417), true}, {to_non_full_ck(13420), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13420), true}, {to_full_ck(13420, 13421), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13423), true}, {to_full_ck(13423, 13424), false}))
+            .with_range(query::clustering_range::make({to_non_full_ck(13425), true}, {to_non_full_ck(13426), false}))
+            .with_range(query::clustering_range::make({to_full_ck(13429, 13428), true}, {to_full_ck(13429, 13429), false}))
+            .build();
+
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range,
+                                                      slice,
+                                                      default_priority_class(),
+                                                      no_resource_tracking(),
+                                                      streamed_mutation::forwarding::yes));
+
+        std::array<int32_t, 2> rt_deletion_times {1534898600, 1534899416};
+        for (auto pkey : boost::irange(1, 3)) {
+            const tombstone tomb = make_tombstone(1525385507816568, rt_deletion_times[pkey - 1]);
+            r.produces_partition_start(to_pkey(pkey))
+            .produces_static_row({{st_cdef, int32_type->decompose(static_row_values[pkey - 1])}})
+            .produces_end_of_stream();
+
+            r.fast_forward_to(to_non_full_ck(3000), to_non_full_ck(6000));
+            for (const auto idx : boost::irange(4471, 4652, 3)) {
+                r.produces_row(to_full_ck(idx, idx), to_expected(idx))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(idx + 1), to_non_full_ck(idx + 2), tomb));
+            }
+            r.produces_end_of_stream();
+
+            r.fast_forward_to(to_non_full_ck(13000), to_non_full_ck(15000));
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13412), to_non_full_ck(13417));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13412), to_non_full_ck(13413), tomb),
+                    {slice})
+                .produces_row(to_full_ck(13414, 13414), to_expected(13414))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13415), to_non_full_ck(13416), tomb),
+                    {slice});
+            }
+
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13419), to_non_full_ck(13420));
+                r.produces_row(to_full_ck(13417, 13417), to_expected(13417))
+                .produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13418), to_non_full_ck(13419), tomb),
+                    {slice})
+                .produces_row(to_full_ck(13420, 13420), to_expected(13420))
+                .produces_row(to_full_ck(13423, 13423), to_expected(13423));
+            }
+
+            {
+                auto slice = make_clustering_range(to_non_full_ck(13425), to_non_full_ck(13426));
+                r.produces_range_tombstone(
+                    make_range_tombstone(to_non_full_ck(13424), to_non_full_ck(13425), tomb),
+                    {slice});
+            }
+
+            r.produces_end_of_stream();
+            r.next_partition();
+        }
+        r.produces_end_of_stream();
+    }
+}
+
+/*
+ * Test file are generated using the following script (Python):
+    session.execute("""
+        CREATE TABLE IF NOT EXISTS slicing_interleaved_rows_and_rts (
+            pk int,
+            ck1 int,
+            ck2 int,
+            st int static,
+            rc int,
+            PRIMARY KEY (pk, ck1, ck2)
+        )
+        WITH compression = { 'sstable_compression' : '' }
+        AND caching = {'keys': 'NONE', 'rows_per_partition': 'NONE'}
+        """)
+
+    query_static = SimpleStatement("""
+        INSERT INTO slicing_interleaved_rows_and_rts (pk, st)
+        VALUES (%s, %s) USING TIMESTAMP 1525385507816578
+	""", consistency_level=ConsistencyLevel.ONE)
+
+    query = SimpleStatement("""
+        INSERT INTO slicing_interleaved_rows_and_rts (pk, ck1, ck2, rc)
+        VALUES (%s, %s, %s, %s) USING TIMESTAMP 1525385507816578
+        """, consistency_level=ConsistencyLevel.ONE)
+
+    query_del = SimpleStatement("""
+	DELETE FROM slicing_interleaved_rows_and_rts USING TIMESTAMP 1525385507816568
+	WHERE pk = %s AND ck1 >= %s AND ck1 <= %s
+        """, consistency_level=ConsistencyLevel.ONE)
+
+    session.execute(query_static, [1, 555])
+
+    for i in range(1, 1024 * 128, 5):
+	session.execute(query_del, [1, i, i + 4])
+
+    for i in range(1, 1024 * 128, 5):
+        session.execute(query, [1, i + 3, i + 3, i + 3])
+ *
+ * Bounds of promoted index blocks:
+ * (1) <incl_start> - (7449, 7449), end_open_marker set
+ * (7450) <incl_end> - (14896) <incl_start>, end_open_marker set
+ * (14899, 14899) - (22345) <incl_end>, end_open_marker empty
+ * (22346) <incl_start> - (29794, 29794), end_open_marker set
+ * (29795) <incl_end> - (37241) <incl_start>, end_open_marker set
+ * ...
+ */
+static thread_local const sstring UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_PATH =
+    "tests/sstables/3.x/uncompressed/slicing_interleaved_rows_and_rts";
+static thread_local const schema_ptr UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA =
+    schema_builder("test_ks", "test_table")
+        .with_column("pk", int32_type, column_kind::partition_key)
+        .with_column("ck1", int32_type, column_kind::clustering_key)
+        .with_column("ck2", int32_type, column_kind::clustering_key)
+        .with_column("st", int32_type, column_kind::static_column)
+        .with_column("rc", int32_type)
+        .build();
+
+SEASTAR_THREAD_TEST_CASE(test_uncompressed_slicing_interleaved_rows_and_rts_read) {
+    sstable_assertions sst(UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA,
+                           UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_PATH);
+    sst.load();
+
+    auto to_pkey = [] (int key) {
+        auto bytes = int32_type->decompose(int32_t(key));
+        auto pk = partition_key::from_single_value(*UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA, bytes);
+        return dht::global_partitioner().decorate_key(*UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA, pk);
+    };
+    auto to_non_full_ck = [] (int ck) {
+        return clustering_key_prefix::from_single_value(
+                *UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA,
+                int32_type->decompose(ck));
+    };
+    auto to_full_ck = [] (int ck1, int ck2) {
+        return clustering_key::from_deeply_exploded(
+                *UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA,
+                { data_value{ck1}, data_value{ck2} });
+    };
+    auto make_tombstone = [] (int64_t ts, int32_t tp) {
+        return tombstone{api::timestamp_type{ts}, gc_clock::time_point(gc_clock::duration(tp))};
+    };
+    auto make_range_tombstone = [] (clustering_key_prefix start, clustering_key_prefix end, tombstone t) {
+        return range_tombstone {
+            std::move(start),
+            bound_kind::incl_start,
+            std::move(end),
+            bound_kind::incl_end,
+            t};
+    };
+
+    auto make_clustering_range = [] (clustering_key_prefix&& start, clustering_key_prefix&& end) {
+        return query::clustering_range::make(
+            query::clustering_range::bound(std::move(start), true),
+            query::clustering_range::bound(std::move(end), false));
+    };
+
+    auto make_assertions = [] (flat_mutation_reader rd) {
+        rd.set_max_buffer_size(1);
+        return assert_that(std::move(rd));
+    };
+
+    auto st_cdef = UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA->get_column_definition(to_bytes("st"));
+    BOOST_REQUIRE(st_cdef);
+    auto rc_cdef = UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA->get_column_definition(to_bytes("rc"));
+    BOOST_REQUIRE(rc_cdef);
+
+    auto to_expected = [rc_cdef] (int val) {
+        return std::vector<flat_reader_assertions::expected_column>{{rc_cdef, int32_type->decompose(int32_t(val))}};
+    };
+
+    // Sequential read
+    {
+        auto r = make_assertions(sst.read_rows_flat());
+        tombstone tomb = make_tombstone(1525385507816568, 1534898526);
+        r.produces_partition_start(to_pkey(1))
+        .produces_static_row({{st_cdef, int32_type->decompose(int32_t(555))}});
+
+        for (auto idx : boost::irange(1, 1024 * 128, 5)) {
+            range_tombstone rt1 =
+                    make_range_tombstone(to_non_full_ck(idx), to_full_ck(idx + 3, idx + 3), tomb);
+            range_tombstone rt2 =
+                    make_range_tombstone(to_full_ck(idx + 3, idx + 3), to_non_full_ck(idx + 4), tomb);
+
+            r.produces_range_tombstone(rt1)
+            .produces_row(to_full_ck(idx + 3, idx + 3), to_expected(idx + 3))
+            .produces_range_tombstone(rt2);
+        }
+        r.produces_partition_end()
+        .produces_end_of_stream();
+    }
+
+    // forwarding read
+    {
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range,
+                                           UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA->full_slice(),
+                                           default_priority_class(),
+                                           no_resource_tracking(),
+                                           streamed_mutation::forwarding::yes));
+
+        const tombstone tomb = make_tombstone(1525385507816568, 1535592075);
+        r.produces_partition_start(to_pkey(1));
+        r.fast_forward_to(to_full_ck(7460, 7461), to_full_ck(7500, 7501));
+        {
+            auto clustering_range = make_clustering_range(to_non_full_ck(7000), to_non_full_ck(8000));
+
+            range_tombstone rt =
+                    make_range_tombstone(to_full_ck(7459, 7459), to_non_full_ck(7460), tomb);
+            r.produces_range_tombstone(rt, {clustering_range});
+
+            for (auto idx : boost::irange(7461, 7501, 5)) {
+                range_tombstone rt1 =
+                        make_range_tombstone(to_non_full_ck(idx), to_full_ck(idx + 3, idx + 3), tomb);
+                range_tombstone rt2 =
+                        make_range_tombstone(to_full_ck(idx + 3, idx + 3), to_non_full_ck(idx + 4), tomb);
+
+                r.produces_range_tombstone(rt1, {clustering_range})
+                .produces_row(to_full_ck(idx + 3, idx + 3), to_expected(idx + 3))
+                .produces_range_tombstone(rt2, {clustering_range});
+            }
+            r.produces_end_of_stream();
+        }
+    }
+
+    // filtering read
+    {
+        auto slice = partition_slice_builder(*UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA)
+            .with_range(make_clustering_range(to_full_ck(7460, 7461), to_full_ck(7500, 7501)))
+            .build();
+
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range, slice));
+        const tombstone tomb = make_tombstone(1525385507816568, 1535592075);
+
+        r.produces_partition_start(to_pkey(1))
+        .produces_static_row({{st_cdef, int32_type->decompose(int32_t(555))}});
+
+        auto clustering_range = make_clustering_range(to_non_full_ck(7000), to_non_full_ck(8000));
+        range_tombstone rt =
+                make_range_tombstone(to_full_ck(7459, 7459), to_non_full_ck(7460), tomb);
+
+        r.produces_range_tombstone(rt, {clustering_range});
+
+        for (auto idx : boost::irange(7461, 7501, 5)) {
+            range_tombstone rt1 =
+                    make_range_tombstone(to_non_full_ck(idx), to_full_ck(idx + 3, idx + 3), tomb);
+            range_tombstone rt2 =
+                    make_range_tombstone(to_full_ck(idx + 3, idx + 3), to_non_full_ck(idx + 4), tomb);
+
+            r.produces_range_tombstone(rt1, {clustering_range})
+            .produces_row(to_full_ck(idx + 3, idx + 3), to_expected(idx + 3))
+            .produces_range_tombstone(rt2, {clustering_range});
+        }
+        r.produces_partition_end()
+        .produces_end_of_stream();
+    }
+
+    // filtering and forwarding read
+    {
+        auto slice = partition_slice_builder(*UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA)
+            .with_range(make_clustering_range(to_full_ck(7470, 7471), to_full_ck(7500, 7501)))
+            .build();
+
+        auto r = make_assertions(sst.read_range_rows_flat(query::full_partition_range,
+                                                      slice,
+                                                      default_priority_class(),
+                                                      no_resource_tracking(),
+                                                      streamed_mutation::forwarding::yes));
+        const tombstone tomb = make_tombstone(1525385507816568, 1535592075);
+        r.produces_partition_start(to_pkey(1));
+        r.fast_forward_to(to_full_ck(7460, 7461), to_full_ck(7600, 7601));
+
+        auto clustering_range = make_clustering_range(to_non_full_ck(7000), to_non_full_ck(8000));
+        range_tombstone rt =
+                make_range_tombstone(to_full_ck(7469, 7469), to_non_full_ck(7470), tomb);
+
+        r.produces_range_tombstone(rt, {clustering_range});
+
+        for (auto idx : boost::irange(7471, 7501, 5)) {
+            range_tombstone rt1 =
+                    make_range_tombstone(to_non_full_ck(idx), to_full_ck(idx + 3, idx + 3), tomb);
+            range_tombstone rt2 =
+                    make_range_tombstone(to_full_ck(idx + 3, idx + 3), to_non_full_ck(idx + 4), tomb);
+
+            r.produces_range_tombstone(rt1, {clustering_range})
+            .produces_row(to_full_ck(idx + 3, idx + 3), to_expected(idx + 3))
+            .produces_range_tombstone(rt2, {clustering_range});
+        }
+        r.produces_end_of_stream();
+    }
+}
 
 // Following tests run on files in tests/sstables/3.x/uncompressed/static_row
 // They were created using following CQL statements:
@@ -2429,24 +2989,28 @@ static void compare_files(sstring filename1, sstring filename2) {
     BOOST_CHECK_EQUAL_COLLECTIONS(b1, e1, b2, e2);
 }
 
-static void compare_sstables(tmpdir&& tmp, sstring table_name, bool compressed = false) {
+static sstring get_write_test_path(sstring table_name, bool compressed = false) {
+    return format("tests/sstables/3.x/{}compressed/write_{}", compressed ? "" : "un", table_name);
+}
+
+static void compare_sstables(sstring result_path, sstring table_name, bool compressed = false) {
     for (auto file_type : {component_type::Data,
                            component_type::Index,
                            component_type::Statistics,
                            component_type::Digest,
                            component_type::Filter}) {
         auto orig_filename =
-                sstable::filename(format("tests/sstables/3.x/{}compressed/write_{}", compressed ? "" : "un",table_name),
+                sstable::filename(get_write_test_path(table_name, compressed),
                                   "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
         auto result_filename =
-                sstable::filename(tmp.path, "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
+                sstable::filename(result_path, "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
         compare_files(orig_filename, result_filename);
     }
 }
 
 // Can be useful if we want, e.g., to avoid range tombstones de-overlapping
 // that otherwise takes place for RTs put into one and the same memtable
-static void write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1, lw_shared_ptr<memtable> mt2,
+static tmpdir write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1, lw_shared_ptr<memtable> mt2,
                                        sstring table_name, bool compressed = false) {
     static db::nop_large_partition_handler nop_lp_handler;
     storage_service_for_tests ssft;
@@ -2457,15 +3021,29 @@ static void write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1
     sst->write_components(make_combined_reader(s,
         mt1->make_flat_reader(s),
         mt2->make_flat_reader(s)), 1, s, cfg, mt1->get_stats()).get();
-    compare_sstables(std::move(tmp), table_name, compressed);
+    compare_sstables(tmp.path, table_name, compressed);
+    return tmp;
 }
 
-static void write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt, sstring table_name, bool compressed = false) {
+static tmpdir write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt, sstring table_name, bool compressed = false) {
     storage_service_for_tests ssft;
     tmpdir tmp;
     auto sst = sstables::test::make_test_sstable(4096, s, tmp.path, 1, sstables::sstable_version_types::mc, sstable::format_types::big);
     write_memtable_to_sstable_for_test(*mt, sst).get();
-    compare_sstables(std::move(tmp), table_name, compressed);
+    compare_sstables(tmp.path, table_name, compressed);
+    return tmp;
+}
+
+static void validate_read(schema_ptr s, sstring path, std::vector<mutation> mutations) {
+    sstable_assertions sst(s, path);
+    sst.load();
+
+    auto assertions = assert_that(sst.read_rows_flat());
+    for (const auto &mut : mutations) {
+        assertions.produces(mut);
+    }
+
+    assertions.produces_end_of_stream();
 }
 
 static constexpr api::timestamp_type write_timestamp = 1525385507816568;
@@ -2489,9 +3067,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_row) {
     mutation mut{s, key};
     mut.set_static_cell("st1", data_value{1135}, write_timestamp);
     mut.set_static_cell("st2", data_value{"hello"}, write_timestamp);
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_composite_partition_key) {
@@ -2517,9 +3096,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_partition_key) {
     mut.partition().apply_insert(*s, ckey, write_timestamp);
     mut.set_cell(ckey, "f", data_value{3}, write_timestamp);
     mut.set_cell(ckey, "g", data_value{"world"}, write_timestamp);
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_composite_clustering_key) {
@@ -2544,9 +3124,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_clustering_key) {
     mut.partition().apply_insert(*s, ckey, write_timestamp);
     mut.set_cell(ckey, "e", data_value{3}, write_timestamp);
     mut.set_cell(ckey, "f", data_value{"world"}, write_timestamp);
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_wide_partitions) {
@@ -2562,37 +3143,36 @@ SEASTAR_THREAD_TEST_CASE(test_write_wide_partitions) {
 
     lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
     api::timestamp_type ts = write_timestamp;
+    sstring ck_base(1024, 'a');
+    sstring rc_base(1024, 'b');
+    auto key1 = make_dkey(s, {to_bytes("key1")});
+    mutation mut1{s, key1};
     {
-        auto key = make_dkey(s, {to_bytes("key1")});
-        mutation mut{s, key};
-        mut.set_static_cell("st", data_value{"hello"}, ts);
-        sstring ck_base(1024, 'a');
-        sstring rc_base(1024, 'b');
+        mut1.set_static_cell("st", data_value{"hello"}, ts);
         for (auto idx: boost::irange(0, 1024)) {
             clustering_key ckey = clustering_key::from_deeply_exploded(*s, {format("{}{}", ck_base, idx)});
-            mut.partition().apply_insert(*s, ckey, ts);
-            mut.set_cell(ckey, "rc", data_value{format("{}{}", rc_base, idx)}, ts);
+            mut1.partition().apply_insert(*s, ckey, ts);
+            mut1.set_cell(ckey, "rc", data_value{format("{}{}", rc_base, idx)}, ts);
             seastar::thread::yield();
         }
-        mt->apply(std::move(mut));
+        mt->apply(mut1);
         ts += 10;
     }
+    auto key2 = make_dkey(s, {to_bytes("key2")});
+    mutation mut2{s, key2};
     {
-        auto key = make_dkey(s, {to_bytes("key2")});
-        mutation mut{s, key};
-        mut.set_static_cell("st", data_value{"goodbye"}, ts);
-        sstring ck_base(1024, 'a');
-        sstring rc_base(1024, 'b');
+        mut2.set_static_cell("st", data_value{"goodbye"}, ts);
         for (auto idx: boost::irange(0, 1024)) {
             clustering_key ckey = clustering_key::from_deeply_exploded(*s, {format("{}{}", ck_base, idx)});
-            mut.partition().apply_insert(*s, ckey, ts);
-            mut.set_cell(ckey, "rc", data_value{format("{}{}", rc_base, idx)}, ts);
+            mut2.partition().apply_insert(*s, ckey, ts);
+            mut2.set_cell(ckey, "rc", data_value{format("{}{}", rc_base, idx)}, ts);
             seastar::thread::yield();
         }
-        mt->apply(std::move(mut));
+        mt->apply(mut2);
     }
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut1, mut2});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_ttled_row) {
@@ -2612,11 +3192,19 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_row) {
     mutation mut{s, key};
     clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 2 });
     gc_clock::duration ttl{1135};
-    mut.partition().apply_insert(*s, ckey, write_timestamp, ttl, write_time_point + ttl);
-    mut.set_cell(ckey, "rc", data_value{3}, write_timestamp);
-    mt->apply(std::move(mut));
 
-    write_and_compare_sstables(s, mt, table_name);
+    auto column_def = s->get_column_definition("rc");
+    if (!column_def) {
+        throw std::runtime_error("no column definition found");
+    }
+    mut.partition().apply_insert(*s, ckey, write_timestamp, ttl, write_time_point + ttl);
+    bytes value = column_def->type->decompose(data_value{3});
+    auto cell = atomic_cell::make_live(*column_def->type, write_timestamp, value, write_time_point + ttl, ttl);
+    mut.set_clustered_cell(ckey, *column_def, std::move(cell));
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_ttled_column) {
@@ -2642,9 +3230,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_column) {
     bytes value = column_def->type->decompose(data_value{1});
     auto cell = atomic_cell::make_live(*column_def->type, write_timestamp, value, write_time_point + ttl, ttl);
     mut.set_clustered_cell(clustering_key::make_empty(), *column_def, std::move(cell));
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_deleted_column) {
@@ -2687,9 +3276,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_deleted_row) {
     mutation mut{s, key};
     clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 2 });
     mut.partition().apply_delete(*s, ckey, tombstone{write_timestamp, write_time_point});
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_collection_wide_update) {
@@ -2715,9 +3305,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_wide_update) {
     set_values.cells.emplace_back(int32_type->decompose(3), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
 
     mut.set_clustered_cell(clustering_key::make_empty(), *s->get_column_definition("col"), set_of_ints_type->serialize_mutation_form(set_values));
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_collection_incremental_update) {
@@ -2740,9 +3331,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_incremental_update) {
     set_values.cells.emplace_back(int32_type->decompose(2), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
 
     mut.set_clustered_cell(clustering_key::make_empty(), *s->get_column_definition("col"), set_of_ints_type->serialize_mutation_form(set_values));
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_multiple_partitions) {
@@ -2762,18 +3354,20 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_partitions) {
     // INSERT INTO multiple_partitions (pk, rc1) VALUES (1, 10);
     // INSERT INTO multiple_partitions (pk, rc2) VALUES (2, 20);
     // INSERT INTO multiple_partitions (pk, rc3) VALUES (3, 30);
+    std::vector<mutation> muts;
     for (auto i : boost::irange(1, 4)) {
         auto key = partition_key::from_deeply_exploded(*s, {i});
-        mutation mut{s, key};
+        muts.emplace_back(s, key);
 
         clustering_key ckey = clustering_key::make_empty();
-        mut.partition().apply_insert(*s, ckey, ts);
-        mut.set_cell(ckey, to_bytes(format("rc{}", i)), data_value{i * 10}, ts);
-        mt->apply(std::move(mut));
+        muts.back().partition().apply_insert(*s, ckey, ts);
+        muts.back().set_cell(ckey, to_bytes(format("rc{}", i)), data_value{i * 10}, ts);
+        mt->apply(muts.back());
         ts += 10;
     }
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, muts);
 }
 
 static void test_write_many_partitions(sstring table_name, tombstone partition_tomb, compression_parameters cp) {
@@ -2785,16 +3379,21 @@ static void test_write_many_partitions(sstring table_name, tombstone partition_t
 
     lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
 
+    std::vector<mutation> muts;
     for (auto i : boost::irange(0, 65536)) {
         auto key = partition_key::from_deeply_exploded(*s, {i});
-        mutation mut{s, key};
+        muts.emplace_back(s, key);
         if (partition_tomb) {
-            mut.partition().apply(partition_tomb);
+            muts.back().partition().apply(partition_tomb);
         }
-        mt->apply(std::move(mut));
+        mt->apply(muts.back());
     }
 
-    write_and_compare_sstables(s, mt, table_name, cp != compression_parameters{});
+    bool compressed = cp != compression_parameters{};
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name, compressed);
+
+    boost::sort(muts, mutation_decorated_key_less_comparator());
+    validate_read(s, tmp.path, muts);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_many_live_partitions) {
@@ -2860,8 +3459,9 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_rows) {
         ts += 10;
     }
 
-    mt->apply(std::move(mut));
-    write_and_compare_sstables(s, mt, table_name);
+    mt->apply(mut);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 // Information on missing columns is serialized differently when the number of columns is > 64.
@@ -2892,20 +3492,21 @@ SEASTAR_THREAD_TEST_CASE(test_write_missing_columns_large_set) {
         for (auto idx: boost::irange(1, 63)) {
             mut.set_cell(ckey, to_bytes(format("rc{}", idx)), data_value{idx}, ts);
         }
-        mt->apply(std::move(mut));
     }
     ts += 10;
+
     // INSERT INTO missing_columns_large_set (pk, ck, rc63, rc64) VALUES (0, 1, 63, 64);
     // For missing columns, the present ones will be written as majority are missing.
     {
         clustering_key ckey = clustering_key::from_deeply_exploded(*s, {1});
         mut.partition().apply_insert(*s, ckey, ts);
-        mut.set_cell(ckey, to_bytes(format("rc63", 63)), data_value{63}, ts);
-        mut.set_cell(ckey, to_bytes(format("rc64", 63)), data_value{64}, ts);
-        mt->apply(std::move(mut));
+        mut.set_cell(ckey, to_bytes("rc63"), data_value{63}, ts);
+        mut.set_cell(ckey, to_bytes("rc64"), data_value{64}, ts);
     }
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_counter_table) {
@@ -3020,9 +3621,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_different_types) {
     mut.set_cell(ckey, "varcharval", data_value{"привет"}, write_timestamp);
     mut.set_cell(ckey, "varintval", varint_type->deserialize(varint_type->from_string("123")), write_timestamp);
     mut.set_cell(ckey, "durationval", duration_type->deserialize(duration_type->from_string("1h4m48s20ms")), write_timestamp);
-    mt->apply(std::move(mut));
+    mt->apply(mut);
 
-    write_and_compare_sstables(s, mt, table_name);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_empty_clustering_values) {
@@ -3047,8 +3649,9 @@ SEASTAR_THREAD_TEST_CASE(test_write_empty_clustering_values) {
     mut.partition().apply_insert(*s, ckey, write_timestamp);
     mut.set_cell(ckey, "rc", data_value{2}, write_timestamp);
 
-    mt->apply(std::move(mut));
-    write_and_compare_sstables(s, mt, table_name);
+    mt->apply(mut);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_large_clustering_key) {
@@ -3080,8 +3683,9 @@ SEASTAR_THREAD_TEST_CASE(test_write_large_clustering_key) {
     mut.partition().apply_insert(*s, ckey, write_timestamp);
     mut.set_cell(ckey, "rc", data_value{1}, write_timestamp);
 
-    mt->apply(std::move(mut));
-    write_and_compare_sstables(s, mt, table_name);
+    mt->apply(mut);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_compact_table) {
@@ -3104,8 +3708,9 @@ SEASTAR_THREAD_TEST_CASE(test_write_compact_table) {
     clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
     mut.set_cell(ckey, "rc", data_value{1}, write_timestamp);
 
-    mt->apply(std::move(mut));
-    write_and_compare_sstables(s, mt, table_name);
+    mt->apply(mut);
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_user_defined_type_table) {
@@ -3132,8 +3737,10 @@ SEASTAR_THREAD_TEST_CASE(test_write_user_defined_type_table) {
     mut.partition().apply_insert(*s, ckey, write_timestamp);
     auto ut_val = make_user_value(ut, user_type_impl::native_type({int32_t(1703), true, sstring("Санкт-Петербург")}));
     mut.set_cell(ckey, "rc", ut_val, write_timestamp);
-    mt->apply(std::move(mut));
-    write_and_compare_sstables(s, mt, table_name);
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_simple_range_tombstone) {

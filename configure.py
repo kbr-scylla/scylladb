@@ -307,7 +307,7 @@ scylla_tests = [
     'tests/json_test',
     'tests/encrypted_file_test',
     'tests/auth_passwords_test',
-
+    'tests/multishard_mutation_query_test',
 ]
 
 perf_tests = [
@@ -652,6 +652,7 @@ scylla_core = (['database.cc',
                  'ent/encryption/kmip_key_provider.cc',
                  'in-memory-file-impl.cc',
                  'mirror-file-impl.cc',
+                 'multishard_mutation_query.cc',
                  ]
                 + [Antlr3Grammar('cql3/Cql.g')]
                 + [Thrift('interface/cassandra.thrift', 'Cassandra')]
