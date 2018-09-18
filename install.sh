@@ -98,7 +98,7 @@ install -m755 seastar/scripts/perftune.py -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/dpdk/usertools/dpdk-devbind.py -Dt "$rprefix"/lib/scylla/
 install -m755 build/release/scylla -Dt "$rprefix/bin"
 install -m755 build/release/iotune -Dt "$rprefix/bin"
-install -m755 dist/common/bin/scyllatop -Dt "$rprefix/bin"
+install -m755 dist/common/bin/* -Dt "$rprefix/bin"
 install -m644 dist/common/scripts/scylla_blocktune.py -Dt "$rprefix"/lib/scylla/
 install -m755 dist/common/scripts/scylla-blocktune -Dt "$rprefix"/lib/scylla/
 install -m755 scylla-housekeeping -Dt "$rprefix"/lib/scylla/
@@ -123,6 +123,7 @@ cp -r swagger-ui/dist "$rprefix"/lib/scylla/swagger-ui
 install -d -m755 -d "$rprefix"/lib/scylla/api
 cp -r api/api-doc "$rprefix"/lib/scylla/api
 cp -r tools/scyllatop "$rprefix"/lib/scylla/scyllatop
+cp -r tools/scyllarepair "$rprefix"/lib/scylla/scyllarepair
 cp -r scylla-housekeeping "$rprefix"/lib/scylla/scylla-housekeeping
 install -d "$rprefix"/sbin
 cp -P dist/common/sbin/* "$rprefix"/sbin
