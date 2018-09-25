@@ -748,7 +748,7 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::get_key_by_id(const id_type& 
 }
 
 kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::unordered_map<sstring, sstring>& map)
-    : kmip_host(ctxt, name, [&map] {
+    : kmip_host(ctxt, name, [&ctxt, &map] {
         host_options opts;
         map_wrapper<std::unordered_map<sstring, sstring>> m(map);
 
@@ -764,7 +764,7 @@ kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::u
         opts.truststore = m("truststore").value_or("");
 
         opts.username = m("username").value_or("");
-        opts.password = m("password").value_or("");
+        opts.password = ctxt.maybe_decrypt_config_value(m("password").value_or(""));
 
         return opts;
     }())
