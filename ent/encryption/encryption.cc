@@ -68,13 +68,29 @@ bytes base64_decode(const sstring& s, size_t off, size_t len) {
     len = std::min(len, s.size() - off);
     auto n = (len / 4) * 3;
     bytes b{bytes::initialized_later(), n};
-    auto r = EVP_DecodeBlock(reinterpret_cast<uint8_t*>(b.data()),
-                    reinterpret_cast<const uint8_t *>(s.data() + off),
+
+    // EVP_DecodeBlock does not handle padding well (i.e. it returns
+    // data with actual padding. This is not what we want, since
+    // we need to allow zeros in data.
+    // Must thus do decoding the hard way...
+
+    std::unique_ptr<EVP_ENCODE_CTX, void (*)(EVP_ENCODE_CTX*)> ctxt(EVP_ENCODE_CTX_new(), &EVP_ENCODE_CTX_free);
+
+    ::EVP_DecodeInit(ctxt.get());
+
+    int outl = 0;
+    auto r = ::EVP_DecodeUpdate(ctxt.get(), reinterpret_cast<uint8_t*>(b.data()), &outl, reinterpret_cast<const uint8_t *>(s.data() + off),
                     int(len));
     if (r < 0) {
         throw std::invalid_argument("Could not decode: " + s);
     }
-    b.resize(r);
+
+    int outl2 = 0;
+    r = ::EVP_DecodeFinal(ctxt.get(), reinterpret_cast<uint8_t*>(b.data() + outl), &outl2);
+    if (r < 0) {
+        throw std::invalid_argument("Could not decode: " + s);
+    }
+    b.resize(outl + outl2);
     return b;
 }
 
