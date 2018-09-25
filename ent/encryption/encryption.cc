@@ -176,6 +176,19 @@ key_info get_key_info(const options& map) {
     return key_info{ std::move(cipher_name), unsigned(key_strength) };
 }
 
+sstring encryption_context::maybe_decrypt_config_value(const sstring& s) const {
+    shared_ptr<symmetric_key> k = get_config_encryption_key();
+    if (!s.empty() && k != nullptr) {
+        auto b = base64_decode(s);
+        auto iv = calculate_sha256(k->key());
+        iv.resize(k->block_size(), 0);
+        bytes dst(bytes::initialized_later(), b.size());
+        auto len = k->decrypt(b.data(), b.size(), dst.data(), dst.size(), iv.data());
+        return sstring(dst.begin(), dst.begin() + len);
+    }
+    return s;
+}
+
 class encryption_context_impl : public encryption_context {
     // poor mans per-thread instance variable. We need a lookup map
     // per shard, so preallocate it, much like a "sharded" thing would,
@@ -186,6 +199,7 @@ class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<system_key>>> _per_thread_system_key_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
     const encryption_config& _cfg;
+    shared_ptr<symmetric_key> _cfg_encryption_key;
 public:
     encryption_context_impl(const encryption_config& cfg)
         : _per_thread_provider_cache(smp::count)
@@ -273,6 +287,14 @@ public:
 
     const encryption_config& config() const override {
         return _cfg;
+    }
+    shared_ptr<symmetric_key> get_config_encryption_key() const override {
+        return _cfg_encryption_key;
+    }
+    future<> load_config_encryption_key(const sstring & name) {
+        return get_system_key(name)->get_key().then([this](auto k) {
+            _cfg_encryption_key = std::move(k);
+        });
     }
 };
 
@@ -510,6 +532,13 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
             });
         });
     }
+
+    if (cfg.config_encryption_active()) {
+        f = f.then([&cfg, ctxt] {
+           return ctxt->load_config_encryption_key(cfg.config_encryption_key_name());
+        });
+    }
+
 
     if (!cfg.kmip_hosts().empty()) {
         // only pre-create on shard 0.
