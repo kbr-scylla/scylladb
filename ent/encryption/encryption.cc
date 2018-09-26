@@ -467,6 +467,7 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
     exts.add_sstable_file_io_extension(encryption_attribute, std::make_unique<encryption_file_io_extension>(ctxt));
     options opts(cfg.system_info_encryption().begin(), cfg.system_info_encryption().end());
     opt_wrapper sie(opts);
+    future<> f = make_ready_future<>();
     if (sie("enabled").value_or("false") == "true") {
         // commitlog/system table encryption should not use replicated keys,
         // We default to local keys, but KMIP should be ok as well.
@@ -485,23 +486,27 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
         // since schemas are duplicated across shards, we must call to each shard and augument
         // them all.
         // Since we are in pre-init phase, this should be safe.
-        return smp::invoke_on_all([opts, &exts] {
-            auto& f = exts.schema_extensions().at(encryption_attribute);
-            for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
-                exts.add_extension_to_schema(s, encryption_attribute, f(opts));
-            }
+        f = f.then([opts, &exts] {
+            return smp::invoke_on_all([opts, &exts] {
+                auto& f = exts.schema_extensions().at(encryption_attribute);
+                for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
+                    exts.add_extension_to_schema(s, encryption_attribute, f(opts));
+                }
+            });
         });
     }
 
     if (!cfg.kmip_hosts().empty()) {
         // only pre-create on shard 0.
-        return parallel_for_each(cfg.kmip_hosts(), [ctxt](auto& p) {
-            auto host = ctxt->get_kmip_host(p.first);
-            return host->connect();
+        f = f.then([&] {
+            return parallel_for_each(cfg.kmip_hosts(), [ctxt](auto& p) {
+                auto host = ctxt->get_kmip_host(p.first);
+                return host->connect();
+            });
         });
     }
 
-    return make_ready_future<>();
+    return f;
 }
 
 }
