@@ -107,9 +107,23 @@ static future<file> open_sstable_component_file(const io_error_handler& error_ha
     return open_checked_file_dma(error_handler, name, flags, options);
 }
 
+static future<file> open_sstable_component_file_non_checked(sstring name, open_flags flags, file_open_options options) {
+    if (flags != open_flags::ro && get_config().enable_sstable_data_integrity_check()) {
+        return open_integrity_checked_file_dma(name, flags, options);
+    }
+    return open_file_dma(name, flags, options);
+}
+
 future<file> new_sstable_component_file(const io_error_handler& error_handler, sstring name, open_flags flags,
         file_open_options options = {}) {
     return open_sstable_component_file(error_handler, name, flags, options).handle_exception([name] (auto ep) {
+        sstlog.error("Could not create SSTable component {}. Found exception: {}", name, ep);
+        return make_exception_future<file>(ep);
+    });
+}
+
+future<file> new_sstable_component_file_non_checked(sstring name, open_flags flags, file_open_options options = {}) {
+    return open_sstable_component_file_non_checked(name, flags, options).handle_exception([name] (auto ep) {
         sstlog.error("Could not create SSTable component {}. Found exception: {}", name, ep);
         return make_exception_future<file>(ep);
     });
@@ -1333,12 +1347,11 @@ future<> sstable::read_summary(const io_priority_class& pc) {
 }
 
 future<file> sstable::open_file(component_type type, open_flags flags, file_open_options opts) {
-    auto f = new_sstable_component_file(_read_error_handler, filename(type), flags, opts);
     if ((type != component_type::Data && type != component_type::Index)
                     || get_config().extensions().sstable_file_io_extensions().empty()) {
-        return f;
+        return new_sstable_component_file(_read_error_handler, filename(type), flags, opts);
     }
-    return f.then([this, type, flags](file f) {
+    return new_sstable_component_file_non_checked(filename(type), flags, opts).then([this, type, flags](file f) {
         return do_with(std::move(f), [this, type, flags](file& f) {
             auto ext_range = get_config().extensions().sstable_file_io_extensions();
             return do_for_each(ext_range.begin(), ext_range.end(), [this, &f, type, flags](auto& ext) {
@@ -1349,8 +1362,8 @@ future<file> sstable::open_file(component_type type, open_flags flags, file_open
                         f = std::move(of);
                     }
                 });
-            }).then([&f] {
-                return f;
+            }).then([this, &f] {
+                return make_checked_file(_read_error_handler, std::move(f));
             });
         });
     });
@@ -3549,7 +3562,7 @@ future<> sstable::write_components(
     }
     return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), cfg, stats, &pc] () mutable {
         auto wr = get_writer(*schema, estimated_partitions, cfg, stats, pc);
-        mr.consume_in_thread(std::move(wr));
+        mr.consume_in_thread(std::move(wr), db::no_timeout);
     });
 }
 

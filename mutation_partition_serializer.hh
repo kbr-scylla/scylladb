@@ -11,7 +11,6 @@
 #pragma once
 
 #include "utils/data_input.hh"
-#include "utils/data_output.hh"
 #include "database_fwd.hh"
 #include "mutation_partition_view.hh"
 #include "bytes_ostream.hh"
