@@ -239,6 +239,7 @@ private:
     } _state = state::ROW_START;
 
     row_consumer& _consumer;
+    shared_sstable _sst;
 
     temporary_buffer<char> _key;
     temporary_buffer<char> _val;
@@ -308,6 +309,7 @@ public:
             deletion_time del;
             del.local_deletion_time = _u32;
             del.marked_for_delete_at = _u64;
+            _sst->get_stats().on_row_read();
             auto ret = _consumer.consume_row_start(key_view(to_bytes_view(_key)), del);
             // after calling the consume function, we can release the
             // buffers we held for it.
@@ -508,12 +510,13 @@ public:
     }
 
     data_consume_rows_context(const schema&,
-                              const shared_sstable&,
+                              const shared_sstable sst,
                               row_consumer& consumer,
                               input_stream<char>&& input, uint64_t start, uint64_t maxlen)
                 : continuous_data_consumer(std::move(input), start, maxlen)
-                , _consumer(consumer) {
-    }
+                , _consumer(consumer)
+                , _sst(std::move(sst))
+    {}
 
     void verify_end_state() {
         // If reading a partial row (i.e., when we have a clustering row
@@ -1173,6 +1176,14 @@ public:
             }
         case state::COMPLEX_COLUMN_SIZE_2:
             _subcolumns_to_read = _u64;
+            if (_subcolumns_to_read == 0) {
+                auto id = get_column_id();
+                move_to_next_column();
+                if (_consumer.consume_complex_column_end(std::move(id)) != consumer_m::proceed::yes) {
+                    _state = state::COLUMN;
+                    return consumer_m::proceed::no;
+                }
+            }
             goto column_label;
         case state::RANGE_TOMBSTONE_MARKER:
         range_tombstone_marker_label:
@@ -1282,6 +1293,13 @@ public:
     { }
 
     void verify_end_state() {
+        // If reading a partial row (i.e., when we have a clustering row
+        // filter and using a promoted index), we may be in FLAGS or FLAGS_2
+        // state instead of PARTITION_START.
+        if (_state == state::FLAGS || _state == state::FLAGS_2) {
+            _consumer.consume_partition_end();
+            return;
+        }
         if (_state != state::PARTITION_START || _prestate != prestate::NONE) {
             throw malformed_sstable_exception("end of input, but not end of partition");
         }

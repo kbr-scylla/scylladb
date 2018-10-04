@@ -26,6 +26,7 @@
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/execution_stage.hh>
+#include <seastar/util/defer.hh>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include "sstables/sstables.hh"
@@ -77,7 +78,9 @@ logging::logger dblog("database");
 namespace {
 
 sstables::sstable::version_types get_highest_supported_format() {
-    if (service::get_local_storage_service().cluster_supports_la_sstable()) {
+    if (service::get_local_storage_service().cluster_supports_mc_sstable()) {
+        return sstables::sstable::version_types::mc;
+    } else if (service::get_local_storage_service().cluster_supports_la_sstable()) {
         return sstables::sstable::version_types::la;
     } else {
         return sstables::sstable::version_types::ka;
@@ -1246,6 +1249,7 @@ void table::set_metrics() {
                     ms::make_total_operations("view_updates_failed_remote", _view_stats.view_updates_failed_remote, ms::description("Number of updates (mutations) that failed to be pushed to remote view replicas"))(cf)(ks),
                     ms::make_total_operations("view_updates_pushed_local", _view_stats.view_updates_pushed_local, ms::description("Number of updates (mutations) pushed to local view replicas"))(cf)(ks),
                     ms::make_total_operations("view_updates_failed_local", _view_stats.view_updates_failed_local, ms::description("Number of updates (mutations) that failed to be pushed to local view replicas"))(cf)(ks),
+                    ms::make_gauge("view_updates_pending", ms::description("Number of updates pushed to view and are still to be completed"), _view_stats.writes)(cf)(ks),
             });
         }
 
@@ -1366,13 +1370,10 @@ table::on_compaction_completion(const std::vector<sstables::shared_sstable>& new
 // For replace/remove_ancestors_needed_write, note that we need to update the compaction backlog
 // manually. The new tables will be coming from a remote shard and thus unaccounted for in our
 // list so far, and the removed ones will no longer be needed by us.
-void table::replace_ancestors_needed_rewrite(std::vector<sstables::shared_sstable> new_sstables) {
+void table::replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables) {
     std::vector<sstables::shared_sstable> old_sstables;
-    std::unordered_set<uint64_t> ancestors;
 
     for (auto& sst : new_sstables) {
-        auto sst_ancestors = sst->ancestors();
-        ancestors.insert(sst_ancestors.begin(), sst_ancestors.end());
         _compaction_strategy.get_backlog_tracker().add_sstable(sst);
     }
 
@@ -1881,19 +1882,19 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                                 }
                             }
 
+                            std::unordered_set<uint64_t> ancestors;
+                            boost::range::transform(old_sstables_for_shard, std::inserter(ancestors, ancestors.end()),
+                                std::mem_fn(&sstables::sstable::generation));
+
                             if (new_sstables_for_shard.empty()) {
                                 // handles case where sstable needing rewrite doesn't produce any sstable
                                 // for a shard it belongs to when resharded (the reason is explained above).
-                                std::unordered_set<uint64_t> ancestors;
-                                boost::range::transform(old_sstables_for_shard, std::inserter(ancestors, ancestors.end()),
-                                    std::mem_fn(&sstables::sstable::generation));
-
                                 return smp::submit_to(shard, [cf, ancestors = std::move(ancestors)] () mutable {
                                     cf->remove_ancestors_needed_rewrite(ancestors);
                                 });
                             } else {
-                                return forward_sstables_to(shard, directory, new_sstables_for_shard, cf, [cf] (auto sstables) {
-                                    cf->replace_ancestors_needed_rewrite(sstables);
+                                return forward_sstables_to(shard, directory, new_sstables_for_shard, cf, [cf, ancestors = std::move(ancestors)] (auto sstables) {
+                                    cf->replace_ancestors_needed_rewrite(std::move(ancestors), std::move(sstables));
                                 });
                             }
                         }).then([&cf, sstables] {
@@ -2131,7 +2132,11 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _streaming_dirty_memory_manager(*this, dbcfg.available_memory * 0.10, cfg.virtual_dirty_soft_limit(), dbcfg.streaming_scheduling_group)
     , _dbcfg(dbcfg)
     , _memtable_controller(make_flush_controller(*_cfg, dbcfg.memtable_scheduling_group, service::get_local_memtable_flush_priority(), [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
-        return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+        auto backlog = (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+        if (_dirty_memory_manager.has_extraneous_flushes_requested()) {
+            backlog = std::max(backlog, _memtable_controller.backlog_of_shares(200));
+        }
+        return backlog;
     }))
     , _read_concurrency_sem(max_count_concurrent_reads,
         max_memory_concurrent_reads(),
@@ -3425,10 +3430,13 @@ future<> memtable_list::request_flush() {
         return make_ready_future<>();
     } else if (!_flush_coalescing) {
         _flush_coalescing = shared_promise<>();
-        return _dirty_memory_manager->get_flush_permit().then([this] (auto permit) {
+        _dirty_memory_manager->start_extraneous_flush();
+        auto ef = defer([this] { _dirty_memory_manager->finish_extraneous_flush(); });
+        return _dirty_memory_manager->get_flush_permit().then([this, ef = std::move(ef)] (auto permit) mutable {
             auto current_flush = std::move(*_flush_coalescing);
             _flush_coalescing = {};
-            return _dirty_memory_manager->flush_one(*this, std::move(permit)).then_wrapped([this, current_flush = std::move(current_flush)] (auto f) mutable {
+            return _dirty_memory_manager->flush_one(*this, std::move(permit)).then_wrapped([this, ef = std::move(ef),
+                                                                                            current_flush = std::move(current_flush)] (auto f) mutable {
                 if (f.failed()) {
                     current_flush.set_exception(f.get_exception());
                 } else {

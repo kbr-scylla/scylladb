@@ -28,6 +28,7 @@
 #include "schema.hh"
 #include "sstables/types.hh"
 #include "utils/UUID.hh"
+#include "db/marshal/type_parser.hh"
 
 namespace sstables {
 
@@ -40,7 +41,7 @@ inline column_values_fixed_lengths get_clustering_values_fixed_lengths(const ser
     column_values_fixed_lengths lengths;
     lengths.reserve(header.clustering_key_types_names.elements.size());
     for (auto&& t : header.clustering_key_types_names.elements) {
-        auto type = abstract_type::parse_type(sstring(std::cbegin(t.value), std::cend(t.value)));
+        auto type = db::marshal::type_parser::parse(to_sstring_view(t.value));
         lengths.push_back(type->value_length_if_fixed());
     }
 
@@ -85,7 +86,9 @@ class column_translation {
                     const column_definition* def = s.get_column_definition(desc.name.value);
                     if (def) {
                         ids.push_back(def->id);
-                        lens.push_back(def->type->value_length_if_fixed());
+                        bytes& type_name = desc.type_name.value;
+                        data_type type = db::marshal::type_parser::parse(to_sstring_view(type_name));
+                        lens.push_back(type->value_length_if_fixed());
                         is_collection.push_back(def->is_multi_cell());
                         is_counter.push_back(def->is_counter());
                     } else {

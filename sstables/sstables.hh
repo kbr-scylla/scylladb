@@ -60,6 +60,7 @@
 #include "sstable_version.hh"
 #include "db/large_partition_handler.hh"
 #include "column_translation.hh"
+#include "stats.hh"
 
 #include <seastar/util/optimized_optional.hh>
 
@@ -474,6 +475,8 @@ private:
     io_error_handler _read_error_handler;
     io_error_handler _write_error_handler;
 
+    sstables_stats _stats;
+
     const bool has_component(component_type f) const;
 
     future<file> open_file(component_type, open_flags, file_open_options = {});
@@ -590,9 +593,6 @@ private:
         }
         serialization_header& s = *static_cast<serialization_header *>(p.get());
         return s;
-    }
-    void adjust_serialization_header() {
-        get_mutable_serialization_header(*_components).adjust();
     }
 public:
     future<> read_toc();
@@ -733,6 +733,10 @@ public:
         const io_priority_class& pc = default_priority_class());
 
     const sstring filename(component_type f) const;
+
+    sstables_stats& get_stats() {
+        return _stats;
+    }
 
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class

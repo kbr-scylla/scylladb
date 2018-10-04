@@ -8,9 +8,10 @@
 #
 # See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
 
+import argparse
 import sys
 import yaml
-import argparse
+
 
 def get(config, key):
     s = open(config).read()
@@ -29,6 +30,7 @@ def get(config, key):
     else:
         print(val)
 
+
 def main():
     parser = argparse.ArgumentParser(description='scylla.yaml config reader/writer from shellscript.')
     parser.add_argument('-c', '--config', dest='config', action='store',
@@ -38,6 +40,7 @@ def main():
                         required=True, help='get parameter')
     args = parser.parse_args()
     get(args.config, args.get)
+
 
 if __name__ == "__main__":
     main()

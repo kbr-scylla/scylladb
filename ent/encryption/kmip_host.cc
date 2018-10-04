@@ -12,6 +12,7 @@
 #include <unordered_map>
 
 #include <seastar/net/dns.hh>
+#include <seastar/net/api.hh>
 #include <seastar/net/tls.hh>
 #include <seastar/core/thread.hh>
 
