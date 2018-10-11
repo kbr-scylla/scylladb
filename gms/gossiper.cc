@@ -919,7 +919,7 @@ void gossiper::make_random_gossip_digest(utils::chunked_vector<gossip_digest>& g
 future<> gossiper::replicate(inet_address ep, const endpoint_state& es) {
     return container().invoke_on_all([ep, es, orig = engine().cpu_id(), self = shared_from_this()] (gossiper& g) {
         if (engine().cpu_id() != orig) {
-            g.endpoint_state_map[ep].apply_application_state(es);
+            g.endpoint_state_map[ep].add_application_state(es);
         }
     });
 }
@@ -928,7 +928,7 @@ future<> gossiper::replicate(inet_address ep, const std::map<application_state, 
     return container().invoke_on_all([ep, &src, &changed, orig = engine().cpu_id(), self = shared_from_this()] (gossiper& g) {
         if (engine().cpu_id() != orig) {
             for (auto&& key : changed) {
-                g.endpoint_state_map[ep].apply_application_state(key, src.at(key));
+                g.endpoint_state_map[ep].add_application_state(key, src.at(key));
             }
         }
     });
@@ -937,7 +937,7 @@ future<> gossiper::replicate(inet_address ep, const std::map<application_state, 
 future<> gossiper::replicate(inet_address ep, application_state key, const versioned_value& value) {
     return container().invoke_on_all([ep, key, &value, orig = engine().cpu_id(), self = shared_from_this()] (gossiper& g) {
         if (engine().cpu_id() != orig) {
-            g.endpoint_state_map[ep].apply_application_state(key, value);
+            g.endpoint_state_map[ep].add_application_state(key, value);
         }
     });
 }
@@ -1164,11 +1164,13 @@ stdx::optional<endpoint_state> gossiper::get_endpoint_state_for_endpoint(inet_ad
     }
 }
 
-void gossiper::reset_endpoint_state_map() {
-    endpoint_state_map.clear();
+future<> gossiper::reset_endpoint_state_map() {
     _unreachable_endpoints.clear();
     _live_endpoints.clear();
     _live_endpoints_just_added.clear();
+    return container().invoke_on_all([] (gossiper& g) {
+        g.endpoint_state_map.clear();
+    });
 }
 
 std::unordered_map<inet_address, endpoint_state>& gms::gossiper::get_endpoint_states() {
@@ -1651,6 +1653,7 @@ void gossiper::maybe_initialize_local_state(int generation_nbr) {
     }
 }
 
+// Runs inside seastar::async context
 void gossiper::add_saved_endpoint(inet_address ep) {
     if (ep == get_broadcast_address()) {
         logger.debug("Attempt to add self as saved endpoint");
@@ -1676,6 +1679,7 @@ void gossiper::add_saved_endpoint(inet_address ep) {
     }
     ep_state.mark_dead();
     endpoint_state_map[ep] = ep_state;
+    replicate(ep, ep_state).get();
     _unreachable_endpoints[ep] = now();
     logger.trace("Adding saved endpoint {} {}", ep, ep_state.get_heart_beat_state().get_generation());
 }
@@ -1772,7 +1776,6 @@ future<> gossiper::do_stop_gossiping() {
         return make_ready_future<>();
     }
     return seastar::async([this, g = this->shared_from_this()] {
-        _enabled = false;
         auto* my_ep_state = get_endpoint_state_for_endpoint_ptr(get_broadcast_address());
         if (my_ep_state) {
             logger.info("My status = {}", get_gossip_status(*my_ep_state));
@@ -1798,6 +1801,7 @@ future<> gossiper::do_stop_gossiping() {
         } else {
             logger.warn("No local state or state is in silent shutdown, not announcing shutdown");
         }
+        _enabled = false;
         _scheduled_gossip_task.cancel();
         timer_callback_lock().get();
         //
@@ -1913,6 +1917,7 @@ void gossiper::mark_as_shutdown(const inet_address& endpoint) {
         auto& ep_state = *es;
         ep_state.add_application_state(application_state::STATUS, storage_service_value_factory().shutdown(true));
         ep_state.get_heart_beat_state().force_highest_possible_version_unsafe();
+        replicate(endpoint, ep_state).get();
         mark_dead(endpoint, ep_state);
         get_local_failure_detector().force_conviction(endpoint);
     }

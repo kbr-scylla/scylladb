@@ -64,6 +64,7 @@
 #include <boost/range/adaptors.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/algorithm/cxx11/none_of.hpp>
+#include <boost/algorithm/cxx11/partition_copy.hpp>
 #include <boost/range/algorithm/count_if.hpp>
 #include <boost/range/algorithm/find.hpp>
 #include <boost/range/algorithm/find_if.hpp>
@@ -170,10 +171,13 @@ public:
 class shared_mutation : public mutation_holder {
     lw_shared_ptr<const frozen_mutation> _mutation;
 public:
-    shared_mutation(const mutation& m) : _mutation(make_lw_shared<const frozen_mutation>(freeze(m))) {
+    explicit shared_mutation(frozen_mutation_and_schema&& fm_a_s)
+            : _mutation(make_lw_shared<const frozen_mutation>(std::move(fm_a_s.fm))) {
         _size = _mutation->representation().size();
-        _schema = m.schema();
-    };
+        _schema = std::move(fm_a_s.s);
+    }
+    explicit shared_mutation(const mutation& m) : shared_mutation(frozen_mutation_and_schema{freeze(m), m.schema()}) {
+    }
     lw_shared_ptr<const frozen_mutation> get_mutation_for(gms::inet_address ep) override {
         return _mutation;
     }
@@ -318,6 +322,9 @@ public:
     }
     const tracing::trace_state_ptr& get_trace_state() const {
         return _trace_state;
+    }
+    storage_proxy::write_stats& stats() {
+        return _stats;
     }
     friend storage_proxy;
 };
@@ -469,6 +476,12 @@ storage_proxy::response_id_type storage_proxy::register_response_handler(shared_
             if (e.handler->_cl == db::consistency_level::ANY && hints) {
                 slogger.trace("Wrote hint to satisfy CL.ANY after no replicas acknowledged the write");
             }
+            if (e.handler->_cl_achieved) { // For CL=ANY this can still be false
+                for (auto&& ep : e.handler->get_targets()) {
+                    ++e.handler->stats().background_replica_writes_failed.get_ep_stat(ep);
+                }
+                e.handler->stats().background_writes_failed += int(!e.handler->get_targets().empty());
+            }
         }
 
         e.handler->on_timeout();
@@ -544,22 +557,26 @@ storage_proxy_stats::split_stats::split_stats(const sstring& category, const sst
 storage_proxy_stats::write_stats::write_stats()
 : writes_attempts(storage_proxy::COORDINATOR_STATS_CATEGORY, "total_write_attempts", "total number of write requests", "mutation_data")
 , writes_errors(storage_proxy::COORDINATOR_STATS_CATEGORY, "write_errors", "number of write requests that failed", "mutation_data")
+, background_replica_writes_failed(storage_proxy::COORDINATOR_STATS_CATEGORY, "background_replica_writes_failed", "number of replica writes that timed out or failed after CL was reached", "mutation_data")
 , read_repair_write_attempts(storage_proxy::COORDINATOR_STATS_CATEGORY, "read_repair_write_attempts", "number of write operations in a read repair context", "mutation_data") { }
 
 storage_proxy_stats::write_stats::write_stats(const sstring& category, bool auto_register_stats)
         : writes_attempts(category, "total_write_attempts", "total number of write requests", "mutation_data", auto_register_stats)
         , writes_errors(category, "write_errors", "number of write requests that failed", "mutation_data", auto_register_stats)
+        , background_replica_writes_failed(category, "background_replica_writes_failed", "number of replica writes that timed out or failed after CL was reached", "mutation_data", auto_register_stats)
         , read_repair_write_attempts(category, "read_repair_write_attempts", "number of write operations in a read repair context", "mutation_data", auto_register_stats) { }
 
 void storage_proxy_stats::write_stats::register_metrics_local() {
     writes_attempts.register_metrics_local();
     writes_errors.register_metrics_local();
+    background_replica_writes_failed.register_metrics_local();
     read_repair_write_attempts.register_metrics_local();
 }
 
 void storage_proxy_stats::write_stats::register_metrics_for(gms::inet_address ep) {
     writes_attempts.register_metrics_for(ep);
     writes_errors.register_metrics_for(ep);
+    background_replica_writes_failed.register_metrics_for(ep);
     read_repair_write_attempts.register_metrics_for(ep);
 }
 
@@ -709,6 +726,9 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
 
         sm::make_total_operations("speculative_data_reads", [this] { return _stats.speculative_data_reads; },
                        sm::description("number of speculative data read requests that were sent")),
+
+        sm::make_total_operations("background_writes_failed", [this] { return _stats.background_writes_failed; },
+                       sm::description("number of write requests that failed after CL was reached")),
     });
 
     _metrics.add_group(REPLICA_STATS_CATEGORY, {
@@ -1292,28 +1312,28 @@ storage_proxy::hint_to_dead_endpoints(response_id_type id, db::consistency_level
 }
 
 template<typename Range, typename CreateWriteHandler>
-future<std::vector<storage_proxy::unique_response_handler>> storage_proxy::mutate_prepare(const Range& mutations, db::consistency_level cl, db::write_type type, CreateWriteHandler create_handler) {
+future<std::vector<storage_proxy::unique_response_handler>> storage_proxy::mutate_prepare(Range&& mutations, db::consistency_level cl, db::write_type type, CreateWriteHandler create_handler) {
     // apply is used to convert exceptions to exceptional future
-    return futurize<std::vector<storage_proxy::unique_response_handler>>::apply([this] (const Range& mutations, db::consistency_level cl, db::write_type type, CreateWriteHandler create_handler) {
+    return futurize<std::vector<storage_proxy::unique_response_handler>>::apply([this] (Range&& mutations, db::consistency_level cl, db::write_type type, CreateWriteHandler create_handler) {
         std::vector<unique_response_handler> ids;
         ids.reserve(std::distance(std::begin(mutations), std::end(mutations)));
         for (auto& m : mutations) {
             ids.emplace_back(*this, create_handler(m, cl, type));
         }
         return make_ready_future<std::vector<unique_response_handler>>(std::move(ids));
-    }, mutations, cl, type, std::move(create_handler));
+    }, std::forward<Range>(mutations), cl, type, std::move(create_handler));
 }
 
 template<typename Range>
-future<std::vector<storage_proxy::unique_response_handler>> storage_proxy::mutate_prepare(const Range& mutations, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state) {
-    return mutate_prepare<>(mutations, cl, type, [this, tr_state = std::move(tr_state)] (const typename Range::value_type& m, db::consistency_level cl, db::write_type type) mutable {
+future<std::vector<storage_proxy::unique_response_handler>> storage_proxy::mutate_prepare(Range&& mutations, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state) {
+    return mutate_prepare<>(std::forward<Range>(mutations), cl, type, [this, tr_state = std::move(tr_state)] (const typename std::decay_t<Range>::value_type& m, db::consistency_level cl, db::write_type type) mutable {
         return create_write_response_handler(m, cl, type, tr_state);
     });
 }
 
 future<> storage_proxy::mutate_begin(std::vector<unique_response_handler> ids, db::consistency_level cl,
-                                     write_stats& stats, stdx::optional<clock_type::time_point> timeout_opt) {
-    return parallel_for_each(ids, [this, cl, timeout_opt, &stats] (unique_response_handler& protected_response) {
+                                     stdx::optional<clock_type::time_point> timeout_opt) {
+    return parallel_for_each(ids, [this, cl, timeout_opt] (unique_response_handler& protected_response) {
         auto response_id = protected_response.id;
         // it is better to send first and hint afterwards to reduce latency
         // but request may complete before hint_to_dead_endpoints() is called and
@@ -1324,7 +1344,7 @@ future<> storage_proxy::mutate_begin(std::vector<unique_response_handler> ids, d
         auto timeout = timeout_opt.value_or(clock_type::now() + std::chrono::milliseconds(_db.local().get_config().write_request_timeout_in_ms()));
         // call before send_to_live_endpoints() for the same reason as above
         auto f = response_wait(response_id, timeout);
-        send_to_live_endpoints(protected_response.release(), timeout, stats); // response is now running and it will either complete or timeout
+        send_to_live_endpoints(protected_response.release(), timeout); // response is now running and it will either complete or timeout
         return std::move(f);
     });
 }
@@ -1503,7 +1523,7 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
     lc.start();
 
     return mutate_prepare(mutations, cl, type, tr_state).then([this, cl, timeout_opt] (std::vector<storage_proxy::unique_response_handler> ids) {
-        return mutate_begin(std::move(ids), cl, _stats, timeout_opt);
+        return mutate_begin(std::move(ids), cl, timeout_opt);
     }).then_wrapped([this, p = shared_from_this(), lc, tr_state] (future<> f) mutable {
         return p->mutate_end(std::move(f), lc, _stats, std::move(tr_state));
     });
@@ -1590,7 +1610,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                 auto& ks = _p._db.local().find_keyspace(m.schema()->ks_name());
                 return _p.create_write_response_handler(ks, cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats);
             }).then([this, cl] (std::vector<unique_response_handler> ids) {
-                return _p.mutate_begin(std::move(ids), cl, _stats, _timeout);
+                return _p.mutate_begin(std::move(ids), cl, _timeout);
             });
         }
         future<> sync_write_to_batchlog() {
@@ -1616,7 +1636,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
             return _p.mutate_prepare(_mutations, _cl, db::write_type::BATCH, _trace_state).then([this] (std::vector<unique_response_handler> ids) {
                 return sync_write_to_batchlog().then([this, ids = std::move(ids)] () mutable {
                     tracing::trace(_trace_state, "Sending batch mutations");
-                    return _p.mutate_begin(std::move(ids), _cl, _stats, _timeout);
+                    return _p.mutate_begin(std::move(ids), _cl, _timeout);
                 }).then(std::bind(&context::async_remove_from_batchlog, this));
             });
         }
@@ -1644,7 +1664,7 @@ bool storage_proxy::cannot_hint(const Range& targets, db::write_type type) {
 }
 
 future<> storage_proxy::send_to_endpoint(
-        mutation m,
+        std::unique_ptr<mutation_holder> m,
         gms::inet_address target,
         std::vector<gms::inet_address> pending_endpoints,
         db::write_type type,
@@ -1654,29 +1674,78 @@ future<> storage_proxy::send_to_endpoint(
 
     // View updates use consistency level ANY in order to fall back to hinted handoff in case of a failed update
     db::consistency_level cl = (type == db::write_type::VIEW) ? db::consistency_level::ANY : db::consistency_level::ONE;
-    std::unordered_set<gms::inet_address> targets(pending_endpoints.begin(), pending_endpoints.end());
-    targets.insert(std::move(target));
-    return mutate_prepare(std::array<mutation, 1>{std::move(m)}, cl, type,
-        [this, targets = std::move(targets), pending_endpoints = std::move(pending_endpoints), &stats] (
-                const mutation& m,
+    return mutate_prepare(std::array{std::move(m)}, cl, type,
+            [this, target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats] (
+                std::unique_ptr<mutation_holder>& m,
                 db::consistency_level cl,
                 db::write_type type) mutable {
-            auto& ks = _db.local().find_keyspace(m.schema()->ks_name());
-            return create_write_response_handler(
-                    ks,
-                    cl,
-                    type,
-                    std::make_unique<shared_mutation>(m),
-                    std::move(targets),
-                    pending_endpoints,
-                    { },
-                    nullptr,
-                    stats);
-    }).then([this, &stats, cl] (std::vector<unique_response_handler> ids) {
-        return mutate_begin(std::move(ids), cl, stats);
+        std::unordered_set<gms::inet_address> targets;
+        targets.reserve(pending_endpoints.size() + 1);
+        std::vector<gms::inet_address> dead_endpoints;
+        boost::algorithm::partition_copy(
+                boost::range::join(pending_endpoints, target),
+                std::inserter(targets, targets.begin()),
+                std::back_inserter(dead_endpoints),
+                [] (gms::inet_address ep) { return gms::get_local_failure_detector().is_alive(ep); });
+        auto& ks = _db.local().find_keyspace(m->schema()->ks_name());
+        slogger.trace("Creating write handler with live: {}; dead: {}", targets, dead_endpoints);
+        db::assure_sufficient_live_nodes(cl, ks, targets, pending_endpoints);
+        return create_write_response_handler(
+            ks,
+            cl,
+            type,
+            std::move(m),
+            std::move(targets),
+            pending_endpoints,
+            std::move(dead_endpoints),
+            nullptr,
+            stats);
+    }).then([this, cl] (std::vector<unique_response_handler> ids) {
+        return mutate_begin(std::move(ids), cl);
     }).then_wrapped([p = shared_from_this(), lc, &stats] (future<>&& f) {
         return p->mutate_end(std::move(f), lc, stats, nullptr);
-        });
+    });
+}
+
+future<> storage_proxy::send_to_endpoint(
+        frozen_mutation_and_schema fm_a_s,
+        gms::inet_address target,
+        std::vector<gms::inet_address> pending_endpoints,
+        db::write_type type) {
+    return send_to_endpoint(
+            std::make_unique<shared_mutation>(std::move(fm_a_s)),
+            std::move(target),
+            std::move(pending_endpoints),
+            type,
+            _stats);
+}
+
+future<> storage_proxy::send_to_endpoint(
+        frozen_mutation_and_schema fm_a_s,
+        gms::inet_address target,
+        std::vector<gms::inet_address> pending_endpoints,
+        db::write_type type,
+        write_stats& stats) {
+    return send_to_endpoint(
+            std::make_unique<shared_mutation>(std::move(fm_a_s)),
+            std::move(target),
+            std::move(pending_endpoints),
+            type,
+            stats);
+}
+
+future<> storage_proxy::send_to_endpoint(
+        mutation m,
+        gms::inet_address target,
+        std::vector<gms::inet_address> pending_endpoints,
+        db::write_type type,
+        write_stats& stats) {
+    return send_to_endpoint(
+            std::make_unique<shared_mutation>(m),
+            std::move(target),
+            std::move(pending_endpoints),
+            type,
+            stats);
 }
 
 future<> storage_proxy::send_to_endpoint(
@@ -1684,7 +1753,12 @@ future<> storage_proxy::send_to_endpoint(
         gms::inet_address target,
         std::vector<gms::inet_address> pending_endpoints,
         db::write_type type) {
-    return send_to_endpoint(std::move(m), std::move(target), std::move(pending_endpoints), type, _stats);
+    return send_to_endpoint(
+            std::make_unique<shared_mutation>(m),
+            std::move(target),
+            std::move(pending_endpoints),
+            type,
+            _stats);
 }
 
 /**
@@ -1702,7 +1776,7 @@ future<> storage_proxy::send_to_endpoint(
  * @throws OverloadedException if the hints cannot be written/enqueued
  */
  // returned future is ready when sent is complete, not when mutation is executed on all (or any) targets!
-void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type response_id, clock_type::time_point timeout, write_stats& stats)
+void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type response_id, clock_type::time_point timeout)
 {
     // extra-datacenter replicas, grouped by dc
     std::unordered_map<sstring, std::vector<gms::inet_address>> dc_groups;
@@ -1710,6 +1784,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
     local.reserve(3);
 
     auto handler_ptr = get_write_response_handler(response_id);
+    auto& stats = handler_ptr->stats();
     auto& handler = *handler_ptr;
 
     for(auto dest: handler.get_targets()) {

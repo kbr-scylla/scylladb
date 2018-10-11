@@ -7,6 +7,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#pragma once
+
 #include <seastar/core/future.hh>
 #include <seastar/core/distributed.hh>
 #include <seastar/core/reactor.hh>

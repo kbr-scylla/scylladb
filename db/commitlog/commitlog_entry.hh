@@ -23,7 +23,8 @@ public:
     commitlog_entry(stdx::optional<column_mapping> mapping, frozen_mutation&& mutation)
         : _mapping(std::move(mapping)), _mutation(std::move(mutation)) { }
     const stdx::optional<column_mapping>& mapping() const { return _mapping; }
-    const frozen_mutation& mutation() const { return _mutation; }
+    const frozen_mutation& mutation() const & { return _mutation; }
+    frozen_mutation&& mutation() && { return std::move(_mutation); }
 };
 
 class commitlog_entry_writer {
@@ -69,5 +70,6 @@ public:
     commitlog_entry_reader(const temporary_buffer<char>& buffer);
 
     const stdx::optional<column_mapping>& get_column_mapping() const { return _ce.mapping(); }
-    const frozen_mutation& mutation() const { return _ce.mutation(); }
+    const frozen_mutation& mutation() const & { return _ce.mutation(); }
+    frozen_mutation&& mutation() && { return std::move(_ce).mutation(); }
 };

@@ -704,6 +704,21 @@ table::make_streaming_reader(schema_ptr s,
     return make_flat_multi_range_reader(s, std::move(source), ranges, slice, pc, nullptr, mutation_reader::forwarding::no);
 }
 
+flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::partition_range& range, mutation_reader::forwarding fwd_mr) const {
+    const auto& slice = schema->full_slice();
+    const auto& pc = service::get_local_streaming_read_priority();
+    auto trace_state = tracing::trace_state_ptr();
+    const auto fwd = streamed_mutation::forwarding::no;
+
+    std::vector<flat_mutation_reader> readers;
+    readers.reserve(_memtables->size() + 1);
+    for (auto&& mt : *_memtables) {
+        readers.emplace_back(mt->make_flat_reader(schema, range, slice, pc, trace_state, fwd, fwd_mr));
+    }
+    readers.emplace_back(make_sstable_reader(schema, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
+    return make_combined_reader(std::move(schema), std::move(readers), fwd, fwd_mr);
+}
+
 future<std::vector<locked_cell>> table::lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout) {
     assert(m.schema() == _counter_cell_locks->schema());
     return _counter_cell_locks->lock_cells(m.decorated_key(), partition_cells_range(m.partition()), timeout);
@@ -4690,6 +4705,36 @@ flat_mutation_reader make_range_sstable_reader(schema_ptr s,
                     std::move(reader_factory_fn)),
             fwd,
             fwd_mr);
+}
+
+flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, dht::i_partitioner& partitioner, schema_ptr schema,
+        std::function<std::optional<dht::partition_range>()> range_generator) {
+    auto ms = mutation_source([&db, &partitioner] (schema_ptr s,
+            const dht::partition_range& pr,
+            const query::partition_slice& ps,
+            const io_priority_class& pc,
+            tracing::trace_state_ptr trace_state,
+            streamed_mutation::forwarding fwd_sm,
+            mutation_reader::forwarding fwd_mr) {
+        auto factory = [&db] (unsigned shard,
+                schema_ptr schema,
+                const dht::partition_range& range,
+                const query::partition_slice&,
+                const io_priority_class&,
+                tracing::trace_state_ptr,
+                streamed_mutation::forwarding,
+                mutation_reader::forwarding fwd_mr) {
+           return db.invoke_on(shard, [gs = global_schema_ptr(std::move(schema)), &range, fwd_mr] (database& db) {
+                auto schema = gs.get();
+                auto& cf = db.find_column_family(schema);
+                return make_foreign(std::make_unique<flat_mutation_reader>(cf.make_streaming_reader(std::move(schema), range, fwd_mr)));
+           });
+        };
+        return make_multishard_combining_reader(std::move(s), pr, ps, pc, partitioner, std::move(factory), std::move(trace_state),
+                fwd_sm, fwd_mr);
+    });
+    return make_flat_multi_range_reader(std::move(schema), std::move(ms), std::move(range_generator), schema->full_slice(),
+            service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);
 }
 
 future<>

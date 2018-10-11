@@ -343,7 +343,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
                         gossiper.check_knows_remote_features(local_features, peer_features);
                     }
 
-                    gossiper.reset_endpoint_state_map();
+                    gossiper.reset_endpoint_state_map().get();
                     for (auto ep : loaded_endpoints) {
                         gossiper.add_saved_endpoint(ep);
                     }
@@ -357,7 +357,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
             slogger.info("Checking remote features with gossip");
             gossiper.do_shadow_round().get();
             gossiper.check_knows_remote_features(local_features);
-            gossiper.reset_endpoint_state_map();
+            gossiper.reset_endpoint_state_map().get();
             for (auto ep : loaded_endpoints) {
                 gossiper.add_saved_endpoint(ep);
             }
@@ -1562,7 +1562,7 @@ future<> storage_service::check_for_endpoint_collision() {
                             throw std::runtime_error("Other bootstrapping/leaving/moving nodes detected, cannot bootstrap while consistent_rangemovement is true (check_for_endpoint_collision)");
                         } else {
                             gossiper.goto_shadow_round();
-                            gossiper.reset_endpoint_state_map();
+                            gossiper.reset_endpoint_state_map().get();
                             found_bootstrapping_node = true;
                             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(gms::gossiper::clk::now() - t).count();
                             slogger.info("Checking bootstrapping/leaving/moving nodes: node={}, status={}, sleep 1 second and check again ({} seconds elapsed) (check_for_endpoint_collision)", addr, state, elapsed);
@@ -1574,7 +1574,7 @@ future<> storage_service::check_for_endpoint_collision() {
             }
         } while (found_bootstrapping_node);
         slogger.info("Checking bootstrapping/leaving/moving nodes: ok (check_for_endpoint_collision)");
-        gossiper.reset_endpoint_state_map();
+        gossiper.reset_endpoint_state_map().get();
     });
 }
 
@@ -1624,8 +1624,9 @@ future<std::unordered_set<token>> storage_service::prepare_replacement_info() {
         auto tokens = get_tokens_for(replace_address);
         // use the replacee's host Id as our own so we receive hints, etc
         return db::system_keyspace::set_local_host_id(host_id).discard_result().then([replace_address, tokens = std::move(tokens)] {
-            gms::get_local_gossiper().reset_endpoint_state_map(); // clean up since we have what we need
-            return make_ready_future<std::unordered_set<token>>(std::move(tokens));
+            return gms::get_local_gossiper().reset_endpoint_state_map().then([tokens = std::move(tokens)] { // clean up since we have what we need
+                return make_ready_future<std::unordered_set<token>>(std::move(tokens));
+            });
         });
     });
 }
@@ -2470,15 +2471,17 @@ future<> storage_service::rebuild(sstring source_dc) {
         if (source_dc != "") {
             streamer->add_source_filter(std::make_unique<dht::range_streamer::single_datacenter_filter>(source_dc));
         }
-        for (const auto& keyspace_name : ss._db.local().get_non_system_keyspaces()) {
-            streamer->add_ranges(keyspace_name, ss.get_local_ranges(keyspace_name));
-        }
-        return streamer->stream_async().then([streamer] {
-            slogger.info("Streaming for rebuild successful");
-        }).handle_exception([] (auto ep) {
-            // This is used exclusively through JMX, so log the full trace but only throw a simple RTE
-            slogger.warn("Error while rebuilding node: {}", std::current_exception());
-            return make_exception_future<>(std::move(ep));
+        auto keyspaces = make_lw_shared<std::vector<sstring>>(ss._db.local().get_non_system_keyspaces());
+        return do_for_each(*keyspaces, [keyspaces, streamer, &ss] (sstring& keyspace_name) {
+            return streamer->add_ranges(keyspace_name, ss.get_local_ranges(keyspace_name));
+        }).then([streamer] {
+            return streamer->stream_async().then([streamer] {
+                slogger.info("Streaming for rebuild successful");
+            }).handle_exception([] (auto ep) {
+                // This is used exclusively through JMX, so log the full trace but only throw a simple RTE
+                slogger.warn("Error while rebuilding node: {}", std::current_exception());
+                return make_exception_future<>(std::move(ep));
+            });
         });
     });
 }

@@ -935,7 +935,6 @@ read_posting_list(service::storage_proxy& proxy,
 
     int32_t page_size = options.get_page_size();
     if (page_size <= 0 || !service::pager::query_pagers::may_need_paging(*view_schema, page_size, *cmd, partition_ranges)) {
-        stats.unpaged_select_queries += 1;
         return proxy.query(view_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_trace_state()})
         .then([base_schema, view_schema, now, &options, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr) {
             cql3::selection::result_set_builder builder(*selection, now, options.get_cql_serialization_format());
@@ -1151,8 +1150,6 @@ select_statement::prepare_restrictions(database& db,
                                        bool allow_filtering)
 {
     try {
-        // FIXME: this method should take a separate allow_filtering parameter
-        // and pass it on. Currently we pass "for_view" as allow_filtering.
         return ::make_shared<restrictions::statement_restrictions>(db, schema, statement_type::SELECT, std::move(_where_clause), bound_names,
             selection->contains_only_static_columns(), selection->contains_a_collection(), for_view, allow_filtering);
     } catch (const exceptions::unrecognized_entity_exception& e) {

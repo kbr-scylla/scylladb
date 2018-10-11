@@ -4463,3 +4463,89 @@ SEASTAR_THREAD_TEST_CASE(test_complex_column_zero_subcolumns_read) {
     r.produces_end_of_stream();
 }
 
+SEASTAR_THREAD_TEST_CASE(test_uncompressed_read_two_rows_fast_forwarding) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    // Following tests run on files in tests/sstables/3.x/uncompressed/read_two_rows_fast_forwarding
+    // They were created using following CQL statements:
+    //
+    // CREATE TABLE two_rows_fast_forwarding (pk int, ck int, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
+    // INSERT INTO two_rows_fast_forwarding (pk, ck, rc) VALUES (0, 7, 7);
+    // INSERT INTO two_rows_fast_forwarding (pk, ck, rc) VALUES (0, 8, 8);
+
+    static const sstring path = "tests/sstables/3.x/uncompressed/read_two_rows_fast_forwarding";
+    static thread_local const schema_ptr s =
+        schema_builder("test_ks", "two_rows_fast_forwarding")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("ck", int32_type, column_kind::clustering_key)
+            .with_column("rc", int32_type)
+            .build();
+    sstable_assertions sst(s, path);
+    sst.load();
+
+    auto to_pkey = [&] (int key) {
+        auto bytes = int32_type->decompose(int32_t(key));
+        auto pk = partition_key::from_single_value(*s, bytes);
+        return dht::global_partitioner().decorate_key(*s, pk);
+    };
+
+    auto to_ckey = [&] (int key) {
+        auto bytes = int32_type->decompose(int32_t(key));
+        return clustering_key::from_single_value(*s, bytes);
+    };
+
+    auto rc_cdef = s->get_column_definition(to_bytes("rc"));
+    BOOST_REQUIRE(rc_cdef);
+
+    auto to_expected = [rc_cdef] (int val) {
+        return std::vector<flat_reader_assertions::expected_column>{{rc_cdef, int32_type->decompose(int32_t(val))}};
+    };
+
+    auto r = assert_that(sst.read_range_rows_flat(query::full_partition_range,
+                                                  s->full_slice(),
+                                                  default_priority_class(),
+                                                  no_resource_tracking(),
+                                                  streamed_mutation::forwarding::yes));
+    r.produces_partition_start(to_pkey(0))
+        .produces_end_of_stream();
+
+    r.fast_forward_to(to_ckey(2), to_ckey(3));
+    r.produces_end_of_stream();
+
+    r.fast_forward_to(to_ckey(4), to_ckey(5));
+    r.produces_end_of_stream();
+
+    r.fast_forward_to(to_ckey(6), to_ckey(9));
+    r.produces_row(to_ckey(7), to_expected(7))
+        .produces_row(to_ckey(8), to_expected(8))
+        .produces_end_of_stream();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_dead_row_marker) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "dead_row_marker";
+    // CREATE TABLE dead_row_marker (pk int, ck int, st int static, rc int , PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.with_column("st", int32_type, column_kind::static_column);
+    builder.with_column("rc", int32_type);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    auto key = partition_key::from_deeply_exploded(*s, { 1 });
+    mutation mut{s, key};
+    mut.set_static_cell("st", data_value{1135}, write_timestamp);
+
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 2 });
+    auto& clustered_row = mut.partition().clustered_row(*s, ckey);
+    clustered_row.apply(row_marker{tombstone{write_timestamp, write_time_point}});
+
+    mut.set_cell(ckey, "rc", data_value{777}, write_timestamp);
+
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+}
+

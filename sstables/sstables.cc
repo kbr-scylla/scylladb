@@ -3161,13 +3161,17 @@ void sstable_writer_m::write_liveness_info(file_writer& writer, const row_marker
     uint64_t timestamp = marker.timestamp();
     _c_stats.update_timestamp(timestamp);
     write_delta_timestamp(writer, timestamp);
-    if (marker.is_expiring()) {
-        auto ttl = marker.ttl().count();
-        auto ldt = marker.expiry().time_since_epoch().count();
+
+    auto write_expiring_liveness_info = [this, &writer] (uint32_t ttl, uint64_t ldt) {
         _c_stats.update_ttl(ttl);
         _c_stats.update_local_deletion_time(ldt);
         write_delta_ttl(writer, ttl);
         write_delta_local_deletion_time(writer, ldt);
+    };
+    if (!marker.is_live()) {
+        write_expiring_liveness_info(expired_liveness_ttl, marker.deletion_time().time_since_epoch().count());
+    } else if (marker.is_expiring()) {
+        write_expiring_liveness_info(marker.ttl().count(), marker.expiry().time_since_epoch().count());
     }
 }
 
@@ -3308,9 +3312,10 @@ static bool row_has_complex_deletion(const schema& s, const row& r) {
 void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint64_t prev_row_size) {
     row_flags flags = row_flags::none;
     row_extended_flags ext_flags = row_extended_flags::none;
-    if (clustered_row.marker().is_live()) {
+    const row_marker& marker = clustered_row.marker();
+    if (!marker.is_missing()) {
         flags |= row_flags::has_timestamp;
-        if (clustered_row.marker().is_expiring()) {
+        if (!marker.is_live() || marker.is_expiring()) {
             flags |= row_flags::has_ttl;
         }
     }
@@ -3707,7 +3712,8 @@ const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_typ
                                 format_types format, sstring component) {
     static std::unordered_map<version_types, const char*, enum_hash<version_types>> fmtmap = {
         { sstable::version_types::ka, "{0}-{1}-{2}-{3}-{5}" },
-        { sstable::version_types::la, "{2}-{3}-{4}-{5}" }
+        { sstable::version_types::la, "{2}-{3}-{4}-{5}" },
+        { sstable::version_types::mc, "{2}-{3}-{4}-{5}" }
     };
 
     return dir + "/" + seastar::format(fmtmap[version], ks, cf, _version_string.at(version), to_sstring(generation), _format_string.at(format), component);
