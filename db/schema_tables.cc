@@ -263,7 +263,6 @@ schema_ptr tables() {
          {"min_index_interval", int32_type},
          {"read_repair_chance", double_type},
          {"speculative_retry", utf8_type},
-         {"in_memory", boolean_type},
         },
         // static columns
         {},
@@ -287,6 +286,7 @@ schema_ptr scylla_tables() {
             .with_column("keyspace_name", utf8_type, column_kind::partition_key)
             .with_column("table_name", utf8_type, column_kind::clustering_key)
             .with_column("version", uuid_type)
+            .with_column("in_memory", boolean_type)
             .set_gc_grace_seconds(schema_gc_grace)
             .with_version(generate_schema_version(id))
             .build();
@@ -420,7 +420,6 @@ schema_ptr views() {
          {"min_index_interval", int32_type},
          {"read_repair_chance", double_type},
          {"speculative_retry", utf8_type},
-         {"in_memory", boolean_type},
         },
         // static columns
         {},
@@ -1497,7 +1496,6 @@ static void add_table_params_to_mutations(mutation& m, const clustering_key& cke
     m.set_clustered_cell(ckey, "read_repair_chance", table->read_repair_chance(), timestamp);
     m.set_clustered_cell(ckey, "speculative_retry", table->speculative_retry().to_sstring(), timestamp);
     m.set_clustered_cell(ckey, "crc_check_chance", table->crc_check_chance(), timestamp);
-    m.set_clustered_cell(ckey, "in_memory", table->is_in_memory(), timestamp);
 
     store_map(m, ckey, "caching", timestamp, table->caching_options().to_map());
 
@@ -1592,6 +1590,8 @@ mutation make_scylla_tables_mutation(schema_ptr table, api::timestamp_type times
     auto ckey = clustering_key::from_singular(*s, table->cf_name());
     mutation m(scylla_tables(), pkey);
     m.set_clustered_cell(ckey, "version", utils::UUID(table->version()), timestamp);
+    m.set_clustered_cell(ckey, "in_memory", table->is_in_memory(), timestamp);
+
     return m;
 }
 
@@ -2022,10 +2022,6 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
     if (table_row.has("speculative_retry")) {
         builder.set_speculative_retry(table_row.get_nonnull<sstring>("speculative_retry"));
     }
-
-    if (table_row.has("in_memory")) {
-        builder.set_in_memory(table_row.get_nonnull<bool>("in_memory"));
-    }
 }
 
 schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations sm, std::experimental::optional<table_schema_version> version)
@@ -2074,6 +2070,17 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
 
     prepare_builder_from_table_row(ctxt, builder, table_row);
 
+
+    if (sm.scylla_tables()) {
+        table_rs = query::result_set(*sm.scylla_tables());
+        if (!table_rs.empty()) {
+            query::result_set_row table_row = table_rs.row(0);
+
+            if (table_row.has("in_memory")) {
+                builder.set_in_memory(table_row.get_nonnull<bool>("in_memory"));
+            }
+        }
+    }
     v3_columns columns(std::move(column_defs), is_dense, is_compound);
     columns.apply_to(builder);
 
