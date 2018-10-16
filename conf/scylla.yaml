@@ -818,3 +818,9 @@ commitlog_total_space_in_mb: -1
 #
 # Keep at 12 for new clusters.
 murmur3_partitioner_ignore_msb_bits: 12
+
+# In memory storage size for sstables in MB
+# If this value is not zero the specified amount of memory
+# will be reserved to store sstables for tables with in_memory
+# property set to 'true'.
+# in_memory_storage_size_mb: 0
