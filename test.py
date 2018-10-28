@@ -109,6 +109,7 @@ boost_tests = [
     'encrypted_file_test',
     'auth_passwords_test',
     'multishard_mutation_query_test',
+    'top_k_test',
 ]
 
 other_tests = [

@@ -19,6 +19,8 @@
 #include <map>
 #include <iostream>
 #include <sstream>
+#include <boost/range/algorithm/adjacent_find.hpp>
+#include <boost/algorithm/cxx11/iota.hpp>
 
 static logging::logger nlogger("NetworkTopologyStrategyLogger");
 
@@ -39,6 +41,27 @@ void print_natural_endpoints(double point, const std::vector<inet_address> v) {
     }
 
     nlogger.debug("{}", strm.str());
+}
+
+#ifndef SEASTAR_DEBUG
+static void verify_sorted(const dht::token_range_vector& trv) {
+    auto not_strictly_before = [] (const dht::token_range a, const dht::token_range b) {
+        return !b.start()
+                || !a.end()
+                || a.end()->value() > b.start()->value()
+                || (a.end()->value() == b.start()->value() && a.end()->is_inclusive() && b.start()->is_inclusive());
+    };
+    BOOST_CHECK(boost::adjacent_find(trv, not_strictly_before) == trv.end());
+}
+#endif
+
+static void check_ranges_are_sorted(abstract_replication_strategy* ars, gms::inet_address ep) {
+    // Too slow in debug mode
+#ifndef SEASTAR_DEBUG
+    verify_sorted(ars->get_ranges(ep));
+    verify_sorted(ars->get_primary_ranges(ep));
+    verify_sorted(ars->get_primary_ranges_within_dc(ep));
+#endif
 }
 
 void strategy_sanity_check(
@@ -139,6 +162,7 @@ void full_ring_check(const std::vector<ring_point>& ring_points,
         auto endpoints2 = ars_ptr->get_natural_endpoints(t2);
 
         endpoints_check(ars_ptr, endpoints2);
+        check_ranges_are_sorted(ars_ptr, rp.host);
         BOOST_CHECK(cache_hit_count + 1 == ars_ptr->get_cache_hits_count());
         BOOST_CHECK(endpoints1 == endpoints2);
     }
@@ -242,14 +266,18 @@ future<> heavy_origin_test() {
         }
 
         int total_rf = 0;
-        double token_point = 1.0;
+        std::default_random_engine random_engine{};
+        std::vector<double> token_points(total_eps, 0.0);
+        boost::algorithm::iota(token_points, 1.0);
+        std::shuffle(token_points.begin(), token_points.end(), random_engine);
+        auto token_point_iterator = token_points.begin();
         for (size_t dc = 0; dc < dc_racks.size(); ++dc) {
             total_rf += dc_replication[dc];
             config_options.emplace(to_sstring(dc),
                                    to_sstring(dc_replication[dc]));
             for (int rack = 0; rack < dc_racks[dc]; ++rack) {
                 for (int ep = 1; ep <= dc_endpoints[dc]/dc_racks[dc]; ++ep) {
-
+                    double token_point = *token_point_iterator++;
                     // 10.dc.rack.ep
                     int32_t ip = 0x0a000000 + ((int8_t)dc << 16) +
                                  ((int8_t)rack << 8) + (int8_t)ep;

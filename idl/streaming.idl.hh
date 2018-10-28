@@ -31,4 +31,13 @@ class prepare_message {
     uint32_t dst_cpu_id;
 };
 
+enum class stream_reason : uint8_t {
+    unspecified,
+    bootstrap,
+    decommission,
+    removenode,
+    rebuild,
+    repair,
+};
+
 }

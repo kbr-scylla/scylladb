@@ -1160,6 +1160,33 @@ SEASTAR_TEST_CASE(restricted_reader_create_reader) {
     });
 }
 
+SEASTAR_TEST_CASE(test_restricted_reader_as_mutation_source) {
+    return seastar::async([] {
+        reader_concurrency_semaphore semaphore(100, 10 * new_reader_base_cost);
+
+        auto make_restricted_populator = [&semaphore](schema_ptr s, const std::vector<mutation> &muts) {
+            auto mt = make_lw_shared<memtable>(s);
+            for (auto &&mut : muts) {
+                mt->apply(mut);
+            }
+
+            auto ms = mt->as_data_source();
+            return mutation_source([&semaphore, ms = std::move(ms)](schema_ptr schema,
+                    const dht::partition_range& range,
+                    const query::partition_slice& slice,
+                    const io_priority_class& pc,
+                    tracing::trace_state_ptr tr,
+                    streamed_mutation::forwarding fwd,
+                    mutation_reader::forwarding fwd_mr,
+                    reader_resource_tracker res_tracker) {
+                return make_restricted_flat_reader(semaphore, std::move(ms), std::move(schema), range, slice, pc, tr,
+                        fwd, fwd_mr);
+            });
+        };
+        run_mutation_source_tests(make_restricted_populator);
+    });
+}
+
 static mutation compacted(const mutation& m) {
     auto result = m;
     result.partition().compact_for_compaction(*result.schema(), always_gc, gc_clock::now());
@@ -1210,7 +1237,7 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
             rd.consume_pausable([&](mutation_fragment&& mf) {
                 position_in_partition::less_compare less(*s);
                 if (!less(mf.position(), position_in_partition_view::before_all_clustered_rows())) {
-                    BOOST_FAIL(sprint("Received clustering fragment: %s", mf));
+                    BOOST_FAIL(sprint("Received clustering fragment: %s", mutation_fragment::printer(*s, mf)));
                 }
                 result.partition().apply(*s, std::move(mf));
                 return stop_iteration::no;
@@ -1221,11 +1248,11 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
                 rd.fast_forward_to(prange, db::no_timeout).get();
                 rd.consume_pausable([&](mutation_fragment&& mf) {
                     if (!mf.relevant_for_range(*s, prange.start())) {
-                        BOOST_FAIL(sprint("Received fragment which is not relevant for range: %s, range: %s", mf, prange));
+                        BOOST_FAIL(sprint("Received fragment which is not relevant for range: %s, range: %s", mutation_fragment::printer(*s, mf), prange));
                     }
                     position_in_partition::less_compare less(*s);
                     if (!less(mf.position(), prange.end())) {
-                        BOOST_FAIL(sprint("Received fragment is out of range: %s, range: %s", mf, prange));
+                        BOOST_FAIL(sprint("Received fragment is out of range: %s, range: %s", mutation_fragment::printer(*s, mf), prange));
                     }
                     result.partition().apply(*s, std::move(mf));
                     return stop_iteration::no;
@@ -1277,7 +1304,7 @@ SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones
 
             rd.consume_pausable([&] (mutation_fragment&& mf) {
                 if (mf.position().has_clustering_key() && !mf.range().overlaps(*s, prange.start(), prange.end())) {
-                    BOOST_FAIL(sprint("Received fragment which is not relevant for the slice: %s, slice: %s", mf, range));
+                    BOOST_FAIL(sprint("Received fragment which is not relevant for the slice: %s, slice: %s", mutation_fragment::printer(*s, mf), range));
                 }
                 result.partition().apply(*s, std::move(mf));
                 return stop_iteration::no;
@@ -1312,7 +1339,7 @@ SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones
             auto consume_clustered = [&] (mutation_fragment&& mf) {
                 position_in_partition::less_compare less(*s);
                 if (less(mf.position(), last_pos)) {
-                    BOOST_FAIL(sprint("Out of order fragment: %s, last pos: %s", mf, last_pos));
+                    BOOST_FAIL(sprint("Out of order fragment: %s, last pos: %s", mutation_fragment::printer(*s, mf), last_pos));
                 }
                 last_pos = position_in_partition(mf.position());
                 result.partition().apply(*s, std::move(mf));

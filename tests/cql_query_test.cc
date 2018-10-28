@@ -3123,7 +3123,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_check) {
 
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j <3; ++j) {
-                e.execute_cql(sprint("INSERT INTO t(p, c, v) VALUES (%s, %s, %s)", i, j, j)).get();
+                e.execute_cql(format("INSERT INTO t(p, c, v) VALUES ({}, {}, {})", i, j, j)).get();
             }
         }
 
@@ -3152,7 +3152,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_check) {
         e.require_table_exists("ks", "t2").get();
         e.execute_cql("CREATE INDEX ON t2(a)").get();
         for (int i = 0; i < 5; ++i) {
-            e.execute_cql(sprint("INSERT INTO t2 (p, a, b) VALUES (%s, %s, %s)", i, i * 10, i * 100)).get();
+            e.execute_cql(format("INSERT INTO t2 (p, a, b) VALUES ({}, {}, {})", i, i * 10, i * 100)).get();
         }
 
         queries = {
@@ -3555,10 +3555,10 @@ SEASTAR_TEST_CASE(test_allow_filtering_with_secondary_index) {
         e.execute_cql("CREATE INDEX ON t2(v)").get();
         for (int i = 1; i <= 5; ++i) {
             for (int j = 1; j <= 2; ++j) {
-                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, 1, 1, i)).get();
-                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, 1, i, i)).get();
-                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, 1, i, i, i)).get();
-                e.execute_cql(sprint("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES (%s, %s, %s, %s, %s)", j, i, i, i, i)).get();
+                e.execute_cql(format("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES ({}, {}, {}, {}, {})", j, 1, 1, 1, i)).get();
+                e.execute_cql(format("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES ({}, {}, {}, {}, {})", j, 1, 1, i, i)).get();
+                e.execute_cql(format("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES ({}, {}, {}, {}, {})", j, 1, i, i, i)).get();
+                e.execute_cql(format("INSERT INTO t2 (pk1, pk2, c1, c2, v) VALUES ({}, {}, {}, {}, {})", j, i, i, i, i)).get();
             }
         }
 
@@ -3983,7 +3983,7 @@ SEASTAR_TEST_CASE(test_select_with_mixed_order_table) {
         // this will create a table satisfying the slice_testcase assumption.
         for(int i=0; i < slice_test_type::total_num_of_values; i++) {
             auto tuple = slice_test_type::bound_val_to_tuple(i);
-            e.execute_cql(sprint("INSERT INTO foo (a, b, c, d, e, f) VALUES (0, %s, %s, %s, %s, %s);",
+            e.execute_cql(format("INSERT INTO foo (a, b, c, d, e, f) VALUES (0, {}, {}, {}, {}, {});",
                     tuple[0],tuple[1],tuple[2],tuple[3],i)).get();
         }
 
@@ -4040,5 +4040,83 @@ SEASTAR_TEST_CASE(test_select_with_mixed_order_table) {
             auto msg = e.execute_cql(sprint(select_query_template,test_case.generate_cql_slice_expresion(column_names))).get0();
             assert_that(msg).is_rows().with_rows_ignore_order(test_case.genrate_results_for_validation());
         }
+    });
+}
+
+SEASTAR_TEST_CASE(test_filtering) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE cf (k int, v int,m int,n int,o int,p int static, PRIMARY KEY ((k,v),m,n));").get();
+        e.execute_cql(
+                "BEGIN UNLOGGED BATCH \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (1, 1, 1, 1, 1 ,1 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (2, 1, 2, 1, 2 ,2 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (3, 1, 3, 1, 3 ,3 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (4, 2, 1, 2, 4 ,4 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (5, 2, 2, 2, 5 ,5 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (6, 2, 3, 2, 6 ,6 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (7, 3, 1, 3, 7 ,7 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (8, 3, 2, 3, 8 ,8 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (9, 3, 3, 3, 9 ,9 ); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (10, 4, 1, 4,10,10); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (11, 4, 2, 4,11,11); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (12, 5, 3, 5,12,12); \n"
+                "INSERT INTO cf (k, v, m, n, o, p) VALUES (12, 5, 4, 5,13,13); \n"
+                "APPLY BATCH;"
+        ).get();
+
+        // Notice the with_serialized_columns_count() check before the set comparison.
+        // Since we are dealing with the result set before serializing to the client,
+        // there is an extra column that is used for the filtering, this column will
+        // not be present in the responce to the client and with_serialized_columns_count()
+        // verifies exactly that.
+
+        // test filtering on partition keys
+        {
+            auto msg = e.execute_cql("SELECT k FROM cf WHERE v=3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_serialized_columns_count(1).with_rows_ignore_order({
+                { int32_type->decompose(7), int32_type->decompose(3)},
+                { int32_type->decompose(8), int32_type->decompose(3) },
+                { int32_type->decompose(9), int32_type->decompose(3) },
+            });
+        }
+
+        // test filtering on clustering keys
+        {
+            auto msg = e.execute_cql("SELECT k FROM cf WHERE n=4 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_serialized_columns_count(1).with_rows_ignore_order({
+                { int32_type->decompose(10), int32_type->decompose(4) },
+                { int32_type->decompose(11), int32_type->decompose(4) },
+            });
+        }
+
+        //test filtering on regular columns
+        {
+            auto msg = e.execute_cql("SELECT k FROM cf WHERE o>7 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_serialized_columns_count(1).with_rows_ignore_order({
+                { int32_type->decompose(8),  int32_type->decompose(8) },
+                { int32_type->decompose(9),  int32_type->decompose(9) },
+                { int32_type->decompose(10), int32_type->decompose(10) },
+                { int32_type->decompose(11), int32_type->decompose(11) },
+                { int32_type->decompose(12), int32_type->decompose(12) },
+                { int32_type->decompose(12), int32_type->decompose(13) },
+            });
+        }
+
+        //test filtering on static columns
+        {
+            auto msg = e.execute_cql("SELECT k FROM cf WHERE p>=10 AND p<=12 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_serialized_columns_count(1).with_rows_ignore_order({
+                { int32_type->decompose(10), int32_type->decompose(10) },
+                { int32_type->decompose(11), int32_type->decompose(11) },
+            });
+        }
+        //test filtering with count
+        {
+            auto msg = e.execute_cql("SELECT COUNT(k) FROM cf WHERE n>3 ALLOW FILTERING;").get0();
+            assert_that(msg).is_rows().with_serialized_columns_count(1).with_size(1).with_rows_ignore_order({
+                { long_type->decompose(4L), int32_type->decompose(4) },
+            });
+        }
+
     });
 }

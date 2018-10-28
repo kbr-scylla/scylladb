@@ -335,6 +335,7 @@ scylla_tests = [
     'tests/encrypted_file_test',
     'tests/auth_passwords_test',
     'tests/multishard_mutation_query_test',
+    'tests/top_k_test',
 ]
 
 perf_tests = [
@@ -792,6 +793,7 @@ pure_boost_tests = set([
     'tests/observable_test',
     'tests/json_test',
     'tests/auth_passwords_test',
+    'tests/top_k_test',
 ])
 
 tests_not_using_seastar_test_framework = set([
@@ -1286,7 +1288,7 @@ with open(buildfile, 'w') as f:
         f.write(textwrap.dedent('''\
             build build/{mode}/iotune: copy seastar/build/{mode}/apps/iotune/iotune
             ''').format(**locals()))
-        f.write('build build/$mode/scylla-package.tar: package build/{mode}/scylla build/{mode}/iotune\n'.format(**locals()))
+        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
         f.write('    mode = {mode}\n'.format(**locals()))
     f.write('build {}: phony\n'.format(seastar_deps))
     f.write(textwrap.dedent('''\
@@ -1303,4 +1305,10 @@ with open(buildfile, 'w') as f:
             description = CLEAN
         build clean: clean
         default {modes_list}
+        ''').format(modes_list=' '.join(build_modes), **globals()))
+    f.write(textwrap.dedent('''\
+        build always: phony
+        rule scylla_version_gen
+            command = ./SCYLLA-VERSION-GEN
+        build build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE: scylla_version_gen
         ''').format(modes_list=' '.join(build_modes), **globals()))

@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/memory.hh>
@@ -78,8 +79,8 @@ private:
     shard_managers_set& _shard_managers;
     per_device_limits_map& _per_device_limits_map;
 
-    seastar::gate _gate;
-    seastar::timer<timer_clock_type> _timer;
+    future<> _started = make_ready_future<>();
+    seastar::abort_source _as;
     int _files_count = 0;
 
 public:
@@ -137,6 +138,9 @@ public:
         , _space_watchdog(_shard_managers, _per_device_limits_map)
     {}
 
+    resource_manager(resource_manager&&) = delete;
+    resource_manager& operator=(resource_manager&&) = delete;
+
     future<semaphore_units<semaphore_default_exception_factory>> get_send_units_for(size_t buf_size);
 
     bool too_many_hints_in_progress() const {
@@ -156,6 +160,7 @@ public:
     }
 
     future<> start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr<gms::gossiper> gossiper_ptr, shared_ptr<service::storage_service> ss_ptr);
+    void allow_replaying() noexcept;
     future<> stop() noexcept;
     void register_manager(manager& m);
     future<> prepare_per_device_limits();

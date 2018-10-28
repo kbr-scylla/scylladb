@@ -2645,10 +2645,14 @@ enum class row_extended_flags : uint8_t {
     none = 0x00,
     // Whether the encoded row is a static. If there is no extended flag, the row is assumed not static.
     is_static = 0x01,
-    // Whether the row deletion is shadowable. If there is no extended flag (or no row deletion)
-    // the deletion is assumed not shadowable.
+    // Cassandra-specific flag, indicates whether the row deletion is shadowable.
     // This flag is deprecated in Origin - see CASSANDRA-11500.
-    has_shadowable_deletion = 0x02,
+    // This flag is never set by Scylla and it fails to read files that have it set.
+    has_shadowable_deletion_cassandra = 0x02,
+    // Scylla-specific flag, indicates whether the row deletion is shadowable.
+    // If set, the shadowable tombstone is writen right after the row deletion.
+    // This is only used by Materialized Views that are not supposed to be exported.
+    has_shadowable_deletion_scylla = 0x80,
 };
 
 // A range tombstone marker (RT marker) represents a bound of a range tombstone
@@ -2693,6 +2697,27 @@ GCC6_CONCEPT(
     };
 )
 
+static indexed_columns get_indexed_regular_columns_partitioned_by_atomicity(const schema& s) {
+    indexed_columns columns;
+    columns.reserve(s.regular_columns_count());
+    for (const auto& element: s.regular_columns() | boost::adaptors::indexed()) {
+        columns.push_back({static_cast<column_id>(element.index()), element.value()});
+    }
+    boost::range::stable_partition(
+            columns,
+            [](const column_definition_indexed_ref& column) { return column.cdef.get().is_atomic();});
+    return columns;
+}
+
+static indexed_columns get_indexed_static_columns(const schema& s) {
+    indexed_columns columns;
+    columns.reserve(s.static_columns_count());
+    for (const auto& element: s.static_columns() | boost::adaptors::indexed()) {
+        columns.push_back({static_cast<column_id>(element.index()), element.value()});
+    }
+    return columns;
+}
+
 // Used for writing SSTables in 'mc' format.
 class sstable_writer_m : public sstable_writer::writer_impl {
 private:
@@ -2712,6 +2737,21 @@ private:
     stdx::optional<key> _first_key, _last_key;
     index_sampling_state _index_sampling_state;
     range_tombstone_stream _range_tombstones;
+    // For regular columns, we write all simple columns first followed by collections
+    // This container has regular columns paritioned by atomicity
+    const indexed_columns _regular_columns;
+    // TODO: unlike regular columns, static ones don't need re-ordering because
+    // they are always all atomic. Perhaps we should do a helper writing missing columns
+    // that would accept just the schema when writing a static row
+    const indexed_columns _static_columns;
+
+    struct cdef_and_collection {
+        const column_definition* cdef;
+        std::reference_wrapper<const atomic_cell_or_collection> collection;
+    };
+
+    // Used to defer writing collections until all atomic cells are written
+    std::vector<cdef_and_collection> _collections;
 
     std::optional<rt_marker> _end_open_marker;
 
@@ -2834,6 +2874,8 @@ public:
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _range_tombstones(_schema)
+        , _regular_columns(get_indexed_regular_columns_partitioned_by_atomicity(s))
+        , _static_columns(get_indexed_static_columns(s))
     {
         _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
         _sst.write_toc(_pc);
@@ -3206,11 +3248,11 @@ void sstable_writer_m::write_cells(file_writer& writer, column_kind kind, const 
     // This differs from Origin where all updated columns are tracked and the set of filled columns of a row
     // is compared with the set of all columns filled in the memtable. So our encoding may be less optimal in some cases
     // but still valid.
-    write_missing_columns(writer, _schema, row_body);
+    write_missing_columns(writer, kind == column_kind::static_column ? _static_columns : _regular_columns, row_body);
     row_body.for_each_cell([this, &writer, kind, &properties, has_complex_deletion] (column_id id, const atomic_cell_or_collection& c) {
         auto&& column_definition = _schema.column_at(kind, id);
         if (!column_definition.is_atomic()) {
-            write_collection(writer, column_definition, c.as_collection_mutation(), properties, has_complex_deletion);
+            _collections.push_back({&column_definition, c});
             return;
         }
         atomic_cell_view cell = c.as_atomic_cell(column_definition);
@@ -3218,15 +3260,26 @@ void sstable_writer_m::write_cells(file_writer& writer, column_kind kind, const 
         ++_c_stats.column_count;
         write_cell(writer, cell, column_definition, properties);
     });
+
+    for (const auto& col: _collections) {
+        write_collection(writer, *col.cdef, col.collection.get().as_collection_mutation(), properties, has_complex_deletion);
+    }
+    _collections.clear();
 }
 
 void sstable_writer_m::write_row_body(file_writer& writer, const clustering_row& row, bool has_complex_deletion) {
     write_liveness_info(writer, row.marker());
-    if (row.tomb()) {
-        auto dt = to_deletion_time(row.tomb().tomb());
+    auto write_tombstone_and_update_stats = [this, &writer] (const tombstone& t) {
+         auto dt = to_deletion_time(t);
         _c_stats.update_timestamp(dt.marked_for_delete_at);
         _c_stats.update_local_deletion_time(dt.local_deletion_time);
         write_delta_deletion_time(writer, dt);
+    };
+    if (row.tomb().regular()) {
+        write_tombstone_and_update_stats(row.tomb().regular());
+    }
+    if (row.tomb().is_shadowable()) {
+        write_tombstone_and_update_stats(row.tomb().tomb());
     }
     row_time_properties properties;
     if (!row.marker().is_missing()) {
@@ -3320,11 +3373,12 @@ void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint
         }
     }
 
-    if (clustered_row.tomb().tomb()) {
+    if (clustered_row.tomb().regular()) {
         flags |= row_flags::has_deletion;
-        if (clustered_row.tomb().tomb() && clustered_row.tomb().is_shadowable()) {
-            ext_flags = row_extended_flags::has_shadowable_deletion;
-        }
+    }
+    if (clustered_row.tomb().is_shadowable()) {
+        flags |= row_flags::extension_flag;
+        ext_flags = row_extended_flags::has_shadowable_deletion_scylla;
     }
 
     if (clustered_row.cells().size() == _schema.regular_columns_count()) {

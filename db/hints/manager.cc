@@ -35,6 +35,7 @@
 #include "disk-error-handler.hh"
 #include "lister.hh"
 #include "db/timeout_clock.hh"
+#include "service/priority_manager.hh"
 
 using namespace std::literals::chrono_literals;
 
@@ -95,6 +96,7 @@ future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr
         return compute_hints_dir_device_id();
     }).then([this] {
         _strorage_service_anchor->register_subscriber(this);
+        set_started();
     });
 }
 
@@ -105,7 +107,7 @@ future<> manager::stop() {
         _strorage_service_anchor->unregister_subscriber(this);
     }
 
-    _stopping = true;
+    set_stopping();
 
     return _draining_eps_gate.close().finally([this] {
         return parallel_for_each(_ep_managers, [] (auto& pair) {
@@ -277,7 +279,7 @@ inline bool manager::have_ep_manager(ep_key_type ep) const noexcept {
 }
 
 bool manager::store_hint(ep_key_type ep, schema_ptr s, lw_shared_ptr<const frozen_mutation> fm, tracing::trace_state_ptr tr_state) noexcept {
-    if (_stopping || !can_hint_for(ep)) {
+    if (stopping() || !started() || !can_hint_for(ep)) {
         manager_logger.trace("Can't store a hint to {}", ep);
         ++_stats.dropped;
         return false;
@@ -501,7 +503,7 @@ bool manager::check_dc_for(ep_key_type ep) const noexcept {
 }
 
 void manager::drain_for(gms::inet_address endpoint) {
-    if (_stopping) {
+    if (stopping()) {
         return;
     }
 
@@ -542,6 +544,7 @@ manager::end_point_hints_manager::sender::sender(end_point_hints_manager& parent
     , _resource_manager(_shard_manager._resource_manager)
     , _proxy(local_storage_proxy)
     , _db(local_db)
+    , _hints_cpu_sched_group(_db.get_streaming_scheduling_group())
     , _gossiper(local_gossiper)
     , _file_update_mutex(_ep_manager.file_update_mutex())
 {}
@@ -554,6 +557,7 @@ manager::end_point_hints_manager::sender::sender(const sender& other, end_point_
     , _resource_manager(_shard_manager._resource_manager)
     , _proxy(other._proxy)
     , _db(other._db)
+    , _hints_cpu_sched_group(other._hints_cpu_sched_group)
     , _gossiper(other._gossiper)
     , _file_update_mutex(_ep_manager.file_update_mutex())
 {}
@@ -609,7 +613,10 @@ manager::end_point_hints_manager::sender::clock::duration manager::end_point_hin
 }
 
 void manager::end_point_hints_manager::sender::start() {
-    _stopped = seastar::async([this] {
+    seastar::thread_attributes attr;
+
+    attr.sched_group = _hints_cpu_sched_group;
+    _stopped = seastar::async(std::move(attr), [this] {
         manager_logger.trace("ep_manager({})::sender: started", end_point_key());
         while (!stopping()) {
             try {
@@ -693,7 +700,7 @@ bool manager::end_point_hints_manager::sender::send_one_file(const sstring& fnam
     lw_shared_ptr<send_one_file_ctx> ctx_ptr = make_lw_shared<send_one_file_ctx>();
 
     try {
-        auto s = commitlog::read_log_file(fname, [this, secs_since_file_mod, &fname, ctx_ptr] (temporary_buffer<char> buf, db::replay_position rp) mutable {
+        auto s = commitlog::read_log_file(fname, service::get_local_streaming_read_priority(), [this, secs_since_file_mod, &fname, ctx_ptr] (temporary_buffer<char> buf, db::replay_position rp) mutable {
             // Check that we can still send the next hint. Don't try to send it if the destination host
             // is DOWN or if we have already failed to send some of the previous hints.
             if (!draining() && ctx_ptr->state.contains(send_state::segment_replay_failed)) {
@@ -759,7 +766,7 @@ void manager::end_point_hints_manager::sender::send_hints_maybe() noexcept {
     int replayed_segments_count = 0;
 
     try {
-        while (have_segments()) {
+        while (replay_allowed() && have_segments()) {
             if (!send_one_file(*_segments_to_replay.begin())) {
                 break;
             }
@@ -934,6 +941,16 @@ future<> manager::rebalance(sstring hints_directory) {
         // Remove the directories of shards that are not present anymore - they should not have any segments by now
         remove_irrelevant_shards_directories(hints_directory);
     });
+}
+
+void manager::update_backlog(size_t backlog, size_t max_backlog) {
+    _backlog_size = backlog;
+    _max_backlog_size = max_backlog;
+    if (backlog < max_backlog) {
+        allow_hints();
+    } else {
+        forbid_hints_for_eps_with_pending_hints();
+    }
 }
 
 }

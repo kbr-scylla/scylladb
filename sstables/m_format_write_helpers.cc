@@ -203,10 +203,10 @@ void write_clustering_prefix(file_writer& out, const schema& s,
 class missing_columns_input_range
         : public input_range_base<missing_columns_input_range, uint64_t> {
 private:
-    const schema& _schema;
+    const indexed_columns& _columns;
     const row& _row;
     mutable uint64_t _current_value = 0;
-    mutable column_id _current_id = 0;
+    mutable size_t _current_index = 0;
     mutable bool _large_mode_produced_size = false;
 
     enum class encoding_mode {
@@ -216,35 +216,35 @@ private:
     } _mode;
 
 public:
-    missing_columns_input_range(const schema& s, const row& row)
-            : _schema(s)
+    missing_columns_input_range(const indexed_columns& columns, const row& row)
+            : _columns(columns)
             , _row(row) {
 
         auto row_size = _row.size();
-        auto total_size = _schema.regular_columns_count();
+        auto total_size = _columns.size();
 
-        _current_id = row_size < total_size ? 0 : total_size;
+        _current_index = row_size < total_size ? 0 : total_size;
         _mode = (total_size < 64)           ? encoding_mode::small :
                 (row_size < total_size / 2) ? encoding_mode::large_encode_present :
                 encoding_mode::large_encode_missing;
     }
 
     bool next() const {
-        auto total_size = _schema.regular_columns_count();
-        if (_current_id == total_size) {
+        auto total_size = _columns.size();
+        if (_current_index == total_size) {
             // No more values to encode
             return false;
         }
 
         if (_mode ==  encoding_mode::small) {
             // Set bit for every missing column
-            for (column_id id = 0; id < total_size; ++id) {
-                auto cell = _row.find_cell(id);
+            for (const auto& element: _columns | boost::adaptors::indexed()) {
+                auto cell = _row.find_cell(element.value().id);
                 if (!cell) {
-                    _current_value |= (uint64_t(1) << id);
+                    _current_value |= (uint64_t(1) << element.index());
                 }
             }
-            _current_id = total_size;
+            _current_index = total_size;
             return true;
         } else {
             // For either of large modes, output the difference between total size and row size first
@@ -255,25 +255,25 @@ public:
             }
 
             if (_mode == encoding_mode::large_encode_present) {
-                while (_current_id < total_size) {
-                    auto cell = _row.find_cell(_current_id);
+                while (_current_index < total_size) {
+                    auto cell = _row.find_cell(_columns[_current_index].id);
                     if (cell) {
-                        _current_value = _current_id;
-                        ++_current_id;
+                        _current_value = _current_index;
+                        ++_current_index;
                         return true;
                     }
-                    ++_current_id;
+                    ++_current_index;
                 }
             } else {
                 assert(_mode == encoding_mode::large_encode_missing);
-                while (_current_id < total_size) {
-                    auto cell = _row.find_cell(_current_id);
+                while (_current_index < total_size) {
+                    auto cell = _row.find_cell(_columns[_current_index].id);
                     if (!cell) {
-                        _current_value = _current_id;
-                        ++_current_id;
+                        _current_value = _current_index;
+                        ++_current_index;
                         return true;
                     }
-                    ++_current_id;
+                    ++_current_index;
                 }
             }
         }
@@ -285,12 +285,12 @@ public:
 
     explicit operator bool() const
     {
-        return (_current_id < _schema.regular_columns_count());
+        return (_current_index < _columns.size());
     }
 };
 
-void write_missing_columns(file_writer& out, const schema& s, const row& row) {
-    for (const auto value: missing_columns_input_range{s, row}) {
+void write_missing_columns(file_writer& out, const indexed_columns& columns, const row& row) {
+    for (const auto value: missing_columns_input_range{columns, row}) {
         write_vint(out, value);
     }
 }

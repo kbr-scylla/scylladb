@@ -4549,3 +4549,161 @@ SEASTAR_THREAD_TEST_CASE(test_dead_row_marker) {
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
 }
 
+SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
+    /* The created SSTables content should match that of
+     * an MV filled with the following queries:
+     *
+     * CREATE TABLE cf (p int PRIMARY KEY, v int) WITH compression = {'sstable_compression': ''};
+     * CREATE MATERIALIZED VIEW mv AS SELECT * FROM cf WHERE p IS NOT NULL AND v IS NOT NULL PRIMARY KEY (v, p);
+     * INSERT INTO cf (p, v) VALUES (1, 0);
+     * UPDATE cf SET v = 1 WHERE p = 1;
+     */
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "shadowable_deletion";
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
+    mutation mut1{s, partition_key::from_deeply_exploded(*s, {1})};
+    {
+        auto& clustered_row = mut1.partition().clustered_row(*s, ckey);
+        clustered_row.apply(row_marker{api::timestamp_type{1540230880370422}});
+        mt->apply(mut1);
+    }
+
+    mutation mut2{s, partition_key::from_deeply_exploded(*s, {0})};
+    {
+        auto& clustered_row = mut2.partition().clustered_row(*s, ckey);
+        api::timestamp_type ts {1540230874370065};
+        gc_clock::time_point tp {gc_clock::duration(1540230880)};
+        clustered_row.apply(row_marker{api::timestamp_type{ts}});
+        clustered_row.apply(shadowable_tombstone(ts, tp));
+        mt->apply(mut2);
+    }
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut1, mut2});
+}
+
+SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
+    /* The created SSTables content should match that of
+     * an MV filled with the following queries:
+     *
+     * CREATE TABLE cf (p INT, c INT, v INT, PRIMARY KEY (p, c));
+     * CREATE MATERIALIZED VIEW mvf AS SELECT * FROM cf WHERE p IS NOT NULL AND c IS NOT NULL AND v IS NOT NULL PRIMARY KEY (v, p, c);
+     * INSERT INTO cf (p, c, v) VALUES (1, 1, 0) USING TIMESTAMP 1540230874370001;
+     * DELETE FROM cf USING TIMESTAMP 1540230874370001 WHERE p = 1 AND c = 1;
+     * UPDATE cf USING TIMESTAMP 1540230874370002 SET v = 0 WHERE p = 1 AND c = 1;
+     * UPDATE cf USING TIMESTAMP 1540230874370003 SET v = 1 WHERE p = 1 AND c = 1;
+     */
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "regular_and_shadowable_deletion";
+    schema_builder builder("sst3", table_name);
+    builder.with_column("v", int32_type, column_kind::partition_key);
+    builder.with_column("p", int32_type, column_kind::clustering_key);
+    builder.with_column("c", int32_type, column_kind::clustering_key);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    auto make_tombstone = [] (int64_t ts, int32_t tp) {
+        return tombstone{api::timestamp_type{ts}, gc_clock::time_point(gc_clock::duration(tp))};
+    };
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { {1}, {1} });
+    mutation mut1{s, partition_key::from_deeply_exploded(*s, {1})};
+    {
+        auto& clustered_row = mut1.partition().clustered_row(*s, ckey);
+        clustered_row.apply(row_marker{api::timestamp_type{1540230874370003}});
+        clustered_row.apply(make_tombstone(1540230874370001, 1540251167));
+        mt->apply(mut1);
+    }
+
+    mutation mut2{s, partition_key::from_deeply_exploded(*s, {0})};
+    {
+        auto& clustered_row = mut2.partition().clustered_row(*s, ckey);
+        gc_clock::time_point tp {gc_clock::duration(1540230880)};
+        clustered_row.apply(row_marker{api::timestamp_type{1540230874370002}});
+        clustered_row.apply(make_tombstone(1540230874370001, 1540251167));
+        clustered_row.apply(shadowable_tombstone(make_tombstone(1540230874370002, 1540251216)));
+        mt->apply(mut2);
+    }
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut1, mut2});
+}
+
+SEASTAR_THREAD_TEST_CASE(test_write_static_row_with_missing_columns) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "static_row_with_missing_columns";
+    // CREATE TABLE static_row (pk int, ck int, st1 int static, st2 int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.with_column("st1", int32_type, column_kind::static_column);
+    builder.with_column("st2", int32_type, column_kind::static_column);
+    builder.with_column("rc", int32_type);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    // INSERT INTO static_row (pk, ck, st1, rc) VALUES (0, 1, 2, 3);
+    auto key = partition_key::from_deeply_exploded(*s, {0});
+    mutation mut{s, key};
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
+    mut.partition().apply_insert(*s, ckey, write_timestamp);
+    mut.set_static_cell("st1", data_value{2}, write_timestamp);
+    mut.set_cell(ckey, "rc", data_value{3}, write_timestamp);
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
+}
+
+SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "interleaved_atomic_and_collection_columns";
+    //
+    auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.with_column("rc1", int32_type);
+    builder.with_column("rc2", set_of_ints_type);
+    builder.with_column("rc3", int32_type);
+    builder.with_column("rc4", set_of_ints_type);
+    builder.with_column("rc5", int32_type);
+    builder.with_column("rc6", set_of_ints_type);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    // INSERT INTO interleaved_atomic_and_collection_columns (pk, ck, rc1, rc4, rc5)
+    //    VALUES (0, 0, 'hello', ['beautiful','world'], 'here') USING TIMESTAMP 1525385507816568;
+    auto key = partition_key::from_deeply_exploded(*s, {0});
+    mutation mut{s, key};
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
+    mut.partition().apply_insert(*s, ckey, write_timestamp);
+    mut.set_cell(ckey, "rc1", data_value{2}, write_timestamp);
+
+    set_type_impl::mutation set_values;
+    set_values.tomb = tombstone {write_timestamp - 1, write_time_point};
+    set_values.cells.emplace_back(int32_type->decompose(3), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
+    set_values.cells.emplace_back(int32_type->decompose(4), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
+    mut.set_clustered_cell(ckey, *s->get_column_definition("rc4"), set_of_ints_type->serialize_mutation_form(set_values));
+
+    mut.set_cell(ckey, "rc5", data_value{5}, write_timestamp);
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
+}
+
