@@ -53,6 +53,7 @@
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
 #include "utils/memory.hh"
+#include <db/view/view_update_from_staging_generator.hh>
 
 seastar::metrics::metric_groups app_metrics;
 
@@ -218,7 +219,7 @@ verify_seastar_io_scheduler(bool has_max_io_requests, bool has_properties, bool 
         if (has_max_io_requests) {
             auto capacity = engine().get_io_queue().capacity();
             if (capacity < 4) {
-                auto cause = sprint("I/O Queue capacity for this shard is too low (%ld, minimum 4 expected).", capacity);
+                auto cause = format("I/O Queue capacity for this shard is too low ({:d}, minimum 4 expected).", capacity);
                 note_bad_conf(cause);
             }
         }
@@ -296,7 +297,7 @@ int main(int ac, char** av) {
     bpo::variables_map vm;
     bpo::store(bpo::command_line_parser(ac, av).options(app.get_options_description()).allow_unregistered().run(), vm);
     if (vm["version"].as<bool>()) {
-        print("%s\n", scylla_version());
+        fmt::print("{}\n", scylla_version());
         return 0;
     }
 
@@ -325,7 +326,7 @@ int main(int ac, char** av) {
 
     return app.run_deprecated(ac, av, [&] {
 
-        print("Scylla version %s starting ...\n", scylla_version());
+        fmt::print("Scylla version {} starting ...\n", scylla_version());
         auto&& opts = app.configuration();
 
         namespace sm = seastar::metrics;
@@ -336,7 +337,7 @@ int main(int ac, char** av) {
         const std::unordered_set<sstring> ignored_options = { "auto-adjust-flush-quota", "background-writer-scheduling-quota" };
         for (auto& opt: ignored_options) {
             if (opts.count(opt)) {
-                print("%s option ignored (deprecated)\n", opt);
+                fmt::print("{} option ignored (deprecated)\n", opt);
             }
         }
 
@@ -641,6 +642,21 @@ int main(int ac, char** av) {
 
             supervisor::notify("loading sstables");
             distributed_loader::init_non_system_keyspaces(db, proxy).get();
+
+            static sharded<db::view::view_update_from_staging_generator> view_update_from_staging_generator;
+            view_update_from_staging_generator.start(std::ref(db), std::ref(proxy)).get();
+            supervisor::notify("discovering staging sstables");
+            db.invoke_on_all([] (database& db) {
+                for (auto& x : db.get_column_families()) {
+                    table& t = *(x.second);
+                    for (sstables::shared_sstable sst : *t.get_sstables()) {
+                        if (sst->is_staging()) {
+                            view_update_from_staging_generator.local().register_staging_sstable(std::move(sst), t.shared_from_this());
+                        }
+                    }
+                }
+            }).get();
+
             // register connection drop notification to update cf's cache hit rate data
             db.invoke_on_all([] (database& db) {
                 db.register_connection_drop_notifier(netw::get_local_messaging_service());
@@ -694,8 +710,9 @@ int main(int ac, char** av) {
             proxy.invoke_on_all([] (service::storage_proxy& p) {
                 p.init_messaging_service();
             }).get();
+
             supervisor::notify("starting streaming service");
-            streaming::stream_session::init_streaming_service(db).get();
+            streaming::stream_session::init_streaming_service(db, sys_dist_ks, view_update_from_staging_generator).get();
             api::set_server_stream_manager(ctx).get();
 
             supervisor::notify("starting hinted handoff manager");
@@ -749,6 +766,11 @@ int main(int ac, char** av) {
                 local_proxy.allow_replaying_hints();
             }).get();
 
+            if (cfg->view_building()) {
+                supervisor::notify("Launching generate_mv_updates for non system tables");
+                view_update_from_staging_generator.invoke_on_all(&db::view::view_update_from_staging_generator::start).get();
+            }
+
             static sharded<db::view::view_builder> view_builder;
             if (cfg->view_building()) {
                 supervisor::notify("starting the view builder");
@@ -793,6 +815,10 @@ int main(int ac, char** av) {
 
             engine().at_exit([] {
                 return view_builder.stop();
+            });
+
+            engine().at_exit([] {
+                return view_update_from_staging_generator.stop();
             });
 
             engine().at_exit([&db] {

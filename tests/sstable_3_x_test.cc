@@ -106,7 +106,7 @@ public:
     void assert_toc(const std::set<component_type>& expected_components) {
         for (auto& expected : expected_components) {
             if(_sst->_recognized_components.count(expected) == 0) {
-                BOOST_FAIL(sprint("Expected component of TOC missing: %s\n ... in: %s",
+                BOOST_FAIL(format("Expected component of TOC missing: {}\n ... in: {}",
                                   expected,
                                   std::set<component_type>(
                                       cbegin(_sst->_recognized_components),
@@ -115,7 +115,7 @@ public:
         }
         for (auto& present : _sst->_recognized_components) {
             if (expected_components.count(present) == 0) {
-                BOOST_FAIL(sprint("Unexpected component of TOC: %s\n ... when expecting: %s",
+                BOOST_FAIL(format("Unexpected component of TOC: {}\n ... when expecting: {}",
                                   present,
                                   expected_components));
             }
@@ -205,7 +205,6 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
             .produces_row(to_ck(110), to_expected(1010))
             .produces_partition_end()
             .produces_partition_start(to_key(2))
-            .produces_static_row({})
             .produces_row(to_ck(101), to_expected(1001))
             .produces_row(to_ck(102), to_expected(1002))
             .produces_row(to_ck(103), to_expected(1003))
@@ -235,7 +234,6 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
             .produces_row(to_ck(108), to_expected(1008))
             .produces_partition_end()
             .produces_partition_start(to_key(2))
-            .produces_static_row({})
             .produces_row(to_ck(102), to_expected(1002))
             .produces_row(to_ck(103), to_expected(1003))
             .produces_row(to_ck(107), to_expected(1007))
@@ -271,7 +269,6 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
         r.next_partition();
 
         r.produces_partition_start(to_key(2))
-            .produces_static_row({})
             .produces_end_of_stream();
 
         r.fast_forward_to(to_ck(103), to_ck(104));
@@ -318,7 +315,6 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
         r.next_partition();
 
         r.produces_partition_start(to_key(2))
-            .produces_static_row({})
             .produces_end_of_stream();
 
         r.fast_forward_to(to_ck(103), to_ck(104));
@@ -1969,7 +1965,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_sparse_read) 
 
     std::vector<const column_definition*> column_defs(64);
     for (int i = 0; i < 64; ++i) {
-        column_defs[i] = UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE_SCHEMA->get_column_definition(to_bytes(sprint("val%d", (i + 1))));
+        column_defs[i] = UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE_SCHEMA->get_column_definition(to_bytes(format("val{:d}", (i + 1))));
         BOOST_REQUIRE(column_defs[i]);
     }
 
@@ -2180,7 +2176,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_dense_read) {
 
     std::vector<const column_definition*> column_defs(64);
     for (int i = 0; i < 64; ++i) {
-        column_defs[i] = UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_SCHEMA->get_column_definition(to_bytes(sprint("val%d", (i + 1))));
+        column_defs[i] = UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_SCHEMA->get_column_definition(to_bytes(format("val{:d}", (i + 1))));
         BOOST_REQUIRE(column_defs[i]);
     }
 
@@ -2748,7 +2744,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_collections_read) {
                 for (auto&& entry : m_view.cells) {
                     auto cmp = compare_unsigned(int32_type->decompose(int32_t(val[idx])), entry.first);
                     if (cmp != 0) {
-                        BOOST_FAIL(sprint("Expected row with column %s having value %s, but it has value %s",
+                        BOOST_FAIL(format("Expected row with column {} having value {}, but it has value {}",
                                           def.id,
                                           int32_type->decompose(int32_t(val[idx])),
                                           entry.first));
@@ -2768,7 +2764,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_collections_read) {
                 for (auto&& entry : m_view.cells) {
                     auto cmp = compare_unsigned(utf8_type->decompose(val[idx]), entry.second.value().linearize());
                     if (cmp != 0) {
-                        BOOST_FAIL(sprint("Expected row with column %s having value %s, but it has value %s",
+                        BOOST_FAIL(format("Expected row with column {} having value {}, but it has value {}",
                                           def.id,
                                           utf8_type->decompose(val[idx]),
                                           entry.second.value().linearize()));
@@ -2790,7 +2786,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_collections_read) {
                     auto cmp2 = compare_unsigned(utf8_type->decompose(val[idx].second), entry.second.value().linearize());
                     if (cmp1 != 0 || cmp2 != 0) {
                         BOOST_FAIL(
-                            sprint("Expected row with column %s having value (%s, %s), but it has value (%s, %s)",
+                            format("Expected row with column {} having value ({}, {}), but it has value ({}, {})",
                                    def.id,
                                    int32_type->decompose(int32_t(val[idx].first)),
                                    utf8_type->decompose(val[idx].second),
@@ -4670,7 +4666,8 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_row_with_missing_columns) {
 SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
     auto abj = defer([] { await_background_jobs().get(); });
     sstring table_name = "interleaved_atomic_and_collection_columns";
-    //
+    // CREATE TABLE interleaved_atomic_and_collection_columns ( pk int, ck int, rc1 int, rc2 set<int>, rc3 int, rc4 set<int>,
+    //     rc5 int, rc6 set<int>, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
@@ -4687,7 +4684,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
     lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
 
     // INSERT INTO interleaved_atomic_and_collection_columns (pk, ck, rc1, rc4, rc5)
-    //    VALUES (0, 0, 'hello', ['beautiful','world'], 'here') USING TIMESTAMP 1525385507816568;
+    //     VALUES (0, 1, 2, {3, 4}, 5) USING TIMESTAMP 1525385507816568;
     auto key = partition_key::from_deeply_exploded(*s, {0});
     mutation mut{s, key};
     clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
@@ -4705,5 +4702,84 @@ SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
     validate_read(s, tmp.path, {mut});
+}
+
+SEASTAR_THREAD_TEST_CASE(test_write_static_interleaved_atomic_and_collection_columns) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "static_interleaved_atomic_and_collection_columns";
+    // CREATE TABLE static_interleaved_atomic_and_collection_columns ( pk int, ck int, st1 int static,
+    //     st2 set<int> static, st3 int static, st4 set<int> static, st5 int static, st6 set<int> static,
+    //     PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
+    auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.with_column("st1", int32_type, column_kind::static_column);
+    builder.with_column("st2", set_of_ints_type, column_kind::static_column);
+    builder.with_column("st3", int32_type, column_kind::static_column);
+    builder.with_column("st4", set_of_ints_type, column_kind::static_column);
+    builder.with_column("st5", int32_type, column_kind::static_column);
+    builder.with_column("st6", set_of_ints_type, column_kind::static_column);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+
+    // INSERT INTO static_interleaved_atomic_and_collection_columns (pk, ck, st1, st4, st5)
+    //     VALUES (0, 1, 2, {3, 4}, 5) USING TIMESTAMP 1525385507816568;
+    auto key = partition_key::from_deeply_exploded(*s, {0});
+    mutation mut{s, key};
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
+    mut.partition().apply_insert(*s, ckey, write_timestamp);
+    mut.set_static_cell("st1", data_value{2}, write_timestamp);
+
+    set_type_impl::mutation set_values;
+    set_values.tomb = tombstone {write_timestamp - 1, write_time_point};
+    set_values.cells.emplace_back(int32_type->decompose(3), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
+    set_values.cells.emplace_back(int32_type->decompose(4), atomic_cell::make_live(*bytes_type, write_timestamp, bytes_view{}));
+    mut.set_static_cell(*s->get_column_definition("st4"), set_of_ints_type->serialize_mutation_form(set_values));
+
+    mut.set_static_cell("st5", data_value{5}, write_timestamp);
+    mt->apply(mut);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut});
+}
+
+SEASTAR_THREAD_TEST_CASE(test_write_empty_static_row) {
+    auto abj = defer([] { await_background_jobs().get(); });
+    sstring table_name = "empty_static_row";
+    // CREATE TABLE empty_static_row (pk int, ck int, st int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
+    schema_builder builder("sst3", table_name);
+    builder.with_column("pk", int32_type, column_kind::partition_key);
+    builder.with_column("ck", int32_type, column_kind::clustering_key);
+    builder.with_column("st", int32_type, column_kind::static_column);
+    builder.with_column("rc", int32_type);
+    builder.set_compressor_params(compression_parameters());
+    schema_ptr s = builder.build(schema_builder::compact_storage::no);
+
+    lw_shared_ptr<memtable> mt = make_lw_shared<memtable>(s);
+    api::timestamp_type ts = write_timestamp;
+
+    // INSERT INTO empty_static_row (pk, ck, rc) VALUES ( 0, 1, 2) USING TIMESTAMP 1525385507816568;
+    auto key1 = partition_key::from_deeply_exploded(*s, {0});
+    mutation mut1{s, key1};
+    clustering_key ckey = clustering_key::from_deeply_exploded(*s, { 1 });
+    mut1.partition().apply_insert(*s, ckey, ts);
+    mut1.set_cell(ckey, "rc", data_value{2}, ts);
+    mt->apply(mut1);
+
+    ts += 10;
+
+    // INSERT INTO empty_static_row (pk, ck, st, rc) VALUES ( 1, 1, 2, 3) USING TIMESTAMP 1525385507816578;
+    auto key2 = partition_key::from_deeply_exploded(*s, {1});
+    mutation mut2{s, key2};
+    mut2.partition().apply_insert(*s, ckey, ts);
+    mut2.set_static_cell("st", data_value{2}, ts);
+    mut2.set_cell(ckey, "rc", data_value{3}, ts);
+    mt->apply(mut2);
+
+    tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
+    validate_read(s, tmp.path, {mut2, mut1}); // Mutations are re-ordered according to decorated_key order
 }
 

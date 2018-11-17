@@ -154,7 +154,7 @@ public:
             } else if (clustering.size() == (expected_normal + 1)) {
                 return true;
             }
-            throw malformed_sstable_exception(sprint("Found %d clustering elements in column name. Was not expecting that!", clustering.size()));
+            throw malformed_sstable_exception(format("Found {:d} clustering elements in column name. Was not expecting that!", clustering.size()));
         }
 
         static bool check_static(const schema& schema, bytes_view col) {
@@ -616,7 +616,7 @@ public:
             case composite::eoc::end:
                 return bound_kind::excl_start;
             default:
-                throw malformed_sstable_exception(sprint("Unexpected start composite marker %d\n", uint16_t(uint8_t(found))));
+                throw malformed_sstable_exception(format("Unexpected start composite marker {:d}\n", uint16_t(uint8_t(found))));
         }
     }
 
@@ -632,7 +632,7 @@ public:
             case composite::eoc::end:
                 return bound_kind::incl_end;
             default:
-                throw malformed_sstable_exception(sprint("Unexpected start composite marker %d\n", uint16_t(uint8_t(found))));
+                throw malformed_sstable_exception(format("Unexpected start composite marker {:d}\n", uint16_t(uint8_t(found))));
         }
     }
 
@@ -1195,16 +1195,18 @@ public:
             fill_cells(column_kind::static_column, _in_progress_static_row.cells());
             sstlog.trace("mp_row_consumer_m {}: consume_row_end(_in_progress_static_row={})", this, static_row::printer(*_schema, _in_progress_static_row));
             _inside_static_row = false;
-            auto action = _mf_filter->apply(_in_progress_static_row);
-            switch (action) {
-            case mutation_fragment_filter::result::emit:
-                _reader->push_mutation_fragment(std::move(_in_progress_static_row));
-                break;
-            case mutation_fragment_filter::result::ignore:
-                break;
-            case mutation_fragment_filter::result::store_and_finish:
-                // static row is always either emited or ignored.
-                throw runtime_exception("We should never need to store static row");
+            if (!_in_progress_static_row.empty()) {
+                auto action = _mf_filter->apply(_in_progress_static_row);
+                switch (action) {
+                case mutation_fragment_filter::result::emit:
+                    _reader->push_mutation_fragment(std::move(_in_progress_static_row));
+                    break;
+                case mutation_fragment_filter::result::ignore:
+                    break;
+                case mutation_fragment_filter::result::store_and_finish:
+                    // static row is always either emited or ignored.
+                    throw runtime_exception("We should never need to store static row");
+                }
             }
         } else {
             if (!_cells.empty()) {

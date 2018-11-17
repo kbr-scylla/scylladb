@@ -25,6 +25,7 @@
 #include "bytes.hh"
 #include "schema.hh"
 #include "tests/eventually.hh"
+#include "db/view/view_update_from_staging_generator.hh"
 
 class database;
 
@@ -42,7 +43,7 @@ namespace cql3 {
 
 class not_prepared_exception : public std::runtime_error {
 public:
-    not_prepared_exception(const cql3::prepared_cache_key_type& id) : std::runtime_error(sprint("Not prepared: %s", id)) {}
+    not_prepared_exception(const cql3::prepared_cache_key_type& id) : std::runtime_error(format("Not prepared: {}", id)) {}
 };
 
 namespace db {
@@ -91,6 +92,8 @@ public:
     virtual auth::service& local_auth_service() = 0;
 
     virtual db::view::view_builder& local_view_builder() = 0;
+
+    virtual db::view::view_update_from_staging_generator& local_view_update_generator() = 0;
 };
 
 future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func);

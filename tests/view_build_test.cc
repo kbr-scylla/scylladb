@@ -28,18 +28,44 @@
 #include "tests/test-utils.hh"
 #include "tests/cql_test_env.hh"
 #include "tests/cql_assertions.hh"
+#include "schema_builder.hh"
+#include "service/priority_manager.hh"
 
 using namespace std::literals::chrono_literals;
+
+static db::nop_large_partition_handler nop_lp_handler;
+
+schema_ptr test_table_schema() {
+    static thread_local auto s = [] {
+        schema_builder builder(make_lw_shared(schema(
+                generate_legacy_id("try1", "data"), "try1", "data",
+        // partition key
+        {{"p", utf8_type}},
+        // clustering key
+        {{"c", utf8_type}},
+        // regular columns
+        {{"v", utf8_type}},
+        // static columns
+        {},
+        // regular column name type
+        utf8_type,
+        // comment
+        ""
+       )));
+       return builder.build(schema_builder::compact_storage::no);
+    }();
+    return s;
+}
 
 SEASTAR_TEST_CASE(test_builder_with_large_partition) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         e.execute_cql("create table cf (p int, c int, v int, primary key (p, c))").get();
 
         for (auto i = 0; i < 1024; ++i) {
-            e.execute_cql(sprint("insert into cf (p, c, v) values (0, %d, 0)", i)).get();
+            e.execute_cql(format("insert into cf (p, c, v) values (0, {:d}, 0)", i)).get();
         }
 
-        auto f = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 10s);
+        auto f = e.local_view_builder().wait_until_built("ks", "vcf");
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where p is not null and c is not null and v is not null "
                       "primary key (v, c, p)").get();
@@ -60,10 +86,10 @@ SEASTAR_TEST_CASE(test_builder_with_multiple_partitions) {
         e.execute_cql("create table cf (p int, c int, v int, primary key (p, c))").get();
 
         for (auto i = 0; i < 1024; ++i) {
-            e.execute_cql(sprint("insert into cf (p, c, v) values (%d, %d, 0)", i % 5, i)).get();
+            e.execute_cql(format("insert into cf (p, c, v) values ({:d}, {:d}, 0)", i % 5, i)).get();
         }
 
-        auto f = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 10s);
+        auto f = e.local_view_builder().wait_until_built("ks", "vcf");
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where p is not null and c is not null and v is not null "
                       "primary key (v, c, p)").get();
@@ -84,10 +110,10 @@ SEASTAR_TEST_CASE(test_builder_with_multiple_partitions_of_batch_size_rows) {
         e.execute_cql("create table cf (p int, c int, v int, primary key (p, c))").get();
 
         for (auto i = 0; i < 1024; ++i) {
-            e.execute_cql(sprint("insert into cf (p, c, v) values (%d, %d, 0)", i % db::view::view_builder::batch_size, i)).get();
+            e.execute_cql(format("insert into cf (p, c, v) values ({:d}, {:d}, 0)", i % db::view::view_builder::batch_size, i)).get();
         }
 
-        auto f = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 10s);
+        auto f = e.local_view_builder().wait_until_built("ks", "vcf");
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where p is not null and c is not null and v is not null "
                       "primary key (v, c, p)").get();
@@ -108,11 +134,11 @@ SEASTAR_TEST_CASE(test_builder_view_added_during_ongoing_build) {
         e.execute_cql("create table cf (p int, c int, v int, primary key (p, c))").get();
 
         for (auto i = 0; i < 5000; ++i) {
-            e.execute_cql(sprint("insert into cf (p, c, v) values (0, %d, 0)", i)).get();
+            e.execute_cql(format("insert into cf (p, c, v) values (0, {:d}, 0)", i)).get();
         }
 
-        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1", lowres_clock::now() + 60s);
-        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2", lowres_clock::now() + 30s);
+        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1");
+        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2");
 
         e.execute_cql("create materialized view vcf1 as select * from cf "
                       "where p is not null and c is not null and v is not null "
@@ -166,12 +192,12 @@ SEASTAR_TEST_CASE(test_builder_across_tokens_with_large_partitions) {
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
         for (auto&& k : boost::irange(0, 4) | boost::adaptors::transformed(make_key)) {
             for (auto i = 0; i < 1000; ++i) {
-                e.execute_cql(sprint("insert into cf (p, c, v) values (0x%s, %d, 0)", k, i)).get();
+                e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
         }
 
-        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1", lowres_clock::now() + 60s);
-        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2", lowres_clock::now() + 30s);
+        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1");
+        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2");
 
         e.execute_cql("create materialized view vcf1 as select * from cf "
                       "where p is not null and c is not null and v is not null "
@@ -208,12 +234,12 @@ SEASTAR_TEST_CASE(test_builder_across_tokens_with_small_partitions) {
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
         for (auto&& k : boost::irange(0, 1000) | boost::adaptors::transformed(make_key)) {
             for (auto i = 0; i < 4; ++i) {
-                e.execute_cql(sprint("insert into cf (p, c, v) values (0x%s, %d, 0)", k, i)).get();
+                e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
         }
 
-        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1", lowres_clock::now() + 60s);
-        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2", lowres_clock::now() + 30s);
+        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf1");
+        auto f2 = e.local_view_builder().wait_until_built("ks", "vcf2");
 
         e.execute_cql("create materialized view vcf1 as select * from cf "
                       "where p is not null and c is not null and v is not null "
@@ -246,13 +272,13 @@ SEASTAR_TEST_CASE(test_builder_with_tombstones) {
         e.execute_cql("create table cf (p int, c1 int, c2 int, v int, primary key (p, c1, c2))").get();
 
         for (auto i = 0; i < 100; ++i) {
-            e.execute_cql(sprint("insert into cf (p, c1, c2, v) values (0, %d, %d, 1)", i % 2, i)).get();
+            e.execute_cql(format("insert into cf (p, c1, c2, v) values (0, {:d}, {:d}, 1)", i % 2, i)).get();
         }
 
         e.execute_cql("delete from cf where p = 0 and c1 = 0").get();
         e.execute_cql("delete from cf where p = 0 and c1 = 1 and c2 >= 50 and c2 < 101").get();
 
-        auto f = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 30s);
+        auto f = e.local_view_builder().wait_until_built("ks", "vcf");
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where p is not null and c1 is not null and c2 is not null and v is not null "
                       "primary key ((v, p), c1, c2)").get();
@@ -286,18 +312,18 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_writes) {
         auto k = keys.begin();
         for (; k != half; ++k) {
             for (size_t i = 0; i < rows_per_partition; ++i) {
-                e.execute_cql(sprint("insert into cf (p, c, v) values (0x%s, %d, 0)", *k, i)).get();
+                e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", *k, i)).get();
             }
         }
 
-        auto f = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 60s);
+        auto f = e.local_view_builder().wait_until_built("ks", "vcf");
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where p is not null and c is not null and v is not null "
                       "primary key (v, c, p)").get();
 
         for (; k != keys.end(); ++k) {
             for (size_t i = 0; i < rows_per_partition; ++i) {
-                e.execute_cql(sprint("insert into cf (p, c, v) values (0x%s, %d, 0)", *k, i)).get();
+                e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", *k, i)).get();
             }
         }
 
@@ -318,7 +344,7 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
         auto make_key = [&] (auto) { return to_hex(random_bytes(128, gen));  };
         for (auto&& k : boost::irange(0, 1000) | boost::adaptors::transformed(make_key)) {
             for (auto i = 0; i < 5; ++i) {
-                e.execute_cql(sprint("insert into cf (p, c, v) values (0x%s, %d, 0)", k, i)).get();
+                e.execute_cql(format("insert into cf (p, c, v) values (0x{}, {:d}, 0)", k, i)).get();
             }
         }
 
@@ -337,6 +363,64 @@ SEASTAR_TEST_CASE(test_builder_with_concurrent_drop) {
             assert_that(msg).is_rows().is_empty();
             msg = e.execute_cql("select * from system_distributed.view_build_status").get0();
             assert_that(msg).is_rows().is_empty();
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_view_update_generator) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("create table t (p text, c text, v text, primary key (p, c))").get();
+        for (auto i = 0; i < 1024; ++i) {
+            e.execute_cql(fmt::format("insert into t (p, c, v) values ('a', 'c{}', 'x')", i)).get();
+        }
+        for (auto i = 0; i < 512; ++i) {
+            e.execute_cql(fmt::format("insert into t (p, c, v) values ('b', 'c{}', '{}')", i, i + 1)).get();
+        }
+        auto& view_update_generator = e.local_view_update_generator();
+        auto s = test_table_schema();
+
+        auto key = partition_key::from_exploded(*s, {to_bytes("a")});
+        mutation m(s, key);
+        auto col = s->get_column_definition("v");
+        for (int i = 1024; i < 1280; ++i) {
+            auto& row = m.partition().clustered_row(*s, clustering_key::from_exploded(*s, {to_bytes(fmt::format("c{}", i))}));
+            row.cells().apply(*col, atomic_cell::make_live(*col->type, 2345, col->type->decompose(sstring(fmt::format("v{}", i)))));
+        }
+        lw_shared_ptr<table> t = e.local_db().find_column_family("ks", "t").shared_from_this();
+
+        auto sst = t->make_streaming_staging_sstable();
+        sstables::sstable_writer_config sst_cfg;
+        sst_cfg.large_partition_handler = &nop_lp_handler;
+        auto& pc = service::get_local_streaming_write_priority();
+        sst->write_components(flat_mutation_reader_from_mutations({m}), 1ul, s, sst_cfg, {}, pc).get();
+        sst->open_data().get();
+        t->add_sstable_and_update_cache(sst).get();
+        view_update_generator.register_staging_sstable(sst, t).get();
+
+        eventually([&] {
+            auto msg = e.execute_cql("SELECT * FROM t WHERE p = 'a'").get0();
+            assert_that(msg).is_rows().with_size(1280);
+            msg = e.execute_cql("SELECT * FROM t WHERE p = 'b'").get0();
+            assert_that(msg).is_rows().with_size(512);
+
+            for (int i = 0; i < 1024; ++i) {
+                auto msg = e.execute_cql(fmt::format("SELECT * FROM t WHERE p = 'a' and c = 'c{}'", i)).get0();
+                assert_that(msg).is_rows().with_size(1).with_row({
+                     {utf8_type->decompose(sstring("a"))},
+                     {utf8_type->decompose(sstring(fmt::format("c{}", i)))},
+                     {utf8_type->decompose(sstring("x"))}
+                 });
+
+            }
+            for (int i = 1024; i < 1280; ++i) {
+                auto msg = e.execute_cql(fmt::format("SELECT * FROM t WHERE p = 'a' and c = 'c{}'", i)).get0();
+                assert_that(msg).is_rows().with_size(1).with_row({
+                     {utf8_type->decompose(sstring("a"))},
+                     {utf8_type->decompose(sstring(fmt::format("c{}", i)))},
+                     {utf8_type->decompose(sstring(fmt::format("v{}", i)))}
+                 });
+
+            }
         });
     });
 }

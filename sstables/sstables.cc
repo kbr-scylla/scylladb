@@ -70,6 +70,7 @@
 #include "db/large_partition_handler.hh"
 #include "sstables/random_access_reader.hh"
 #include "mirror-file-impl.hh"
+#include <boost/algorithm/string/predicate.hpp>
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -733,7 +734,7 @@ inline void write(sstable_version_types v, file_writer& out, const summary& s) {
 future<summary_entry&> sstable::read_summary_entry(size_t i) {
     // The last one is the boundary marker
     if (i >= (_components->summary.entries.size())) {
-        throw std::out_of_range(sprint("Invalid Summary index: %ld", i));
+        throw std::out_of_range(format("Invalid Summary index: {:d}", i));
     }
 
     return make_ready_future<summary_entry&>(_components->summary.entries[i]);
@@ -802,6 +803,11 @@ future<> parse(sstable_version_types v, random_access_reader& in, utils::estimat
         if (length == 0) {
             throw malformed_sstable_exception("Estimated histogram with zero size found. Can't continue!");
         }
+
+        // Arrays are potentially pre-initialized by the estimated_histogram constructor.
+        eh.bucket_offsets.clear();
+        eh.buckets.clear();
+
         eh.bucket_offsets.reserve(length - 1);
         eh.buckets.reserve(length);
 
@@ -1060,7 +1066,7 @@ void sstable::write_toc(const io_priority_class& pc) {
         // the generation of a sstable that exists.
         f.close().get();
         remove_mirrored_file(file_path).get();
-        throw std::runtime_error(sprint("SSTable write failed due to existence of TOC file for generation %ld of %s.%s", _generation, _schema->ks_name(), _schema->cf_name()));
+        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", _generation, _schema->ks_name(), _schema->cf_name()));
     }
 
     file_output_stream_options options;
@@ -1583,7 +1589,7 @@ static void write_compound_non_dense_column_name(sstable_version_types v, Writer
     }
     size_t sz = ck_bview.size() + c.size();
     if (sz > std::numeric_limits<uint16_t>::max()) {
-        throw std::runtime_error(sprint("Column name too large (%d > %d)", sz, std::numeric_limits<uint16_t>::max()));
+        throw std::runtime_error(format("Column name too large ({:d} > {:d})", sz, std::numeric_limits<uint16_t>::max()));
     }
     out.prepare(uint16_t(sz));
     out.write(ck_bview, c);
@@ -1598,7 +1604,7 @@ template<typename Writer>
 static void write_column_name(sstable_version_types v, Writer& out, bytes_view column_names) {
     size_t sz = column_names.size();
     if (sz > std::numeric_limits<uint16_t>::max()) {
-        throw std::runtime_error(sprint("Column name too large (%d > %d)", sz, std::numeric_limits<uint16_t>::max()));
+        throw std::runtime_error(format("Column name too large ({:d} > {:d})", sz, std::numeric_limits<uint16_t>::max()));
     }
     out.prepare(uint16_t(sz));
     out.write(column_names);
@@ -1914,7 +1920,7 @@ void sstable::write_range_tombstone(file_writer& out,
         const tombstone t,
         column_mask mask) {
     if (!_schema->is_compound() && (start_marker == composite::eoc::end || end_marker == composite::eoc::start)) {
-        throw std::logic_error(sprint("Cannot represent marker type in range tombstone for non-compound schemas"));
+        throw std::logic_error(format("Cannot represent marker type in range tombstone for non-compound schemas"));
     }
     write_range_tombstone_bound(out, *_schema, start, suffix, start_marker);
     write(_version, out, mask);
@@ -2440,7 +2446,7 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
     // sstable write may fail to generate empty metadata if mutation source has only data from other shard.
     // see https://github.com/scylladb/scylla/issues/2932 for details on how it can happen.
     if (sm.token_ranges.elements.empty()) {
-        throw std::runtime_error(sprint("Failed to generate sharding metadata for %s", get_filename()));
+        throw std::runtime_error(format("Failed to generate sharding metadata for {}", get_filename()));
     }
 
     if (!_components->scylla_metadata) {
@@ -2697,25 +2703,16 @@ GCC6_CONCEPT(
     };
 )
 
-static indexed_columns get_indexed_regular_columns_partitioned_by_atomicity(const schema& s) {
-    indexed_columns columns;
-    columns.reserve(s.regular_columns_count());
-    for (const auto& element: s.regular_columns() | boost::adaptors::indexed()) {
-        columns.push_back({static_cast<column_id>(element.index()), element.value()});
+static indexed_columns get_indexed_columns_partitioned_by_atomicity(schema::const_iterator_range_type columns) {
+    indexed_columns result;
+    result.reserve(columns.size());
+    for (const auto& col: columns) {
+        result.emplace_back(col);
     }
     boost::range::stable_partition(
-            columns,
-            [](const column_definition_indexed_ref& column) { return column.cdef.get().is_atomic();});
-    return columns;
-}
-
-static indexed_columns get_indexed_static_columns(const schema& s) {
-    indexed_columns columns;
-    columns.reserve(s.static_columns_count());
-    for (const auto& element: s.static_columns() | boost::adaptors::indexed()) {
-        columns.push_back({static_cast<column_id>(element.index()), element.value()});
-    }
-    return columns;
+            result,
+            [](const std::reference_wrapper<const column_definition>& column) { return column.get().is_atomic();});
+    return result;
 }
 
 // Used for writing SSTables in 'mc' format.
@@ -2727,7 +2724,7 @@ private:
     std::unique_ptr<file_writer> _data_writer;
     std::optional<file_writer> _index_writer;
     bool _tombstone_written = false;
-    bool _row_deletion_written = false;
+    bool _static_row_written = false;
     // The length of partition header (partition key, partition deletion and static row, if present)
     // as written to the data file
     // Used for writing promoted index
@@ -2737,13 +2734,11 @@ private:
     stdx::optional<key> _first_key, _last_key;
     index_sampling_state _index_sampling_state;
     range_tombstone_stream _range_tombstones;
-    // For regular columns, we write all simple columns first followed by collections
-    // This container has regular columns paritioned by atomicity
-    const indexed_columns _regular_columns;
-    // TODO: unlike regular columns, static ones don't need re-ordering because
-    // they are always all atomic. Perhaps we should do a helper writing missing columns
-    // that would accept just the schema when writing a static row
+
+    // For static and regular columns, we write all simple columns first followed by collections
+    // These containers have columns partitioned by atomicity
     const indexed_columns _static_columns;
+    const indexed_columns _regular_columns;
 
     struct cdef_and_collection {
         const column_definition* cdef;
@@ -2786,6 +2781,12 @@ private:
     void ensure_tombstone_is_written() {
         if (!_tombstone_written) {
             consume(tombstone());
+        }
+    }
+
+    void ensure_static_row_is_written_if_needed() {
+        if (!_static_columns.empty() && !_static_row_written) {
+            consume(static_row{});
         }
     }
 
@@ -2840,7 +2841,7 @@ private:
     void write_collection(file_writer& writer, const column_definition& cdef, collection_mutation_view collection,
                           const row_time_properties& properties, bool has_complex_deletion);
 
-    void write_cells(file_writer& writer, column_kind kind, const row& row_body, const row_time_properties& properties, bool has_complex_deletion = false);
+    void write_cells(file_writer& writer, column_kind kind, const row& row_body, const row_time_properties& properties, bool has_complex_deletion);
     void write_row_body(file_writer& writer, const clustering_row& row, bool has_complex_deletion);
     void write_static_row(const row& static_row);
 
@@ -2874,8 +2875,8 @@ public:
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _range_tombstones(_schema)
-        , _regular_columns(get_indexed_regular_columns_partitioned_by_atomicity(s))
-        , _static_columns(get_indexed_static_columns(s))
+        , _static_columns(get_indexed_columns_partitioned_by_atomicity(s.static_columns()))
+        , _regular_columns(get_indexed_columns_partitioned_by_atomicity(s.regular_columns()))
     {
         _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
         _sst.write_toc(_pc);
@@ -3020,6 +3021,7 @@ void sstable_writer_m::drain_tombstones(std::optional<position_in_partition_view
     };
 
     ensure_tombstone_is_written();
+    ensure_static_row_is_written_if_needed();
     position_in_partition::less_compare less{_schema};
     position_in_partition::equal_compare eq{_schema};
     while (auto mfo = get_next_rt()) {
@@ -3092,6 +3094,7 @@ void sstable_writer_m::consume_new_partition(const dht::decorated_key& dk) {
     _partition_header_length = _data_writer->offset() - _c_stats.start_offset;
 
     _tombstone_written = false;
+    _static_row_written = false;
 }
 
 void sstable_writer_m::consume(tombstone t) {
@@ -3220,26 +3223,26 @@ void sstable_writer_m::write_liveness_info(file_writer& writer, const row_marker
 void sstable_writer_m::write_collection(file_writer& writer, const column_definition& cdef,
         collection_mutation_view collection, const row_time_properties& properties, bool has_complex_deletion) {
     auto& ctype = *static_pointer_cast<const collection_type_impl>(cdef.type);
-  collection.data.with_linearized([&] (bytes_view collection_bv) {
-    auto mview = ctype.deserialize_mutation_form(collection_bv);
-    if (has_complex_deletion) {
-        auto dt = to_deletion_time(mview.tomb);
-        write_delta_deletion_time(writer, dt);
-        if (mview.tomb) {
-            _c_stats.update_timestamp(dt.marked_for_delete_at);
-            _c_stats.update_local_deletion_time(dt.local_deletion_time);
+    collection.data.with_linearized([&] (bytes_view collection_bv) {
+        auto mview = ctype.deserialize_mutation_form(collection_bv);
+        if (has_complex_deletion) {
+            auto dt = to_deletion_time(mview.tomb);
+            write_delta_deletion_time(writer, dt);
+            if (mview.tomb) {
+                _c_stats.update_timestamp(dt.marked_for_delete_at);
+                _c_stats.update_local_deletion_time(dt.local_deletion_time);
+            }
         }
-    }
 
-    write_vint(writer, mview.cells.size());
-    if (!mview.cells.empty()) {
-        ++_c_stats.column_count;
-    }
-    for (const auto& [cell_path, cell]: mview.cells) {
-        ++_c_stats.cells_count;
-        write_cell(writer, cell, cdef, properties, cell_path);
-    }
-  });
+        write_vint(writer, mview.cells.size());
+        if (!mview.cells.empty()) {
+            ++_c_stats.column_count;
+        }
+        for (const auto& [cell_path, cell]: mview.cells) {
+            ++_c_stats.cells_count;
+            write_cell(writer, cell, cdef, properties, cell_path);
+        }
+    });
 }
 
 void sstable_writer_m::write_cells(file_writer& writer, column_kind kind, const row& row_body,
@@ -3305,6 +3308,27 @@ uint64_t calculate_write_size(Func&& func) {
     return written_size;
 }
 
+// Find if any collection in the row contains a collection-wide tombstone
+static bool row_has_complex_deletion(const schema& s, const row& r, column_kind kind) {
+    bool result = false;
+    r.for_each_cell_until([&] (column_id id, const atomic_cell_or_collection& c) {
+        auto&& cdef = s.column_at(kind, id);
+        if (cdef.is_atomic()) {
+            return stop_iteration::no;
+        }
+        auto t = static_pointer_cast<const collection_type_impl>(cdef.type);
+        return c.as_collection_mutation().data.with_linearized([&] (bytes_view c_bv) {
+            auto mview = t->deserialize_mutation_form(c_bv);
+            if (mview.tomb) {
+                result = true;
+            }
+            return stop_iteration(static_cast<bool>(mview.tomb));
+        });
+    });
+
+    return result;
+}
+
 void sstable_writer_m::write_static_row(const row& static_row) {
     assert(_schema.is_compound());
 
@@ -3314,13 +3338,16 @@ void sstable_writer_m::write_static_row(const row& static_row) {
     if (static_row.size() == _schema.static_columns_count()) {
         flags |= row_flags::has_all_columns;
     }
-
+    bool has_complex_deletion = row_has_complex_deletion(_schema, static_row, column_kind::static_column);
+    if (has_complex_deletion) {
+        flags |= row_flags::has_complex_deletion;
+    }
     write(_sst.get_version(), *_data_writer, flags);
     write(_sst.get_version(), *_data_writer, row_extended_flags::is_static);
 
     // Calculate the size of the row body
-    auto write_row = [this, &static_row] (file_writer& writer) {
-        write_cells(writer, column_kind::static_column, static_row, row_time_properties{});
+    auto write_row = [this, &static_row, has_complex_deletion] (file_writer& writer) {
+        write_cells(writer, column_kind::static_column, static_row, row_time_properties{}, has_complex_deletion);
     };
 
     uint64_t row_body_size = calculate_write_size(write_row) + unsigned_vint::serialized_size(0);
@@ -3338,28 +3365,8 @@ void sstable_writer_m::write_static_row(const row& static_row) {
 stop_iteration sstable_writer_m::consume(static_row&& sr) {
     ensure_tombstone_is_written();
     write_static_row(sr.cells());
+    _static_row_written = true;
     return stop_iteration::no;
-}
-
-// Find if any collection in the row contains a collection-wide tombstone
-static bool row_has_complex_deletion(const schema& s, const row& r) {
-    bool result = false;
-    r.for_each_cell_until([&] (column_id id, const atomic_cell_or_collection& c) {
-        auto&& cdef = s.column_at(column_kind::regular_column, id);
-        if (cdef.is_atomic()) {
-            return stop_iteration::no;
-        }
-        auto t = static_pointer_cast<const collection_type_impl>(cdef.type);
-      return c.as_collection_mutation().data.with_linearized([&] (bytes_view c_bv) {
-        auto mview = t->deserialize_mutation_form(c_bv);
-        if (mview.tomb) {
-            result = true;
-        }
-        return stop_iteration(static_cast<bool>(mview.tomb));
-    });
-    });
-
-    return result;
 }
 
 void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint64_t prev_row_size) {
@@ -3384,7 +3391,7 @@ void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint
     if (clustered_row.cells().size() == _schema.regular_columns_count()) {
         flags |= row_flags::has_all_columns;
     }
-    bool has_complex_deletion = row_has_complex_deletion(_schema, clustered_row.cells());
+    bool has_complex_deletion = row_has_complex_deletion(_schema, clustered_row.cells(), column_kind::regular_column);
     if (has_complex_deletion) {
         flags |= row_flags::has_complex_deletion;
     }
@@ -3741,6 +3748,10 @@ sstring sstable::toc_filename() const {
     return filename(component_type::TOC);
 }
 
+bool sstable::is_staging() const {
+    return boost::algorithm::ends_with(_dir, "staging");
+}
+
 const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_types version, int64_t generation,
                                 format_types format, component_type component) {
 
@@ -3832,11 +3843,27 @@ future<> sstable::set_generation(int64_t new_generation) {
     });
 }
 
+void sstable::move_to_new_dir_in_thread(sstring new_dir, int64_t new_generation) {
+    create_links(new_dir, new_generation).get();
+    remove_file(filename(component_type::TOC)).get();
+    sstable_write_io_check(sync_directory, _dir).get();
+    sstring old_dir = std::exchange(_dir, std::move(new_dir));
+    int64_t old_generation = std::exchange(_generation, new_generation);
+    parallel_for_each(all_components(), [this, old_generation, old_dir] (auto p) {
+        if (p.first == component_type::TOC) {
+            return make_ready_future<>();
+        }
+        return remove_file(sstable::filename(old_dir, _schema->ks_name(), _schema->cf_name(), _version, old_generation, _format, p.second));
+    }).get();
+    sync_directory(_dir).get();
+    sync_directory(old_dir).get();
+}
+
 entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname) {
     static std::regex la_mc("(la|mc)-(\\d+)-(\\w+)-(.*)");
     static std::regex ka("(\\w+)-(\\w+)-ka-(\\d+)-(.*)");
 
-    static std::regex dir(".*/([^/]*)/(\\w+)-[\\da-fA-F]+(?:/upload|/snapshots/[^/]+)?/?");
+    static std::regex dir(".*/([^/]*)/(\\w+)-[\\da-fA-F]+(?:/staging|/upload|/snapshots/[^/]+)?/?");
 
     std::smatch match;
 
@@ -3857,7 +3884,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
             ks = dirmatch[1].str();
             cf = dirmatch[2].str();
         } else {
-            throw malformed_sstable_exception(seastar::sprint("invalid version for file %s with path %s. Path doesn't match known pattern.", fname, sstdir));
+            throw malformed_sstable_exception(seastar::format("invalid version for file {} with path {}. Path doesn't match known pattern.", fname, sstdir));
         }
         version = (match[1].str() == "la") ? sstable::version_types::la : sstable::version_types::mc;
         generation = match[2].str();
@@ -3871,7 +3898,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
         generation = match[3].str();
         component = sstring(match[4].str());
     } else {
-        throw malformed_sstable_exception(seastar::sprint("invalid version for file %s. Name doesn't match any known version.", fname));
+        throw malformed_sstable_exception(seastar::format("invalid version for file {}. Name doesn't match any known version.", fname));
     }
     return entry_descriptor(sstdir, ks, cf, version, boost::lexical_cast<unsigned long>(generation), sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
 }
@@ -3880,7 +3907,7 @@ sstable::version_types sstable::version_from_sstring(sstring &s) {
     try {
         return reverse_map(s, _version_string);
     } catch (std::out_of_range&) {
-        throw std::out_of_range(seastar::sprint("Unknown sstable version: %s", s.c_str()));
+        throw std::out_of_range(seastar::format("Unknown sstable version: {}", s.c_str()));
     }
 }
 
@@ -3888,7 +3915,7 @@ sstable::format_types sstable::format_from_sstring(sstring &s) {
     try {
         return reverse_map(s, _format_string);
     } catch (std::out_of_range&) {
-        throw std::out_of_range(seastar::sprint("Unknown sstable format: %s", s.c_str()));
+        throw std::out_of_range(seastar::format("Unknown sstable format: {}", s.c_str()));
     }
 }
 
@@ -3937,7 +3964,7 @@ void sstable::set_first_and_last_keys() {
     }
     auto decorate_key = [this] (const char *m, const bytes& value) {
         if (value.empty()) {
-            throw std::runtime_error(sprint("%s key of summary of %s is empty", m, get_filename()));
+            throw std::runtime_error(format("{} key of summary of {} is empty", m, get_filename()));
         }
         auto pk = key::from_bytes(value).to_partition_key(*_schema);
         return dht::global_partitioner().decorate_key(*_schema, std::move(pk));
@@ -3956,14 +3983,14 @@ const partition_key& sstable::get_last_partition_key() const {
 
 const dht::decorated_key& sstable::get_first_decorated_key() const {
     if (!_first) {
-        throw std::runtime_error(sprint("first key of %s wasn't set", get_filename()));
+        throw std::runtime_error(format("first key of {} wasn't set", get_filename()));
     }
     return *_first;
 }
 
 const dht::decorated_key& sstable::get_last_decorated_key() const {
     if (!_last) {
-        throw std::runtime_error(sprint("last key of %s wasn't set", get_filename()));
+        throw std::runtime_error(format("last key of {} wasn't set", get_filename()));
     }
     return *_last;
 }

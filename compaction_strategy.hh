@@ -105,7 +105,7 @@ public:
         } else if (short_name == "InMemoryCompactionStrategy") {
             return compaction_strategy_type::in_memory;
         } else {
-            throw exceptions::configuration_exception(sprint("Unable to find compaction strategy class '%s'", name));
+            throw exceptions::configuration_exception(format("Unable to find compaction strategy class '{}'", name));
         }
     }
 

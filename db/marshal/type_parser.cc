@@ -78,12 +78,12 @@ data_type type_parser::do_parse(bool multicell)
             size_t pos;
             std::stoul(name, &pos, 0x10);
             if (pos != name.size()) {
-                throw exceptions::syntax_exception(sprint("expected 8-byte hex number, found %s", name));
+                throw exceptions::syntax_exception(format("expected 8-byte hex number, found {}", name));
             }
         } catch (const std::invalid_argument & e) {
-            throw exceptions::syntax_exception(sprint("expected 8-byte hex number, found %s", name));
+            throw exceptions::syntax_exception(format("expected 8-byte hex number, found {}", name));
         } catch (const std::out_of_range& e) {
-            throw exceptions::syntax_exception(sprint("expected 8-byte hex number, found %s", name));
+            throw exceptions::syntax_exception(format("expected 8-byte hex number, found {}", name));
         }
         name = read_next_identifier();
     }
@@ -127,7 +127,7 @@ std::vector<data_type> type_parser::get_type_parameters(bool multicell)
             throw e;
         }
     }
-    throw exceptions::syntax_exception(sprint("Syntax error parsing '%s' at char %d: unexpected end of string", _str, _idx));
+    throw exceptions::syntax_exception(format("Syntax error parsing '{}' at char {:d}: unexpected end of string", _str, _idx));
 }
 
 std::tuple<sstring, bytes, std::vector<bytes>, std::vector<data_type>> type_parser::get_user_type_parameters()
@@ -156,7 +156,7 @@ std::tuple<sstring, bytes, std::vector<bytes>, std::vector<data_type>> type_pars
         field_names.emplace_back(from_hex(read_next_identifier()));
 
         if (_str[_idx] != ':') {
-            throw exceptions::syntax_exception(sprint("expecting ':' token"));
+            throw exceptions::syntax_exception(format("expecting ':' token"));
         }
         ++_idx;
 
@@ -171,7 +171,7 @@ std::tuple<sstring, bytes, std::vector<bytes>, std::vector<data_type>> type_pars
             throw e;
         }
     }
-    throw exceptions::syntax_exception(sprint("Syntax error parsing '%s' at char %d: unexpected end of string", _str, _idx));
+    throw exceptions::syntax_exception(format("Syntax error parsing '{}' at char {:d}: unexpected end of string", _str, _idx));
 }
 
 data_type type_parser::get_abstract_type(const sstring& compare_with)

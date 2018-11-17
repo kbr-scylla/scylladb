@@ -41,13 +41,13 @@ public:
 
     ::shared_ptr<primary_key_restrictions<T>> do_merge_to(schema_ptr schema, ::shared_ptr<restriction> restriction) const {
         if (restriction->is_multi_column()) {
-            throw std::runtime_error(sprint("%s not implemented", __PRETTY_FUNCTION__));
+            throw std::runtime_error(format("{} not implemented", __PRETTY_FUNCTION__));
         }
         return ::make_shared<single_column_primary_key_restrictions<T>>(schema, _allow_filtering)->merge_to(schema, restriction);
     }
     ::shared_ptr<primary_key_restrictions<T>> merge_to(schema_ptr schema, ::shared_ptr<restriction> restriction) override {
         if (restriction->is_multi_column()) {
-            throw std::runtime_error(sprint("%s not implemented", __PRETTY_FUNCTION__));
+            throw std::runtime_error(format("{} not implemented", __PRETTY_FUNCTION__));
         }
         if (restriction->is_on_token()) {
             return static_pointer_cast<token_restriction>(restriction);
@@ -189,12 +189,12 @@ statement_restrictions::statement_restrictions(database& db,
                 auto col_id = r->get_entity()->prepare_column_identifier(schema);
                 const auto *cd = get_column_definition(schema, *col_id);
                 if (!cd) {
-                    throw exceptions::invalid_request_exception(sprint("restriction '%s' unknown column %s", relation->to_string(), r->get_entity()->to_string()));
+                    throw exceptions::invalid_request_exception(format("restriction '{}' unknown column {}", relation->to_string(), r->get_entity()->to_string()));
                 }
                 _not_null_columns.insert(cd);
 
                 if (!for_view) {
-                    throw exceptions::invalid_request_exception(sprint("restriction '%s' is only supported in materialized view creation", relation->to_string()));
+                    throw exceptions::invalid_request_exception(format("restriction '{}' is only supported in materialized view creation", relation->to_string()));
                 }
             } else {
                 add_restriction(relation->to_restriction(db, schema, bound_names), for_view, allow_filtering);
@@ -220,8 +220,7 @@ statement_restrictions::statement_restrictions(database& db,
 
     if (selects_only_static_columns && has_clustering_columns_restriction()) {
         if (type.is_update() || type.is_delete()) {
-            throw exceptions::invalid_request_exception(sprint(
-                "Invalid restrictions on clustering columns since the %s statement modifies only static columns", type));
+            throw exceptions::invalid_request_exception(format("Invalid restrictions on clustering columns since the {} statement modifies only static columns", type));
         }
 
         if (type.is_select()) {
@@ -429,8 +428,7 @@ void statement_restrictions::process_clustering_columns_restrictions(bool has_qu
                 const column_definition* clustering_column = &(*clustering_columns_iter);
                 ++clustering_columns_iter;
                 if (clustering_column != restricted_column) {
-                        throw exceptions::invalid_request_exception(sprint(
-                            "PRIMARY KEY column \"%s\" cannot be restricted as preceding column \"%s\" is not restricted",
+                        throw exceptions::invalid_request_exception(format("PRIMARY KEY column \"{}\" cannot be restricted as preceding column \"{}\" is not restricted",
                             restricted_column->name_as_text(), clustering_column->name_as_text()));
                 }
             }
@@ -753,81 +751,90 @@ bool single_column_restriction::contains::is_satisfied_by(const schema& schema,
         if (!cell_value) {
             return false;
         }
-        auto deserialized = cell_value->with_linearized([&] (bytes_view cell_value_bv) {
-            return _column_def.type->deserialize(cell_value_bv);
+        return cell_value->with_linearized([&] (bytes_view cell_value_bv) {
+            return is_satisfied_by(cell_value_bv, options);
         });
-        for (auto&& value : _values) {
-            auto fragmented_val = value->bind_and_get(options);
-            if (!fragmented_val) {
-                continue;
-            }
-          return with_linearized(*fragmented_val, [&] (bytes_view val) {
-            auto exists_in = [&](auto&& range) {
-                auto found = std::find_if(range.begin(), range.end(), [&] (auto&& element) {
-                    return element_type->compare(element.serialize(), val) == 0;
-                });
-                return found != range.end();
-            };
-            if (col_type->is_list()) {
-                if (!exists_in(value_cast<list_type_impl::native_type>(deserialized))) {
-                    return false;
-                }
-            } else if (col_type->is_set()) {
-                if (!exists_in(value_cast<set_type_impl::native_type>(deserialized))) {
-                    return false;
-                }
-            } else {
-                auto data_map = value_cast<map_type_impl::native_type>(deserialized);
-                if (!exists_in(data_map | boost::adaptors::transformed([] (auto&& p) { return p.second; }))) {
-                    return false;
-                }
-            }
-            return true;
-          });
-        }
-        if (col_type->is_map()) {
-            auto& data_map = value_cast<map_type_impl::native_type>(deserialized);
-            for (auto&& key : _keys) {
-                auto k = key->bind_and_get(options);
-                if (!k) {
-                    continue;
-                }
-                auto found = with_linearized(*k, [&] (bytes_view k_bv) {
-                  return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
-                    return map_key_type->compare(element.first.serialize(), k_bv) == 0;
-                  });
-                });
-                if (found == data_map.end()) {
-                    return false;
-                }
-            }
-            for (uint32_t i = 0; i < _entry_keys.size(); ++i) {
-                auto map_key = _entry_keys[i]->bind_and_get(options);
-                auto map_value = _entry_values[i]->bind_and_get(options);
-                if (!map_key || !map_value) {
-                    continue;
-                }
-                auto found = with_linearized(*map_key, [&] (bytes_view map_key_bv) {
-                  return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
-                    return map_key_type->compare(element.first.serialize(), map_key_bv) == 0;
-                  });
-                });
-                if (found == data_map.end()
-                    || with_linearized(*map_value, [&] (bytes_view map_value_bv) {
-                         return element_type->compare(found->second.serialize(), map_value_bv);
-                       }) != 0) {
-                    return false;
-                }
-            }
-        }
     }
 
     return true;
 }
 
-bool single_column_restriction::contains::is_satisfied_by(bytes_view data, const query_options& options) const {
-    //TODO(sarna): Deserialize & return. It would be nice to deduplicate, is_satisfied_by above is rather long
-    fail(unimplemented::cause::INDEXES);
+bool single_column_restriction::contains::is_satisfied_by(bytes_view collection_bv, const query_options& options) const {
+    auto col_type = static_pointer_cast<const collection_type_impl>(_column_def.type);
+    if (collection_bv.empty() || ((!_keys.empty() || !_entry_keys.empty()) && !col_type->is_map())) {
+        return false;
+    }
+
+    auto&& map_key_type = col_type->name_comparator();
+    auto&& element_type = col_type->is_set() ? col_type->name_comparator() : col_type->value_comparator();
+
+    auto deserialized = _column_def.type->deserialize(collection_bv);
+    for (auto&& value : _values) {
+        auto fragmented_val = value->bind_and_get(options);
+        if (!fragmented_val) {
+            continue;
+        }
+      return with_linearized(*fragmented_val, [&] (bytes_view val) {
+        auto exists_in = [&](auto&& range) {
+            auto found = std::find_if(range.begin(), range.end(), [&] (auto&& element) {
+                return element_type->compare(element.serialize(), val) == 0;
+            });
+            return found != range.end();
+        };
+        if (col_type->is_list()) {
+            if (!exists_in(value_cast<list_type_impl::native_type>(deserialized))) {
+                return false;
+            }
+        } else if (col_type->is_set()) {
+            if (!exists_in(value_cast<set_type_impl::native_type>(deserialized))) {
+                return false;
+            }
+        } else {
+            auto data_map = value_cast<map_type_impl::native_type>(deserialized);
+            if (!exists_in(data_map | boost::adaptors::transformed([] (auto&& p) { return p.second; }))) {
+                return false;
+            }
+        }
+        return true;
+      });
+    }
+    if (col_type->is_map()) {
+        auto& data_map = value_cast<map_type_impl::native_type>(deserialized);
+        for (auto&& key : _keys) {
+            auto k = key->bind_and_get(options);
+            if (!k) {
+                continue;
+            }
+            auto found = with_linearized(*k, [&] (bytes_view k_bv) {
+              return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
+                return map_key_type->compare(element.first.serialize(), k_bv) == 0;
+              });
+            });
+            if (found == data_map.end()) {
+                return false;
+            }
+        }
+        for (uint32_t i = 0; i < _entry_keys.size(); ++i) {
+            auto map_key = _entry_keys[i]->bind_and_get(options);
+            auto map_value = _entry_values[i]->bind_and_get(options);
+            if (!map_key || !map_value) {
+                continue;
+            }
+            auto found = with_linearized(*map_key, [&] (bytes_view map_key_bv) {
+              return std::find_if(data_map.begin(), data_map.end(), [&] (auto&& element) {
+                return map_key_type->compare(element.first.serialize(), map_key_bv) == 0;
+              });
+            });
+            if (found == data_map.end()
+                || with_linearized(*map_value, [&] (bytes_view map_value_bv) {
+                     return element_type->compare(found->second.serialize(), map_value_bv);
+                   }) != 0) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 bool token_restriction::EQ::is_satisfied_by(const schema& schema,

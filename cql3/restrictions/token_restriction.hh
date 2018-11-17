@@ -160,7 +160,7 @@ public:
     }
 
     sstring to_string() const override {
-        return sprint("EQ(%s)", _value->to_string());
+        return format("EQ({})", _value->to_string());
     }
 
     virtual bool is_satisfied_by(const schema& schema,
@@ -240,7 +240,7 @@ public:
         }
     }
     sstring to_string() const override {
-        return sprint("SLICE%s", _slice);
+        return format("SLICE{}", _slice);
     }
 
     virtual bool is_satisfied_by(const schema& schema,

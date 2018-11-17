@@ -179,7 +179,9 @@ class Thrift(object):
 
 def default_target_arch():
     if platform.machine() in ['i386', 'i686', 'x86_64']:
-        return 'nehalem'
+        return 'westmere'   # support PCLMUL
+    elif platform.machine() == 'aarch64':
+        return 'armv8-a+crc+crypto'
     else:
         return ''
 
@@ -253,6 +255,7 @@ scylla_tests = [
     'tests/perf/perf_sstable',
     'tests/cql_query_test',
     'tests/secondary_index_test',
+    'tests/json_cql_query_test',
     'tests/storage_proxy_test',
     'tests/schema_change_test',
     'tests/mutation_reader_test',
@@ -415,6 +418,7 @@ extra_cxxflags = {}
 cassandra_interface = Thrift(source='interface/cassandra.thrift', service='Cassandra')
 
 scylla_core = (['database.cc',
+                'table.cc',
                 'atomic_cell.cc',
                 'schema.cc',
                 'frozen_schema.cc',
@@ -563,6 +567,7 @@ scylla_core = (['database.cc',
                 'db/marshal/type_parser.cc',
                 'db/batchlog_manager.cc',
                 'db/view/view.cc',
+                'db/view/view_update_from_staging_generator.cc',
                 'db/view/row_locking.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',

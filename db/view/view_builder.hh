@@ -151,6 +151,10 @@ class view_builder final : public service::migration_listener::only_view_notific
     future<> _started = make_ready_future<>();
     // Used to coordinate between shards the conclusion of the build process for a particular view.
     std::unordered_set<utils::UUID> _built_views;
+    // Counter and promise (both on shard 0 only!) allowing to wait for all
+    // shards to have read the view build statuses
+    unsigned _shards_finished_read = 0;
+    seastar::shared_promise<> _shards_finished_read_promise;
     // Used for testing.
     std::unordered_map<std::pair<sstring, sstring>, seastar::shared_promise<>, utils::tuple_hash> _build_notifiers;
 
@@ -178,7 +182,7 @@ public:
     virtual void on_drop_view(const sstring& ks_name, const sstring& view_name) override;
 
     // For tests
-    future<> wait_until_built(const sstring& ks_name, const sstring& view_name, lowres_clock::time_point timeout);
+    future<> wait_until_built(const sstring& ks_name, const sstring& view_name);
 
 private:
     build_step& get_or_create_build_step(utils::UUID);

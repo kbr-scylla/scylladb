@@ -80,7 +80,7 @@ inline sstring cf_type_to_sstring(cf_type t) {
     } else if (t == cf_type::super) {
         return "Super";
     }
-    throw std::invalid_argument(sprint("unknown type: %d\n", uint8_t(t)));
+    throw std::invalid_argument(format("unknown type: {:d}\n", uint8_t(t)));
 }
 
 inline cf_type sstring_to_cf_type(sstring name) {
@@ -89,7 +89,7 @@ inline cf_type sstring_to_cf_type(sstring name) {
     } else if (name == "Super") {
         return cf_type::super;
     }
-    throw std::invalid_argument(sprint("unknown type: %s\n", name));
+    throw std::invalid_argument(format("unknown type: {}\n", name));
 }
 
 struct speculative_retry {
@@ -108,11 +108,11 @@ public:
         } else if (_t == type::ALWAYS) {
             return "ALWAYS";
         } else if (_t == type::CUSTOM) {
-            return sprint("%.2fms", _v);
+            return format("{:.2f}ms", _v);
         } else if (_t == type::PERCENTILE) {
-            return sprint("%.1fPERCENTILE", 100 * _v);
+            return format("{:.1f}PERCENTILE", 100 * _v);
         } else {
-            throw std::invalid_argument(sprint("unknown type: %d\n", uint8_t(_t)));
+            throw std::invalid_argument(format("unknown type: {:d}\n", uint8_t(_t)));
         }
     }
     static speculative_retry from_sstring(sstring str) {
@@ -125,7 +125,7 @@ public:
             try {
                 return boost::lexical_cast<double>(str.substr(0, str.size() - t.size()));
             } catch (boost::bad_lexical_cast& e) {
-                throw std::invalid_argument(sprint("cannot convert %s to speculative_retry\n", str));
+                throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
             }
         };
 
@@ -142,7 +142,7 @@ public:
             t = type::PERCENTILE;
             v = convert(percentile) / 100;
         } else {
-            throw std::invalid_argument(sprint("cannot convert %s to speculative_retry\n", str));
+            throw std::invalid_argument(format("cannot convert {} to speculative_retry\n", str));
         }
         return speculative_retry(t, v);
     }
@@ -334,14 +334,14 @@ public:
     }
     const column_mapping_entry& static_column_at(column_id id) const {
         if (id >= _n_static) {
-            throw std::out_of_range(sprint("static column id %d >= %d", id, _n_static));
+            throw std::out_of_range(format("static column id {:d} >= {:d}", id, _n_static));
         }
         return _columns[id];
     }
     const column_mapping_entry& regular_column_at(column_id id) const {
         auto n_regular = _columns.size() - _n_static;
         if (id >= n_regular) {
-            throw std::out_of_range(sprint("regular column id %d >= %d", id, n_regular));
+            throw std::out_of_range(format("regular column id {:d} >= {:d}", id, n_regular));
         }
         return _columns[id + _n_static];
     }

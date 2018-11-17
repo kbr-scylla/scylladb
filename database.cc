@@ -207,7 +207,7 @@ table::make_streaming_memtable_big_list(streaming_memtable_big& smb) {
 table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
     : _schema(std::move(schema))
     , _config(std::move(config))
-    , _view_stats(sprint("%s_%s_view_replica_update", _schema->ks_name(), _schema->cf_name()))
+    , _view_stats(format("{}_{}_view_replica_update", _schema->ks_name(), _schema->cf_name()))
     , _memtables(_config.enable_disk_writes ? make_memtable_list() : make_memory_only_memtable_list())
     , _streaming_memtables(_config.enable_disk_writes ? make_streaming_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
@@ -317,7 +317,7 @@ ranges_for_clustering_key_filter(const schema_ptr& schema, const query::clusteri
         // This test is enough because equal bounds in nonwrapping_range are inclusive.
         auto is_singular = [&schema] (const auto& type_it, const bytes_view& b1, const bytes_view& b2) {
             if (type_it == schema->clustering_key_type()->types().end()) {
-                throw std::runtime_error(sprint("clustering key filter passed more components than defined in schema of %s.%s",
+                throw std::runtime_error(format("clustering key filter passed more components than defined in schema of {}.{}",
                     schema->ks_name(), schema->cf_name()));
             }
             return (*type_it)->compare(b1, b2) == 0;
@@ -673,9 +673,11 @@ table::make_reader(schema_ptr s,
     return make_combined_reader(s, std::move(readers), fwd, fwd_mr);
 }
 
-sstables::shared_sstable
-table::make_streaming_sstable_for_write() {
+sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<sstring> subdir) {
     sstring dir = _config.datadir;
+    if (subdir) {
+        dir += "/" + *subdir;
+    }
     auto newtab = sstables::make_sstable(_schema,
             dir, calculate_generation_for_new_table(),
             get_highest_supported_format(),
@@ -830,7 +832,11 @@ void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsi
     new_sstables->insert(sstable);
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk(), shards_for_the_sstable);
-    _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
+    if (sstable->is_staging()) {
+        _sstables_staging.emplace(sstable->generation(), sstable);
+    } else {
+        _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
+    }
 }
 
 future<>
@@ -1246,9 +1252,9 @@ void table::set_metrics() {
         // Metrics related to row locking
         auto add_row_lock_metrics = [this, ks, cf] (row_locker::single_lock_stats& stats, sstring stat_name) {
             _metrics.add_group("column_family", {
-                ms::make_total_operations(sprint("row_lock_%s_acquisitions", stat_name), stats.lock_acquisitions, ms::description(sprint("Row lock acquisitions for %s lock", stat_name)))(cf)(ks),
-                ms::make_queue_length(sprint("row_lock_%s_operations_currently_waiting_for_lock", stat_name), stats.operations_currently_waiting_for_lock, ms::description(sprint("Operations currently waiting for %s lock", stat_name)))(cf)(ks),
-                ms::make_histogram(sprint("row_lock_%s_waiting_time", stat_name), ms::description(sprint("Histogram representing time that operations spent on waiting for %s lock", stat_name)),
+                ms::make_total_operations(format("row_lock_{}_acquisitions", stat_name), stats.lock_acquisitions, ms::description(format("Row lock acquisitions for {} lock", stat_name)))(cf)(ks),
+                ms::make_queue_length(format("row_lock_{}_operations_currently_waiting_for_lock", stat_name), stats.operations_currently_waiting_for_lock, ms::description(format("Operations currently waiting for {} lock", stat_name)))(cf)(ks),
+                ms::make_histogram(format("row_lock_{}_waiting_time", stat_name), ms::description(format("Histogram representing time that operations spent on waiting for {} lock", stat_name)),
                         [&stats] {return stats.estimated_waiting_for_lock.get_histogram(std::chrono::microseconds(100));})(cf)(ks)
             });
         };
@@ -1330,11 +1336,11 @@ table::on_compaction_completion(const std::vector<sstables::shared_sstable>& new
     for (auto& sst : sstables_to_remove) {
         auto shards = sst->get_shards_for_this_sstable();
         if (shards.size() > 1) {
-            throw std::runtime_error(sprint("A regular compaction for %s.%s INCORRECTLY used shared sstable %s. Only resharding work with those!",
+            throw std::runtime_error(format("A regular compaction for {}.{} INCORRECTLY used shared sstable {}. Only resharding work with those!",
                 _schema->ks_name(), _schema->cf_name(), sst->toc_filename()));
         }
         if (!belongs_to_current_shard(shards)) {
-            throw std::runtime_error(sprint("A regular compaction for %s.%s INCORRECTLY used sstable %s which doesn't belong to this shard!",
+            throw std::runtime_error(format("A regular compaction for {}.{} INCORRECTLY used sstable {} which doesn't belong to this shard!",
                 _schema->ks_name(), _schema->cf_name(), sst->toc_filename()));
         }
     }
@@ -1618,7 +1624,9 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
 
 std::vector<sstables::shared_sstable> table::candidates_for_compaction() const {
     return boost::copy_range<std::vector<sstables::shared_sstable>>(*get_sstables()
-        | boost::adaptors::filtered([this] (auto& sst) { return !_sstables_need_rewrite.count(sst->generation()); }));
+            | boost::adaptors::filtered([this] (auto& sst) {
+        return !_sstables_need_rewrite.count(sst->generation()) && !_sstables_staging.count(sst->generation());
+    }));
 }
 
 std::vector<sstables::shared_sstable> table::sstables_need_rewrite() const {
@@ -1890,10 +1898,10 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                             for (auto& sst : new_sstables_for_shard) {
                                 auto& shards = sst->get_shards_for_this_sstable();
                                 if (shards.size() != 1) {
-                                    throw std::runtime_error(sprint("resharded sstable %s doesn't belong to only one shard", sst->get_filename()));
+                                    throw std::runtime_error(format("resharded sstable {} doesn't belong to only one shard", sst->get_filename()));
                                 }
                                 if (shards.front() != shard) {
-                                    throw std::runtime_error(sprint("resharded sstable %s should belong to shard %d", sst->get_filename(), shard));
+                                    throw std::runtime_error(format("resharded sstable {} should belong to shard {:d}", sst->get_filename(), shard));
                                 }
                             }
 
@@ -1974,11 +1982,17 @@ future<sstables::entry_descriptor> distributed_loader::probe_file(distributed<da
     }
     auto cf_sstable_open = [sstdir, comps, fname] (column_family& cf, sstables::foreign_sstable_open_info info) {
         cf.update_sstables_known_generation(comps.generation);
+        if (shared_sstable sst = cf.get_staging_sstable(comps.generation)) {
+            dblog.warn("SSTable {} is already present in staging/ directory. Moving from staging will be retried.", sst->get_filename());
+            return seastar::async([sst = std::move(sst), comps = std::move(comps)] () {
+                sst->move_to_new_dir_in_thread(comps.sstdir, comps.generation);
+            });
+        }
         {
             auto i = boost::range::find_if(*cf._sstables->all(), [gen = comps.generation] (sstables::shared_sstable sst) { return sst->generation() == gen; });
             if (i != cf._sstables->all()->end()) {
                 auto new_toc = sstdir + "/" + fname;
-                throw std::runtime_error(sprint("Attempted to add sstable generation %d twice: new=%s existing=%s",
+                throw std::runtime_error(format("Attempted to add sstable generation {:d} twice: new={} existing={}",
                                                 comps.generation, new_toc, (*i)->toc_filename()));
             }
         }
@@ -2105,7 +2119,7 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
                     // shard 0 is the responsible for removing a partial sstable.
                     return sstables::sstable::remove_sstable_with_temp_toc(ks, cf, sstdir, gen, version, format);
                 } else if (v.second.status != component_status::has_toc_file) {
-                    throw sstables::malformed_sstable_exception(sprint("At directory: %s: no TOC found for SSTable with generation %d!. Refusing to boot", sstdir, v.first));
+                    throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable with generation {:d}!. Refusing to boot", sstdir, v.first));
                 }
                 return make_ready_future<>();
             });
@@ -2455,10 +2469,12 @@ future<> distributed_loader::populate_keyspace(distributed<database>& db, sstrin
                 auto sstdir = ks.column_family_directory(ksdir, cfname, uuid);
                 dblog.info("Keyspace {}: Reading CF {} id={} version={}", ks_name, cfname, uuid, s->version());
                 return ks.make_directory_for_column_family(cfname, uuid).then([&db, sstdir, uuid, ks_name, cfname] {
+                    return distributed_loader::populate_column_family(db, sstdir + "/staging", ks_name, cfname);
+                }).then([&db, sstdir, uuid, ks_name, cfname] {
                     return distributed_loader::populate_column_family(db, sstdir, ks_name, cfname);
                 }).handle_exception([ks_name, cfname, sstdir](std::exception_ptr eptr) {
                     std::string msg =
-                        sprint("Exception while populating keyspace '%s' with column family '%s' from file '%s': %s",
+                        format("Exception while populating keyspace '{}' with column family '{}' from file '{}': {}",
                                ks_name, cfname, sstdir, eptr);
                     dblog.error("Exception while populating keyspace '{}' with column family '{}' from file '{}': {}",
                                 ks_name, cfname, sstdir, eptr);
@@ -2921,7 +2937,7 @@ sstring
 keyspace::column_family_directory(const sstring& base_path, const sstring& name, utils::UUID uuid) const {
     auto uuid_sstring = uuid.to_sstring();
     boost::erase_all(uuid_sstring, "-");
-    return sprint("%s/%s-%s", base_path, name, uuid_sstring);
+    return format("{}/{}-{}", base_path, name, uuid_sstring);
 }
 
 future<>
@@ -2935,21 +2951,22 @@ keyspace::make_directory_for_column_family(const sstring& name, utils::UUID uuid
             io_check(recursive_touch_directory, cfdir).get();
         }
         io_check(touch_directory, cfdirs[0] + "/upload").get();
+        io_check(touch_directory, cfdirs[0] + "/staging").get();
     });
 }
 
 no_such_keyspace::no_such_keyspace(const sstring& ks_name)
-    : runtime_error{sprint("Can't find a keyspace %s", ks_name)}
+    : runtime_error{format("Can't find a keyspace {}", ks_name)}
 {
 }
 
 no_such_column_family::no_such_column_family(const utils::UUID& uuid)
-    : runtime_error{sprint("Can't find a column family with UUID %s", uuid)}
+    : runtime_error{format("Can't find a column family with UUID {}", uuid)}
 {
 }
 
 no_such_column_family::no_such_column_family(const sstring& ks_name, const sstring& cf_name)
-    : runtime_error{sprint("Can't find a column family %s in keyspace %s", cf_name, ks_name)}
+    : runtime_error{format("Can't find a column family {} in keyspace {}", cf_name, ks_name)}
 {
 }
 
@@ -3256,7 +3273,7 @@ std::unordered_set<sstring> database::get_initial_tokens() {
     try {
         boost::split(tokens, tokens_string, boost::is_any_of(sstring(", ")));
     } catch (...) {
-        throw std::runtime_error(sprint("Unable to parse initial_token=%s", tokens_string));
+        throw std::runtime_error(format("Unable to parse initial_token={}", tokens_string));
     }
     tokens.erase("");
     return tokens;
@@ -3297,7 +3314,7 @@ void database::register_connection_drop_notifier(netw::messaging_service& ms) {
 }
 
 std::ostream& operator<<(std::ostream& out, const column_family& cf) {
-    return fprint(out, "{column_family: %s/%s}", cf._schema->ks_name(), cf._schema->cf_name());
+    return fmt_print(out, "{{column_family: {}/{}}}", cf._schema->ks_name(), cf._schema->cf_name());
 }
 
 std::ostream& operator<<(std::ostream& out, const database& db) {
@@ -3555,7 +3572,7 @@ future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_
 future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {
   return update_write_metrics(seastar::futurize_apply([&] {
     if (!s->is_synced()) {
-        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+        throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
                                         s->ks_name(), s->cf_name(), s->version()));
     }
     try {
@@ -3609,7 +3626,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_
     auto uuid = m.column_family_id();
     auto& cf = find_column_family(uuid);
     if (!s->is_synced()) {
-        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+        throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
 
@@ -3655,7 +3672,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, db::timeout_clo
 
 future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
     if (!s->is_synced()) {
-        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+        throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
     return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, fragmented, plan_id] () mutable {
@@ -3671,9 +3688,9 @@ keyspace::config
 database::make_keyspace_config(const keyspace_metadata& ksm) {
     keyspace::config cfg;
     if (_cfg->data_file_directories().size() > 0) {
-        cfg.datadir = sprint("%s/%s", _cfg->data_file_directories()[0], ksm.name());
+        cfg.datadir = format("{}/{}", _cfg->data_file_directories()[0], ksm.name());
         for (auto& extra : _cfg->data_file_directories()) {
-            cfg.all_datadirs.push_back(sprint("%s/%s", extra, ksm.name()));
+            cfg.all_datadirs.push_back(format("{}/{}", extra, ksm.name()));
         }
         cfg.enable_disk_writes = !_cfg->enable_in_memory_data_store();
         cfg.enable_disk_reads = true; // we allways read from disk
@@ -3745,19 +3762,19 @@ std::ostream&
 operator<<(std::ostream& os, const exploded_clustering_prefix& ecp) {
     // Can't pass to_hex() to transformed(), since it is overloaded, so wrap:
     auto enhex = [] (auto&& x) { return to_hex(x); };
-    return fprint(os, "prefix{%s}", ::join(":", ecp._v | boost::adaptors::transformed(enhex)));
+    return fmt_print(os, "prefix{{{}}}", ::join(":", ecp._v | boost::adaptors::transformed(enhex)));
 }
 
 std::ostream&
 operator<<(std::ostream& os, const atomic_cell_view& acv) {
     if (acv.is_live()) {
-        return fprint(os, "atomic_cell{%s;ts=%d;expiry=%d,ttl=%d}",
+        return fmt_print(os, "atomic_cell{{{};ts={:d};expiry={:d},ttl={:d}}}",
             to_hex(acv.value().linearize()),
             acv.timestamp(),
             acv.is_live_and_has_ttl() ? acv.expiry().time_since_epoch().count() : -1,
             acv.is_live_and_has_ttl() ? acv.ttl().count() : 0);
     } else {
-        return fprint(os, "atomic_cell{DEAD;ts=%d;deletion_time=%d}",
+        return fmt_print(os, "atomic_cell{{DEAD;ts={:d};deletion_time={:d}}}",
             acv.timestamp(), acv.deletion_time().time_since_epoch().count());
     }
 }
@@ -3872,7 +3889,7 @@ future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_fun
                 return tsf().then([this, &cf, auto_snapshot, low_mark, should_flush](db_clock::time_point truncated_at) {
                     future<> f = make_ready_future<>();
                     if (auto_snapshot) {
-                        auto name = sprint("%d-%s", truncated_at.time_since_epoch().count(), cf.schema()->cf_name());
+                        auto name = format("{:d}-{}", truncated_at.time_since_epoch().count(), cf.schema()->cf_name());
                         f = cf.snapshot(name);
                     }
                     return f.then([this, &cf, truncated_at, low_mark, should_flush] {
@@ -4453,64 +4470,6 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
 }
 
 /**
- * Given an update for the base table, calculates the set of potentially affected views,
- * generates the relevant updates, and sends them to the paired view replicas.
- */
-future<row_locker::lock_holder> table::push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout) const {
-    //FIXME: Avoid unfreezing here.
-    auto m = fm.unfreeze(s);
-    auto& base = schema();
-    m.upgrade(base);
-    auto views = affected_views(base, m);
-    if (views.empty()) {
-        return make_ready_future<row_locker::lock_holder>();
-    }
-    auto cr_ranges = db::view::calculate_affected_clustering_ranges(*base, m.decorated_key(), m.partition(), views);
-    if (cr_ranges.empty()) {
-        return generate_and_propagate_view_updates(base, std::move(views), std::move(m), { }, timeout).then([] {
-                // In this case we are not doing a read-before-write, just a
-                // write, so no lock is needed.
-                return make_ready_future<row_locker::lock_holder>();
-        });
-    }
-    // We read the whole set of regular columns in case the update now causes a base row to pass
-    // a view's filters, and a view happens to include columns that have no value in this update.
-    // Also, one of those columns can determine the lifetime of the base row, if it has a TTL.
-    auto columns = boost::copy_range<std::vector<column_id>>(
-            base->regular_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)));
-    query::partition_slice::option_set opts;
-    opts.set(query::partition_slice::option::send_partition_key);
-    opts.set(query::partition_slice::option::send_clustering_key);
-    opts.set(query::partition_slice::option::send_timestamp);
-    opts.set(query::partition_slice::option::send_ttl);
-    auto slice = query::partition_slice(
-            std::move(cr_ranges), { }, std::move(columns), std::move(opts), { }, cql_serialization_format::internal(), query::max_rows);
-    // Take the shard-local lock on the base-table row or partition as needed.
-    // We'll return this lock to the caller, which will release it after
-    // writing the base-table update.
-    future<row_locker::lock_holder> lockf = local_base_lock(base, m.decorated_key(), slice.default_row_ranges(), timeout);
-    return lockf.then([m = std::move(m), slice = std::move(slice), views = std::move(views), base, this, timeout] (row_locker::lock_holder lock) {
-      return do_with(
-        dht::partition_range::make_singular(m.decorated_key()),
-        std::move(slice),
-        std::move(m),
-        [base, views = std::move(views), lock = std::move(lock), this, timeout] (auto& pk, auto& slice, auto& m) mutable {
-            auto reader = this->make_reader(
-                base,
-                pk,
-                slice,
-                service::get_local_sstable_query_read_priority());
-            return this->generate_and_propagate_view_updates(base, std::move(views), std::move(m), std::move(reader), timeout).then([lock = std::move(lock)] () mutable {
-                // return the local partition/row lock we have taken so it
-                // remains locked until the caller is done modifying this
-                // partition/row and destroys the lock object.
-                return std::move(lock);
-            });
-      });
-    });
-}
-
-/**
  * Shard-local locking of clustering rows or entire partitions of the base
  * table during a Materialized-View read-modify-update:
  *
@@ -4635,7 +4594,7 @@ table::cache_hit_rate table::get_hit_rate(gms::inet_address addr) {
             auto* state = eps->get_application_state_ptr(gms::application_state::CACHE_HITRATES);
             float f = -1.0f; // missing state means old node
             if (state) {
-                sstring me = sprint("%s.%s", _schema->ks_name(), _schema->cf_name());
+                sstring me = format("{}.{}", _schema->ks_name(), _schema->cf_name());
                 auto i = state->value.find(me);
                 if (i != sstring::npos) {
                     f = strtof(&state->value[i + me.size() + 1], nullptr);

@@ -290,7 +290,7 @@ deletable_row& view_updates::get_view_row(const partition_key& base_key, const c
         auto* base_col = _base->get_column_definition(cdef.name());
         if (!base_col) {
             if (!_view_info.is_index()) {
-                throw std::logic_error(sprint("Column %s doesn't exist in base and this view is not backing a secondary index", cdef.name_as_text()));
+                throw std::logic_error(format("Column {} doesn't exist in base and this view is not backing a secondary index", cdef.name_as_text()));
             }
             auto& partitioner = dht::global_partitioner();
             return linearized_values.emplace_back(partitioner.token_to_bytes(token_for(base_key)));
@@ -422,7 +422,7 @@ void create_virtual_column(schema_builder& builder, const bytes& name, const dat
     if (!ctype) {
         // TODO: When #2201 is done, we also need to handle here
         // unfrozen UDTs.
-        throw exceptions::invalid_request_exception(sprint("Unsupported unselected multi-cell non-collection column %s for Materialized View", name));
+        throw exceptions::invalid_request_exception(format("Unsupported unselected multi-cell non-collection column {} for Materialized View", name));
     }
     if (ctype->is_list()) {
         // A list has ints as keys, and values (the list's items).
@@ -1224,6 +1224,20 @@ future<> view_builder::calculate_shard_build_step(
         }
     }
 
+    // All shards need to arrive at the same decisions on whether or not to
+    // restart a view build at some common token (reshard), and which token
+    // to restart at. So we need to wait until all shards have read the view
+    // build statuses before they can all proceed to make the (same) decision.
+    // If we don't synchronoize here, a fast shard may make a decision, start
+    // building and finish a build step - before the slowest shard even read
+    // the view build information.
+    container().invoke_on(0, [] (view_builder& builder) {
+        if (++builder._shards_finished_read == smp::count) {
+            builder._shards_finished_read_promise.set_value();
+        }
+        return builder._shards_finished_read_promise.get_shared_future();
+    }).get();
+
     std::unordered_set<utils::UUID> loaded_views;
     if (view_build_status_per_shard.size() != smp::count) {
         reshard(std::move(view_build_status_per_shard), loaded_views);
@@ -1589,10 +1603,10 @@ future<> view_builder::maybe_mark_view_as_built(view_ptr view, dht::token next_t
     });
 }
 
-future<> view_builder::wait_until_built(const sstring& ks_name, const sstring& view_name, lowres_clock::time_point timeout) {
-    return container().invoke_on(0, [ks_name, view_name, timeout] (view_builder& builder) {
+future<> view_builder::wait_until_built(const sstring& ks_name, const sstring& view_name) {
+    return container().invoke_on(0, [ks_name, view_name] (view_builder& builder) {
         auto v = std::pair(std::move(ks_name), std::move(view_name));
-        return builder._build_notifiers[std::move(v)].get_shared_future(timeout);
+        return builder._build_notifiers[std::move(v)].get_shared_future();
     });
 }
 

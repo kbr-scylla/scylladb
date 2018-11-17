@@ -56,12 +56,12 @@ row_assertion::describe(schema_ptr schema) const {
         auto&& value = e.second;
         const column_definition* def = schema->get_column_definition(name);
         if (!def) {
-            BOOST_FAIL(sprint("Schema is missing column definition for '%s'", name));
+            BOOST_FAIL(format("Schema is missing column definition for '{}'", name));
         }
         if (value.is_null()) {
-            return sprint("%s=null", to_sstring(name));
+            return format("{}=null", to_sstring(name));
         } else {
-            return sprint("%s=\"%s\"", to_sstring(name), def->type->to_string(def->type->decompose(value)));
+            return format("{}=\"{}\"", to_sstring(name), def->type->to_string(def->type->decompose(value)));
         }
     })) + "}";
 }
@@ -73,7 +73,7 @@ result_set_assertions::has(const row_assertion& ra) const {
             return *this;
         }
     }
-    BOOST_FAIL(sprint("Row %s not found in %s", ra.describe(_rs.schema()), _rs));
+    BOOST_FAIL(format("Row {} not found in {}", ra.describe(_rs.schema()), _rs));
     return *this;
 }
 
@@ -82,7 +82,7 @@ result_set_assertions::has_only(const row_assertion& ra) const {
     BOOST_REQUIRE(_rs.rows().size() == 1);
     auto& row = _rs.rows()[0];
     if (!ra.matches(row)) {
-        BOOST_FAIL(sprint("Expected %s but got %s", ra.describe(_rs.schema()), row));
+        BOOST_FAIL(format("Expected {} but got {}", ra.describe(_rs.schema()), row));
     }
     return *this;
 }

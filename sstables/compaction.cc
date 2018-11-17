@@ -371,7 +371,7 @@ private:
             _ancestors.push_back(sst->generation());
             _info->start_size += sst->bytes_on_disk();
             _info->total_partitions += sst->get_estimated_key_count();
-            formatted_msg += sprint("%s:level=%d, ", sst->get_filename(), sst->get_sstable_level());
+            formatted_msg += format("{}:level={:d}, ", sst->get_filename(), sst->get_sstable_level());
 
             // Do not actually compact a sstable that is fully expired and can be safely
             // dropped without ressurrecting old data.
@@ -412,7 +412,7 @@ private:
         sstring new_sstables_msg;
 
         for (auto& newtab : _info->new_sstables) {
-            new_sstables_msg += sprint("%s:level=%d, ", newtab->get_filename(), newtab->get_sstable_level());
+            new_sstables_msg += format("{}:level={:d}, ", newtab->get_filename(), newtab->get_sstable_level());
         }
 
         // FIXME: there is some missing information in the log message below.
@@ -779,7 +779,7 @@ static std::unique_ptr<compaction> make_compaction(bool cleanup, Params&&... par
 future<compaction_info>
 compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable()> creator, bool cleanup) {
     if (descriptor.sstables.empty()) {
-        throw std::runtime_error(sprint("Called compaction with empty set on behalf of {}.{}", cf.schema()->ks_name(), cf.schema()->cf_name()));
+        throw std::runtime_error(format("Called compaction with empty set on behalf of {}.{}", cf.schema()->ks_name(), cf.schema()->cf_name()));
     }
     auto c = make_compaction(cleanup, cf, std::move(descriptor), std::move(creator));
     return compaction::run(std::move(c));
@@ -789,7 +789,7 @@ future<std::vector<shared_sstable>>
 reshard_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable(shard_id)> creator,
         uint64_t max_sstable_size, uint32_t sstable_level) {
     if (sstables.empty()) {
-        throw std::runtime_error(sprint("Called resharding with empty set on behalf of {}.{}", cf.schema()->ks_name(), cf.schema()->cf_name()));
+        throw std::runtime_error(format("Called resharding with empty set on behalf of {}.{}", cf.schema()->ks_name(), cf.schema()->cf_name()));
     }
     auto c = std::make_unique<resharding_compaction>(std::move(sstables), cf, std::move(creator), max_sstable_size, sstable_level);
     return compaction::run(std::move(c)).then([] (auto ret) {
@@ -820,7 +820,10 @@ get_fully_expired_sstables(column_family& cf, const std::vector<sstables::shared
     auto compacted_undeleted_gens = boost::copy_range<std::unordered_set<int64_t>>(cf.compacted_undeleted_sstables()
         | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::generation)));
     auto has_undeleted_ancestor = [&compacted_undeleted_gens] (auto& candidate) {
-        return boost::algorithm::any_of(candidate->ancestors(), [&compacted_undeleted_gens] (auto gen) {
+        // Get ancestors from metadata collector which is empty after restart. It works for this purpose because
+        // we only need to check that a sstable compacted *in this instance* hasn't an ancestor undeleted.
+        // Not getting it from sstable metadata because mc format hasn't it available.
+        return boost::algorithm::any_of(candidate->get_metadata_collector().ancestors(), [&compacted_undeleted_gens] (auto gen) {
             return compacted_undeleted_gens.count(gen);
         });
     };

@@ -212,12 +212,11 @@ public:
     }
 
     virtual sstring to_string() const override {
-        return sprint("EQ(%s)", _value->to_string());
+        return format("EQ({})", _value->to_string());
     }
 
     virtual void do_merge_with(::shared_ptr<primary_key_restrictions<clustering_key_prefix>> other) override {
-        throw exceptions::invalid_request_exception(sprint(
-            "%s cannot be restricted by more than one relation if it includes an Equal",
+        throw exceptions::invalid_request_exception(format("{} cannot be restricted by more than one relation if it includes an Equal",
             get_columns_in_commons(other)));
     }
 
@@ -337,7 +336,7 @@ public:
 #endif
 
     virtual void do_merge_with(::shared_ptr<primary_key_restrictions<clustering_key_prefix>> other) override {
-        throw exceptions::invalid_request_exception(sprint("%s cannot be restricted by more than one relation if it includes a IN",
+        throw exceptions::invalid_request_exception(format("{} cannot be restricted by more than one relation if it includes a IN",
                                                            get_columns_in_commons(other)));
     }
 
@@ -370,7 +369,7 @@ public:
     }
 
     virtual sstring to_string() const override  {
-        return sprint("IN(%s)", std::to_string(_values));
+        return format("IN({})", std::to_string(_values));
     }
 
 protected:
@@ -446,7 +445,7 @@ public:
     }
 
     virtual std::vector<bytes_opt> bounds(statements::bound b, const query_options& options) const override {
-        throw std::runtime_error(sprint("%s not implemented", __PRETTY_FUNCTION__));
+        throw std::runtime_error(format("{} not implemented", __PRETTY_FUNCTION__));
 #if 0
         return Composites.toByteBuffers(boundsAsComposites(b, options));
 #endif

@@ -262,8 +262,8 @@ SEASTAR_TEST_CASE(test_query_built_indexes_virtual_table) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         auto idx = secondary_index::index_table_name("idx");
         e.execute_cql("create table cf(p int PRIMARY KEY, v int);").get();
-        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf", lowres_clock::now() + 10min);
-        auto f2 = e.local_view_builder().wait_until_built("ks", idx, lowres_clock::now() + 10min);
+        auto f1 = e.local_view_builder().wait_until_built("ks", "vcf");
+        auto f2 = e.local_view_builder().wait_until_built("ks", idx);
         e.execute_cql("create materialized view vcf as select * from cf "
                       "where v is not null and p is not null "
                       "primary key (v, p)").get();
@@ -279,7 +279,7 @@ SEASTAR_TEST_CASE(test_query_built_indexes_virtual_table) {
         assert_that(rs).is_rows().with_rows_ignore_order({
                 { {utf8_type->decompose(sstring("ks"))}, {utf8_type->decompose(idx)} },
         });
-        rs = e.execute_cql(sprint("select * from system.\"IndexInfo\" where table_name = 'ks' and index_name = '%s'", idx)).get0();
+        rs = e.execute_cql(format("select * from system.\"IndexInfo\" where table_name = 'ks' and index_name = '{}'", idx)).get0();
         assert_that(rs).is_rows().with_size(1);
         rs = e.execute_cql("select * from system.\"IndexInfo\" where table_name = 'ks' and index_name = 'vcf'").get0();
         assert_that(rs).is_rows().with_size(0);
