@@ -20,7 +20,7 @@
  */
 
 #include "message/messaging_service.hh"
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "service/storage_service.hh"
@@ -31,7 +31,7 @@
 #include "gms/gossiper.hh"
 #include "query-request.hh"
 #include "query-result.hh"
-#include "rpc/rpc.hh"
+#include <seastar/rpc/rpc.hh>
 #include "db/config.hh"
 #include "db/system_keyspace.hh"
 #include "dht/i_partitioner.hh"
@@ -75,8 +75,8 @@
 #include "idl/partition_checksum.dist.impl.hh"
 #include "idl/query.dist.impl.hh"
 #include "idl/cache_temperature.dist.impl.hh"
-#include "rpc/lz4_compressor.hh"
-#include "rpc/multi_algo_compressor_factory.hh"
+#include <seastar/rpc/lz4_compressor.hh>
+#include <seastar/rpc/multi_algo_compressor_factory.hh>
 #include "partition_range_compat.hh"
 #include "stdx.hh"
 #include <boost/range/adaptor/filtered.hpp>
@@ -279,6 +279,8 @@ void messaging_service::start_listen() {
         so.compressor_factory = &compressor_factory;
     }
     so.streaming_domain = rpc::streaming_domain_type(0x55AA);
+    so.load_balancing_algorithm = server_socket::load_balancing_algorithm::port;
+
     // FIXME: we don't set so.tcp_nodelay, because we can't tell at this point whether the connection will come from a
     //        local or remote datacenter, and whether or not the connection will be used for gossip. We can fix
     //        the first by wrapping its server_socket, but not the second.
@@ -304,6 +306,7 @@ void messaging_service::start_listen() {
                 }
                 listen_options lo;
                 lo.reuse_address = true;
+                lo.lba =  server_socket::load_balancing_algorithm::port;
                 auto addr = make_ipv4_address(ipv4_addr{a.raw_addr(), _ssl_port});
                 return std::make_unique<rpc_protocol_server_wrapper>(*_rpc,
                         so, seastar::tls::listen(_credentials, addr, lo), limits);

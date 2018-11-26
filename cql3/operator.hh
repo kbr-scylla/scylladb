@@ -32,7 +32,7 @@
 
 #include <cstddef>
 #include <iosfwd>
-#include "core/sstring.hh"
+#include <seastar/core/sstring.hh>
 #include "seastarx.hh"
 
 namespace cql3 {

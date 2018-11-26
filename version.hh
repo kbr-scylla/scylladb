@@ -11,8 +11,8 @@
 
 #pragma once
 
-#include "core/sstring.hh"
-#include "core/print.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/print.hh>
 #include <tuple>
 
 #include "seastarx.hh"

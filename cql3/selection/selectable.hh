@@ -32,7 +32,7 @@
 #pragma once
 
 #include "schema.hh"
-#include "core/shared_ptr.hh"
+#include <seastar/core/shared_ptr.hh>
 #include "cql3/selection/selector.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/functions/function.hh"

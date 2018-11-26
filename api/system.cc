@@ -11,7 +11,7 @@
 #include "api/api-doc/system.json.hh"
 #include "api/api.hh"
 
-#include "http/exception.hh"
+#include <seastar/http/exception.hh>
 #include "log.hh"
 
 namespace api {

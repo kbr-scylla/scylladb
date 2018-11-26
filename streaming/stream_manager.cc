@@ -25,7 +25,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include "streaming/stream_manager.hh"
 #include "streaming/stream_result_future.hh"
 #include "log.hh"

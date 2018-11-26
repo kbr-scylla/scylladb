@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "core/sstring.hh"
+#include <seastar/core/sstring.hh>
 #include "seastarx.hh"
 
 #include <experimental/optional>

@@ -12,7 +12,7 @@
 #define UTILS_HASH_HH_
 
 #include <functional>
-#include "core/apply.hh"
+#include <seastar/core/apply.hh>
 
 namespace utils {
 

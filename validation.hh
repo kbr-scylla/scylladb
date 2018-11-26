@@ -32,7 +32,7 @@
 
 #include "database_fwd.hh"
 #include "schema.hh"
-#include "core/sstring.hh"
+#include <seastar/core/sstring.hh>
 
 namespace validation {
 

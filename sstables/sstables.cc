@@ -23,13 +23,13 @@
 #include <vector>
 #include <typeinfo>
 #include <limits>
-#include "core/future.hh"
-#include "core/future-util.hh"
-#include "core/sstring.hh"
-#include "core/fstream.hh"
-#include "core/shared_ptr.hh"
-#include "core/do_with.hh"
-#include "core/thread.hh"
+#include <seastar/core/future.hh>
+#include <seastar/core/future-util.hh>
+#include <seastar/core/sstring.hh>
+#include <seastar/core/fstream.hh>
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/do_with.hh>
+#include <seastar/core/thread.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/byteorder.hh>
 #include <iterator>
@@ -55,11 +55,12 @@
 #include <boost/range/algorithm/set_algorithm.hpp>
 #include <boost/range/algorithm_ext/is_sorted.hpp>
 #include <regex>
-#include <core/align.hh>
+#include <seastar/core/align.hh>
 #include "range_tombstone_list.hh"
 #include "counters.hh"
 #include "binary_search.hh"
 #include "utils/bloom_filter.hh"
+#include "utils/memory_data_sink.hh"
 
 #include "checked-file-impl.hh"
 #include "integrity_checked_file_impl.hh"
@@ -70,6 +71,7 @@
 #include "db/large_partition_handler.hh"
 #include "sstables/random_access_reader.hh"
 #include "mirror-file-impl.hh"
+#include "utils/UUID_gen.hh"
 #include <boost/algorithm/string/predicate.hpp>
 
 thread_local disk_error_signal_type sstable_read_error;
@@ -330,6 +332,18 @@ inline void write(sstable_version_types v, file_writer& out, const vint<T>& t) {
 template <class T>
 future<> parse(sstable_version_types v, random_access_reader& in, vint<T>& t) {
     return read_vint(in, t.value);
+}
+
+future<> parse(sstable_version_types, random_access_reader& in, utils::UUID& uuid) {
+    return in.read_exactly(uuid.serialized_size()).then([&uuid] (temporary_buffer<char> buf) {
+        check_buf_size(buf, utils::UUID::serialized_size());
+
+        uuid = utils::UUID_gen::get_UUID(const_cast<int8_t*>(reinterpret_cast<const int8_t*>(buf.get())));
+    });
+}
+
+inline void write(sstable_version_types v, file_writer& out, const utils::UUID& uuid) {
+    out.write(uuid.serialize()).get();
 }
 
 template <class T>
@@ -1410,6 +1424,7 @@ future<> sstable::update_info_for_opened_data() {
     }).then([this] {
         this->set_clustering_components_ranges();
         this->set_first_and_last_keys();
+        _run_identifier = _components->scylla_metadata->get_optional_run_identifier().value_or(utils::make_random_uuid());
 
         // Get disk usage for this sstable (includes all components).
         _bytes_on_disk = 0;
@@ -2438,7 +2453,7 @@ sstable::read_scylla_metadata(const io_priority_class& pc) {
 }
 
 void
-sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features) {
+sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, struct run_identifier identifier) {
     auto&& first_key = get_first_decorated_key();
     auto&& last_key = get_last_decorated_key();
     auto sm = create_sharding_metadata(_schema, first_key, last_key, shard);
@@ -2455,6 +2470,7 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
 
     _components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
     _components->scylla_metadata->data.set<scylla_metadata_type::Features>(std::move(features));
+    _components->scylla_metadata->data.set<scylla_metadata_type::RunIdentifier>(std::move(identifier));
 
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
 }
@@ -2491,6 +2507,7 @@ class sstable_writer_k_l : public sstable_writer::writer_impl {
     shard_id _shard; // Specifies which shard new sstable will belong to.
     write_monitor* _monitor;
     bool _correctly_serialize_non_compound_range_tombstones;
+    utils::UUID _run_identifier;
 private:
     void prepare_file_writer();
     void finish_file_writer();
@@ -2501,7 +2518,8 @@ public:
     sstable_writer_k_l(sstable_writer_k_l&& o) : writer_impl(o._sst, o._schema, o._pc, o._cfg), _backup(o._backup),
             _leave_unsealed(o._leave_unsealed), _compression_enabled(o._compression_enabled), _writer(std::move(o._writer)),
             _components_writer(std::move(o._components_writer)), _shard(o._shard), _monitor(o._monitor),
-            _correctly_serialize_non_compound_range_tombstones(o._correctly_serialize_non_compound_range_tombstones) { }
+            _correctly_serialize_non_compound_range_tombstones(o._correctly_serialize_non_compound_range_tombstones),
+            _run_identifier(o._run_identifier) { }
     void consume_new_partition(const dht::decorated_key& dk) override { return _components_writer->consume_new_partition(dk); }
     void consume(tombstone t) override { _components_writer->consume(t); }
     stop_iteration consume(static_row&& sr) override { return _components_writer->consume(std::move(sr)); }
@@ -2558,6 +2576,7 @@ sstable_writer_k_l::sstable_writer_k_l(sstable& sst, const schema& s, uint64_t e
     , _shard(shard)
     , _monitor(cfg.monitor)
     , _correctly_serialize_non_compound_range_tombstones(cfg.correctly_serialize_non_compound_range_tombstones)
+    , _run_identifier(cfg.run_identifier)
 {
     _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
     _sst.write_toc(_pc);
@@ -2589,7 +2608,8 @@ void sstable_writer_k_l::consume_end_of_stream()
     if (!_correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
     }
-    _sst.write_scylla_metadata(_pc, _shard, std::move(features));
+    run_identifier identifier{_run_identifier};
+    _sst.write_scylla_metadata(_pc, _shard, std::move(features), std::move(identifier));
 
     _monitor->on_write_completed();
 
@@ -2734,6 +2754,8 @@ private:
     stdx::optional<key> _first_key, _last_key;
     index_sampling_state _index_sampling_state;
     range_tombstone_stream _range_tombstones;
+    memory_data_sink_buffers _tmp_bufs;
+    file_writer _tmp_writer; // writes into _tmp_bufs.
 
     // For static and regular columns, we write all simple columns first followed by collections
     // These containers have columns partitioned by atomicity
@@ -2775,6 +2797,7 @@ private:
         size_t desired_block_size;
     } _pi_write_m;
     column_stats _c_stats;
+    utils::UUID _run_identifier;
 
     void init_file_writers();
     void close_data_writer();
@@ -2866,6 +2889,13 @@ private:
     }
     void write_promoted_index(file_writer& writer);
     void consume(rt_marker&& marker);
+
+    void flush_tmp_bufs() {
+        for (auto&& buf : _tmp_bufs.buffers()) {
+            _data_writer->write(buf.get(), buf.size()).get();
+        }
+        _tmp_bufs.clear();
+    }
 public:
 
     sstable_writer_m(sstable& sst, const schema& s, uint64_t estimated_partitions,
@@ -2875,8 +2905,10 @@ public:
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _range_tombstones(_schema)
+        , _tmp_writer(output_stream<char>(data_sink(std::make_unique<memory_data_sink>(_tmp_bufs)), _sst.sstable_buffer_size))
         , _static_columns(get_indexed_columns_partitioned_by_atomicity(s.static_columns()))
         , _regular_columns(get_indexed_columns_partitioned_by_atomicity(s.regular_columns()))
+        , _run_identifier(cfg.run_identifier)
     {
         _sst.generate_toc(_schema.get_compressor_params().get_compressor(), _schema.bloom_filter_fp_chance());
         _sst.write_toc(_pc);
@@ -3345,16 +3377,13 @@ void sstable_writer_m::write_static_row(const row& static_row) {
     write(_sst.get_version(), *_data_writer, flags);
     write(_sst.get_version(), *_data_writer, row_extended_flags::is_static);
 
-    // Calculate the size of the row body
-    auto write_row = [this, &static_row, has_complex_deletion] (file_writer& writer) {
-        write_cells(writer, column_kind::static_column, static_row, row_time_properties{}, has_complex_deletion);
-    };
+    write_cells(_tmp_writer, column_kind::static_column, static_row, row_time_properties{}, has_complex_deletion);
+    _tmp_writer.flush().get();
 
-    uint64_t row_body_size = calculate_write_size(write_row) + unsigned_vint::serialized_size(0);
+    uint64_t row_body_size = _tmp_bufs.size() + unsigned_vint::serialized_size(0);
     write_vint(*_data_writer, row_body_size);
     write_vint(*_data_writer, 0); // as the static row always comes first, the previous row size is always zero
-
-    write_row(*_data_writer);
+    flush_tmp_bufs();
 
     _partition_header_length += (_data_writer->offset() - current_pos);
 
@@ -3402,16 +3431,13 @@ void sstable_writer_m::write_clustered(const clustering_row& clustered_row, uint
 
     write_clustering_prefix(*_data_writer, _schema, clustered_row.key(), ephemerally_full_prefix{_schema.is_compact_table()});
 
-    auto write_row = [this, &clustered_row, has_complex_deletion] (file_writer& writer) {
-        write_row_body(writer, clustered_row, has_complex_deletion);
-    };
+    write_row_body(_tmp_writer, clustered_row, has_complex_deletion);
+    _tmp_writer.flush().get();
 
-    uint64_t row_body_size = calculate_write_size(write_row) + unsigned_vint::serialized_size(prev_row_size);
-
+    uint64_t row_body_size = _tmp_bufs.size() + unsigned_vint::serialized_size(prev_row_size);
     write_vint(*_data_writer, row_body_size);
     write_vint(*_data_writer, prev_row_size);
-
-    write_row(*_data_writer);
+    flush_tmp_bufs();
 
     // Collect statistics
     if (_schema.clustering_key_size()) {
@@ -3443,9 +3469,6 @@ static void write_clustering_prefix(file_writer& writer, bound_kind_m kind,
 
 void sstable_writer_m::write_promoted_index(file_writer& writer) {
     static constexpr size_t width_base = 65536;
-    if (_pi_write_m.promoted_index.size() < 2) {
-        return;
-    }
     write_vint(writer, _partition_header_length);
     write(_sst.get_version(), writer, to_deletion_time(_pi_write_m.tomb));
     write_vint(writer, _pi_write_m.promoted_index.size());
@@ -3510,9 +3533,13 @@ stop_iteration sstable_writer_m::consume_end_of_partition() {
         return write_promoted_index(writer);
     };
 
-    uint64_t pi_size = calculate_write_size(write_pi);
-    write_vint(*_index_writer, pi_size);
-    write_pi(*_index_writer);
+    if (_pi_write_m.promoted_index.size() < 2) {
+        write_vint(*_index_writer, uint64_t(0));
+    } else {
+        uint64_t pi_size = calculate_write_size(write_pi);
+        write_vint(*_index_writer, pi_size);
+        write_pi(*_index_writer);
+    }
 
     // compute size of the current row.
     _c_stats.partition_size = _data_writer->offset() - _c_stats.start_offset;
@@ -3554,11 +3581,13 @@ void sstable_writer_m::consume_end_of_stream() {
     if (!_cfg.correctly_serialize_non_compound_range_tombstones) {
         features.disable(sstable_feature::NonCompoundRangeTombstones);
     }
-    _sst.write_scylla_metadata(_pc, _shard, std::move(features));
+    run_identifier identifier{_run_identifier};
+    _sst.write_scylla_metadata(_pc, _shard, std::move(features), std::move(identifier));
     _cfg.monitor->on_write_completed();
     if (!_cfg.leave_unsealed) {
         _sst.seal_sstable(_cfg.backup).get();
     }
+    _tmp_writer.close().get();
     _cfg.monitor->on_flush_completed();
 }
 
@@ -4007,11 +4036,6 @@ double sstable::get_compression_ratio() const {
     }
 }
 
-std::unordered_set<uint64_t> sstable::ancestors() const {
-    const compaction_metadata& cm = get_compaction_metadata();
-    return boost::copy_range<std::unordered_set<uint64_t>>(cm.ancestors.elements);
-}
-
 void sstable::set_sstable_level(uint32_t new_level) {
     auto entry = _components->statistics.contents.find(metadata_type::Stats);
     if (entry == _components->statistics.contents.end()) {
@@ -4103,6 +4127,8 @@ sstable::~sstable() {
         }
 
     }
+
+    _on_closed(*this);
 }
 
 sstring

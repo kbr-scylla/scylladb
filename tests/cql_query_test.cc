@@ -21,8 +21,8 @@
 #include "tests/cql_test_env.hh"
 #include "tests/cql_assertions.hh"
 
-#include "core/future-util.hh"
-#include "core/sleep.hh"
+#include <seastar/core/future-util.hh>
+#include <seastar/core/sleep.hh>
 #include "transport/messages/result_message.hh"
 #include "utils/big_decimal.hh"
 
@@ -1432,6 +1432,10 @@ SEASTAR_TEST_CASE(test_table_compression) {
             assert(!f.failed());
             e.require_table_exists("ks", "tb4");
             BOOST_REQUIRE(e.local_db().find_schema("ks", "tb4")->get_compressor_params().get_compressor() == compressor::deflate);
+            return e.execute_cql("create table tb6 (foo text PRIMARY KEY, bar text);");
+        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+            e.require_table_exists("ks", "tb6");
+            BOOST_REQUIRE(e.local_db().find_schema("ks", "tb6")->get_compressor_params().get_compressor() == compressor::lz4);
         });
     });
 }

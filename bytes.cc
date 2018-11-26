@@ -9,7 +9,7 @@
  */
 
 #include "bytes.hh"
-#include "core/print.hh"
+#include <seastar/core/print.hh>
 
 static inline int8_t hex_to_int(unsigned char c) {
     switch (c) {

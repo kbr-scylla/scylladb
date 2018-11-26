@@ -14,17 +14,17 @@
 #include "dht/i_partitioner.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "index/secondary_index_manager.hh"
-#include "core/sstring.hh"
-#include "core/shared_ptr.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <seastar/core/execution_stage.hh>
-#include "net/byteorder.hh"
+#include <seastar/net/byteorder.hh>
 #include "utils/UUID_gen.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "db_clock.hh"
 #include "gc_clock.hh"
 #include <chrono>
-#include "core/distributed.hh"
+#include <seastar/core/distributed.hh>
 #include <functional>
 #include <cstdint>
 #include <unordered_map>
@@ -37,8 +37,8 @@
 #include <string.h>
 #include "types.hh"
 #include "compound.hh"
-#include "core/future.hh"
-#include "core/gate.hh"
+#include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include "cql3/column_specification.hh"
 #include "db/commitlog/replay_position.hh"
 #include <limits>
@@ -287,6 +287,8 @@ public:
 class table;
 using column_family = table;
 
+class database_sstable_write_monitor;
+
 class table : public enable_lw_shared_from_this<table> {
 public:
     struct config {
@@ -384,7 +386,7 @@ private:
     // plan memtables and the resulting sstables are not made visible until
     // the streaming is complete.
     struct monitored_sstable {
-        std::unique_ptr<sstables::write_monitor> monitor;
+        std::unique_ptr<database_sstable_write_monitor> monitor;
         sstables::shared_sstable sstable;
     };
 

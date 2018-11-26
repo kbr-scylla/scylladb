@@ -28,9 +28,9 @@
 #include "md5_hasher.hh"
 #include "xx_hasher.hh"
 
-#include "core/sstring.hh"
-#include "core/do_with.hh"
-#include "core/thread.hh"
+#include <seastar/core/sstring.hh>
+#include <seastar/core/do_with.hh>
+#include <seastar/core/thread.hh>
 #include <seastar/util/alloc_failure_injector.hh>
 
 #include "database.hh"
@@ -1791,4 +1791,16 @@ SEASTAR_THREAD_TEST_CASE(test_row_size_is_immune_to_application_order) {
     }();
 
     BOOST_REQUIRE_EQUAL(size1, size2);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_schema_changes) {
+    for_each_schema_change([] (schema_ptr base, const std::vector<mutation>& base_mutations,
+                               schema_ptr changed, const std::vector<mutation>& changed_mutations) {
+        BOOST_REQUIRE_EQUAL(base_mutations.size(), changed_mutations.size());
+        for (auto bc : boost::range::combine(base_mutations, changed_mutations)) {
+            auto b = boost::get<0>(bc);
+            b.upgrade(changed);
+            BOOST_CHECK_EQUAL(b, boost::get<1>(bc));
+        }
+    });
 }

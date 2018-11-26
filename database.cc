@@ -12,7 +12,7 @@
 #include "lister.hh"
 #include "database.hh"
 #include "unimplemented.hh"
-#include "core/future-util.hh"
+#include <seastar/core/future-util.hh>
 #include "db/commitlog/commitlog_entry.hh"
 #include "db/system_keyspace.hh"
 #include "db/consistency_level.hh"
@@ -21,7 +21,7 @@
 #include "to_string.hh"
 #include "query-result-writer.hh"
 #include "cql3/column_identifier.hh"
-#include "core/seastar.hh"
+#include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics.hh>
@@ -46,12 +46,12 @@
 #include <boost/range/adaptor/map.hpp>
 #include "frozen_mutation.hh"
 #include "mutation_partition_applier.hh"
-#include "core/do_with.hh"
+#include <seastar/core/do_with.hh>
 #include "service/migration_manager.hh"
 #include "service/storage_service.hh"
 #include "message/messaging_service.hh"
 #include "mutation_query.hh"
-#include <core/fstream.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/core/enum.hh>
 #include "utils/latency.hh"
 #include "schema_registry.hh"
@@ -430,8 +430,8 @@ class incremental_reader_selector : public reader_selector {
     const dht::partition_range* _pr;
     lw_shared_ptr<sstables::sstable_set> _sstables;
     tracing::trace_state_ptr _trace_state;
-    sstables::sstable_set::incremental_selector _selector;
-    std::unordered_set<sstables::shared_sstable> _read_sstables;
+    std::optional<sstables::sstable_set::incremental_selector> _selector;
+    std::unordered_set<int64_t> _read_sstable_gens;
     sstable_reader_factory_type _fn;
 
     flat_mutation_reader create_reader(sstables::shared_sstable sst) {
@@ -470,18 +470,24 @@ public:
         auto readers = std::vector<flat_mutation_reader>();
 
         do {
-            auto selection = _selector.select(_selector_position);
+            auto selection = _selector->select(_selector_position);
             _selector_position = selection.next_position;
 
             dblog.trace("incremental_reader_selector {}: {} sstables to consider, advancing selector to {}", this, selection.sstables.size(),
                     _selector_position);
 
             readers = boost::copy_range<std::vector<flat_mutation_reader>>(selection.sstables
-                    | boost::adaptors::filtered([this] (auto& sst) { return _read_sstables.emplace(sst).second; })
+                    | boost::adaptors::filtered([this] (auto& sst) { return _read_sstable_gens.emplace(sst->generation()).second; })
                     | boost::adaptors::transformed([this] (auto& sst) { return this->create_reader(sst); }));
         } while (!_selector_position.is_max() && readers.empty() && (!pos || dht::ring_position_tri_compare(*_s, *pos, _selector_position) >= 0));
 
         dblog.trace("incremental_reader_selector {}: created {} new readers", this, readers.size());
+
+        // prevents sstable_set::incremental_selector::_current_sstables from holding reference to
+        // sstables when done selecting.
+        if (_selector_position.is_max()) {
+            _selector.reset();
+        }
 
         return readers;
     }
@@ -1440,13 +1446,15 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
                 sst->set_unshared();
                 return sst;
         };
-        auto sstables_to_compact = descriptor.sstables;
-        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable,
-                cleanup).then([this, sstables_to_compact = std::move(sstables_to_compact)] (auto info) {
-            _compaction_strategy.notify_completion(sstables_to_compact, info.new_sstables);
-            this->on_compaction_completion(info.new_sstables, sstables_to_compact);
-            return info;
-        });
+        auto replace_sstables = [this, release_exhausted = descriptor.release_exhausted] (std::vector<sstables::shared_sstable> old_ssts,
+                std::vector<sstables::shared_sstable> new_ssts) {
+            _compaction_strategy.notify_completion(old_ssts, new_ssts);
+            _compaction_manager.propagate_replacement(this, old_ssts, new_ssts);
+            this->on_compaction_completion(new_ssts, old_ssts);
+            release_exhausted(old_ssts);
+        };
+
+        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable, replace_sstables, cleanup);
     }).then([this] (auto info) {
         if (info.type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
@@ -1459,7 +1467,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
         // shows how many sstables each row is merged from. This information
         // cannot be accessed until we make combined_reader more generic,
         // for example, by adding a reducer method.
-        return db::system_keyspace::update_compaction_history(info.ks, info.cf, info.ended_at,
+        return db::system_keyspace::update_compaction_history(info.ks_name, info.cf_name, info.ended_at,
             info.start_size, info.end_size, std::unordered_map<int32_t, int64_t>{});
     });
 }
@@ -4261,6 +4269,7 @@ future<> table::fail_streaming_mutations(utils::UUID plan_id) {
     _streaming_memtables_big.erase(it);
     return entry->flush_in_progress.close().then([this, entry] {
         for (auto&& sst : entry->sstables) {
+            sst.monitor->write_failed();
             sst.sstable->mark_for_deletion();
         }
     });

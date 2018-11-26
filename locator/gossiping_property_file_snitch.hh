@@ -35,7 +35,7 @@
 #include "production_snitch_base.hh"
 #include "exceptions/exceptions.hh"
 #include "service/storage_service.hh"
-#include "core/file.hh"
+#include <seastar/core/file.hh>
 #include "log.hh"
 #include "locator/reconnectable_snitch_helper.hh"
 

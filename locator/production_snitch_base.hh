@@ -35,7 +35,7 @@
 
 #include "gms/endpoint_state.hh"
 #include "locator/token_metadata.hh"
-#include "core/sstring.hh"
+#include <seastar/core/sstring.hh>
 #include "snitch_base.hh"
 
 namespace locator {

@@ -11,8 +11,8 @@
 
 #pragma once
 
-#include "core/abort_source.hh"
-#include "core/sleep.hh"
+#include <seastar/core/abort_source.hh>
+#include <seastar/core/sleep.hh>
 #include "seastarx.hh"
 #include <chrono>
 

@@ -8,7 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "core/future-util.hh"
+#include <seastar/core/future-util.hh>
 #include "audit/audit.hh"
 #include "db/config.hh"
 #include "cql3/cql_statement.hh"

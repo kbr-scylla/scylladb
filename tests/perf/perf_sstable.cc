@@ -8,9 +8,9 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include <core/distributed.hh>
-#include <core/app-template.hh>
-#include <core/sstring.hh>
+#include <seastar/core/distributed.hh>
+#include <seastar/core/app-template.hh>
+#include <seastar/core/sstring.hh>
 #include <random>
 
 // hack: perf_sstable falsely depends on Boost.Test, but we can't include it with

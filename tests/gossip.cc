@@ -9,8 +9,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "core/reactor.hh"
-#include "core/app-template.hh"
+#include <seastar/core/reactor.hh>
+#include <seastar/core/app-template.hh>
 #include "db/system_distributed_keyspace.hh"
 #include "message/messaging_service.hh"
 #include "gms/failure_detector.hh"
