@@ -170,7 +170,17 @@ void encrypted_file_impl::clear_length() {
 bytes encrypted_file_impl::iv_for(uint64_t pos) const {
     assert(!(pos & (block_size - 1)));
 
-    bytes b(bytes::initialized_later(), _key->iv_len());
+    // #658. ECB block mode has no IV. Bad for security,
+    // but must handle.
+    size_t iv_len = _key->iv_len();
+    if (iv_len == 0) {
+        return bytes{};
+    }
+
+    assert(iv_len >= _key->block_size());
+    assert(iv_len >= sizeof(uint64_t));
+
+    bytes b(bytes::initialized_later(), iv_len);
     std::fill(b.begin(), b.end() - sizeof(uint64_t), 0);
 
     // write block pos as little endian IV-len integer
