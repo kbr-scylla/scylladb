@@ -14,6 +14,8 @@
 
 namespace gms {
 
+class feature_service;
+
 /**
  * A gossip feature tracks whether all the nodes the current one is
  * aware of support the specified feature.
@@ -21,12 +23,13 @@ namespace gms {
  * A feature should only be created once the gossiper is available.
  */
 class feature final {
+    feature_service* _service = nullptr;
     sstring _name;
     bool _enabled = false;
     mutable shared_promise<> _pr;
     friend class gossiper;
 public:
-    explicit feature(sstring name, bool enabled = false);
+    explicit feature(feature_service& service, sstring name, bool enabled = false);
     feature() = default;
     ~feature();
     feature(const feature& other) = delete;

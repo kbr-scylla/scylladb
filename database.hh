@@ -925,7 +925,7 @@ private:
     future<> seal_active_streaming_memtable_immediate(flush_permit&&);
 
     // filter manifest.json files out
-    static bool manifest_json_filter(const lister::path&, const directory_entry& entry);
+    static bool manifest_json_filter(const fs::path&, const directory_entry& entry);
 
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
@@ -1417,6 +1417,12 @@ public:
     std::unordered_set<sstring> get_initial_tokens();
     std::experimental::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
+    reader_concurrency_semaphore& user_read_concurrency_sem() {
+        return _read_concurrency_sem;
+    }
+    reader_concurrency_semaphore& streaming_read_concurrency_sem() {
+        return _streaming_concurrency_sem;
+    }
     reader_concurrency_semaphore& system_keyspace_read_concurrency_sem() {
         return _system_read_concurrency_sem;
     }
@@ -1452,6 +1458,8 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy);
+
+bool is_internal_keyspace(const sstring& name);
 
 class distributed_loader {
 public:

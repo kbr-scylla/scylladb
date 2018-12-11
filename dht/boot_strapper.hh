@@ -30,7 +30,6 @@
 #include "dht/i_partitioner.hh"
 #include <unordered_set>
 #include "database.hh"
-#include "db/config.hh"
 
 namespace dht {
 

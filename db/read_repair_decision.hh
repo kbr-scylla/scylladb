@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <iostream>
+
 namespace db {
 
 enum class read_repair_decision {

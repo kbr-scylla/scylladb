@@ -509,11 +509,16 @@ future<> migration_manager::validate(schema_ptr schema) {
     });
 }
 
-future<> migration_manager::announce_new_column_family(schema_ptr cfm, bool announce_locally) {
+future<> migration_manager::announce_new_column_family(schema_ptr cfm, bool announce_locally)
+{
+    return announce_new_column_family(std::move(cfm), api::new_timestamp(), announce_locally);
+}
+
+future<> migration_manager::announce_new_column_family(schema_ptr cfm, api::timestamp_type timestamp, bool announce_locally) {
 #if 0
     cfm.validate();
 #endif
-    return validate(cfm).then([this, cfm, announce_locally] {
+    return validate(cfm).then([this, cfm, announce_locally, timestamp] {
         try {
             auto& db = get_local_storage_proxy().get_db().local();
             auto&& keyspace = db.find_keyspace(cfm->ks_name());
@@ -525,7 +530,7 @@ future<> migration_manager::announce_new_column_family(schema_ptr cfm, bool anno
             }
 
             mlogger.info("Create new ColumnFamily: {}", cfm);
-            return db::schema_tables::make_create_table_mutations(keyspace.metadata(), cfm, api::new_timestamp())
+            return db::schema_tables::make_create_table_mutations(keyspace.metadata(), cfm, timestamp)
                 .then([announce_locally, this] (auto&& mutations) {
                     return announce(std::move(mutations), announce_locally);
                 });

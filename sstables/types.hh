@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <seastar/util/gcc6-concepts.hh>
 #include "disk_types.hh"
 #include <seastar/core/enum.hh>
 #include "bytes.hh"
@@ -47,6 +48,15 @@ static inline bytes_view to_bytes_view(const temporary_buffer<char>& b) {
 }
 
 namespace sstables {
+
+GCC6_CONCEPT(
+template<typename T>
+concept bool Writer() {
+    return requires(T& wr, const char* data, size_t size) {
+        { wr.write(data, size) } -> void
+    };
+}
+)
 
 struct commitlog_interval {
     db::replay_position start;
@@ -238,9 +248,10 @@ struct metadata {
 template <typename T>
 uint64_t serialized_size(sstable_version_types v, const T& object);
 
-template <class T>
+template <class T, typename W>
+GCC6_CONCEPT(requires Writer<W>())
 typename std::enable_if_t<!std::is_integral<T>::value && !std::is_enum<T>::value, void>
-write(sstable_version_types v, file_writer& out, const T& t);
+write(sstable_version_types v, W& out, const T& t);
 
 // serialized_size() implementation for metadata class
 template <typename Component>
@@ -554,7 +565,7 @@ inline bool is_expired_liveness_ttl(uint32_t ttl) {
 }
 
 struct statistics {
-    disk_hash<uint32_t, metadata_type, uint32_t> hash;
+    disk_array<uint32_t, std::pair<metadata_type, uint32_t>> offsets; // ordered by metadata_type
     std::unordered_map<metadata_type, std::unique_ptr<metadata>> contents;
 };
 

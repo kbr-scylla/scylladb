@@ -179,6 +179,8 @@ public:
         _is_normal = get_status() == sstring(versioned_value::STATUS_NORMAL);
     }
 
+    bool is_cql_ready() const;
+
     friend std::ostream& operator<<(std::ostream& os, const endpoint_state& x);
 };
 

@@ -1,4 +1,5 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 #
 # Copyright (C) 2015 ScyllaDB
 #
@@ -256,12 +257,14 @@ scylla_tests = [
     'tests/cql_query_test',
     'tests/secondary_index_test',
     'tests/json_cql_query_test',
+    'tests/filtering_test',
     'tests/storage_proxy_test',
     'tests/schema_change_test',
     'tests/mutation_reader_test',
     'tests/mutation_query_test',
     'tests/row_cache_test',
     'tests/test-serialization',
+    'tests/broken_sstable_test',
     'tests/sstable_test',
     'tests/sstable_3_x_test',
     'tests/sstable_mutation_test',
@@ -291,6 +294,7 @@ scylla_tests = [
     'tests/log_heap_test',
     'tests/managed_vector_test',
     'tests/crc_test',
+    'tests/checksum_utils_test',
     'tests/flush_queue_test',
     'tests/dynamic_bitset_test',
     'tests/auth_test',
@@ -339,10 +343,13 @@ scylla_tests = [
     'tests/auth_passwords_test',
     'tests/multishard_mutation_query_test',
     'tests/top_k_test',
+    'tests/utf8_test',
+    'tests/small_vector_test',
 ]
 
 perf_tests = [
     'tests/perf/perf_mutation_readers',
+    'tests/perf/perf_checksum',
     'tests/perf/perf_mutation_fragment',
     'tests/perf/perf_idl',
 ]
@@ -451,14 +458,12 @@ scylla_core = (['database.cc',
                 'sstables/sstables.cc',
                 'sstables/sstable_version.cc',
                 'sstables/compress.cc',
-                'sstables/row.cc',
                 'sstables/partition.cc',
                 'sstables/compaction.cc',
                 'sstables/compaction_strategy.cc',
                 'sstables/compaction_manager.cc',
                 'sstables/integrity_checked_file_impl.cc',
                 'sstables/prepended_input_stream.cc',
-                'sstables/m_format_write_helpers.cc',
                 'sstables/m_format_read_helpers.cc',
                 'transport/event.cc',
                 'transport/event_notifier.cc',
@@ -582,6 +587,7 @@ scylla_core = (['database.cc',
                 'utils/exceptions.cc',
                 'utils/config_file.cc',
                 'utils/memory.cc',
+                'utils/gz/crc_combine.cc',
                 'gms/version_generator.cc',
                 'gms/versioned_value.cc',
                 'gms/gossiper.cc',
@@ -686,6 +692,8 @@ scylla_core = (['database.cc',
                 'in-memory-file-impl.cc',
                 'mirror-file-impl.cc',
                 'multishard_mutation_query.cc',
+                'reader_concurrency_semaphore.cc',
+                'utils/utf8.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -777,6 +785,7 @@ pure_boost_tests = set([
     'tests/test-serialization',
     'tests/range_test',
     'tests/crc_test',
+    'tests/checksum_utils_test',
     'tests/managed_vector_test',
     'tests/dynamic_bitset_test',
     'tests/idl_test',
@@ -799,6 +808,7 @@ pure_boost_tests = set([
     'tests/json_test',
     'tests/auth_passwords_test',
     'tests/top_k_test',
+    'tests/small_vector_test',
 ])
 
 tests_not_using_seastar_test_framework = set([
@@ -817,6 +827,7 @@ tests_not_using_seastar_test_framework = set([
     'tests/memory_footprint',
     'tests/gossip',
     'tests/perf/perf_sstable',
+    'tests/small_vector_test',
 ]) | pure_boost_tests
 
 for t in tests_not_using_seastar_test_framework:
@@ -852,6 +863,10 @@ deps['tests/perf/perf_fast_forward'] += ['release.cc']
 deps['tests/meta_test'] = ['tests/meta_test.cc']
 deps['tests/imr_test'] = ['tests/imr_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['tests/reusable_buffer_test'] = ['tests/reusable_buffer_test.cc']
+deps['tests/utf8_test'] = ['utils/utf8.cc', 'tests/utf8_test.cc']
+deps['tests/small_vector_test'] = ['tests/small_vector_test.cc']
+
+deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
 warnings = [
     '-Wno-mismatched-tags',  # clang-only
@@ -1006,6 +1021,8 @@ seastar_ldflags = args.user_ldflags
 seastar_flags += ['--compiler', args.cxx, '--c-compiler', args.cc, '--cflags=%s' % (seastar_cflags), '--ldflags=%s' % (seastar_ldflags),
                   '--c++-dialect=gnu++1z', '--optflags=%s' % (modes['release']['opt']), ]
 
+libdeflate_cflags = seastar_cflags
+
 status = subprocess.call([args.python, './configure.py'] + seastar_flags, cwd='seastar')
 
 if status != 0:
@@ -1036,7 +1053,7 @@ seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_re
 
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config("--libs", "jsoncpp"),
-                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lcrypt', ' -lcryptopp',
+                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp',
                  maybe_static(args.staticboost, '-lboost_date_time'), ])
 
 xxhash_dir = 'xxHash'
@@ -1133,6 +1150,9 @@ with open(buildfile, 'w') as f:
             command = {ninja} -C $subdir $target
             restat = 1
             description = NINJA $out
+        rule run
+            command = $in > $out
+            description = GEN $out
         rule copy
             command = cp $in $out
             description = COPY $out
@@ -1205,6 +1225,10 @@ with open(buildfile, 'w') as f:
             if binary.endswith('.a'):
                 f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
             else:
+                objs.extend(['$builddir/' + mode + '/' + artifact for artifact in [
+                    'libdeflate/libdeflate.a'
+                ]])
+                objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary.startswith('tests/'):
                     local_libs = '$libs'
                     if binary not in tests_not_using_seastar_test_framework or binary in pure_boost_tests:
@@ -1246,6 +1270,12 @@ with open(buildfile, 'w') as f:
                     antlr3_grammars.add(src)
                 else:
                     raise Exception('No rule for ' + src)
+        compiles['$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o'] = '$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc'
+        compiles['$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'] = 'utils/gz/gen_crc_combine_table.cc'
+        f.write('build {}: run {}\n'.format('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc',
+                                            '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
+        f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
+                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
         for obj in compiles:
             src = compiles[obj]
             gen_headers = list(ragels.keys())
@@ -1295,6 +1325,10 @@ with open(buildfile, 'w') as f:
             ''').format(**locals()))
         f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
         f.write('    mode = {mode}\n'.format(**locals()))
+        f.write('rule libdeflate.{mode}\n'.format(**locals()))
+        f.write('    command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}"\n'.format(**locals()))
+        f.write('build build/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
+
     f.write('build {}: phony\n'.format(seastar_deps))
     f.write(textwrap.dedent('''\
         rule configure

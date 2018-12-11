@@ -12,4 +12,6 @@
 [submodule "kmipc"]
 	path = kmipc
 	url = ../cryptsoft-kmipc
-
+[submodule "libdeflate"]
+	path = libdeflate
+	url = ../libdeflate

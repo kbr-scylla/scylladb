@@ -27,8 +27,10 @@
 #include <seastar/core/simple-stream.hh>
 #include <seastar/core/metrics.hh>
 #include "utils/chunked_vector.hh"
+#include "utils/config_file.hh"
 #include "init.hh"
 #include "db/extensions.hh"
+#include "db/config.hh"
 #include "sstables/sstables.hh"
 
 class mirror_file_handle_impl : public file_handle_impl {

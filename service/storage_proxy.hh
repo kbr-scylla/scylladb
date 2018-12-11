@@ -55,7 +55,6 @@
 #include "tracing/trace_state.hh"
 #include <seastar/core/metrics.hh>
 #include "frozen_mutation.hh"
-#include "db/config.hh"
 #include "storage_proxy_stats.hh"
 
 namespace compat {
@@ -83,7 +82,8 @@ private:
     struct rh_entry {
         ::shared_ptr<abstract_write_response_handler> handler;
         timer<clock_type> expire_timer;
-        rh_entry(::shared_ptr<abstract_write_response_handler>&& h, std::function<void()>&& cb);
+        rh_entry(::shared_ptr<abstract_write_response_handler>&& h);
+        rh_entry(rh_entry&&) = delete;
     };
 
     using response_id_type = uint64_t;

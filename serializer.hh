@@ -42,7 +42,7 @@ class buffer_view {
     FragmentIterator _next;
 public:
     using fragment_type = bytes_view;
-    
+
     class iterator {
         bytes_view _current;
         size_t _left = 0;

@@ -43,20 +43,23 @@ public:
 
     virtual ~file_writer() = default;
     file_writer(file_writer&&) = default;
-
-    future<> write(const char* buf, size_t n) {
+    // Must be called in a seastar thread.
+    void write(const char* buf, size_t n) {
         _offset.offset += n;
-        return _out.write(buf, n);
+        _out.write(buf, n).get();
     }
-    future<> write(const bytes& s) {
+    // Must be called in a seastar thread.
+    void write(bytes_view s) {
         _offset.offset += s.size();
-        return _out.write(s);
+        _out.write(reinterpret_cast<const char*>(s.begin()), s.size()).get();
     }
-    future<> flush() {
-        return _out.flush();
+    // Must be called in a seastar thread.
+    void flush() {
+        _out.flush().get();
     }
-    future<> close() {
-        return _out.close();
+    // Must be called in a seastar thread.
+    void close() {
+        _out.close().get();
     }
     uint64_t offset() const {
         return _offset.offset;
@@ -110,8 +113,8 @@ serialized_size(sstable_version_types v, const T& object) {
     uint64_t size = 0;
     auto writer = file_writer(make_sizing_output_stream(size));
     write(v, writer, object);
-    writer.flush().get();
-    writer.close().get();
+    writer.flush();
+    writer.close();
     return size;
 }
 
@@ -140,7 +143,7 @@ public:
             uint32_t per_chunk_checksum = ChecksumType::init_checksum();
 
             per_chunk_checksum = ChecksumType::checksum(per_chunk_checksum, buf.begin() + offset, size);
-            _full_checksum = ChecksumType::checksum_combine(_full_checksum, per_chunk_checksum, size);
+            _full_checksum = checksum_combine_or_feed<ChecksumType>(_full_checksum, per_chunk_checksum, buf.begin() + offset, size);
             _c.checksums.push_back(per_chunk_checksum);
         }
         return _out.put(std::move(buf));

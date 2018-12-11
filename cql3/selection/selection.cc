@@ -328,7 +328,7 @@ std::unique_ptr<result_set> result_set_builder::build() {
     return std::move(_result_set);
 }
 
-bool result_set_builder::restrictions_filter::operator()(const selection& selection,
+bool result_set_builder::restrictions_filter::do_filter(const selection& selection,
                                                          const std::vector<bytes>& partition_key,
                                                          const std::vector<bytes>& clustering_key,
                                                          const query::result_row_view& static_row,
@@ -342,8 +342,6 @@ bool result_set_builder::restrictions_filter::operator()(const selection& select
     auto static_row_iterator = static_row.iterator();
     auto row_iterator = row.iterator();
     auto non_pk_restrictions_map = _restrictions->get_non_pk_restriction();
-    auto partition_key_restrictions_map = _restrictions->get_single_column_partition_key_restrictions();
-    auto clustering_key_restrictions_map = _restrictions->get_single_column_clustering_key_restrictions();
     for (auto&& cdef : selection.get_columns()) {
         switch (cdef->kind) {
         case column_kind::static_column:
@@ -379,6 +377,10 @@ bool result_set_builder::restrictions_filter::operator()(const selection& select
             }
             break;
         case column_kind::partition_key: {
+            if (_skip_pk_restrictions) {
+                continue;
+            }
+            auto partition_key_restrictions_map = _restrictions->get_single_column_partition_key_restrictions();
             auto restr_it = partition_key_restrictions_map.find(cdef);
             if (restr_it == partition_key_restrictions_map.end()) {
                 continue;
@@ -393,6 +395,10 @@ bool result_set_builder::restrictions_filter::operator()(const selection& select
             }
             break;
         case column_kind::clustering_key: {
+            if (_skip_ck_restrictions) {
+                continue;
+            }
+            auto clustering_key_restrictions_map = _restrictions->get_single_column_clustering_key_restrictions();
             auto restr_it = clustering_key_restrictions_map.find(cdef);
             if (restr_it == clustering_key_restrictions_map.end()) {
                 continue;
@@ -410,6 +416,18 @@ bool result_set_builder::restrictions_filter::operator()(const selection& select
         }
     }
     return true;
+}
+
+bool result_set_builder::restrictions_filter::operator()(const selection& selection,
+                                                         const std::vector<bytes>& partition_key,
+                                                         const std::vector<bytes>& clustering_key,
+                                                         const query::result_row_view& static_row,
+                                                         const query::result_row_view& row) const {
+    bool accepted = do_filter(selection, partition_key, clustering_key, static_row, row);
+    if (!accepted) {
+        ++_rows_dropped;
+    }
+    return accepted;
 }
 
 api::timestamp_type result_set_builder::timestamp_of(size_t idx) {

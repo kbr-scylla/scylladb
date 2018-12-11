@@ -40,8 +40,6 @@
 #include "cql3/operation.hh"
 #include "cql3/relation.hh"
 
-#include "db/consistency_level.hh"
-
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/future-util.hh>
 

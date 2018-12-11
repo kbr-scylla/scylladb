@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 #
 # Copyright (C) 2015 ScyllaDB
 #
@@ -32,6 +33,7 @@ boost_tests = [
     # disabled until we resolve audit vs DROP INDEX conflict: 
     # 'secondary_index_test',
     'json_cql_query_test',
+    'filtering_test',
     'storage_proxy_test',
     'schema_change_test',
     'sstable_mutation_test',
@@ -56,6 +58,7 @@ boost_tests = [
     'logalloc_test',
     'log_heap_test',
     'crc_test',
+    'checksum_utils_test',
     'flush_queue_test',
     'config_test',
     'dynamic_bitset_test',
@@ -97,6 +100,7 @@ boost_tests = [
     'querier_cache',
     'limiting_data_source_test',
     'sstable_test',
+    'broken_sstable_test',
     'sstable_3_x_test',
     'meta_test',
     'reusable_buffer_test',
@@ -108,6 +112,8 @@ boost_tests = [
     'auth_passwords_test',
     'multishard_mutation_query_test',
     'top_k_test',
+    'utf8_test',
+    'small_vector_test',
 ]
 
 other_tests = [

@@ -15,7 +15,6 @@
 #include <seastar/core/future-util.hh>
 #include "db/commitlog/commitlog_entry.hh"
 #include "db/system_keyspace.hh"
-#include "db/consistency_level.hh"
 #include "db/commitlog/commitlog.hh"
 #include "db/config.hh"
 #include "to_string.hh"
@@ -65,6 +64,8 @@
 #include "sstables/compaction_manager.hh"
 #include "sstables/compaction_backlog_manager.hh"
 #include "sstables/progress_monitor.hh"
+#include "auth/common.hh"
+#include "tracing/trace_keyspace_helper.hh"
 
 #include "checked-file-impl.hh"
 #include "disk-error-handler.hh"
@@ -165,6 +166,18 @@ static const std::unordered_set<sstring> system_keyspaces = {
 
 bool is_system_keyspace(const sstring& name) {
     return system_keyspaces.find(name) != system_keyspaces.end();
+}
+
+static const std::unordered_set<sstring> internal_keyspaces = {
+        db::system_distributed_keyspace::NAME,
+        db::system_keyspace::NAME,
+        db::schema_tables::NAME,
+        auth::meta::AUTH_KS,
+        tracing::trace_keyspace_helper::KEYSPACE_NAME
+};
+
+bool is_internal_keyspace(const sstring& name) {
+    return internal_keyspaces.find(name) != internal_keyspaces.end();
 }
 
 // Used for tests where the CF exists without a database object. We need to pass a valid
@@ -670,7 +683,7 @@ table::make_reader(schema_ptr s,
         readers.emplace_back(mt->make_flat_reader(s, range, slice, pc, trace_state, fwd, fwd_mr));
     }
 
-    if (_config.enable_cache) {
+    if (_config.enable_cache && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
         readers.emplace_back(_cache.make_reader(s, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
         readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
@@ -1134,8 +1147,8 @@ distributed_loader::flush_upload_dir(distributed<database>& db, sstring ks_name,
     return do_with(work(), [&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] (work& work) {
         auto& cf = db.local().find_column_family(ks_name, cf_name);
 
-        return lister::scan_dir(lister::path(cf._config.datadir) / "upload", { directory_entry_type::regular },
-                [&work] (lister::path parent_dir, directory_entry de) {
+        return lister::scan_dir(fs::path(cf._config.datadir) / "upload", { directory_entry_type::regular },
+                [&work] (fs::path parent_dir, directory_entry de) {
             auto comps = sstables::entry_descriptor::make_descriptor(parent_dir.native(), de.name);
             if (comps.component != component_type::TOC) {
                 return make_ready_future<>();
@@ -1195,7 +1208,7 @@ table::reshuffle_sstables(std::set<int64_t> all_generations, int64_t start) {
     };
 
     return do_with(work(start, std::move(all_generations)), [this] (work& work) {
-        return lister::scan_dir(_config.datadir, { directory_entry_type::regular }, [this, &work] (lister::path parent_dir, directory_entry de) {
+        return lister::scan_dir(_config.datadir, { directory_entry_type::regular }, [this, &work] (fs::path parent_dir, directory_entry de) {
             auto comps = sstables::entry_descriptor::make_descriptor(parent_dir.native(), de.name);
             if (comps.component != component_type::TOC) {
                 return make_ready_future<>();
@@ -1451,7 +1464,9 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
             _compaction_strategy.notify_completion(old_ssts, new_ssts);
             _compaction_manager.propagate_replacement(this, old_ssts, new_ssts);
             this->on_compaction_completion(new_ssts, old_ssts);
-            release_exhausted(old_ssts);
+            if (release_exhausted) {
+                release_exhausted(old_ssts);
+            }
         };
 
         return sstables::compact_sstables(std::move(descriptor), *this, create_sstable, replace_sstables, cleanup);
@@ -1663,7 +1678,7 @@ const std::vector<sstables::shared_sstable>& table::compacted_undeleted_sstables
     return _sstables_compacted_but_not_deleted;
 }
 
-inline bool table::manifest_json_filter(const lister::path&, const directory_entry& entry) {
+inline bool table::manifest_json_filter(const fs::path&, const directory_entry& entry) {
     // Filter out directories. If type of the entry is unknown - check its name.
     if (entry.type.value_or(directory_entry_type::regular) != directory_entry_type::directory && entry.name == "manifest.json") {
         return false;
@@ -1692,9 +1707,9 @@ future<> distributed_loader::open_sstable(distributed<database>& db, sstables::e
     // to distribute evenly the resource usage among all shards.
 
     return db.invoke_on(column_family::calculate_shard_from_sstable_generation(comps.generation),
-            [&db, comps = std::move(comps), func = std::move(func), pc] (database& local) {
+            [&db, comps = std::move(comps), func = std::move(func), &pc] (database& local) {
 
-        return with_semaphore(local.sstable_load_concurrency_sem(), 1, [&db, &local, comps = std::move(comps), func = std::move(func), pc] {
+        return with_semaphore(local.sstable_load_concurrency_sem(), 1, [&db, &local, comps = std::move(comps), func = std::move(func), &pc] {
             auto& cf = local.find_column_family(comps.ks, comps.cf);
 
             auto f = sstables::sstable::load_shared_components(cf.schema(), comps.sstdir, comps.generation, comps.version, comps.format, pc);
@@ -2053,8 +2068,13 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
     auto verifier = make_lw_shared<std::unordered_map<unsigned long, sstable_descriptor>>();
 
     return do_with(std::vector<future<>>(), [&db, sstdir = std::move(sstdir), verifier, ks, cf] (std::vector<future<>>& futures) {
-        return lister::scan_dir(sstdir, { directory_entry_type::regular }, [&db, verifier, &futures] (lister::path sstdir, directory_entry de) {
+        return lister::scan_dir(sstdir, { directory_entry_type::regular }, [&db, verifier, &futures] (fs::path sstdir, directory_entry de) {
             // FIXME: The secondary indexes are in this level, but with a directory type, (starting with ".")
+
+            if (de.type && *de.type == directory_entry_type::directory && sstables::sstable::is_temp_dir(de.name)) {
+                return lister::rmdir(sstdir / de.name);
+            }
+
             auto f = distributed_loader::probe_file(db, sstdir.native(), de.name).then([verifier, sstdir, de] (auto entry) {
                 if (entry.component == component_type::TemporaryStatistics) {
                     return remove_file(sstables::sstable::filename(sstdir.native(), entry.ks, entry.cf, entry.version, entry.generation,
@@ -2063,7 +2083,7 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
 
                 if (verifier->count(entry.generation)) {
                     if (verifier->at(entry.generation).status == component_status::has_toc_file) {
-                        lister::path file_path(sstdir / de.name.c_str());
+                        fs::path file_path(sstdir / de.name);
                         if (entry.component == component_type::TOC) {
                             throw sstables::malformed_sstable_exception("Invalid State encountered. TOC file already processed", file_path.native());
                         } else if (entry.component == component_type::TemporaryTOC) {
@@ -2181,9 +2201,6 @@ database::database(const db::config& cfg, database_config dbcfg)
         [this] {
             ++_stats->sstable_read_queue_overloaded;
             return std::make_exception_ptr(std::runtime_error("sstable inactive read queue overloaded"));
-        },
-        [this] {
-            return _querier_cache.evict_one();
         })
     // No timeouts or queue length limits - a failure here can kill an entire repair.
     // Trust the caller to limit concurrency.
@@ -2195,12 +2212,11 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _version(empty_version)
     , _compaction_manager(make_compaction_manager(*_cfg, dbcfg))
     , _enable_incremental_backups(cfg.incremental_backups())
-    , _querier_cache(dbcfg.available_memory * 0.04)
+    , _querier_cache(_read_concurrency_sem, dbcfg.available_memory * 0.04)
     , _large_partition_handler(std::make_unique<db::cql_table_large_partition_handler>(_cfg->compaction_large_partition_warning_threshold_mb()*1024*1024))
     , _result_memory_limiter(dbcfg.available_memory / 10)
 {
     local_schema_registry().init(*this); // TODO: we're never unbound.
-    _compaction_manager->start();
     setup_metrics();
 
     _row_cache_tracker.set_compaction_scheduling_group(dbcfg.memory_compaction_scheduling_group);
@@ -2447,6 +2463,9 @@ database::setup_metrics() {
 }
 
 database::~database() {
+    _read_concurrency_sem.clear_inactive_reads();
+    _streaming_concurrency_sem.clear_inactive_reads();
+    _system_read_concurrency_sem.clear_inactive_reads();
 }
 
 void database::update_version(const utils::UUID& version) {
@@ -2493,7 +2512,7 @@ future<> distributed_loader::populate_keyspace(distributed<database>& db, sstrin
 }
 
 static future<> populate(distributed<database>& db, sstring datadir) {
-    return lister::scan_dir(datadir, { directory_entry_type::directory }, [&db] (lister::path datadir, directory_entry de) {
+    return lister::scan_dir(datadir, { directory_entry_type::directory }, [&db] (fs::path datadir, directory_entry de) {
         auto& ks_name = de.name;
         if (is_system_keyspace(ks_name)) {
             return make_ready_future<>();
@@ -3370,7 +3389,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
     m.upgrade(cf.schema());
 
     // prepare partition slice
-    std::vector<column_id> static_columns;
+    query::column_id_vector static_columns;
     static_columns.reserve(m.partition().static_row().size());
     m.partition().static_row().for_each_cell([&] (auto id, auto&&) {
         static_columns.emplace_back(id);
@@ -3378,7 +3397,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
 
     query::clustering_row_ranges cr_ranges;
     cr_ranges.reserve(8);
-    std::vector<column_id> regular_columns;
+    query::column_id_vector regular_columns;
     regular_columns.reserve(32);
 
     for (auto&& cr : m.partition().clustered_rows()) {
@@ -3938,19 +3957,17 @@ const sstring& database::get_snitch_name() const {
 // For the filesystem operations, this code will assume that all keyspaces are visible in all shards
 // (as we have been doing for a lot of the other operations, like the snapshot itself).
 future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_names) {
-    namespace bf = boost::filesystem;
-
     std::vector<sstring> data_dirs = _cfg->data_file_directories();
     lw_shared_ptr<lister::dir_entry_types> dirs_only_entries_ptr = make_lw_shared<lister::dir_entry_types>({ directory_entry_type::directory });
     lw_shared_ptr<sstring> tag_ptr = make_lw_shared<sstring>(std::move(tag));
     std::unordered_set<sstring> ks_names_set(keyspace_names.begin(), keyspace_names.end());
 
     return parallel_for_each(data_dirs, [this, tag_ptr, ks_names_set = std::move(ks_names_set), dirs_only_entries_ptr] (const sstring& parent_dir) {
-        std::unique_ptr<lister::filter_type> filter = std::make_unique<lister::filter_type>([] (const lister::path& parent_dir, const directory_entry& dir_entry) { return true; });
+        std::unique_ptr<lister::filter_type> filter = std::make_unique<lister::filter_type>([] (const fs::path& parent_dir, const directory_entry& dir_entry) { return true; });
 
         // if specific keyspaces names were given - filter only these keyspaces directories
         if (!ks_names_set.empty()) {
-            filter = std::make_unique<lister::filter_type>([ks_names_set = std::move(ks_names_set)] (const lister::path& parent_dir, const directory_entry& dir_entry) {
+            filter = std::make_unique<lister::filter_type>([ks_names_set = std::move(ks_names_set)] (const fs::path& parent_dir, const directory_entry& dir_entry) {
                 return ks_names_set.find(dir_entry.name) != ks_names_set.end();
             });
         }
@@ -3973,25 +3990,25 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
         //  |- <keyspace name2>
         //  |- ...
         //
-        return lister::scan_dir(parent_dir, *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (lister::path parent_dir, directory_entry de) {
+        return lister::scan_dir(parent_dir, *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (fs::path parent_dir, directory_entry de) {
             // KS directory
-            return lister::scan_dir(parent_dir / de.name.c_str(), *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (lister::path parent_dir, directory_entry de) mutable {
+            return lister::scan_dir(parent_dir / de.name, *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (fs::path parent_dir, directory_entry de) mutable {
                 // CF directory
-                return lister::scan_dir(parent_dir / de.name.c_str(), *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (lister::path parent_dir, directory_entry de) mutable {
+                return lister::scan_dir(parent_dir / de.name, *dirs_only_entries_ptr, [this, tag_ptr, dirs_only_entries_ptr] (fs::path parent_dir, directory_entry de) mutable {
                     // "snapshots" directory
-                    lister::path snapshots_dir(parent_dir / de.name.c_str());
+                    fs::path snapshots_dir(parent_dir / de.name);
                     if (tag_ptr->empty()) {
                         dblog.info("Removing {}", snapshots_dir.native());
                         // kill the whole "snapshots" subdirectory
                         return lister::rmdir(std::move(snapshots_dir));
                     } else {
-                        return lister::scan_dir(std::move(snapshots_dir), *dirs_only_entries_ptr, [this, tag_ptr] (lister::path parent_dir, directory_entry de) {
-                            lister::path snapshot_dir(parent_dir / de.name.c_str());
+                        return lister::scan_dir(std::move(snapshots_dir), *dirs_only_entries_ptr, [this, tag_ptr] (fs::path parent_dir, directory_entry de) {
+                            fs::path snapshot_dir(parent_dir / de.name);
                             dblog.info("Removing {}", snapshot_dir.native());
                             return lister::rmdir(std::move(snapshot_dir));
-                        }, [tag_ptr] (const lister::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == *tag_ptr; });
+                        }, [tag_ptr] (const fs::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == *tag_ptr; });
                     }
-                 }, [] (const lister::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == "snapshots"; });
+                 }, [] (const fs::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == "snapshots"; });
             });
         }, *filter);
     });
@@ -4162,17 +4179,17 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
     return seastar::async([this] {
         std::unordered_map<sstring, snapshot_details> all_snapshots;
         for (auto& datadir : _config.all_datadirs) {
-            lister::path snapshots_dir = lister::path(datadir) / "snapshots";
+            fs::path snapshots_dir = fs::path(datadir) / "snapshots";
             auto file_exists = io_check([&snapshots_dir] { return engine().file_exists(snapshots_dir.native()); }).get0();
             if (!file_exists) {
                 continue;
             }
 
-            lister::scan_dir(snapshots_dir,  { directory_entry_type::directory }, [this, datadir, &all_snapshots] (lister::path snapshots_dir, directory_entry de) {
+            lister::scan_dir(snapshots_dir,  { directory_entry_type::directory }, [this, datadir, &all_snapshots] (fs::path snapshots_dir, directory_entry de) {
                 auto snapshot_name = de.name;
                 all_snapshots.emplace(snapshot_name, snapshot_details());
-                return lister::scan_dir(snapshots_dir / snapshot_name.c_str(),  { directory_entry_type::regular }, [this, datadir, &all_snapshots, snapshot_name] (lister::path snapshot_dir, directory_entry de) {
-                    return io_check(file_size, (snapshot_dir / de.name.c_str()).native()).then([this, datadir, &all_snapshots, snapshot_name, snapshot_dir, name = de.name] (auto size) {
+                return lister::scan_dir(snapshots_dir / fs::path(snapshot_name),  { directory_entry_type::regular }, [this, datadir, &all_snapshots, snapshot_name] (fs::path snapshot_dir, directory_entry de) {
+                    return io_check(file_size, (snapshot_dir / de.name).native()).then([this, datadir, &all_snapshots, snapshot_name, snapshot_dir, name = de.name] (auto size) {
                         // The manifest is the only file expected to be in this directory not belonging to the SSTable.
                         // For it, we account the total size, but zero it for the true size calculation.
                         //
@@ -4184,7 +4201,7 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
                         } else {
                             size = 0;
                         }
-                        return io_check(file_size, (lister::path(datadir) / name.c_str()).native()).then_wrapped([&all_snapshots, snapshot_name, size] (auto fut) {
+                        return io_check(file_size, (fs::path(datadir) / name).native()).then_wrapped([&all_snapshots, snapshot_name, size] (auto fut) {
                             try {
                                 // File exists in the main SSTable directory. Snapshots are not contributing to size
                                 fut.get0();
@@ -4675,31 +4692,87 @@ flat_mutation_reader make_range_sstable_reader(schema_ptr s,
             fwd_mr);
 }
 
+template <typename T>
+using foreign_unique_ptr = foreign_ptr<std::unique_ptr<T>>;
+
 flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, dht::i_partitioner& partitioner, schema_ptr schema,
         std::function<std::optional<dht::partition_range>()> range_generator) {
+    class streaming_reader_lifecycle_policy
+            : public reader_lifecycle_policy
+            , public enable_shared_from_this<streaming_reader_lifecycle_policy> {
+        struct inactive_read : public reader_concurrency_semaphore::inactive_read {
+            foreign_unique_ptr<flat_mutation_reader> reader;
+            explicit inactive_read(foreign_unique_ptr<flat_mutation_reader> reader)
+                : reader(std::move(reader)) {
+            }
+            virtual void evict() override {
+                reader.reset();
+            }
+        };
+        struct reader_context {
+            std::unique_ptr<const dht::partition_range> range;
+            foreign_unique_ptr<utils::phased_barrier::operation> read_operation;
+            std::optional<reader_concurrency_semaphore::inactive_read_handle> pause_handle_opt;
+        };
+        distributed<database>& _db;
+        std::vector<reader_context> _contexts;
+    public:
+        explicit streaming_reader_lifecycle_policy(distributed<database>& db) : _db(db), _contexts(smp::count) {
+        }
+        virtual future<foreign_unique_ptr<flat_mutation_reader>> create_reader(
+                shard_id shard,
+                schema_ptr schema,
+                const dht::partition_range& range,
+                const query::partition_slice&,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr,
+                mutation_reader::forwarding fwd_mr) override {
+            _contexts[shard].range = std::make_unique<dht::partition_range>(range);
+            return _db.invoke_on(shard, [gs = global_schema_ptr(std::move(schema)), range = _contexts[shard].range.get(), fwd_mr] (database& db) {
+                auto schema = gs.get();
+                auto& cf = db.find_column_family(schema);
+                return make_ready_future<foreign_unique_ptr<utils::phased_barrier::operation>, foreign_unique_ptr<flat_mutation_reader>>(
+                        make_foreign(std::make_unique<utils::phased_barrier::operation>(cf.read_in_progress())),
+                        make_foreign(std::make_unique<flat_mutation_reader>(cf.make_streaming_reader(std::move(schema), *range, fwd_mr))));
+            }).then([this, zis = shared_from_this(), shard] (foreign_unique_ptr<utils::phased_barrier::operation> read_operation,
+                    foreign_unique_ptr<flat_mutation_reader> reader) {
+                _contexts[shard].read_operation = std::move(read_operation);
+                return std::move(reader);
+            });
+        }
+        virtual void destroy_reader(shard_id shard, future<paused_or_stopped_reader> reader_fut) noexcept override {
+            reader_fut.then([this, zis = shared_from_this(), shard] (paused_or_stopped_reader&& reader) mutable {
+                return smp::submit_to(shard, [ctx = std::move(_contexts[shard]), reader = std::move(reader.remote_reader)] () mutable {
+                    reader.release();
+                });
+            });
+        }
+        virtual future<> pause(foreign_unique_ptr<flat_mutation_reader> reader) override {
+            const auto shard = reader.get_owner_shard();
+            return _db.invoke_on(shard, [reader = std::move(reader)] (database& db) mutable {
+                return db.streaming_read_concurrency_sem().register_inactive_read(std::make_unique<inactive_read>(std::move(reader)));
+            }).then([this, zis = shared_from_this(), shard] (reader_concurrency_semaphore::inactive_read_handle handle) {
+                _contexts[shard].pause_handle_opt = handle;
+            });
+        }
+        virtual future<foreign_unique_ptr<flat_mutation_reader>> try_resume(shard_id shard) override {
+            return _db.invoke_on(shard, [handle = *_contexts[shard].pause_handle_opt] (database& db) mutable {
+                if (auto ir_ptr = db.streaming_read_concurrency_sem().unregister_inactive_read(handle)) {
+                    return std::move(static_cast<inactive_read&>(*ir_ptr).reader);
+                }
+                return foreign_unique_ptr<flat_mutation_reader>{};
+            });
+        }
+    };
     auto ms = mutation_source([&db, &partitioner] (schema_ptr s,
             const dht::partition_range& pr,
             const query::partition_slice& ps,
             const io_priority_class& pc,
             tracing::trace_state_ptr trace_state,
-            streamed_mutation::forwarding fwd_sm,
+            streamed_mutation::forwarding,
             mutation_reader::forwarding fwd_mr) {
-        auto factory = [&db] (unsigned shard,
-                schema_ptr schema,
-                const dht::partition_range& range,
-                const query::partition_slice&,
-                const io_priority_class&,
-                tracing::trace_state_ptr,
-                streamed_mutation::forwarding,
-                mutation_reader::forwarding fwd_mr) {
-           return db.invoke_on(shard, [gs = global_schema_ptr(std::move(schema)), &range, fwd_mr] (database& db) {
-                auto schema = gs.get();
-                auto& cf = db.find_column_family(schema);
-                return make_foreign(std::make_unique<flat_mutation_reader>(cf.make_streaming_reader(std::move(schema), range, fwd_mr)));
-           });
-        };
-        return make_multishard_combining_reader(std::move(s), pr, ps, pc, partitioner, std::move(factory), std::move(trace_state),
-                fwd_sm, fwd_mr);
+        return make_multishard_combining_reader(make_shared<streaming_reader_lifecycle_policy>(db), partitioner, std::move(s), pr, ps, pc,
+                std::move(trace_state), fwd_mr);
     });
     return make_flat_multi_range_reader(std::move(schema), std::move(ms), std::move(range_generator), schema->full_slice(),
             service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);

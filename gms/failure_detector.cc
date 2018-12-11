@@ -35,6 +35,7 @@
 #include "gms/inet_address.hh"
 #include "service/storage_service.hh"
 #include "log.hh"
+#include "db/config.hh"
 #include <iostream>
 #include <chrono>
 

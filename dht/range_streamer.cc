@@ -35,6 +35,7 @@
 #include "streaming/stream_plan.hh"
 #include "streaming/stream_state.hh"
 #include "service/storage_service.hh"
+#include "db/config.hh"
 #include <seastar/core/semaphore.hh>
 #include <boost/range/adaptors.hpp>
 
