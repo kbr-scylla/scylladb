@@ -238,6 +238,12 @@ future<> local_file_provider::write_key_file(key_info info, key_ptr k) {
                 return rename_file(tmpnam, _path);
             });
         });
+    }).handle_exception([this](auto ep) {
+        try {
+            std::rethrow_exception(ep);
+        } catch (...) {
+            std::throw_with_nested(std::runtime_error("Could not write key file '" + _path + "'"));
+        }
     });
 }
 
