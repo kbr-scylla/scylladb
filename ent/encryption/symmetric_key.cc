@@ -131,7 +131,7 @@ void encryption::symmetric_key::transform_unpadded_impl(const uint8_t* input,
     }
 
     if (input_len & (_block_size - 1)) {
-        throw std::invalid_argument("Data must aligned to 'blocksize'");
+        throw std::invalid_argument("Data must be aligned to 'blocksize'");
     }
 
     int outl = 0;
