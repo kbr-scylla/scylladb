@@ -66,12 +66,28 @@ public:
     kmip_error(int res)
         : system_error(res, kmip_errorc)
     {}
+    kmip_error(int res, const std::string& msg)
+        : system_error(res, kmip_errorc, msg)
+    {}
 };
 
 // Checks a gnutls return value.
 // < 0 -> error.
-static void kmip_chk(int res) {
-    if (res < 0) {
+static void kmip_chk(int res, KMIP_CMD * cmd = nullptr) {
+    if (res != KMIP_ERROR_NONE) {
+        int status=0, reason=0;
+        char* message = nullptr;
+
+        if (KMIP_CMD_get_result(cmd, &status, &reason, &message) == KMIP_ERROR_NONE) {
+            auto* ctxt = cmd != nullptr ? KMIP_CMD_get_ctx(cmd) : "(unknown cmd)";
+            auto s = sprint("%s: status=%s, reason=%s, message=%s",
+                            ctxt,
+                            KMIP_RESULT_STATUS_to_string(status, 0, nullptr),
+                            KMIP_RESULT_REASON_to_string(reason, 0, nullptr),
+                            message ? message : "<none>"
+                            );
+            throw kmip_error(res, s);
+        }
         throw kmip_error(res);
     }
 }
@@ -451,7 +467,7 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
         kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
         return res;
     }).then([this, cmd = std::move(cmd_in)](int res) mutable {
-        kmip_chk(res);
+        kmip_chk(res, cmd);
         kmip_log.trace("{}: result {}", *this, KMIP_CMD_get_response(cmd));
         return std::move(cmd);
     });
@@ -570,8 +586,8 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
 
 
         // TODO: this is inefficient. We can probably put this in a single batch.
-        kmip_cmd cmd;;
-        KMIP_CMD_set_ctx(cmd, const_cast<char *>("create"));
+        kmip_cmd cmd;
+        KMIP_CMD_set_ctx(cmd, const_cast<char *>("Create key"));
 
         return do_cmd(std::move(cmd), [info, kdl_attrs = std::move(kdl_attrs), crypt_alg](KMIP_CMD* cmd) {
             return KMIP_CMD_create_smpl(cmd, KMIP_OBJECT_TYPE_SYMMETRIC_KEY,
@@ -583,7 +599,7 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
         }).then([this, info](kmip_cmd cmd) {
             /* now get the details (the value of the key) */
             char* new_id;
-            kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id));
+            kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id), cmd);
 
             utils::UUID uuid(new_id);
             kmip_log.trace("{}: Created {}:{}", _name, info, uuid);
@@ -614,6 +630,7 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
 future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
     if (engine().cpu_id() == 0) {
         kmip_cmd cmd;
+        KMIP_CMD_set_ctx(cmd, const_cast<char *>("Find key"));
 
         auto uuid = utils::UUID_gen::get_UUID(id);
         sstring tmp = uuid.to_sstring();
