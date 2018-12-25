@@ -456,6 +456,7 @@ scylla_core = (['database.cc',
                 'compress.cc',
                 'sstables/mp_row_consumer.cc',
                 'sstables/sstables.cc',
+                'sstables/mc/writer.cc',
                 'sstables/sstable_version.cc',
                 'sstables/compress.cc',
                 'sstables/partition.cc',
@@ -646,6 +647,7 @@ scylla_core = (['database.cc',
                 'init.cc',
                 'lister.cc',
                 'repair/repair.cc',
+                'repair/row_level.cc',
                 'exceptions/exceptions.cc',
                 'auth/allow_all_authenticator.cc',
                 'auth/allow_all_authorizer.cc',
@@ -694,6 +696,7 @@ scylla_core = (['database.cc',
                 'multishard_mutation_query.cc',
                 'reader_concurrency_semaphore.cc',
                 'utils/utf8.cc',
+                'utils/ascii.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -756,6 +759,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/tracing.idl.hh',
         'idl/consistency_level.idl.hh',
         'idl/cache_temperature.idl.hh',
+        'idl/view.idl.hh',
         ]
 
 scylla_tests_dependencies = scylla_core + idls + [
@@ -1276,6 +1280,13 @@ with open(buildfile, 'w') as f:
                                             '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
         f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
                                                 '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
+        f.write(
+            'build {mode}-objects: phony {objs}\n'.format(
+                mode=mode,
+                objs=' '.join(compiles)
+            )
+        )
+
         for obj in compiles:
             src = compiles[obj]
             gen_headers = list(ragels.keys())
@@ -1326,7 +1337,7 @@ with open(buildfile, 'w') as f:
         f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
         f.write('    mode = {mode}\n'.format(**locals()))
         f.write('rule libdeflate.{mode}\n'.format(**locals()))
-        f.write('    command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}"\n'.format(**locals()))
+        f.write('    command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc}\n'.format(**locals()))
         f.write('build build/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
 
     f.write('build {}: phony\n'.format(seastar_deps))

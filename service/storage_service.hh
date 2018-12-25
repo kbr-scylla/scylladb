@@ -54,7 +54,7 @@
 #include <seastar/core/semaphore.hh>
 #include "utils/fb_utilities.hh"
 #include "utils/serialized_action.hh"
-#include "database.hh"
+#include "database_fwd.hh"
 #include "streaming/stream_state.hh"
 #include "streaming/stream_plan.hh"
 #include <seastar/core/distributed.hh>
@@ -295,6 +295,7 @@ private:
     gms::feature _la_sstable_feature;
     gms::feature _stream_with_rpc_stream_feature;
     gms::feature _mc_sstable_feature;
+    gms::feature _row_level_repair_feature;
 public:
     void enable_all_features();
 
@@ -2280,6 +2281,10 @@ public:
 
     bool cluster_supports_mc_sstable() const {
         return bool(_mc_sstable_feature);
+    }
+
+    bool cluster_supports_row_level_repair() const {
+        return bool(_row_level_repair_feature);
     }
 private:
     future<> set_cql_ready(bool ready);

@@ -231,7 +231,7 @@ public:
             if (_promoted_index_size <= data_size) {
                 data.trim_front(_promoted_index_size);
             } else {
-                assert(data.empty());
+                data.trim(0);
                 return skip_bytes{_promoted_index_size - data_size};
             }
         }
@@ -716,7 +716,7 @@ public:
             return make_ready_future<>();
         }
 
-        auto cmp_with_start = [pos_cmp = promoted_index_block_compare(s), s]
+        auto cmp_with_start = [pos_cmp = promoted_index_block_compare(s), &s]
                 (position_in_partition_view pos, const promoted_index_block& info) -> bool {
             return pos_cmp(pos, info.start(s));
         };

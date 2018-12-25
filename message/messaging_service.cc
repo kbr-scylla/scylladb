@@ -34,6 +34,7 @@
 #include <seastar/rpc/rpc.hh>
 #include "db/config.hh"
 #include "db/system_keyspace.hh"
+#include "db/view/view_update_backlog.hh"
 #include "dht/i_partitioner.hh"
 #include "range.hh"
 #include "frozen_schema.hh"
@@ -56,6 +57,8 @@
 #include "idl/partition_checksum.dist.hh"
 #include "idl/query.dist.hh"
 #include "idl/cache_temperature.dist.hh"
+#include "idl/view.dist.hh"
+#include "idl/mutation.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
 #include "idl/consistency_level.dist.impl.hh"
@@ -75,8 +78,10 @@
 #include "idl/partition_checksum.dist.impl.hh"
 #include "idl/query.dist.impl.hh"
 #include "idl/cache_temperature.dist.impl.hh"
+#include "idl/mutation.dist.impl.hh"
 #include <seastar/rpc/lz4_compressor.hh>
 #include <seastar/rpc/multi_algo_compressor_factory.hh>
+#include "idl/view.dist.impl.hh"
 #include "partition_range_compat.hh"
 #include "stdx.hh"
 #include <boost/range/adaptor/filtered.hpp>
@@ -445,6 +450,16 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPLICATION_FINISHED:
     case messaging_verb::REPAIR_CHECKSUM_RANGE:
     case messaging_verb::STREAM_MUTATION_FRAGMENTS:
+    case messaging_verb::REPAIR_ROW_LEVEL_START:
+    case messaging_verb::REPAIR_ROW_LEVEL_STOP:
+    case messaging_verb::REPAIR_GET_FULL_ROW_HASHES:
+    case messaging_verb::REPAIR_GET_COMBINED_ROW_HASH:
+    case messaging_verb::REPAIR_GET_SYNC_BOUNDARY:
+    case messaging_verb::REPAIR_GET_ROW_DIFF:
+    case messaging_verb::REPAIR_PUT_ROW_DIFF:
+    case messaging_verb::REPAIR_GET_ESTIMATED_PARTITIONS:
+    case messaging_verb::REPAIR_SET_ESTIMATED_PARTITIONS:
+    case messaging_verb::REPAIR_GET_DIFF_ALGORITHMS:
         return 2;
     case messaging_verb::MUTATION_DONE:
     case messaging_verb::MUTATION_FAILED:
@@ -513,11 +528,7 @@ future<> messaging_service::init_local_preferred_ip_cache() {
         // just read.
         //
         for (auto& p : _preferred_ip_cache) {
-            msg_addr id = {
-                .addr = p.first
-            };
-
-            this->remove_rpc_client(id);
+            this->remove_rpc_client(msg_addr(p.first));
         }
     });
 }
@@ -892,24 +903,24 @@ future<> messaging_service::send_counter_mutation(msg_addr id, clock_type::time_
     return send_message_timeout<void>(this, messaging_verb::COUNTER_MUTATION, std::move(id), timeout, std::move(fms), cl, std::move(trace_info));
 }
 
-void messaging_service::register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id)>&& func) {
+void messaging_service::register_mutation_done(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, rpc::optional<db::view::update_backlog> backlog)>&& func) {
     register_handler(this, netw::messaging_verb::MUTATION_DONE, std::move(func));
 }
 void messaging_service::unregister_mutation_done() {
     _rpc->unregister_handler(netw::messaging_verb::MUTATION_DONE);
 }
-future<> messaging_service::send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id) {
-    return send_message_oneway(this, messaging_verb::MUTATION_DONE, std::move(id), std::move(shard), std::move(response_id));
+future<> messaging_service::send_mutation_done(msg_addr id, unsigned shard, response_id_type response_id, db::view::update_backlog backlog) {
+    return send_message_oneway(this, messaging_verb::MUTATION_DONE, std::move(id), std::move(shard), std::move(response_id), std::move(backlog));
 }
 
-void messaging_service::register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed)>&& func) {
+void messaging_service::register_mutation_failed(std::function<future<rpc::no_wait_type> (const rpc::client_info& cinfo, unsigned shard, response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog)>&& func) {
     register_handler(this, netw::messaging_verb::MUTATION_FAILED, std::move(func));
 }
 void messaging_service::unregister_mutation_failed() {
     _rpc->unregister_handler(netw::messaging_verb::MUTATION_FAILED);
 }
-future<> messaging_service::send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed) {
-    return send_message_oneway(this, messaging_verb::MUTATION_FAILED, std::move(id), std::move(shard), std::move(response_id), num_failed);
+future<> messaging_service::send_mutation_failed(msg_addr id, unsigned shard, response_id_type response_id, size_t num_failed, db::view::update_backlog backlog) {
+    return send_message_oneway(this, messaging_verb::MUTATION_FAILED, std::move(id), std::move(shard), std::move(response_id), num_failed, std::move(backlog));
 }
 
 void messaging_service::register_read_data(std::function<future<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature> (const rpc::client_info&, rpc::opt_time_point t, query::read_command cmd, ::compat::wrapping_partition_range pr, rpc::optional<query::digest_algorithm> oda)>&& func) {
@@ -1002,6 +1013,115 @@ future<partition_checksum> messaging_service::send_repair_checksum_range(
     return send_message<partition_checksum>(this,
             messaging_verb::REPAIR_CHECKSUM_RANGE, std::move(id),
             std::move(keyspace), std::move(cf), std::move(range), hash_version);
+}
+
+// Wrapper for REPAIR_GET_FULL_ROW_HASHES
+void messaging_service::register_repair_get_full_row_hashes(std::function<future<std::unordered_set<repair_hash>> (const rpc::client_info& cinfo, uint32_t repair_meta_id)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_FULL_ROW_HASHES, std::move(func));
+}
+void messaging_service::unregister_repair_get_full_row_hashes() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_FULL_ROW_HASHES);
+}
+future<std::unordered_set<repair_hash>> messaging_service::send_repair_get_full_row_hashes(msg_addr id, uint32_t repair_meta_id) {
+    return send_message<future<std::unordered_set<repair_hash>>>(this, messaging_verb::REPAIR_GET_FULL_ROW_HASHES, std::move(id), repair_meta_id);
+}
+
+// Wrapper for REPAIR_GET_COMBINED_ROW_HASH
+void messaging_service::register_repair_get_combined_row_hash(std::function<future<repair_hash> (const rpc::client_info& cinfo, uint32_t repair_meta_id, std::optional<repair_sync_boundary> common_sync_boundary)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_COMBINED_ROW_HASH, std::move(func));
+}
+void messaging_service::unregister_repair_get_combined_row_hash() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_COMBINED_ROW_HASH);
+}
+future<repair_hash> messaging_service::send_repair_get_combined_row_hash(msg_addr id, uint32_t repair_meta_id, std::optional<repair_sync_boundary> common_sync_boundary) {
+    return send_message<future<repair_hash>>(this, messaging_verb::REPAIR_GET_COMBINED_ROW_HASH, std::move(id), repair_meta_id, std::move(common_sync_boundary));
+}
+
+void messaging_service::register_repair_get_sync_boundary(std::function<future<get_sync_boundary_response> (const rpc::client_info& cinfo, uint32_t repair_meta_id, std::optional<repair_sync_boundary> skipped_sync_boundary)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_SYNC_BOUNDARY, std::move(func));
+}
+void messaging_service::unregister_repair_get_sync_boundary() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_SYNC_BOUNDARY);
+}
+future<get_sync_boundary_response> messaging_service::send_repair_get_sync_boundary(msg_addr id, uint32_t repair_meta_id, std::optional<repair_sync_boundary> skipped_sync_boundary) {
+    return send_message<future<get_sync_boundary_response>>(this, messaging_verb::REPAIR_GET_SYNC_BOUNDARY, std::move(id), repair_meta_id, std::move(skipped_sync_boundary));
+}
+
+// Wrapper for REPAIR_GET_ROW_DIFF
+void messaging_service::register_repair_get_row_diff(std::function<future<repair_rows_on_wire> (const rpc::client_info& cinfo, uint32_t repair_meta_id, std::unordered_set<repair_hash> set_diff, bool needs_all_rows)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_ROW_DIFF, std::move(func));
+}
+void messaging_service::unregister_repair_get_row_diff() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_ROW_DIFF);
+}
+future<repair_rows_on_wire> messaging_service::send_repair_get_row_diff(msg_addr id, uint32_t repair_meta_id, std::unordered_set<repair_hash> set_diff, bool needs_all_rows) {
+    return send_message<future<repair_rows_on_wire>>(this, messaging_verb::REPAIR_GET_ROW_DIFF, std::move(id), repair_meta_id, std::move(set_diff), needs_all_rows);
+}
+
+// Wrapper for REPAIR_PUT_ROW_DIFF
+void messaging_service::register_repair_put_row_diff(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, repair_rows_on_wire row_diff)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_PUT_ROW_DIFF, std::move(func));
+}
+void messaging_service::unregister_repair_put_row_diff() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_PUT_ROW_DIFF);
+}
+future<> messaging_service::send_repair_put_row_diff(msg_addr id, uint32_t repair_meta_id, repair_rows_on_wire row_diff) {
+    return send_message<void>(this, messaging_verb::REPAIR_PUT_ROW_DIFF, std::move(id), repair_meta_id, std::move(row_diff));
+}
+
+// Wrapper for REPAIR_ROW_LEVEL_START
+void messaging_service::register_repair_row_level_start(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_ROW_LEVEL_START, std::move(func));
+}
+void messaging_service::unregister_repair_row_level_start() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_ROW_LEVEL_START);
+}
+future<> messaging_service::send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name) {
+    return send_message<void>(this, messaging_verb::REPAIR_ROW_LEVEL_START, std::move(id), repair_meta_id, std::move(keyspace_name), std::move(cf_name), std::move(range), algo, max_row_buf_size, seed, remote_shard, remote_shard_count, remote_ignore_msb, std::move(remote_partitioner_name));
+}
+
+// Wrapper for REPAIR_ROW_LEVEL_STOP
+void messaging_service::register_repair_row_level_stop(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_ROW_LEVEL_STOP, std::move(func));
+}
+void messaging_service::unregister_repair_row_level_stop() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_ROW_LEVEL_STOP);
+}
+future<> messaging_service::send_repair_row_level_stop(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range) {
+    return send_message<void>(this, messaging_verb::REPAIR_ROW_LEVEL_STOP, std::move(id), repair_meta_id, std::move(keyspace_name), std::move(cf_name), std::move(range));
+}
+
+// Wrapper for REPAIR_GET_ESTIMATED_PARTITIONS
+void messaging_service::register_repair_get_estimated_partitions(std::function<future<uint64_t> (const rpc::client_info& cinfo, uint32_t repair_meta_id)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_ESTIMATED_PARTITIONS, std::move(func));
+}
+void messaging_service::unregister_repair_get_estimated_partitions() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_ESTIMATED_PARTITIONS);
+}
+future<uint64_t> messaging_service::send_repair_get_estimated_partitions(msg_addr id, uint32_t repair_meta_id) {
+    return send_message<future<uint64_t>>(this, messaging_verb::REPAIR_GET_ESTIMATED_PARTITIONS, std::move(id), repair_meta_id);
+}
+
+// Wrapper for REPAIR_SET_ESTIMATED_PARTITIONS
+void messaging_service::register_repair_set_estimated_partitions(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, uint64_t estimated_partitions)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_SET_ESTIMATED_PARTITIONS, std::move(func));
+}
+void messaging_service::unregister_repair_set_estimated_partitions() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_SET_ESTIMATED_PARTITIONS);
+}
+future<> messaging_service::send_repair_set_estimated_partitions(msg_addr id, uint32_t repair_meta_id, uint64_t estimated_partitions) {
+    return send_message<void>(this, messaging_verb::REPAIR_SET_ESTIMATED_PARTITIONS, std::move(id), repair_meta_id, estimated_partitions);
+}
+
+// Wrapper for REPAIR_GET_DIFF_ALGORITHMS
+void messaging_service::register_repair_get_diff_algorithms(std::function<future<std::vector<row_level_diff_detect_algorithm>> (const rpc::client_info& cinfo)>&& func) {
+    register_handler(this, messaging_verb::REPAIR_GET_DIFF_ALGORITHMS, std::move(func));
+}
+void messaging_service::unregister_repair_get_diff_algorithms() {
+    _rpc->unregister_handler(messaging_verb::REPAIR_GET_DIFF_ALGORITHMS);
+}
+future<std::vector<row_level_diff_detect_algorithm>> messaging_service::send_repair_get_diff_algorithms(msg_addr id) {
+    return send_message<future<std::vector<row_level_diff_detect_algorithm>>>(this, messaging_verb::REPAIR_GET_DIFF_ALGORITHMS, std::move(id));
 }
 
 } // namespace net

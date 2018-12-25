@@ -66,6 +66,7 @@
 #include <seastar/core/metrics_registration.hh>
 #include "tracing/trace_state.hh"
 #include "db/view/view.hh"
+#include "db/view/view_update_backlog.hh"
 #include "db/view/row_locking.hh"
 #include "lister.hh"
 #include "utils/phased_barrier.hh"
@@ -76,6 +77,7 @@
 #include "querier.hh"
 #include "mutation_query.hh"
 #include "db/large_partition_handler.hh"
+#include "cache_temperature.hh"
 #include <unordered_set>
 
 class cell_locker;
@@ -112,6 +114,7 @@ class serializer;
 namespace db {
 class commitlog;
 class config;
+class extensions;
 class rp_handle;
 
 namespace system_keyspace {
@@ -268,20 +271,9 @@ struct cf_stats {
     int64_t clustering_filter_fast_path_count = 0;
     // how many sstables survived the clustering key checks
     int64_t surviving_sstables_after_clustering_filter = 0;
-};
 
-class cache_temperature {
-    float hit_rate;
-    explicit cache_temperature(uint8_t hr) : hit_rate(hr/255.0f) {}
-public:
-    uint8_t get_serialized_temperature() const {
-        return hit_rate * 255;
-    }
-    cache_temperature() : hit_rate(0) {}
-    explicit cache_temperature(float hr) : hit_rate(hr) {}
-    explicit operator float() const { return hit_rate; }
-    static cache_temperature invalid() { return cache_temperature(-1.0f); }
-    friend struct ser::serializer<cache_temperature>;
+    // How many view updates were dropped due to overload.
+    int64_t dropped_view_updates = 0;
 };
 
 class table;
@@ -314,6 +306,7 @@ public:
         bool enable_metrics_reporting = false;
         db::large_partition_handler* large_partition_handler;
         db::timeout_semaphore* view_update_concurrency_semaphore;
+        size_t view_update_concurrency_semaphore_limit;
     };
     struct no_commitlog {};
     struct stats {
@@ -882,8 +875,7 @@ private:
     future<> generate_and_propagate_view_updates(const schema_ptr& base,
             std::vector<view_ptr>&& views,
             mutation&& m,
-            flat_mutation_reader_opt existings,
-            db::timeout_clock::time_point timeout) const;
+            flat_mutation_reader_opt existings) const;
 
     mutable row_locker _row_locker;
     future<row_locker::lock_holder> local_base_lock(
@@ -1073,6 +1065,7 @@ public:
         seastar::scheduling_group streaming_scheduling_group;
         bool enable_metrics_reporting = false;
         db::timeout_semaphore* view_update_concurrency_semaphore = nullptr;
+        size_t view_update_concurrency_semaphore_limit;
     };
 private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
@@ -1174,6 +1167,7 @@ private:
     static const size_t max_count_system_concurrent_reads{10};
     size_t max_memory_system_concurrent_reads() { return _dbcfg.available_memory * 0.02; };
     static constexpr size_t max_concurrent_sstable_loads() { return 3; }
+    size_t max_memory_pending_view_updates() const { return _dbcfg.available_memory * 0.1; }
 
     struct db_stats {
         uint64_t total_writes = 0;
@@ -1210,7 +1204,7 @@ private:
 
     semaphore _sstable_load_concurrency_sem{max_concurrent_sstable_loads()};
 
-    db::timeout_semaphore _view_update_concurrency_sem{100}; // Stand-in hack for #2538
+    db::timeout_semaphore _view_update_concurrency_sem{max_memory_pending_view_updates()};
 
     cache_tracker _row_cache_tracker;
 
@@ -1390,6 +1384,7 @@ public:
     const db::config& get_config() const {
         return *_cfg;
     }
+    const db::extensions& extensions() const;
 
     db::large_partition_handler* get_large_partition_handler() {
         return _large_partition_handler.get();
@@ -1445,6 +1440,10 @@ public:
 
     query::querier_cache& get_querier_cache() {
         return _querier_cache;
+    }
+
+    db::view::update_backlog get_view_update_backlog() const {
+        return {max_memory_pending_view_updates() - _view_update_concurrency_sem.current(), max_memory_pending_view_updates()};
     }
 
     friend class distributed_loader;

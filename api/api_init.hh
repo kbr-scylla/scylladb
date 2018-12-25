@@ -8,7 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 #pragma once
-#include "database.hh"
+#include "database_fwd.hh"
 #include "service/storage_proxy.hh"
 #include <seastar/http/httpd.hh>
 

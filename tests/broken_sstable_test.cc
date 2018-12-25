@@ -19,47 +19,29 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <boost/test/unit_test.hpp>
-
-#include "sstables/data_consume_context.hh"
-#include "sstables/mp_row_consumer.hh"
 #include "tests/test-utils.hh"
 #include "sstable_test.hh"
 
 using namespace sstables;
 
-struct my_mp_row_consumer_reader : public mp_row_consumer_reader {
-    my_mp_row_consumer_reader(schema_ptr s) : mp_row_consumer_reader(std::move(s)) {}
-    virtual future<> fill_buffer(db::timeout_clock::time_point) override {
-        BOOST_FAIL("unexpected");
-        abort();
-    }
-    virtual void next_partition() override { BOOST_FAIL("unexpected"); }
-    virtual future<> fast_forward_to(const dht::partition_range&, db::timeout_clock::time_point) {
-        BOOST_FAIL("unexpected");
-        abort();
-    }
-    virtual void on_end_of_stream() override { BOOST_FAIL("unexpected"); }
-    virtual future<> fast_forward_to(position_range, db::timeout_clock::time_point) {
-        BOOST_FAIL("unexpected");
-        abort();
-    }
+namespace {
+struct my_consumer {
+    stop_iteration consume(static_row sr) { return stop_iteration::no; }
+    stop_iteration consume(clustering_row cr) { return stop_iteration::no; }
+    stop_iteration consume(range_tombstone rt) { return stop_iteration::no; }
+    stop_iteration consume(tombstone tomb) { return stop_iteration::no; }
+    void consume_end_of_stream() {}
+    void consume_new_partition(const dht::decorated_key& dk) {}
+    stop_iteration consume_end_of_partition() { return stop_iteration::no; }
 };
+}
 
-static void broken_sst(sstring dir, unsigned long generation, schema_ptr s, sstring msg) {
+static void broken_sst(sstring dir, unsigned long generation, schema_ptr s, sstring msg,
+    sstable_version_types version = la) {
     try {
-        sstable_ptr sstp = std::get<0>(reusable_sst(s, dir, generation).get());
-        auto r = std::make_unique<my_mp_row_consumer_reader>(s);
-        auto c = std::make_unique<mp_row_consumer_k_l>(r.get(), s, default_priority_class(),
-                                                       no_resource_tracking(),
-                                                       streamed_mutation::forwarding::no, sstp);
-        auto ctx = data_consume_rows<data_consume_rows_context>(*s, sstp, *c);
-        auto fut = repeat([&ctx] {
-            return ctx.read().then([&ctx] {
-                return ctx.eof() ? stop_iteration::yes : stop_iteration::no;
-            });
-        });
-        fut.get();
+        sstable_ptr sstp = std::get<0>(reusable_sst(s, dir, generation, version).get());
+        auto r = sstp->read_rows_flat(s);
+        r.consume(my_consumer{}, db::no_timeout).get();
         BOOST_FAIL("expecting exception");
     } catch (malformed_sstable_exception& e) {
         BOOST_REQUIRE_EQUAL(sstring(e.what()), msg);
@@ -71,6 +53,98 @@ static void broken_sst(sstring dir, unsigned long generation, sstring msg) {
     // a malformed component and checking that it fails.
     auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
     return broken_sst(dir, generation, s, msg);
+}
+
+SEASTAR_THREAD_TEST_CASE(missing_column_in_schema) {
+    schema_ptr s = schema_builder("test_ks", "test_table")
+                       .with_column("key1", utf8_type, column_kind::partition_key)
+                       .with_column("key2", utf8_type, column_kind::clustering_key)
+                       .with_column("key3", utf8_type, column_kind::clustering_key)
+                       .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/incompatible_serialized_type", 122, s,
+        "Column val missing in current schema in sstable "
+        "tests/sstables/incompatible_serialized_type/mc-122-big-Data.db",
+        sstable::version_types::mc);
+}
+
+SEASTAR_THREAD_TEST_CASE(incompatible_serialized_type) {
+    schema_ptr s = schema_builder("test_ks", "test_table")
+                       .with_column("key1", utf8_type, column_kind::partition_key)
+                       .with_column("key2", utf8_type, column_kind::clustering_key)
+                       .with_column("key3", utf8_type, column_kind::clustering_key)
+                       .with_column("val", int32_type, column_kind::regular_column)
+                       .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/incompatible_serialized_type", 122, s,
+        "val definition in serialization header does not match schema. Expected "
+        "org.apache.cassandra.db.marshal.Int32Type but got "
+        "org.apache.cassandra.db.marshal.UTF8Type in sstable "
+        "tests/sstables/incompatible_serialized_type/mc-122-big-Data.db",
+        sstable::version_types::mc);
+}
+
+SEASTAR_THREAD_TEST_CASE(mismatched_timestamp) {
+    schema_ptr s = schema_builder("test_ks", "test_table")
+                       .with_column("key1", utf8_type, column_kind::partition_key)
+                       .with_column("key2", utf8_type, column_kind::clustering_key)
+                       .with_column("key3", utf8_type, column_kind::clustering_key)
+                       .with_column("val", utf8_type, column_kind::regular_column)
+                       .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/mismatched_timestamp", 122, s,
+        "Range tombstone with ck ckp{00056b65793262} and two different tombstones at ends: "
+        "{tombstone: timestamp=1544745393692803, deletion_time=1544745393}, {tombstone: "
+        "timestamp=1446576446577440, deletion_time=1442880998} in sstable "
+        "tests/sstables/mismatched_timestamp/mc-122-big-Data.db",
+        sstable::version_types::mc);
+}
+
+SEASTAR_THREAD_TEST_CASE(broken_open_tombstone) {
+    schema_ptr s = schema_builder("test_ks", "test_table")
+                       .with_column("key1", utf8_type, column_kind::partition_key)
+                       .with_column("key2", utf8_type, column_kind::clustering_key)
+                       .with_column("key3", utf8_type, column_kind::clustering_key)
+                       .with_column("val", utf8_type, column_kind::regular_column)
+                       .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/broken_open_tombstone", 122, s,
+        "Range tombstones have to be disjoint: current opened range tombstone { clustering: "
+        "ckp{00056b65793262}, kind: incl start, tombstone: {tombstone: timestamp=1544745393692803, "
+        "deletion_time=1544745393} }, new tombstone {tombstone: timestamp=1544745393692803, "
+        "deletion_time=1544745393} in sstable "
+        "tests/sstables/broken_open_tombstone/mc-122-big-Data.db",
+        sstable::version_types::mc);
+}
+
+SEASTAR_THREAD_TEST_CASE(broken_close_tombstone) {
+    schema_ptr s = schema_builder("test_ks", "test_table")
+                       .with_column("key1", utf8_type, column_kind::partition_key)
+                       .with_column("key2", utf8_type, column_kind::clustering_key)
+                       .with_column("key3", utf8_type, column_kind::clustering_key)
+                       .with_column("val", utf8_type, column_kind::regular_column)
+                       .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/broken_close_tombstone", 122, s,
+        "Closing range tombstone that wasn't opened: clustering ckp{00056b65793262}, kind incl "
+        "end, tombstone {tombstone: timestamp=1544745393692803, deletion_time=1544745393} in "
+        "sstable tests/sstables/broken_close_tombstone/mc-122-big-Data.db",
+        sstable::version_types::mc);
+}
+
+SEASTAR_THREAD_TEST_CASE(broken_start_composite) {
+    schema_ptr s =
+        schema_builder("test_ks", "test_table")
+            .with_column("test_key", utf8_type, column_kind::partition_key)
+            .with_column("test_val", utf8_type, column_kind::clustering_key)
+            .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/broken_start_composite", 76, s,
+        "Unexpected start composite marker 2 in sstable tests/sstables/broken_start_composite/la-76-big-Data.db");
+}
+
+SEASTAR_THREAD_TEST_CASE(broken_end_composite) {
+    schema_ptr s =
+        schema_builder("test_ks", "test_table")
+            .with_column("test_key", utf8_type, column_kind::partition_key)
+            .with_column("test_val", utf8_type, column_kind::clustering_key)
+            .build(schema_builder::compact_storage::no);
+    broken_sst("tests/sstables/broken_end_composite", 76, s,
+        "Unexpected end composite marker 3 in sstable tests/sstables/broken_end_composite/la-76-big-Data.db");
 }
 
 SEASTAR_THREAD_TEST_CASE(static_mismatch) {

@@ -31,6 +31,7 @@
 #include "cql3/statements/truncate_statement.hh"
 #include "cql3/statements/prepared_statement.hh"
 #include "cql3/cql_statement.hh"
+#include "database.hh"
 
 #include <experimental/optional>
 

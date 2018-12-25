@@ -93,6 +93,7 @@ static const sstring ROLES_FEATURE = "ROLES";
 static const sstring LA_SSTABLE_FEATURE = "LA_SSTABLE_FORMAT";
 static const sstring STREAM_WITH_RPC_STREAM = "STREAM_WITH_RPC_STREAM";
 static const sstring MC_SSTABLE_FEATURE = "MC_SSTABLE_FORMAT";
+static const sstring ROW_LEVEL_REPAIR = "ROW_LEVEL_REPAIR";
 
 distributed<storage_service> _the_storage_service;
 
@@ -136,6 +137,7 @@ storage_service::storage_service(distributed<database>& db, sharded<auth::servic
         , _la_sstable_feature(_feature_service, LA_SSTABLE_FEATURE)
         , _stream_with_rpc_stream_feature(_feature_service, STREAM_WITH_RPC_STREAM)
         , _mc_sstable_feature(_feature_service, MC_SSTABLE_FEATURE)
+        , _row_level_repair_feature(_feature_service, ROW_LEVEL_REPAIR)
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
         , _update_pending_ranges_action([this] { return do_update_pending_ranges(); })
         , _sys_dist_ks(sys_dist_ks) {
@@ -162,6 +164,7 @@ void storage_service::enable_all_features() {
     _la_sstable_feature.enable();
     _stream_with_rpc_stream_feature.enable();
     _mc_sstable_feature.enable();
+    _row_level_repair_feature.enable();
 }
 
 enum class node_external_status {
@@ -237,7 +240,8 @@ sstring storage_service::get_config_supported_features() {
         LA_SSTABLE_FEATURE,
         STREAM_WITH_RPC_STREAM,
         MATERIALIZED_VIEWS_FEATURE,
-        INDEXES_FEATURE
+        INDEXES_FEATURE,
+        ROW_LEVEL_REPAIR
     };
     auto& config = service::get_local_storage_service()._db.local().get_config();
     if (config.enable_sstables_mc_format()) {
@@ -421,6 +425,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     app_states.emplace(gms::application_state::CACHE_HITRATES, value_factory.cache_hitrates(""));
     app_states.emplace(gms::application_state::SCHEMA_TABLES_VERSION, versioned_value(db::schema_tables::version));
     app_states.emplace(gms::application_state::RPC_READY, value_factory.cql_ready(false));
+    app_states.emplace(gms::application_state::VIEW_BACKLOG, versioned_value(""));
     slogger.info("Starting up server gossip");
 
     auto& gossiper = gms::get_local_gossiper();
@@ -906,6 +911,7 @@ void storage_service::handle_state_normal(inet_address endpoint) {
         }
     }
 
+    bool is_member = _token_metadata.is_member(endpoint);
     // Update pending ranges after update of normal tokens immediately to avoid
     // a race where natural endpoint was updated to contain node A, but A was
     // not yet removed from pending endpoints
@@ -934,7 +940,10 @@ void storage_service::handle_state_normal(inet_address endpoint) {
         db::system_keyspace::update_local_tokens(std::unordered_set<dht::token>(), local_tokens_to_remove).discard_result().get();
     }
 
-    notify_joined(endpoint);
+    // Send joined notification only when this node was not a member prior to this
+    if (!is_member) {
+        notify_joined(endpoint);
+    }
 
     update_pending_ranges().get();
     if (slogger.is_enabled(logging::log_level::debug)) {

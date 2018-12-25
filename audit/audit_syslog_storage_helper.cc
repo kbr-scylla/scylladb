@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <syslog.h>
 #include <fmt/time.h>
+#include "utils/class_registrator.hh"
 
 namespace audit {
 

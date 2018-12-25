@@ -29,6 +29,7 @@
 #include "batch_statement.hh"
 #include "raw/batch_statement.hh"
 #include "db/config.hh"
+#include "database.hh"
 #include <seastar/core/execution_stage.hh>
 
 namespace {

@@ -10,9 +10,11 @@
 
 #pragma  once
 
-#include "database.hh"
+#include "database_fwd.hh"
 #include <seastar/core/timer.hh>
 #include <seastar/core/sharded.hh>
+
+using namespace seastar;
 
 namespace service {
 

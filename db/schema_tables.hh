@@ -34,6 +34,7 @@
 #include "schema.hh"
 #include "hashing.hh"
 #include "schema_mutations.hh"
+#include "database.hh"
 
 #include <vector>
 #include <map>

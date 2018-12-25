@@ -167,6 +167,11 @@ public:
     dht::token _token;
     partition_key _key;
 
+    decorated_key(dht::token t, partition_key k)
+        : _token(std::move(t))
+        , _key(std::move(k)) {
+    }
+
     struct less_comparator {
         schema_ptr s;
         less_comparator(schema_ptr s);
@@ -790,6 +795,8 @@ public:
     }
     stdx::optional<dht::token_range> next();
 };
+
+std::unique_ptr<dht::i_partitioner> make_partitioner(sstring name, unsigned shard_count, unsigned sharding_ignore_msb_bits);
 
 } // dht
 

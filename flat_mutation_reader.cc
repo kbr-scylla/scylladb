@@ -487,11 +487,11 @@ flat_mutation_reader_from_mutations(std::vector<mutation> mutations, const dht::
         }
     public:
         reader(schema_ptr s, std::vector<mutation>&& mutations, const dht::partition_range& pr)
-            : impl(std::move(s))
+            : impl(s)
             , _mutations(std::move(mutations))
             , _cur(find_first_partition(_mutations, pr))
             , _end(find_last_partition(_mutations, pr))
-            , _cmp(*_cur->schema())
+            , _cmp(*s)
         {
             _end_of_stream = _cur == _end;
             if (!_end_of_stream) {
@@ -509,6 +509,7 @@ flat_mutation_reader_from_mutations(std::vector<mutation> mutations, const dht::
             // clear_and_dispose() used by mutation_partition destructor won't
             // work properly.
 
+            _cur = _mutations.begin();
             while (_cur != _end) {
                 destroy_current_mutation();
                 ++_cur;
@@ -809,4 +810,42 @@ make_flat_mutation_reader_from_fragments(schema_ptr schema, std::deque<mutation_
         }
     };
     return make_flat_mutation_reader<reader>(std::move(schema), std::move(fragments));
+}
+
+
+/*
+ * This reader takes a get_next_fragment generator that produces mutation_fragment_opt which is returned by
+ * generating_reader.
+ *
+ */
+class generating_reader final : public flat_mutation_reader::impl {
+    std::function<future<mutation_fragment_opt> ()> _get_next_fragment;
+public:
+    generating_reader(schema_ptr s, std::function<future<mutation_fragment_opt> ()> get_next_fragment)
+        : impl(std::move(s)), _get_next_fragment(std::move(get_next_fragment))
+    { }
+    virtual future<> fill_buffer(db::timeout_clock::time_point) override {
+        return do_until([this] { return is_end_of_stream() || is_buffer_full(); }, [this] {
+            return _get_next_fragment().then([this] (mutation_fragment_opt mopt) {
+                if (!mopt) {
+                    _end_of_stream = true;
+                } else {
+                    push_mutation_fragment(std::move(*mopt));
+                }
+            });
+        });
+    }
+    virtual void next_partition() override {
+        throw std::bad_function_call();
+    }
+    virtual future<> fast_forward_to(const dht::partition_range&, db::timeout_clock::time_point) override {
+        throw std::bad_function_call();
+    }
+    virtual future<> fast_forward_to(position_range, db::timeout_clock::time_point) override {
+        throw std::bad_function_call();
+    }
+};
+
+flat_mutation_reader make_generating_reader(schema_ptr s, std::function<future<mutation_fragment_opt> ()> get_next_fragment) {
+    return make_flat_mutation_reader<generating_reader>(std::move(s), std::move(get_next_fragment));
 }
