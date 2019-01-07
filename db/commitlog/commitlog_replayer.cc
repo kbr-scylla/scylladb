@@ -42,13 +42,13 @@
 #include "database.hh"
 #include "sstables/sstables.hh"
 #include "db/system_keyspace.hh"
-#include "cql3/query_processor.hh"
 #include "log.hh"
 #include "converting_mutation_partition_applier.hh"
 #include "schema_registry.hh"
 #include "commitlog_entry.hh"
 #include "service/priority_manager.hh"
 #include "db/extensions.hh"
+#include "utils/fragmented_temporary_buffer.hh"
 
 static logging::logger rlogger("commitlog_replayer");
 
@@ -67,7 +67,7 @@ class db::commitlog_replayer::impl {
 
     friend class db::commitlog_replayer;
 public:
-    impl(seastar::sharded<cql3::query_processor>& db);
+    impl(seastar::sharded<database>& db);
 
     future<> init();
 
@@ -100,7 +100,7 @@ public:
         return _column_mappings.stop();
     }
 
-    future<> process(stats*, temporary_buffer<char> buf, replay_position rp) const;
+    future<> process(stats*, fragmented_temporary_buffer buf, replay_position rp) const;
     future<stats> recover(sstring file, const sstring& fname_prefix) const;
 
     typedef std::unordered_map<utils::UUID, replay_position> rp_map;
@@ -120,20 +120,20 @@ public:
         return j != i->second.end() ? j->second : replay_position();
     }
 
-    seastar::sharded<cql3::query_processor>&
-        _qp;
+    seastar::sharded<database>&
+        _db;
     shard_rpm_map
         _rpm;
     shard_rp_map
         _min_pos;
 };
 
-db::commitlog_replayer::impl::impl(seastar::sharded<cql3::query_processor>& qp)
-    : _qp(qp)
+db::commitlog_replayer::impl::impl(seastar::sharded<database>& db)
+    : _db(db)
 {}
 
 future<> db::commitlog_replayer::impl::init() {
-    return _qp.map_reduce([this](shard_rpm_map map) {
+    return _db.map_reduce([this](shard_rpm_map map) {
         for (auto& p1 : map) {
             for (auto& p2 : p1.second) {
                 auto& pp = _rpm[p1.first][p2.first];
@@ -145,9 +145,9 @@ future<> db::commitlog_replayer::impl::init() {
                 }
             }
         }
-    }, [this](cql3::query_processor& qp) {
-        return do_with(shard_rpm_map{}, [this, &qp](shard_rpm_map& map) {
-            return parallel_for_each(qp.db().local().get_column_families(), [&map, &qp](auto& cfp) {
+    }, [this](database& db) {
+        return do_with(shard_rpm_map{}, [this, &db](shard_rpm_map& map) {
+            return parallel_for_each(db.get_column_families(), [&map, &db](auto& cfp) {
                 auto uuid = cfp.first;
                 // We do this on each cpu, for each CF, which technically is a little wasteful, but the values are
                 // cached, this is only startup, and it makes the code easier.
@@ -177,7 +177,7 @@ future<> db::commitlog_replayer::impl::init() {
         // existing sstables-per-shard.
         // So, go through all CF:s and check, if a shard mapping does not
         // have data for it, assume we must set global pos to zero.
-        for (auto&p : _qp.local().db().local().get_column_families()) {
+        for (auto&p : _db.local().get_column_families()) {
             for (auto&p1 : _rpm) { // for each shard
                 if (!p1.second.count(p.first)) {
                     _min_pos[p1.first] = replay_position();
@@ -212,7 +212,7 @@ db::commitlog_replayer::impl::recover(sstring file, const sstring& fname_prefix)
     }
 
     auto s = make_lw_shared<stats>();
-    auto& exts = _qp.local().db().local().extensions();
+    auto& exts = _db.local().extensions();
 
     return db::commitlog::read_log_file(file, fname_prefix, service::get_local_commitlog_priority(),
             std::bind(&impl::process, this, s.get(), std::placeholders::_1,
@@ -231,7 +231,7 @@ db::commitlog_replayer::impl::recover(sstring file, const sstring& fname_prefix)
     });
 }
 
-future<> db::commitlog_replayer::impl::process(stats* s, temporary_buffer<char> buf, replay_position rp) const {
+future<> db::commitlog_replayer::impl::process(stats* s, fragmented_temporary_buffer buf, replay_position rp) const {
     try {
 
         commitlog_entry_reader cer(buf);
@@ -263,8 +263,8 @@ future<> db::commitlog_replayer::impl::process(stats* s, temporary_buffer<char> 
             return make_ready_future<>();
         }
 
-        auto shard = _qp.local().db().local().shard_of(fm);
-        return _qp.local().db().invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp, shard, s] (database& db) -> future<> {
+        auto shard = _db.local().shard_of(fm);
+        return _db.invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp, shard, s] (database& db) -> future<> {
             auto& fm = cer.mutation();
             // TODO: might need better verification that the deserialized mutation
             // is schema compatible. My guess is that just applying the mutation
@@ -312,8 +312,8 @@ future<> db::commitlog_replayer::impl::process(stats* s, temporary_buffer<char> 
     return make_ready_future<>();
 }
 
-db::commitlog_replayer::commitlog_replayer(seastar::sharded<cql3::query_processor>& qp)
-    : _impl(std::make_unique<impl>(qp))
+db::commitlog_replayer::commitlog_replayer(seastar::sharded<database>& db)
+    : _impl(std::make_unique<impl>(db))
 {}
 
 db::commitlog_replayer::commitlog_replayer(commitlog_replayer&& r) noexcept
@@ -323,8 +323,8 @@ db::commitlog_replayer::commitlog_replayer(commitlog_replayer&& r) noexcept
 db::commitlog_replayer::~commitlog_replayer()
 {}
 
-future<db::commitlog_replayer> db::commitlog_replayer::create_replayer(seastar::sharded<cql3::query_processor>& qp) {
-    return do_with(commitlog_replayer(qp), [](auto&& rp) {
+future<db::commitlog_replayer> db::commitlog_replayer::create_replayer(seastar::sharded<database>& db) {
+    return do_with(commitlog_replayer(db), [](auto&& rp) {
         auto f = rp._impl->init();
         return f.then([rp = std::move(rp)]() mutable {
             return make_ready_future<commitlog_replayer>(std::move(rp));

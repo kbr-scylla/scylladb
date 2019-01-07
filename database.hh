@@ -116,6 +116,7 @@ class commitlog;
 class config;
 class extensions;
 class rp_handle;
+class data_listeners;
 
 namespace system_keyspace {
 void make(database& db, bool durable, bool volatile_testing_only);
@@ -307,6 +308,7 @@ public:
         db::large_partition_handler* large_partition_handler;
         db::timeout_semaphore* view_update_concurrency_semaphore;
         size_t view_update_concurrency_semaphore_limit;
+        db::data_listeners* data_listeners = nullptr;
     };
     struct no_commitlog {};
     struct stats {
@@ -859,7 +861,7 @@ public:
         return _index_manager;
     }
 
-    db::large_partition_handler* get_large_partition_handler() {
+    db::large_partition_handler* get_large_partition_handler() const {
         assert(_config.large_partition_handler);
         return _config.large_partition_handler;
     }
@@ -1096,7 +1098,7 @@ public:
      */
     locator::abstract_replication_strategy& get_replication_strategy();
     const locator::abstract_replication_strategy& get_replication_strategy() const;
-    column_family::config make_column_family_config(const schema& s, const db::config& db_config, db::large_partition_handler* lp_handler) const;
+    column_family::config make_column_family_config(const schema& s, const database& db) const;
     future<> make_directory_for_column_family(const sstring& name, utils::UUID uuid);
     void add_or_update_column_family(const schema_ptr& s) {
         _metadata->add_or_update_column_family(s);
@@ -1243,6 +1245,11 @@ private:
 
     std::unique_ptr<db::large_partition_handler> _large_partition_handler;
 
+    query::result_memory_limiter _result_memory_limiter;
+
+    friend db::data_listeners;
+    std::unique_ptr<db::data_listeners> _data_listeners;
+
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
@@ -1258,8 +1265,6 @@ private:
     future<> do_apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout);
     future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
-
-    query::result_memory_limiter _result_memory_limiter;
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
                                              tracing::trace_state_ptr trace_state);
@@ -1386,7 +1391,7 @@ public:
     }
     const db::extensions& extensions() const;
 
-    db::large_partition_handler* get_large_partition_handler() {
+    db::large_partition_handler* get_large_partition_handler() const {
         return _large_partition_handler.get();
     }
 
@@ -1447,6 +1452,10 @@ public:
     }
 
     friend class distributed_loader;
+
+    db::data_listeners& data_listeners() const {
+        return *_data_listeners;
+    }
 };
 
 // Creates a streaming reader that reads from all shards.
@@ -1459,21 +1468,5 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
 future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy);
 
 bool is_internal_keyspace(const sstring& name);
-
-class distributed_loader {
-public:
-    static void reshard(distributed<database>& db, sstring ks_name, sstring cf_name);
-    static future<> open_sstable(distributed<database>& db, sstables::entry_descriptor comps,
-        std::function<future<> (column_family&, sstables::foreign_sstable_open_info)> func,
-        const io_priority_class& pc = default_priority_class());
-    static future<> load_new_sstables(distributed<database>& db, sstring ks, sstring cf, std::vector<sstables::entry_descriptor> new_tables);
-    static future<std::vector<sstables::entry_descriptor>> flush_upload_dir(distributed<database>& db, sstring ks_name, sstring cf_name);
-    static future<sstables::entry_descriptor> probe_file(distributed<database>& db, sstring sstdir, sstring fname);
-    static future<> populate_column_family(distributed<database>& db, sstring sstdir, sstring ks, sstring cf);
-    static future<> populate_keyspace(distributed<database>& db, sstring datadir, sstring ks_name);
-    static future<> init_system_keyspace(distributed<database>& db);
-    static future<> ensure_system_table_directories(distributed<database>& db);
-    static future<> init_non_system_keyspaces(distributed<database>& db, distributed<service::storage_proxy>& proxy);
-};
 
 #endif /* DATABASE_HH_ */

@@ -345,6 +345,7 @@ scylla_tests = [
     'tests/top_k_test',
     'tests/utf8_test',
     'tests/small_vector_test',
+    'tests/data_listeners_test',
 ]
 
 perf_tests = [
@@ -564,6 +565,7 @@ scylla_core = (['database.cc',
                 'db/commitlog/commitlog.cc',
                 'db/commitlog/commitlog_replayer.cc',
                 'db/commitlog/commitlog_entry.cc',
+                'db/data_listeners.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
                 'db/config.cc',
@@ -669,6 +671,7 @@ scylla_core = (['database.cc',
                 'tracing/tracing.cc',
                 'tracing/trace_keyspace_helper.cc',
                 'tracing/trace_state.cc',
+                'tracing/tracing_backend_registry.cc',
                 'table_helper.cc',
                 'audit/audit.cc',
                 'audit/audit_cf_storage_helper.cc',
@@ -695,6 +698,7 @@ scylla_core = (['database.cc',
                 'mirror-file-impl.cc',
                 'multishard_mutation_query.cc',
                 'reader_concurrency_semaphore.cc',
+                'distributed_loader.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
@@ -1056,7 +1060,7 @@ for mode in build_modes:
 seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_restat.'
 
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
-libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config("--libs", "jsoncpp"),
+libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config("--libs", "jsoncpp"),
                  maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp',
                  maybe_static(args.staticboost, '-lboost_date_time'), ])
 

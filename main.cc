@@ -46,6 +46,7 @@
 #include "disk-error-handler.hh"
 #include "tracing/tracing.hh"
 #include "audit/audit.hh"
+#include "tracing/tracing_backend_registry.hh"
 #include <seastar/core/prometheus.hh>
 #include "message/messaging_service.hh"
 #include <seastar/net/dns.hh>
@@ -57,12 +58,19 @@
 #include "utils/memory.hh"
 #include <db/view/view_update_from_staging_generator.hh>
 #include "gms/feature_service.hh"
+#include "distributed_loader.hh"
 
 seastar::metrics::metric_groups app_metrics;
 
 using namespace std::chrono_literals;
 
 namespace bpo = boost::program_options;
+
+namespace tracing {
+
+void register_tracing_keyspace_backend(backend_registry& br);
+
+}
 
 template<typename K, typename V, typename... Args, typename K2, typename V2 = V>
 V get_or_default(const std::unordered_map<K, V, Args...>& ss, const K2& key, const V2& def = V()) {
@@ -476,7 +484,9 @@ int main(int ac, char** av) {
                 smp::invoke_on_all([] { engine().set_strict_dma(false); }).get();
             }
             supervisor::notify("creating tracing");
-            tracing::tracing::create_tracing("trace_keyspace_helper").get();
+            tracing::backend_registry tracing_backend_registry;
+            tracing::register_tracing_keyspace_backend(tracing_backend_registry);
+            tracing::tracing::create_tracing(tracing_backend_registry, "trace_keyspace_helper").get();
             audit::audit::create_audit(*cfg).handle_exception([&] (auto&& e) {
                 startlog.error("audit creation failed: {}", e);
             }).get();
@@ -647,7 +657,7 @@ int main(int ac, char** av) {
             db::system_keyspace::minimal_setup(db, qp);
 
             // schema migration, if needed, is also done on shard 0
-            db::legacy_schema_migrator::migrate(proxy, qp.local()).get();
+            db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
 
             supervisor::notify("loading sstables");
 
@@ -682,7 +692,7 @@ int main(int ac, char** av) {
                 auto paths = cl->get_segments_to_replay();
                 if (!paths.empty()) {
                     supervisor::notify("replaying commit log");
-                    auto rp = db::commitlog_replayer::create_replayer(qp).get0();
+                    auto rp = db::commitlog_replayer::create_replayer(db).get0();
                     rp.recover(paths, db::commitlog::descriptor::FILENAME_PREFIX).get();
                     supervisor::notify("replaying commit log - flushing memtables");
                     db.invoke_on_all([] (database& db) {
@@ -754,7 +764,7 @@ int main(int ac, char** av) {
                     });
                 });
             }).get();
-            repair_init_messaging_service_handler().get();
+            repair_init_messaging_service_handler(sys_dist_ks, view_update_from_staging_generator).get();
             supervisor::notify("starting storage service", true);
             auto& ss = service::get_local_storage_service();
             ss.init_messaging_service_part().get();

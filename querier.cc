@@ -191,6 +191,7 @@ void querier_cache::scan_cache_entries() {
     while (it != end && it->is_expired(now)) {
         ++_stats.time_based_evictions;
         --_stats.population;
+        _sem.unregister_inactive_read(it->get_inactive_handle());
         it = _entries.erase(it);
     }
 }
@@ -274,12 +275,12 @@ static void insert_querier(
 
     if (memory_usage >= max_queriers_memory_usage) {
         auto it = entries.begin();
-        const auto end = entries.end();
-        while (it != end && memory_usage >= max_queriers_memory_usage) {
-            ++stats.memory_based_evictions;
+        while (it != entries.end() && memory_usage >= max_queriers_memory_usage) {
             memory_usage -= it->memory_usage();
-            --stats.population;
+            sem.unregister_inactive_read(it->get_inactive_handle());
             it = entries.erase(it);
+            --stats.population;
+            ++stats.memory_based_evictions;
         }
     }
 

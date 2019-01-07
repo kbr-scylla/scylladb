@@ -278,7 +278,7 @@ future<> replicated_key_provider::validate() const {
 }
 
 future<> replicated_key_provider::maybe_initialize_tables() {
-    auto& db = cql3::get_local_query_processor().db().local();
+    auto& db = cql3::get_local_query_processor().db();
     auto f = make_ready_future();
 
     if (db.has_schema(KSNAME, TABLENAME)) {

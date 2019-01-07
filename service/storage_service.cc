@@ -65,6 +65,7 @@
 #include "sstables/sstables.hh"
 #include "db/config.hh"
 #include "auth/common.hh"
+#include "distributed_loader.hh"
 #include <seastar/core/metrics.hh>
 #include "audit/audit.hh"
 
@@ -590,6 +591,7 @@ void storage_service::join_token_ring(int delay) {
             ss << _bootstrap_tokens;
             set_mode(mode::JOINING, format("Replacing a node with token(s): {}", ss.str()), true);
         }
+        mark_existing_views_as_built();
         bootstrap(_bootstrap_tokens);
         // bootstrap will block until finished
         if (_is_bootstrap_mode) {
@@ -696,6 +698,18 @@ bool storage_service::is_joined() {
     // Every time we set _joined, we do it on all shards, so we can read its
     // value locally.
     return _joined && !_is_survey_mode;
+}
+
+void storage_service::mark_existing_views_as_built() {
+    _db.invoke_on(0, [this] (database& db) {
+        return do_with(db.get_views(), [this] (std::vector<view_ptr>& views) {
+            return parallel_for_each(views, [this] (view_ptr& view) {
+                return db::system_keyspace::mark_view_as_built(view->ks_name(), view->cf_name()).then([this, view] {
+                    return _sys_dist_ks.local().finish_view_build(view->ks_name(), view->cf_name());
+                });
+            });
+        });
+    }).get();
 }
 
 // Runs inside seastar::async context
@@ -1288,11 +1302,11 @@ future<> storage_service::stop_transport() {
         return seastar::async([&ss] {
             slogger.info("Stop transport: starts");
 
-            gms::stop_gossiping().get();
-            slogger.info("Stop transport: stop_gossiping done");
-
             ss.shutdown_client_servers().get();
             slogger.info("Stop transport: shutdown rpc and cql server done");
+
+            gms::stop_gossiping().get();
+            slogger.info("Stop transport: stop_gossiping done");
 
             ss.do_stop_ms().get();
             slogger.info("Stop transport: shutdown messaging_service done");
