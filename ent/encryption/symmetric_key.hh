@@ -15,7 +15,6 @@
 #include <tuple>
 #include <iosfwd>
 
-#include "../../stdx.hh"
 #include "../../bytes.hh"
 
 // forward declare openssl evp.

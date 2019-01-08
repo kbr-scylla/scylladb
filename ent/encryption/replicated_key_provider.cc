@@ -144,7 +144,7 @@ opt_bytes replicated_key_provider::decode_id(const opt_bytes& b) const {
             }
         }
     }
-    return stdx::nullopt;
+    return std::nullopt;
 }
 
 future<key_ptr, opt_bytes> replicated_key_provider::key(const key_info& info, opt_bytes input) {

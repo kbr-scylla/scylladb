@@ -29,6 +29,7 @@
  */
 
 #include "cql3/statements/ks_prop_defs.hh"
+#include "database.hh"
 
 namespace cql3 {
 
@@ -58,7 +59,7 @@ std::map<sstring, sstring> ks_prop_defs::get_replication_options() const {
     return std::map<sstring, sstring>{};
 }
 
-std::experimental::optional<sstring> ks_prop_defs::get_replication_strategy_class() const {
+std::optional<sstring> ks_prop_defs::get_replication_strategy_class() const {
     return _strategy_class;
 }
 

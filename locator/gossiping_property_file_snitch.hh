@@ -31,7 +31,7 @@
 #include <string>
 #include <chrono>
 #include <boost/algorithm/string.hpp>
-#include <experimental/optional>
+#include <optional>
 #include "production_snitch_base.hh"
 #include "exceptions/exceptions.hh"
 #include "service/storage_service.hh"
@@ -123,7 +123,7 @@ private:
 
 private:
     timer<lowres_clock> _file_reader;
-    std::experimental::optional<timespec> _last_file_mod;
+    std::optional<timespec> _last_file_mod;
     std::istringstream _istrm;
     bool _file_reader_runs = false;
     unsigned _file_reader_cpu_id;

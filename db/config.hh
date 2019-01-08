@@ -144,6 +144,9 @@ public:
     val(hints_directory, sstring, "/var/lib/scylla/hints", Used,   \
             "The directory where hints files are stored if hinted handoff is enabled."   \
     )                                           \
+    val(view_hints_directory, sstring, "/var/lib/scylla/view_hints", Used,   \
+            "The directory where materialized-view updates are stored while a view replica is unreachable."   \
+    )                                           \
     val(saved_caches_directory, sstring, "/var/lib/scylla/saved_caches", Unused, \
             "The directory location where table key and row caches are stored."  \
     )                                                   \
@@ -767,7 +770,7 @@ private:
         }
         // do not add to boost::options. We only care about yaml config
         void add_command_line_option(boost::program_options::options_description_easy_init&,
-                        const stdx::string_view&, const stdx::string_view&) override {}
+                        const std::string_view&, const std::string_view&) override {}
     };
 
     log_legacy_value<seastar::log_level> default_log_level;

@@ -1,6 +1,13 @@
 #!/bin/bash
 
+here="$(realpath $(dirname "$0"))"
+toplevel="$(realpath "$here/../..")"
+group_args=()
 docker_args=()
+
+for gid in $(id -G); do
+    group_args+=(--group-add "$gid")
+done
 
 if [[ "$1" = -* ]]; then
     while [[ "$1" != "--" && $# != 0 ]]; do
@@ -14,4 +21,18 @@ if [[ "$1" = -* ]]; then
     shift
 fi
 
-docker run --sig-proxy=true --rm -u "$(id -u):$(id -g)" --cap-add SYS_PTRACE -v "$PWD:$PWD" -v /tmp:/tmp -w "$PWD" "${docker_args[@]}" "$(<tools/toolchain/image)" "$@"
+docker run \
+       --sig-proxy=true \
+       --rm \
+       -u "$(id -u):$(id -g)" \
+       "${group_args[@]}" \
+       --cap-add SYS_PTRACE \
+       -v "$PWD:$PWD" \
+       -v "$toplevel:$toplevel" \
+       -v /tmp:/tmp \
+       -v /etc/passwd:/etc/passwd:ro \
+       -v /etc/group:/etc/group:ro \
+       -w "$PWD" \
+       "${docker_args[@]}" \
+       "$(<"$here/image")" \
+       "$@"

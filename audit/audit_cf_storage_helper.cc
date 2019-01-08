@@ -49,7 +49,7 @@ audit_cf_storage_helper::audit_cf_storage_helper()
 }
 
 future<> audit_cf_storage_helper::start(const db::config&) {
-    return table_helper::setup_keyspace(KEYSPACE_NAME, "1", _dummy_query_state, _table);
+    return table_helper::setup_keyspace(KEYSPACE_NAME, "1", _dummy_query_state, { &_table });
 }
 
 future<> audit_cf_storage_helper::stop() {
@@ -99,7 +99,7 @@ cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_i
         cql3::raw_value::make_value(utf8_type->decompose(username)),
         cql3::raw_value::make_value(boolean_type->decompose(error)),
     };
-    return cql3::query_options(db::consistency_level::ONE, infinite_timeout_config, std::experimental::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
+    return cql3::query_options(db::consistency_level::ONE, infinite_timeout_config, std::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
 }
 
 cql3::query_options audit_cf_storage_helper::make_login_data(net::ipv4_address node_ip,
@@ -125,7 +125,7 @@ cql3::query_options audit_cf_storage_helper::make_login_data(net::ipv4_address n
             cql3::raw_value::make_value(utf8_type->decompose(username)),
             cql3::raw_value::make_value(boolean_type->decompose(error)),
     };
-    return cql3::query_options(db::consistency_level::ONE, infinite_timeout_config, std::experimental::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
+    return cql3::query_options(db::consistency_level::ONE, infinite_timeout_config, std::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT, cql_serialization_format::latest());
 }
 
 using registry = class_registrator<storage_helper, audit_cf_storage_helper>;

@@ -15,7 +15,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <set>
-#include <experimental/optional>
+#include <optional>
 
 #include "seastarx.hh"
 #include "utils/chunked_vector.hh"
@@ -126,20 +126,6 @@ std::ostream& operator<<(std::ostream& os, const std::optional<T>& opt) {
         os << "{}";
     }
     return os;
-}
-
-namespace experimental {
-
-template <typename T>
-std::ostream& operator<<(std::ostream& os, const std::experimental::optional<T>& opt) {
-    if (opt) {
-        os << "{" << *opt << "}";
-    } else {
-        os << "{}";
-    }
-    return os;
-}
-
 }
 
 }

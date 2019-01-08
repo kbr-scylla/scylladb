@@ -10,7 +10,6 @@
 #pragma once
 
 #include <seastar/core/sharded.hh>
-#include "stdx.hh"
 
 #include "service/query_state.hh"
 #include "cql3/query_options.hh"
@@ -65,8 +64,8 @@ public:
         , _keyspace(std::move(keyspace))
         , _table(std::move(table))
     { }
-    void set_query_string(const std::experimental::string_view& query_string) {
-        _query = query_string.to_string();
+    void set_query_string(const std::string_view& query_string) {
+        _query = sstring(query_string);
     }
     const sstring& keyspace() const { return _keyspace; }
     const sstring& table() const { return _table; }

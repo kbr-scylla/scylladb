@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include <experimental/string_view>
+#include <string_view>
 #include <functional>
 #include <iosfwd>
 #include <optional>
@@ -38,7 +38,6 @@
 #include <seastar/core/sstring.hh>
 
 #include "seastarx.hh"
-#include "stdx.hh"
 
 namespace auth {
 
@@ -56,7 +55,7 @@ public:
     /// An anonymous user.
     ///
     authenticated_user() = default;
-    explicit authenticated_user(stdx::string_view name);
+    explicit authenticated_user(std::string_view name);
 };
 
 ///

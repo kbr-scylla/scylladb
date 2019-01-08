@@ -21,6 +21,7 @@
 #include "service/priority_manager.hh"
 #include "message/messaging_service.hh"
 #include "sstables/sstables.hh"
+#include "database.hh"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -1349,8 +1350,8 @@ static int do_repair_start(seastar::sharded<database>& db, sstring keyspace,
         // dropping ranges with no intersection.
         // We don't have a range::intersect() method, but we can use
         // range::subtract() and subtract the complement range.
-        std::experimental::optional<::range<dht::token>::bound> tok_start;
-        std::experimental::optional<::range<dht::token>::bound> tok_end;
+        std::optional<::range<dht::token>::bound> tok_start;
+        std::optional<::range<dht::token>::bound> tok_end;
         if (!options.start_token.empty()) {
             tok_start = ::range<dht::token>::bound(
                 dht::global_partitioner().from_sstring(options.start_token),

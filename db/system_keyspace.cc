@@ -672,7 +672,7 @@ schema_ptr built_views() {
 schema_ptr scylla_views_builds_in_progress() {
     static thread_local auto schema = [] {
         auto id = generate_legacy_id(NAME, SCYLLA_VIEWS_BUILDS_IN_PROGRESS);
-        return schema_builder(NAME, SCYLLA_VIEWS_BUILDS_IN_PROGRESS, stdx::make_optional(id))
+        return schema_builder(NAME, SCYLLA_VIEWS_BUILDS_IN_PROGRESS, std::make_optional(id))
                 .with_column("keyspace_name", utf8_type, column_kind::partition_key)
                 .with_column("view_name", utf8_type, column_kind::clustering_key)
                 .with_column("cpu_id", int32_type, column_kind::clustering_key)
@@ -1135,7 +1135,7 @@ typedef utils::UUID truncation_key;
 typedef std::unordered_map<truncation_key, truncation_record> truncation_map;
 
 static constexpr uint8_t current_version = 1;
-static thread_local std::experimental::optional<truncation_map> truncation_records;
+static thread_local std::optional<truncation_map> truncation_records;
 
 future<> save_truncation_records(const column_family& cf, db_clock::time_point truncated_at, replay_positions positions) {
     truncation_record r;

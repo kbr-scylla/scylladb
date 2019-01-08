@@ -42,6 +42,7 @@
 #include "service/storage_service.hh"
 #include "message/messaging_service.hh"
 #include "dht/i_partitioner.hh"
+#include "database.hh"
 #include "log.hh"
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
@@ -1158,7 +1159,7 @@ endpoint_state& gossiper::get_endpoint_state(inet_address ep) {
     return *ptr;
 }
 
-stdx::optional<endpoint_state> gossiper::get_endpoint_state_for_endpoint(inet_address ep) const {
+std::optional<endpoint_state> gossiper::get_endpoint_state_for_endpoint(inet_address ep) const {
     auto it = endpoint_state_map.find(ep);
     if (it == endpoint_state_map.end()) {
         return {};
@@ -1215,8 +1216,8 @@ utils::UUID gossiper::get_host_id(inet_address endpoint) {
     return utils::UUID(app_state->value);
 }
 
-std::experimental::optional<endpoint_state> gossiper::get_state_for_version_bigger_than(inet_address for_endpoint, int version) {
-    std::experimental::optional<endpoint_state> reqd_endpoint_state;
+std::optional<endpoint_state> gossiper::get_state_for_version_bigger_than(inet_address for_endpoint, int version) {
+    std::optional<endpoint_state> reqd_endpoint_state;
     auto es = get_endpoint_state_for_endpoint_ptr(for_endpoint);
     if (es) {
         auto& eps = *es;
@@ -1985,7 +1986,7 @@ sstring gossiper::get_gossip_status(const inet_address& endpoint) const {
     return do_get_gossip_status(get_application_state_ptr(endpoint, application_state::STATUS));
 }
 
-future<> gossiper::wait_for_gossip(std::chrono::milliseconds initial_delay, stdx::optional<int32_t> force_after) {
+future<> gossiper::wait_for_gossip(std::chrono::milliseconds initial_delay, std::optional<int32_t> force_after) {
     static constexpr std::chrono::milliseconds GOSSIP_SETTLE_MIN_WAIT_MS{5000};
     static constexpr std::chrono::milliseconds GOSSIP_SETTLE_POLL_INTERVAL_MS{1000};
     static constexpr int32_t GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED = 3;

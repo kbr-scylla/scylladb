@@ -530,9 +530,9 @@ struct scylla_metadata {
         }
         return *ext;
     }
-    stdx::optional<utils::UUID> get_optional_run_identifier() const {
+    std::optional<utils::UUID> get_optional_run_identifier() const {
         auto* m = data.get<scylla_metadata_type::RunIdentifier, run_identifier>();
-        return m ? stdx::make_optional(m->id) : stdx::nullopt;
+        return m ? std::make_optional(m->id) : std::nullopt;
     }
 
     template <typename Describer>
@@ -562,7 +562,7 @@ struct hash<sstables::metadata_type> : enum_hash<sstables::metadata_type> {};
 namespace sstables {
 
 // Special value to represent expired (i.e., 'dead') liveness info
-constexpr static uint32_t expired_liveness_ttl = std::numeric_limits<uint32_t>::max();
+constexpr static uint32_t expired_liveness_ttl = std::numeric_limits<int32_t>::max();
 
 inline bool is_expired_liveness_ttl(uint32_t ttl) {
     return ttl == expired_liveness_ttl;

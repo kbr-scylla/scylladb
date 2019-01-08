@@ -15,6 +15,7 @@
 #include "service/storage_service.hh"
 #include "db/config.hh"
 #include "utils/histogram.hh"
+#include "database.hh"
 
 namespace api {
 

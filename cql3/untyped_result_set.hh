@@ -29,7 +29,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 #include <unordered_map>
-#include <experimental/optional>
+#include <optional>
 #include "bytes.hh"
 #include "types.hh"
 #include "transport/messages/result_message_base.hh"
@@ -57,8 +57,8 @@ public:
         return value_cast<T>(data_type_for<T>()->deserialize(get_blob(name)));
     }
     template<typename T>
-    std::experimental::optional<T> get_opt(const sstring& name) const {
-        return has(name) ? get_as<T>(name) : std::experimental::optional<T>{};
+    std::optional<T> get_opt(const sstring& name) const {
+        return has(name) ? get_as<T>(name) : std::optional<T>{};
     }
     template<typename T>
     T get_or(const sstring& name, T t) const {

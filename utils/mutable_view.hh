@@ -10,10 +10,8 @@
 
 #pragma once
 
-#include <experimental/string_view>
+#include <string_view>
 #include <seastar/core/sstring.hh>
-
-#include "stdx.hh"
 
 template<typename CharT>
 class basic_mutable_view {
@@ -38,8 +36,8 @@ public:
         , _end(ptr + length)
     { }
 
-    operator stdx::basic_string_view<CharT>() const noexcept {
-        return stdx::basic_string_view<CharT>(begin(), size());
+    operator std::basic_string_view<CharT>() const noexcept {
+        return std::basic_string_view<CharT>(begin(), size());
     }
 
     CharT& operator[](size_t idx) const { return _begin[idx]; }

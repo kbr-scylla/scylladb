@@ -11,7 +11,7 @@
 #pragma once
 
 #include <chrono>
-#include <experimental/string_view>
+#include <string_view>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -26,7 +26,6 @@
 #include "auth/resource.hh"
 #include "auth/role_or_anonymous.hh"
 #include "log.hh"
-#include "stdx.hh"
 #include "utils/hash.hh"
 #include "utils/loading_cache.hh"
 

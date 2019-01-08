@@ -31,6 +31,7 @@
 #include "gms/failure_detector.hh"
 #include "log.hh"
 #include "db/config.hh"
+#include "database.hh"
 
 static logging::logger blogger("boot_strapper");
 

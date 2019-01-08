@@ -10,13 +10,11 @@
 
 #include "duration.hh"
 
-#include "stdx.hh"
-
 #include <boost/lexical_cast.hpp>
 #include <seastar/core/print.hh>
 
 #include <cctype>
-#include <experimental/optional>
+#include <optional>
 #include <limits>
 #include <regex>
 #include <sstream>
@@ -142,7 +140,7 @@ struct year_unit final : public duration_unit_impl<9, months_counter, 12> {
     const char* long_name() const noexcept override { return "years"; }
 } const year{};
 
-const auto unit_table = std::unordered_map<stdx::string_view, std::reference_wrapper<const duration_unit>>{
+const auto unit_table = std::unordered_map<std::string_view, std::reference_wrapper<const duration_unit>>{
         {year.short_name(), year},
         {month.short_name(), month},
         {week.short_name(), week},
@@ -194,7 +192,7 @@ public:
         try {
             count = parse_count(m, group_index);
         } catch (const std::out_of_range&) {
-            throw cql_duration_error(format("Invalid duration. The count for the {} is out of range", unit.long_name()));
+            throw cql_duration_error(seastar::format("Invalid duration. The count for the {} is out of range", unit.long_name()));
         }
 
         return add(count, unit);
@@ -218,7 +216,7 @@ private:
 
         if (count > available) {
             throw cql_duration_error(
-                    format("Invalid duration. The number of {} must be less than or equal to {}",
+                    seastar::format("Invalid duration. The number of {} must be less than or equal to {}",
                            unit.long_name(),
                            available));
         }
@@ -237,10 +235,10 @@ private:
 
         if (_current_unit != nullptr) {
             if (index == _current_unit->index()) {
-                throw cql_duration_error(format("Invalid duration. The {} are specified multiple times", unit.long_name()));
+                throw cql_duration_error(seastar::format("Invalid duration. The {} are specified multiple times", unit.long_name()));
             } else if (index > _current_unit->index()) {
                 throw cql_duration_error(
-                        format("Invalid duration. The {} should be after {}",
+                        seastar::format("Invalid duration. The {} should be after {}",
                                _current_unit->long_name(),
                                unit.long_name()));
             }
@@ -254,7 +252,7 @@ private:
 // These functions assume no sign information ('-). That is left to the `cql_duration` constructor.
 //
 
-stdx::optional<cql_duration> parse_duration_standard_format(stdx::string_view s) {
+std::optional<cql_duration> parse_duration_standard_format(std::string_view s) {
 
     //
     // We parse one component (pair of a count and unit) at a time in order to give more precise error messages when
@@ -279,7 +277,7 @@ stdx::optional<cql_duration> parse_duration_standard_format(stdx::string_view s)
 
         // Special case for mu.
         {
-            auto view = stdx::string_view(symbol);
+            auto view = std::string_view(symbol);
             view.remove_suffix(1);
 
             if (view == u8"µ") {
@@ -301,7 +299,7 @@ stdx::optional<cql_duration> parse_duration_standard_format(stdx::string_view s)
     return b.build();
 }
 
-stdx::optional<cql_duration> parse_duration_iso8601_format(stdx::string_view s) {
+std::optional<cql_duration> parse_duration_iso8601_format(std::string_view s) {
     static const auto pattern = std::regex("P((\\d+)Y)?((\\d+)M)?((\\d+)D)?(T((\\d+)H)?((\\d+)M)?((\\d+)S)?)?");
 
     std::cmatch match;
@@ -341,7 +339,7 @@ stdx::optional<cql_duration> parse_duration_iso8601_format(stdx::string_view s) 
     return b.build();
 }
 
-stdx::optional<cql_duration> parse_duration_iso8601_alternative_format(stdx::string_view s) {
+std::optional<cql_duration> parse_duration_iso8601_alternative_format(std::string_view s) {
     static const auto pattern = std::regex("P(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})");
 
     std::cmatch match;
@@ -359,7 +357,7 @@ stdx::optional<cql_duration> parse_duration_iso8601_alternative_format(stdx::str
             .build();
 }
 
-stdx::optional<cql_duration> parse_duration_iso8601_week_format(stdx::string_view s) {
+std::optional<cql_duration> parse_duration_iso8601_week_format(std::string_view s) {
     static const auto pattern = std::regex("P(\\d+)W");
 
     std::cmatch match;
@@ -373,7 +371,7 @@ stdx::optional<cql_duration> parse_duration_iso8601_week_format(stdx::string_vie
 }
 
 // Parse a duration string without sign information assuming one of the supported formats.
-stdx::optional<cql_duration> parse_duration(stdx::string_view s) {
+std::optional<cql_duration> parse_duration(std::string_view s) {
     if (s.length() == 0u) {
         return {};
     }
@@ -395,7 +393,7 @@ stdx::optional<cql_duration> parse_duration(stdx::string_view s) {
 
 }
 
-cql_duration::cql_duration(stdx::string_view s) {
+cql_duration::cql_duration(std::string_view s) {
     const bool is_negative = (s.length() != 0) && (s[0] == '-');
 
     // Without any sign indicator ('-').
@@ -403,7 +401,7 @@ cql_duration::cql_duration(stdx::string_view s) {
 
     const auto d = parse_duration(ps);
     if (!d) {
-        throw cql_duration_error(format("Unable to convert '{}' to a duration", s));
+        throw cql_duration_error(seastar::format("Unable to convert '{}' to a duration", s));
     }
 
     *this = *d;

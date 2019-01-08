@@ -421,7 +421,7 @@ void kmip_host::impl::release(KMIP_CMD* cmd, con_ptr cp) {
 
 template<typename Func>
 future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func && f) {
-    using opt_int = std::experimental::optional<int>;
+    using opt_int = std::optional<int>;
 
     cp->attach(cmd);
 
@@ -499,7 +499,7 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(KMIP_CMD* cmd) 
     }
 
     using con_ptr = ::shared_ptr<kmip_host::impl::connection>;
-    using con_opt = std::experimental::optional<con_ptr>;
+    using con_opt = std::optional<con_ptr>;
 
     return repeat_until_value([this, cmd, i = size_t(0)]() mutable {
         if (i++ == _options.hosts.size()) {

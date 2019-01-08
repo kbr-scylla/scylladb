@@ -32,11 +32,12 @@
 #include "mutation_rebuilder.hh"
 #include "random-utils.hh"
 #include "cql3/cql3_type.hh"
+#include "make_random_string.hh"
 #include <boost/algorithm/string/join.hpp>
 
 // partitions must be sorted by decorated key
 static void require_no_token_duplicates(const std::vector<mutation>& partitions) {
-    std::experimental::optional<dht::token> last_token;
+    std::optional<dht::token> last_token;
     for (auto&& p : partitions) {
         const dht::decorated_key& key = p.decorated_key();
         if (last_token && key.token() == *last_token) {
@@ -377,11 +378,11 @@ static void test_streamed_mutation_forwarding_is_consistent_with_slicing(populat
         flat_mutation_reader fwd_reader =
             ms.make_reader(m.schema(), prange, full_slice, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
 
-        stdx::optional<mutation_rebuilder> builder{};
+        std::optional<mutation_rebuilder> builder{};
         struct consumer {
             schema_ptr _s;
-            stdx::optional<mutation_rebuilder>& _builder;
-            consumer(schema_ptr s, stdx::optional<mutation_rebuilder>& builder)
+            std::optional<mutation_rebuilder>& _builder;
+            consumer(schema_ptr s, std::optional<mutation_rebuilder>& builder)
                 : _s(std::move(s))
                 , _builder(builder) { }
 
@@ -586,7 +587,7 @@ static void test_fast_forwarding_across_partitions_to_empty_range(populate_fn po
 
     for (auto&& key : keys) {
         mutation m(s, key);
-        sstring val(sstring::initialized_later(), 1024);
+        sstring val = make_random_string(1024);
         for (auto i : boost::irange(0u, ckeys_per_part)) {
             table.add_row(m, table.make_ckey(next_ckey + i), val);
         }
@@ -1021,7 +1022,7 @@ static void test_clustering_slices(populate_fn populate) {
         .with_column("v", bytes_type)
         .build();
 
-    auto make_ck = [&] (int ck1, stdx::optional<int> ck2 = stdx::nullopt, stdx::optional<int> ck3 = stdx::nullopt) {
+    auto make_ck = [&] (int ck1, std::optional<int> ck2 = std::nullopt, std::optional<int> ck3 = std::nullopt) {
         std::vector<data_value> components;
         components.push_back(data_value(ck1));
         if (ck2) {

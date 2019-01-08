@@ -261,11 +261,11 @@ public:
     future<> stop() { return make_ready_future<>(); }
 };
 
-static stdx::optional<std::vector<sstring>> parse_hinted_handoff_enabled(sstring opt) {
+static std::optional<std::vector<sstring>> parse_hinted_handoff_enabled(sstring opt) {
     using namespace boost::algorithm;
 
     if (boost::iequals(opt, "false") || opt == "0") {
-        return stdx::nullopt;
+        return std::nullopt;
     } else if (boost::iequals(opt, "true") || opt == "1") {
         return std::vector<sstring>{};
     }
@@ -403,7 +403,7 @@ int main(int ac, char** av) {
             sstring api_address = cfg->api_address() != "" ? cfg->api_address() : rpc_address;
             sstring broadcast_address = cfg->broadcast_address();
             sstring broadcast_rpc_address = cfg->broadcast_rpc_address();
-            stdx::optional<std::vector<sstring>> hinted_handoff_enabled = parse_hinted_handoff_enabled(cfg->hinted_handoff_enabled());
+            std::optional<std::vector<sstring>> hinted_handoff_enabled = parse_hinted_handoff_enabled(cfg->hinted_handoff_enabled());
             auto prom_addr = [&] {
                 try {
                     return seastar::net::dns::get_host_by_name(cfg->prometheus_address()).get0();
@@ -560,7 +560,7 @@ int main(int ac, char** av) {
                     directories.insert(std::move(shard_dir));
                 }
             }
-            boost::filesystem::path view_pending_updates_base_dir = boost::filesystem::path(db.local().get_config().data_file_directories()[0]) / "view_pending_updates";
+            boost::filesystem::path view_pending_updates_base_dir = boost::filesystem::path(db.local().get_config().view_hints_directory());
             sstring view_pending_updates_base_dir_str = view_pending_updates_base_dir.native();
             dirs.touch_and_lock(view_pending_updates_base_dir_str).get();
             directories.insert(view_pending_updates_base_dir_str);
@@ -747,7 +747,7 @@ int main(int ac, char** av) {
             if (hinted_handoff_enabled) {
                 db::hints::manager::rebalance(cfg->hints_directory()).get();
             }
-            db::hints::manager::rebalance(cfg->data_file_directories()[0] + "/view_pending_updates").get();
+            db::hints::manager::rebalance(cfg->view_hints_directory()).get();
 
             proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {
                 local_proxy.start_hints_manager(gms::get_local_gossiper().shared_from_this(), service::get_local_storage_service().shared_from_this());

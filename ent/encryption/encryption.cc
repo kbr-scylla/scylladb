@@ -37,7 +37,6 @@
 #include "kmip_key_provider.hh"
 #include "kmip_host.hh"
 #include "bytes.hh"
-#include "stdx.hh"
 #include "utils/class_registrator.hh"
 #include "db/extensions.hh"
 #include "db/system_keyspace.hh"

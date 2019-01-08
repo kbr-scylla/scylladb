@@ -31,7 +31,7 @@
 #pragma once
 
 #include "function.hh"
-#include <experimental/optional>
+#include <optional>
 
 namespace cql3 {
 namespace functions {

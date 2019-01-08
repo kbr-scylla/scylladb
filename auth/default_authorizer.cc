@@ -50,6 +50,7 @@ extern "C" {
 #include "cql3/untyped_result_set.hh"
 #include "exceptions/exceptions.hh"
 #include "log.hh"
+#include "database.hh"
 
 namespace auth {
 
@@ -198,10 +199,10 @@ default_authorizer::authorize(const role_or_anonymous& maybe_role, const resourc
 
 future<>
 default_authorizer::modify(
-        stdx::string_view role_name,
+        std::string_view role_name,
         permission_set set,
         const resource& resource,
-        stdx::string_view op) const {
+        std::string_view op) const {
     return do_with(
             format("UPDATE {}.{} SET {} = {} {} ? WHERE {} = ? AND {} = ?",
                     meta::AUTH_KS,
@@ -221,11 +222,11 @@ default_authorizer::modify(
 }
 
 
-future<> default_authorizer::grant(stdx::string_view role_name, permission_set set, const resource& resource) const {
+future<> default_authorizer::grant(std::string_view role_name, permission_set set, const resource& resource) const {
     return modify(role_name, std::move(set), resource, "+");
 }
 
-future<> default_authorizer::revoke(stdx::string_view role_name, permission_set set, const resource& resource) const {
+future<> default_authorizer::revoke(std::string_view role_name, permission_set set, const resource& resource) const {
     return modify(role_name, std::move(set), resource, "-");
 }
 
@@ -258,7 +259,7 @@ future<std::vector<permission_details>> default_authorizer::list_all() const {
     });
 }
 
-future<> default_authorizer::revoke_all(stdx::string_view role_name) const {
+future<> default_authorizer::revoke_all(std::string_view role_name) const {
     static const sstring query = format("DELETE FROM {}.{} WHERE {} = ?",
             meta::AUTH_KS,
             PERMISSIONS_CF,

@@ -225,7 +225,7 @@ private:
         return log_slow_query() && e > _slow_query_threshold;
     }
 
-    void init_session_records(trace_type type, std::chrono::seconds slow_query_ttl, std::experimental::optional<utils::UUID> session_id = std::experimental::nullopt, span_id parent_id = span_id::illegal_id) {
+    void init_session_records(trace_type type, std::chrono::seconds slow_query_ttl, std::optional<utils::UUID> session_id = std::nullopt, span_id parent_id = span_id::illegal_id) {
         _records = make_lw_shared<one_session_records>();
         _records->session_id = session_id ? *session_id : utils::UUID_gen::get_time_UUID();
 
@@ -318,7 +318,7 @@ private:
      *
      * @param val the optional value with a serial consistency level
      */
-    void set_optional_serial_consistency_level(const std::experimental::optional<db::consistency_level>& val);
+    void set_optional_serial_consistency_level(const std::optional<db::consistency_level>& val);
 
     /**
      * Returns the string with the representation of the given raw value.
@@ -383,7 +383,7 @@ private:
      */
     void add_prepared_statement(prepared_checked_weak_ptr& prepared);
 
-    void set_username(const stdx::optional<auth::authenticated_user>& user) {
+    void set_username(const std::optional<auth::authenticated_user>& user) {
         if (user) {
             _records->session_rec.username = format("{}", *user);
         }
@@ -471,11 +471,11 @@ private:
     friend void set_response_size(const trace_state_ptr& p, size_t s) noexcept;
     friend void set_batchlog_endpoints(const trace_state_ptr& p, const std::unordered_set<gms::inet_address>& val);
     friend void set_consistency_level(const trace_state_ptr& p, db::consistency_level val);
-    friend void set_optional_serial_consistency_level(const trace_state_ptr& p, const std::experimental::optional<db::consistency_level>&val);
+    friend void set_optional_serial_consistency_level(const trace_state_ptr& p, const std::optional<db::consistency_level>&val);
     friend void add_query(const trace_state_ptr& p, sstring_view val);
     friend void set_user_timestamp(const trace_state_ptr& p, api::timestamp_type val);
     friend void add_prepared_statement(const trace_state_ptr& p, prepared_checked_weak_ptr& prepared);
-    friend void set_username(const trace_state_ptr& p, const stdx::optional<auth::authenticated_user>& user);
+    friend void set_username(const trace_state_ptr& p, const std::optional<auth::authenticated_user>& user);
     friend void add_table_name(const trace_state_ptr& p, const sstring& ks_name, const sstring& cf_name);
     friend void stop_foreground(const trace_state_ptr& state) noexcept;
     friend void stop_foreground_prepared(const trace_state_ptr& state, const cql3::query_options* prepared_options_ptr) noexcept;
@@ -601,7 +601,7 @@ inline void set_consistency_level(const trace_state_ptr& p, db::consistency_leve
     }
 }
 
-inline void set_optional_serial_consistency_level(const trace_state_ptr& p, const std::experimental::optional<db::consistency_level>& val) {
+inline void set_optional_serial_consistency_level(const trace_state_ptr& p, const std::optional<db::consistency_level>& val) {
     if (p) {
         p->set_optional_serial_consistency_level(val);
     }
@@ -625,7 +625,7 @@ inline void add_prepared_statement(const trace_state_ptr& p, prepared_checked_we
     }
 }
 
-inline void set_username(const trace_state_ptr& p, const stdx::optional<auth::authenticated_user>& user) {
+inline void set_username(const trace_state_ptr& p, const std::optional<auth::authenticated_user>& user) {
     if (p) {
         p->set_username(user);
     }
@@ -686,7 +686,7 @@ inline void trace(const trace_state_ptr& p, A&&... a) noexcept {
     }
 }
 
-inline std::experimental::optional<trace_info> make_trace_info(const trace_state_ptr& state) {
+inline std::optional<trace_info> make_trace_info(const trace_state_ptr& state) {
     // We want to trace the remote replicas' operations only when a full tracing
     // is requested or when a slow query logging is enabled and the session is
     // still active.
@@ -698,7 +698,7 @@ inline std::experimental::optional<trace_info> make_trace_info(const trace_state
         return trace_info{state->session_id(), state->type(), state->write_on_close(), state->raw_props(), state->slow_query_threshold_us(), state->slow_query_ttl_sec(), state->my_span_id()};
     }
 
-    return std::experimental::nullopt;
+    return std::nullopt;
 }
 
 inline void stop_foreground(const trace_state_ptr& state) noexcept {

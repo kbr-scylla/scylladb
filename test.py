@@ -185,7 +185,7 @@ if __name__ == "__main__":
                         help="Run only test whose name contains given string")
     parser.add_argument('--mode', choices=all_modes,
                         help="Run only tests for given build mode")
-    parser.add_argument('--timeout', action="store", default="300", type=int,
+    parser.add_argument('--timeout', action="store", default="3000", type=int,
                         help="timeout value for test execution")
     parser.add_argument('--jenkins', action="store",
                         help="jenkins output file prefix")
@@ -234,8 +234,6 @@ if __name__ == "__main__":
 
     n_total = len(test_to_run)
     env = os.environ
-    # disable false positive due to new (with_alignment(...)) ...
-    env['ASAN_OPTIONS'] = 'alloc_dealloc_mismatch=0'
     env['UBSAN_OPTIONS'] = 'print_stacktrace=1'
     env['BOOST_TEST_CATCH_SYSTEM_ERRORS'] = 'no'
 

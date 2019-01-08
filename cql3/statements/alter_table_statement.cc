@@ -38,6 +38,7 @@
 #include <boost/range/adaptor/transformed.hpp>
 #include "cql3/util.hh"
 #include "view_info.hh"
+#include "database.hh"
 
 namespace cql3 {
 

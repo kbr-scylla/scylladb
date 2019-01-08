@@ -64,7 +64,7 @@ class encrypted_file_impl : public seastar::file_impl {
     ::shared_ptr<symmetric_key> _block_key;
     bytes _hash_salt;
 
-    stdx::optional<uint64_t> _file_length;
+    std::optional<uint64_t> _file_length;
 
     // this is somewhat large, but we assume this is for bulky stuff like sstables/commitlog
     // so large alignment should be preferable to reaclculating block IV too often.
@@ -164,7 +164,7 @@ void encrypted_file_impl::maybe_set_length(uint64_t s) {
 }
 
 void encrypted_file_impl::clear_length() {
-    _file_length = stdx::nullopt;
+    _file_length = std::nullopt;
 }
 
 bytes encrypted_file_impl::iv_for(uint64_t pos) const {

@@ -17,7 +17,6 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/shared_ptr.hh>
 
-#include "../../stdx.hh"
 #include "../../bytes.hh"
 #include "../../compress.hh"
 
@@ -52,7 +51,7 @@ class symmetric_key;
 struct key_info;
 
 using options = std::map<sstring, sstring>;
-using opt_bytes = std::experimental::optional<bytes>;
+using opt_bytes = std::optional<bytes>;
 using key_ptr = shared_ptr<symmetric_key>;
 
 /**
@@ -79,12 +78,12 @@ public:
         : _options(opts)
     {}
 
-    stdx::optional<mapped_type> operator()(const key_type& k) const {
+    std::optional<mapped_type> operator()(const key_type& k) const {
         auto i = _options.find(k);
         if (i != _options.end()) {
             return i->second;
         }
-        return stdx::nullopt;
+        return std::nullopt;
     }
 };
 

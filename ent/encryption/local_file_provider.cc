@@ -51,10 +51,10 @@ public:
         // TODO: assert options -> my key
         auto i = _keys.find(info);
         if (i != _keys.end()) {
-            return make_ready_future<key_ptr, opt_bytes>(i->second, stdx::nullopt);
+            return make_ready_future<key_ptr, opt_bytes>(i->second, std::nullopt);
         }
         return load_or_create(info).then([](key_ptr k) {
-            return make_ready_future<key_ptr, opt_bytes>(k, stdx::nullopt);
+            return make_ready_future<key_ptr, opt_bytes>(k, std::nullopt);
         });
     }
     future<> validate() const override {

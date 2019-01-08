@@ -13,7 +13,7 @@
 #include <seastar/core/sstring.hh>
 
 #include <cstdint>
-#include <experimental/string_view>
+#include <string_view>
 #include <ostream>
 #include <stdexcept>
 
@@ -36,7 +36,7 @@ using nanoseconds_counter = cql_duration_counter<int64_t, struct nanosecond_tag>
 
 class cql_duration_error : public std::invalid_argument {
 public:
-    explicit cql_duration_error(std::experimental::string_view what) : std::invalid_argument(what.data()) {}
+    explicit cql_duration_error(std::string_view what) : std::invalid_argument(what.data()) {}
 
     virtual ~cql_duration_error() = default;
 };
@@ -107,7 +107,7 @@ public:
     //
     // Throws `cql_duration_error` in the event of a parsing error.
     //
-    explicit cql_duration(std::experimental::string_view s);
+    explicit cql_duration(std::string_view s);
 
     months_counter::value_type months{0};
     days_counter::value_type days{0};
