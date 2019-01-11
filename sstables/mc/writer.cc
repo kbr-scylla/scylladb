@@ -308,9 +308,11 @@ void write_missing_columns(W& out, const indexed_columns& columns, const row& ro
 template <typename T, typename W>
 GCC6_CONCEPT(requires Writer<W>())
 void write_unsigned_delta_vint(W& out, T value, T base) {
-    using unsigned_type = std::make_unsigned_t<T>;
-    unsigned_type delta = static_cast<unsigned_type>(value) - base;
-    write_vint(out, delta);
+    // sign-extend to 64-bits
+    using signed_type = std::make_signed_t<T>;
+    int64_t delta = static_cast<signed_type>(value) - static_cast<signed_type>(base);
+    // write as unsigned 64-bit varint
+    write_vint(out, static_cast<uint64_t>(delta));
 }
 
 template <typename W>
@@ -321,13 +323,13 @@ void write_delta_timestamp(W& out, api::timestamp_type timestamp, const encoding
 
 template <typename W>
 GCC6_CONCEPT(requires Writer<W>())
-void write_delta_ttl(W& out, uint32_t ttl, const encoding_stats& enc_stats) {
+void write_delta_ttl(W& out, int32_t ttl, const encoding_stats& enc_stats) {
     write_unsigned_delta_vint(out, ttl, enc_stats.min_ttl);
 }
 
 template <typename W>
 GCC6_CONCEPT(requires Writer<W>())
-void write_delta_local_deletion_time(W& out, uint32_t local_deletion_time, const encoding_stats& enc_stats) {
+void write_delta_local_deletion_time(W& out, int32_t local_deletion_time, const encoding_stats& enc_stats) {
     write_unsigned_delta_vint(out, local_deletion_time, enc_stats.min_local_deletion_time);
 }
 
@@ -350,29 +352,36 @@ static bytes_array_vint_size to_bytes_array_vint_size(const sstring& s) {
     return result;
 }
 
+sstring type_name_with_udt_frozen(data_type type) {
+    if (type->is_user_type()) {
+        return "org.apache.cassandra.db.marshal.FrozenType(" + type->name() + ")";
+    }
+    return type->name();
+}
 
 static sstring pk_type_to_string(const schema& s) {
     if (s.partition_key_size() == 1) {
-        return s.partition_key_columns().begin()->type->name();
+        return type_name_with_udt_frozen(s.partition_key_columns().begin()->type);
     } else {
         sstring type_params = ::join(",", s.partition_key_columns()
                                           | boost::adaptors::transformed(std::mem_fn(&column_definition::type))
-                                          | boost::adaptors::transformed(std::mem_fn(&abstract_type::name)));
+                                          | boost::adaptors::transformed(type_name_with_udt_frozen));
         return "org.apache.cassandra.db.marshal.CompositeType(" + type_params + ")";
     }
 }
 
 serialization_header make_serialization_header(const schema& s, const encoding_stats& enc_stats) {
     serialization_header header;
-    header.min_timestamp_base.value = static_cast<uint64_t>(enc_stats.min_timestamp) - encoding_stats::timestamp_epoch;
-    header.min_local_deletion_time_base.value = enc_stats.min_local_deletion_time - encoding_stats::deletion_time_epoch;
-    header.min_ttl_base.value = enc_stats.min_ttl - encoding_stats::ttl_epoch;
+    // mc serialization header minimum values are delta-encoded based on the default timestamp epoch times
+    header.min_timestamp_base.value = static_cast<uint64_t>(enc_stats.min_timestamp - encoding_stats::timestamp_epoch);
+    header.min_local_deletion_time_base.value = static_cast<uint64_t>(enc_stats.min_local_deletion_time - encoding_stats::deletion_time_epoch);
+    header.min_ttl_base.value = static_cast<uint64_t>(enc_stats.min_ttl - encoding_stats::ttl_epoch);
 
     header.pk_type_name = to_bytes_array_vint_size(pk_type_to_string(s));
 
     header.clustering_key_types_names.elements.reserve(s.clustering_key_size());
     for (const auto& ck_column : s.clustering_key_columns()) {
-        auto ck_type_name = to_bytes_array_vint_size(ck_column.type->name());
+        auto ck_type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(ck_column.type));
         header.clustering_key_types_names.elements.push_back(std::move(ck_type_name));
     }
 
@@ -380,7 +389,7 @@ serialization_header make_serialization_header(const schema& s, const encoding_s
     for (const auto& static_column : s.static_columns()) {
         serialization_header::column_desc cd;
         cd.name = to_bytes_array_vint_size(static_column.name());
-        cd.type_name = to_bytes_array_vint_size(static_column.type->name());
+        cd.type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(static_column.type));
         header.static_columns.elements.push_back(std::move(cd));
     }
 
@@ -388,7 +397,7 @@ serialization_header make_serialization_header(const schema& s, const encoding_s
     for (const auto& regular_column : s.regular_columns()) {
         serialization_header::column_desc cd;
         cd.name = to_bytes_array_vint_size(regular_column.name());
-        cd.type_name = to_bytes_array_vint_size(regular_column.type->name());
+        cd.type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(regular_column.type));
         header.regular_columns.elements.push_back(std::move(cd));
     }
 
@@ -617,10 +626,10 @@ private:
     void write_delta_timestamp(bytes_ostream& writer, api::timestamp_type timestamp) {
         sstables::mc::write_delta_timestamp(writer, timestamp, _enc_stats);
     }
-    void write_delta_ttl(bytes_ostream& writer, uint32_t ttl) {
+    void write_delta_ttl(bytes_ostream& writer, int32_t ttl) {
         sstables::mc::write_delta_ttl(writer, ttl, _enc_stats);
     }
-    void write_delta_local_deletion_time(bytes_ostream& writer, uint32_t ldt) {
+    void write_delta_local_deletion_time(bytes_ostream& writer, int32_t ldt) {
         sstables::mc::write_delta_local_deletion_time(writer, ldt, _enc_stats);
     }
     void write_delta_deletion_time(bytes_ostream& writer, deletion_time dt) {
@@ -629,8 +638,8 @@ private:
 
     struct row_time_properties {
         std::optional<api::timestamp_type> timestamp;
-        std::optional<uint32_t> ttl;
-        std::optional<uint32_t> local_deletion_time;
+        std::optional<int32_t> ttl;
+        std::optional<int32_t> local_deletion_time;
     };
 
     // Writes single atomic cell

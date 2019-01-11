@@ -297,7 +297,7 @@ struct compaction_metadata : public metadata_base<compaction_metadata> {
 };
 
 struct stats_metadata : public metadata_base<stats_metadata> {
-    utils::estimated_histogram estimated_row_size;
+    utils::estimated_histogram estimated_partition_size;
     utils::estimated_histogram estimated_cells_count;
     db::replay_position position;
     int64_t min_timestamp;
@@ -323,7 +323,7 @@ struct stats_metadata : public metadata_base<stats_metadata> {
         switch (v) {
         case sstable_version_types::mc:
             return f(
-                estimated_row_size,
+                estimated_partition_size,
                 estimated_cells_count,
                 position,
                 min_timestamp,
@@ -347,7 +347,7 @@ struct stats_metadata : public metadata_base<stats_metadata> {
         case sstable_version_types::ka:
         case sstable_version_types::la:
             return f(
-                estimated_row_size,
+                estimated_partition_size,
                 estimated_cells_count,
                 position,
                 min_timestamp,
@@ -371,8 +371,8 @@ using bytes_array_vint_size = disk_string_vint_size;
 
 struct serialization_header : public metadata_base<serialization_header> {
     vint<uint64_t> min_timestamp_base;
-    vint<uint32_t> min_local_deletion_time_base;
-    vint<uint32_t> min_ttl_base;
+    vint<uint64_t> min_local_deletion_time_base;
+    vint<uint64_t> min_ttl_base;
     bytes_array_vint_size pk_type_name;
     disk_array_vint_size<bytes_array_vint_size> clustering_key_types_names;
     struct column_desc {
@@ -410,16 +410,17 @@ struct serialization_header : public metadata_base<serialization_header> {
         abort();
     }
 
-    uint64_t get_min_timestamp() const {
-        return min_timestamp_base.value + encoding_stats::timestamp_epoch;
+    // mc serialization header minimum values are delta-encoded based on the default timestamp epoch times
+    api::timestamp_type get_min_timestamp() const {
+        return static_cast<api::timestamp_type>(min_timestamp_base.value + encoding_stats::timestamp_epoch);
     }
 
-    uint32_t get_min_ttl() const {
-        return min_ttl_base.value + encoding_stats::ttl_epoch;
+    int32_t get_min_ttl() const {
+        return static_cast<int32_t>(min_ttl_base.value) + encoding_stats::ttl_epoch;
     }
 
-    uint32_t get_min_local_deletion_time() const {
-        return min_local_deletion_time_base.value + encoding_stats::deletion_time_epoch;
+    int32_t get_min_local_deletion_time() const {
+        return static_cast<int32_t>(min_local_deletion_time_base.value) + encoding_stats::deletion_time_epoch;
     }
 };
 
