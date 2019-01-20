@@ -575,7 +575,7 @@ scylla_core = (['database.cc',
                 'db/marshal/type_parser.cc',
                 'db/batchlog_manager.cc',
                 'db/view/view.cc',
-                'db/view/view_update_from_staging_generator.cc',
+                'db/view/view_update_generator.cc',
                 'db/view/row_locking.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
@@ -979,6 +979,14 @@ if not try_compile(compiler=args.cxx, source='''\
     print('Installed boost version too old.  Please update {}.'.format(pkgname("boost-devel")))
     sys.exit(1)
 
+if try_compile(args.cxx, source = textwrap.dedent('''\
+        #include <lz4.h>
+
+        void m() {
+            LZ4_compress_default(static_cast<const char*>(0), static_cast<char*>(0), 0, 0);
+        }
+        '''), flags=args.user_cflags.split()):
+    defines.append("HAVE_LZ4_COMPRESS_DEFAULT")
 
 has_sanitize_address_use_after_scope = try_compile(compiler=args.cxx, flags=['-fsanitize-address-use-after-scope'], source='int f() {}')
 

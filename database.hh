@@ -423,6 +423,10 @@ private:
     std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_staging;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
+    // This semaphore ensures that an operation like snapshot won't have its selected
+    // sstables deleted by compaction in parallel, a race condition which could
+    // easily result in failure.
+    seastar::semaphore _sstable_deletion_sem = {1};
     // There are situations in which we need to stop writing sstables. Flushers will take
     // the read lock, and the ones that wish to stop that process will take the write lock.
     rwlock _sstables_lock;
@@ -472,6 +476,8 @@ private:
     utils::phased_barrier _pending_writes_phaser;
     // Corresponding phaser for in-progress reads.
     utils::phased_barrier _pending_reads_phaser;
+    // Corresponding phaser for in-progress streams
+    utils::phased_barrier _pending_streams_phaser;
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
     void move_sstable_from_staging_in_thread(sstables::shared_sstable sst);
@@ -782,8 +788,8 @@ public:
     future<std::unordered_set<sstring>> get_sstables_by_partition_key(const sstring& key) const;
 
     const sstables::sstable_set& get_sstable_set() const;
-    lw_shared_ptr<sstable_list> get_sstables() const;
-    lw_shared_ptr<sstable_list> get_sstables_including_compacted_undeleted() const;
+    lw_shared_ptr<const sstable_list> get_sstables() const;
+    lw_shared_ptr<const sstable_list> get_sstables_including_compacted_undeleted() const;
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;
     std::vector<sstables::shared_sstable> select_sstables(const dht::partition_range& range) const;
     std::vector<sstables::shared_sstable> candidates_for_compaction() const;
@@ -847,6 +853,14 @@ public:
         return _pending_reads_phaser.advance_and_await();
     }
 
+    utils::phased_barrier::operation stream_in_progress() {
+        return _pending_streams_phaser.start();
+    }
+
+    future<> await_pending_streams() {
+        return _pending_streams_phaser.advance_and_await();
+    }
+
     void add_or_update_view(view_ptr v);
     void remove_view(view_ptr v);
     void clear_views();
@@ -870,6 +884,10 @@ public:
             std::vector<view_ptr>,
             dht::token base_token,
             flat_mutation_reader&&);
+
+    reader_concurrency_semaphore& read_concurrency_semaphore() {
+        return *_config.read_concurrency_semaphore;
+    }
 
 private:
     future<row_locker::lock_holder> do_push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout, mutation_source&& source) const;

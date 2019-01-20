@@ -1542,8 +1542,7 @@ void sstable::write_cell(file_writer& out, atomic_cell_view cell, const column_d
         uint32_t deletion_time_size = sizeof(uint32_t);
         uint32_t deletion_time = cell.deletion_time().time_since_epoch().count();
 
-        _c_stats.update_local_deletion_time(deletion_time);
-        _c_stats.tombstone_histogram.update(deletion_time);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(deletion_time);
 
         write(_version, out, mask, timestamp, deletion_time_size, deletion_time);
         return;
@@ -1572,11 +1571,10 @@ void sstable::write_cell(file_writer& out, atomic_cell_view cell, const column_d
         uint32_t expiration = cell.expiry().time_since_epoch().count();
         disk_data_value_view<uint32_t> cell_value { cell.value() };
 
-        _c_stats.update_local_deletion_time(expiration);
         // tombstone histogram is updated with expiration time because if ttl is longer
         // than gc_grace_seconds for all data, sstable will be considered fully expired
         // when actually nothing is expired.
-        _c_stats.tombstone_histogram.update(expiration);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(expiration);
 
         write(_version, out, mask, ttl, expiration, timestamp, cell_value);
     } else {
@@ -1607,13 +1605,16 @@ void sstable::maybe_write_row_marker(file_writer& out, const schema& schema, con
         uint32_t deletion_time_size = sizeof(uint32_t);
         uint32_t deletion_time = marker.deletion_time().time_since_epoch().count();
 
-        _c_stats.tombstone_histogram.update(deletion_time);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(deletion_time);
 
         write(_version, out, mask, timestamp, deletion_time_size, deletion_time);
     } else if (marker.is_expiring()) {
         column_mask mask = column_mask::expiration;
         uint32_t ttl = marker.ttl().count();
         uint32_t expiration = marker.expiry().time_since_epoch().count();
+
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(expiration);
+
         write(_version, out, mask, ttl, expiration, timestamp, value_length);
     } else {
         column_mask mask = column_mask::none;
@@ -1626,8 +1627,7 @@ void sstable::write_deletion_time(file_writer& out, const tombstone t) {
     uint32_t deletion_time = t.deletion_time.time_since_epoch().count();
 
     update_cell_stats(_c_stats, timestamp);
-    _c_stats.update_local_deletion_time(deletion_time);
-    _c_stats.tombstone_histogram.update(deletion_time);
+    _c_stats.update_local_deletion_time_and_tombstone_histogram(deletion_time);
 
     write(_version, out, deletion_time, timestamp);
 }
@@ -2039,9 +2039,7 @@ void components_writer::consume(tombstone t) {
         d.local_deletion_time = t.deletion_time.time_since_epoch().count();
         d.marked_for_delete_at = t.timestamp;
 
-        _sst._c_stats.tombstone_histogram.update(d.local_deletion_time);
-        _sst._c_stats.update_local_deletion_time(d.local_deletion_time);
-        _sst._c_stats.update_timestamp(d.marked_for_delete_at);
+        _sst._c_stats.update(d);
     } else {
         // Default values for live, undeleted rows.
         d.local_deletion_time = std::numeric_limits<int32_t>::max();
@@ -2386,6 +2384,20 @@ sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partition
     return sstable_writer(*this, s, estimated_partitions, cfg, enc_stats, pc, shard);
 }
 
+// Encoding stats for compaction are based on the sstable's stats metadata
+// since, in contract to the mc-format encoding_stats that are evaluated
+// before the sstable data is written, the stats metadata is updated during
+// writing so it provides actual minimum values of the written timestamps.
+encoding_stats sstable::get_encoding_stats_for_compaction() const {
+    encoding_stats enc_stats;
+
+    enc_stats.min_timestamp = _c_stats.timestamp_tracker.min();
+    enc_stats.min_local_deletion_time = _c_stats.local_deletion_time_tracker.min();
+    enc_stats.min_ttl = _c_stats.ttl_tracker.min();
+
+    return enc_stats;
+}
+
 future<> sstable::write_components(
         flat_mutation_reader mr,
         uint64_t estimated_partitions,
@@ -2524,8 +2536,8 @@ std::vector<sstring> sstable::component_filenames() const {
     return res;
 }
 
-bool sstable::is_staging() const {
-    return boost::algorithm::ends_with(_dir, "staging");
+bool sstable::requires_view_building() const {
+    return boost::algorithm::ends_with(_dir, "staging") || boost::algorithm::ends_with(_dir, "upload");
 }
 
 sstring sstable::filename(const sstring& dir, const sstring& ks, const sstring& cf, version_types version, int64_t generation,

@@ -2594,7 +2594,11 @@ bool collection_type_impl::mutation::compact_and_expire(row_tombstone base_tomb,
     can_gc_fn& can_gc, gc_clock::time_point gc_before)
 {
     bool any_live = false;
-    tomb.apply(base_tomb.regular());
+    auto t = tomb;
+    if (tomb <= base_tomb.regular() || (tomb.deletion_time < gc_before && can_gc(tomb))) {
+        tomb = tombstone();
+    }
+    t.apply(base_tomb.regular());
     std::vector<std::pair<bytes, atomic_cell>> survivors;
     for (auto&& name_and_cell : cells) {
         atomic_cell& cell = name_and_cell.second;
@@ -2602,7 +2606,7 @@ bool collection_type_impl::mutation::compact_and_expire(row_tombstone base_tomb,
             return cell.deletion_time() >= gc_before || !can_gc(tombstone(cell.timestamp(), cell.deletion_time()));
         };
 
-        if (cell.is_covered_by(tomb, false)) {
+        if (cell.is_covered_by(t, false)) {
             continue;
         }
         if (cell.has_expired(query_time)) {
@@ -2620,9 +2624,6 @@ bool collection_type_impl::mutation::compact_and_expire(row_tombstone base_tomb,
         }
     }
     cells = std::move(survivors);
-    if (tomb.deletion_time < gc_before && can_gc(tomb)) {
-        tomb = tombstone();
-    }
     return any_live;
 }
 
@@ -3459,11 +3460,21 @@ tuple_type_impl::hash(bytes_view v) const {
 
 shared_ptr<cql3::cql3_type>
 tuple_type_impl::as_cql3_type() const {
-    return cql3::make_cql3_tuple_type(static_pointer_cast<const tuple_type_impl>(shared_from_this()));
+    auto tuple_name = is_multi_cell() ? "tuple<{}>" : "frozen<tuple<{}>>";
+    auto name = format(std::move(tuple_name),
+                       ::join(", ",
+                            all_types()
+                            | boost::adaptors::transformed(std::mem_fn(&abstract_type::as_cql3_type))));
+    return make_shared<cql3::cql3_type>(std::move(name), shared_from_this(), false);
 }
 
 sstring
 tuple_type_impl::make_name(const std::vector<data_type>& types) {
+    // To keep format compatibility with Origin we never wrap
+    // tuple name into
+    // "org.apache.cassandra.db.marshal.FrozenType(...)".
+    // Even when the tuple is frozen.
+    // For more details see #4087
     return format("org.apache.cassandra.db.marshal.TupleType({})", ::join(", ", types | boost::adaptors::transformed(std::mem_fn(&abstract_type::name))));
 }
 
@@ -3509,12 +3520,20 @@ user_type_impl::get_name_as_string() const {
 
 shared_ptr<cql3::cql3_type>
 user_type_impl::as_cql3_type() const {
-    return make_shared<cql3::cql3_type>(get_name_as_string(), shared_from_this(), false);
+    auto name = is_multi_cell() ? get_name_as_string() : "frozen<" + get_name_as_string() + ">";
+    return make_shared<cql3::cql3_type>(std::move(name), shared_from_this(), false);
 }
 
 sstring
-user_type_impl::make_name(sstring keyspace, bytes name, std::vector<bytes> field_names, std::vector<data_type> field_types) {
+user_type_impl::make_name(sstring keyspace,
+                          bytes name,
+                          std::vector<bytes> field_names,
+                          std::vector<data_type> field_types,
+                          bool is_multi_cell) {
     std::ostringstream os;
+    if (!is_multi_cell) {
+        os << "org.apache.cassandra.db.marshal.FrozenType(";
+    }
     os << "org.apache.cassandra.db.marshal.UserType(" << keyspace << "," << to_hex(name);
     for (size_t i = 0; i < field_names.size(); ++i) {
         os << ",";
@@ -3522,6 +3541,9 @@ user_type_impl::make_name(sstring keyspace, bytes name, std::vector<bytes> field
         os << field_types[i]->name(); // FIXME: ignore frozen<>
     }
     os << ")";
+    if (!is_multi_cell) {
+        os << ")";
+    }
     return os.str();
 }
 

@@ -666,7 +666,7 @@ void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsi
     new_sstables->insert(sstable);
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk(), shards_for_the_sstable);
-    if (sstable->is_staging()) {
+    if (sstable->requires_view_building()) {
         _sstables_staging.emplace(sstable->generation(), sstable);
     } else {
         _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
@@ -996,7 +996,7 @@ table::start() {
 future<>
 table::stop() {
     return _async_gate.close().then([this] {
-        return when_all(await_pending_writes(), await_pending_reads()).discard_result().finally([this] {
+        return when_all(await_pending_writes(), await_pending_reads(), await_pending_streams()).discard_result().finally([this] {
             return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
                 return _compaction_manager.remove(this).then([this] {
                     // Nest, instead of using when_all, so we don't lose any exceptions.
@@ -1191,6 +1191,7 @@ table::on_compaction_completion(const std::vector<sstables::shared_sstable>& new
 
     // This is done in the background, so we can consider this compaction completed.
     seastar::with_gate(_sstable_deletion_gate, [this, sstables_to_remove] {
+       return with_semaphore(_sstable_deletion_sem, 1, [this, sstables_to_remove = std::move(sstables_to_remove)] {
         return sstables::delete_atomically(sstables_to_remove, *get_large_partition_handler()).then_wrapped([this, sstables_to_remove] (future<> f) {
             std::exception_ptr eptr;
             try {
@@ -1214,6 +1215,7 @@ table::on_compaction_completion(const std::vector<sstables::shared_sstable>& new
                 return make_exception_future<>(eptr);
             }
             return make_ready_future<>();
+         });
         }).then([this] {
             // refresh underlying data source in row cache to prevent it from holding reference
             // to sstables files which were previously deleted.
@@ -1454,7 +1456,7 @@ const sstables::sstable_set& table::get_sstable_set() const {
     return *_sstables;
 }
 
-lw_shared_ptr<sstable_list> table::get_sstables() const {
+lw_shared_ptr<const sstable_list> table::get_sstables() const {
     return _sstables->all();
 }
 
@@ -1480,7 +1482,7 @@ std::vector<sstables::shared_sstable> table::sstables_need_rewrite() const {
 // As long as we haven't deleted them, compaction needs to ensure it doesn't
 // garbage-collect a tombstone that covers data in an sstable that may not be
 // successfully deleted.
-lw_shared_ptr<sstable_list> table::get_sstables_including_compacted_undeleted() const {
+lw_shared_ptr<const sstable_list> table::get_sstables_including_compacted_undeleted() const {
     if (_sstables_compacted_but_not_deleted.empty()) {
         return get_sstables();
     }
@@ -1685,6 +1687,7 @@ seal_snapshot(sstring jsondir) {
 
 future<> table::snapshot(sstring name) {
     return flush().then([this, name = std::move(name)]() {
+       return with_semaphore(_sstable_deletion_sem, 1, [this, name = std::move(name)]() {
         auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables->all());
         return do_with(std::move(tables), [this, name](std::vector<sstables::shared_sstable> & tables) {
             auto jsondir = _config.datadir + "/snapshots/" + name;
@@ -1744,6 +1747,7 @@ future<> table::snapshot(sstring name) {
                 });
             });
         });
+       });
     });
 }
 
@@ -2284,7 +2288,7 @@ write_memtable_to_sstable(memtable& mt, sstables::shared_sstable sst,
     cfg.monitor = &monitor;
     cfg.large_partition_handler = lp_handler;
     return sst->write_components(mt.make_flush_reader(mt.schema(), pc), mt.partition_count(),
-        mt.schema(), cfg, mt.get_stats(), pc);
+        mt.schema(), cfg, mt.get_encoding_stats(), pc);
 }
 
 future<>

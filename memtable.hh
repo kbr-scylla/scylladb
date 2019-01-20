@@ -25,6 +25,7 @@
 #include "partition_version.hh"
 #include "flat_mutation_reader.hh"
 #include "mutation_cleaner.hh"
+#include "sstables/types.hh"
 
 class frozen_mutation;
 
@@ -131,39 +132,36 @@ private:
     mutation_source_opt _underlying;
     uint64_t _flushed_memory = 0;
 
-    class encoding_stats_collector {
+    class memtable_encoding_stats_collector : public encoding_stats_collector {
     private:
-        min_max_tracker<api::timestamp_type> timestamp;
-        min_tracker<int32_t> min_local_deletion_time;
-        min_tracker<int32_t> min_ttl;
+        max_tracker<api::timestamp_type> max_timestamp;
 
         void update_timestamp(api::timestamp_type ts) {
             if (ts != api::missing_timestamp) {
-                timestamp.update(ts);
+                encoding_stats_collector::update_timestamp(ts);
+                max_timestamp.update(ts);
             }
         }
 
     public:
-        encoding_stats_collector()
-            : timestamp(encoding_stats::timestamp_epoch, 0)
-            , min_local_deletion_time(encoding_stats::deletion_time_epoch)
-            , min_ttl(encoding_stats::ttl_epoch)
+        memtable_encoding_stats_collector()
+            : max_timestamp(0)
         {}
 
         void update(atomic_cell_view cell) {
             update_timestamp(cell.timestamp());
             if (cell.is_live_and_has_ttl()) {
-                min_ttl.update(cell.ttl().count());
-                min_local_deletion_time.update(cell.expiry().time_since_epoch().count());
+                update_ttl(cell.ttl().count());
+                update_local_deletion_time(cell.expiry().time_since_epoch().count());
             } else if (!cell.is_live()) {
-                min_local_deletion_time.update(cell.deletion_time().time_since_epoch().count());
+                update_local_deletion_time(cell.deletion_time().time_since_epoch().count());
             }
         }
 
         void update(tombstone tomb) {
             if (tomb) {
                 update_timestamp(tomb.timestamp);
-                min_local_deletion_time.update(tomb.deletion_time.time_since_epoch().count());
+                update_local_deletion_time(tomb.deletion_time.time_since_epoch().count());
             }
         }
 
@@ -176,6 +174,11 @@ private:
                     auto ctype = static_pointer_cast<const collection_type_impl>(col.type);
                   item.as_collection_mutation().data.with_linearized([&] (bytes_view bv) {
                     auto mview = ctype->deserialize_mutation_form(bv);
+                    // Note: when some of the collection cells are dead and some are live
+                    // we need to encode a "live" deletion_time for the living ones.
+                    // It is not strictly required to update encoding_stats for the latter case
+                    // since { <int64_t>.min(), <int32_t>.max() } will not affect the encoding_stats
+                    // minimum values.  (See #4035)
                     update(mview.tomb);
                     for (auto& entry : mview.cells) {
                         update(entry.second);
@@ -193,10 +196,11 @@ private:
             update_timestamp(marker.timestamp());
             if (!marker.is_missing()) {
                 if (!marker.is_live()) {
-                    min_local_deletion_time.update(marker.deletion_time().time_since_epoch().count());
+                    update_ttl(sstables::expired_liveness_ttl);
+                    update_local_deletion_time(marker.deletion_time().time_since_epoch().count());
                 } else if (marker.is_expiring()) {
-                    min_ttl.update(marker.ttl().count());
-                    min_local_deletion_time.update(marker.expiry().time_since_epoch().count());
+                    update_ttl(marker.ttl().count());
+                    update_local_deletion_time(marker.expiry().time_since_epoch().count());
                 }
             }
         }
@@ -220,12 +224,8 @@ private:
             }
         }
 
-        encoding_stats get() const {
-            return { timestamp.min(), min_local_deletion_time.get(), min_ttl.get() };
-        }
-
-        api::timestamp_type max_timestamp() const {
-            return timestamp.max();
+        api::timestamp_type get_max_timestamp() const {
+            return max_timestamp.get();
         }
     } _stats_collector;
 
@@ -276,12 +276,13 @@ public:
     logalloc::region_group* region_group() {
         return group();
     }
-    encoding_stats get_stats() const {
+
+    encoding_stats get_encoding_stats() const {
         return _stats_collector.get();
     }
 
     api::timestamp_type get_max_timestamp() const {
-        return _stats_collector.max_timestamp();
+        return _stats_collector.get_max_timestamp();
     }
 
     mutation_cleaner& cleaner() {

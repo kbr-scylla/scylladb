@@ -18,6 +18,7 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_ptr.hh>
 
+#include "../db/view/view_update_generator.hh"
 #include "transport/messages/result_message_base.hh"
 #include "cql3/query_options_fwd.hh"
 #include "cql3/values.hh"
@@ -25,7 +26,6 @@
 #include "bytes.hh"
 #include "schema.hh"
 #include "tests/eventually.hh"
-#include "db/view/view_update_from_staging_generator.hh"
 
 class database;
 
@@ -93,7 +93,7 @@ public:
 
     virtual db::view::view_builder& local_view_builder() = 0;
 
-    virtual db::view::view_update_from_staging_generator& local_view_update_generator() = 0;
+    virtual db::view::view_update_generator& local_view_update_generator() = 0;
 };
 
 future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func);

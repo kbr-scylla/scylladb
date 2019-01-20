@@ -352,20 +352,13 @@ static bytes_array_vint_size to_bytes_array_vint_size(const sstring& s) {
     return result;
 }
 
-sstring type_name_with_udt_frozen(data_type type) {
-    if (type->is_user_type()) {
-        return "org.apache.cassandra.db.marshal.FrozenType(" + type->name() + ")";
-    }
-    return type->name();
-}
-
 static sstring pk_type_to_string(const schema& s) {
     if (s.partition_key_size() == 1) {
-        return type_name_with_udt_frozen(s.partition_key_columns().begin()->type);
+        return s.partition_key_columns().begin()->type->name();
     } else {
         sstring type_params = ::join(",", s.partition_key_columns()
                                           | boost::adaptors::transformed(std::mem_fn(&column_definition::type))
-                                          | boost::adaptors::transformed(type_name_with_udt_frozen));
+                                          | boost::adaptors::transformed(std::mem_fn(&abstract_type::name)));
         return "org.apache.cassandra.db.marshal.CompositeType(" + type_params + ")";
     }
 }
@@ -381,7 +374,7 @@ serialization_header make_serialization_header(const schema& s, const encoding_s
 
     header.clustering_key_types_names.elements.reserve(s.clustering_key_size());
     for (const auto& ck_column : s.clustering_key_columns()) {
-        auto ck_type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(ck_column.type));
+        auto ck_type_name = to_bytes_array_vint_size(ck_column.type->name());
         header.clustering_key_types_names.elements.push_back(std::move(ck_type_name));
     }
 
@@ -389,7 +382,7 @@ serialization_header make_serialization_header(const schema& s, const encoding_s
     for (const auto& static_column : s.static_columns()) {
         serialization_header::column_desc cd;
         cd.name = to_bytes_array_vint_size(static_column.name());
-        cd.type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(static_column.type));
+        cd.type_name = to_bytes_array_vint_size(static_column.type->name());
         header.static_columns.elements.push_back(std::move(cd));
     }
 
@@ -397,7 +390,7 @@ serialization_header make_serialization_header(const schema& s, const encoding_s
     for (const auto& regular_column : s.regular_columns()) {
         serialization_header::column_desc cd;
         cd.name = to_bytes_array_vint_size(regular_column.name());
-        cd.type_name = to_bytes_array_vint_size(type_name_with_udt_frozen(regular_column.type));
+        cd.type_name = to_bytes_array_vint_size(regular_column.type->name());
         header.regular_columns.elements.push_back(std::move(cd));
     }
 
@@ -522,7 +515,7 @@ static indexed_columns get_indexed_columns_partitioned_by_atomicity(schema::cons
 // Used for writing SSTables in 'mc' format.
 class writer : public sstable_writer::writer_impl {
 private:
-    encoding_stats _enc_stats;
+    const encoding_stats _enc_stats;
     shard_id _shard; // Specifies which shard the new SStable will belong to.
     bool _compression_enabled = false;
     std::unique_ptr<file_writer> _data_writer;
@@ -607,12 +600,6 @@ private:
     void maybe_set_pi_first_clustering(const clustering_info& info);
     void maybe_add_pi_block();
     void add_pi_block();
-
-    void update_deletion_time_stats(deletion_time dt) {
-        _c_stats.update_timestamp(dt.marked_for_delete_at);
-        _c_stats.update_local_deletion_time(dt.local_deletion_time);
-        _c_stats.tombstone_histogram.update(dt.local_deletion_time);
-    }
 
     uint64_t get_data_offset() const {
         if (_sst.has_component(component_type::CompressionInfo)) {
@@ -919,9 +906,7 @@ void writer::consume(tombstone t) {
     auto dt = to_deletion_time(t);
     write(_sst.get_version(), *_data_writer, dt);
     _partition_header_length += (_data_writer->offset() - current_pos);
-    if (t) {
-        update_deletion_time_stats(dt);
-    }
+    _c_stats.update(t);
 
     _pi_write_m.tomb = t;
     _tombstone_written = true;
@@ -991,8 +976,7 @@ void writer::write_cell(bytes_ostream& writer, atomic_cell_view cell, const colu
     _c_stats.update_timestamp(cell.timestamp());
     if (is_deleted) {
         auto ldt = cell.deletion_time().time_since_epoch().count();
-        _c_stats.update_local_deletion_time(ldt);
-        _c_stats.tombstone_histogram.update(ldt);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(ldt);
         _sst.get_stats().on_cell_tombstone_write();
         return;
     }
@@ -1001,11 +985,10 @@ void writer::write_cell(bytes_ostream& writer, atomic_cell_view cell, const colu
         auto expiration = cell.expiry().time_since_epoch().count();
         auto ttl = cell.ttl().count();
         _c_stats.update_ttl(ttl);
-        _c_stats.update_local_deletion_time(expiration);
         // tombstone histogram is updated with expiration time because if ttl is longer
         // than gc_grace_seconds for all data, sstable will be considered fully expired
         // when actually nothing is expired.
-        _c_stats.tombstone_histogram.update(expiration);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(expiration);
     } else { // regular live cell
         _c_stats.update_local_deletion_time(std::numeric_limits<int>::max());
     }
@@ -1017,13 +1000,13 @@ void writer::write_liveness_info(bytes_ostream& writer, const row_marker& marker
         return;
     }
 
-    uint64_t timestamp = marker.timestamp();
+    api::timestamp_type timestamp = marker.timestamp();
     _c_stats.update_timestamp(timestamp);
     write_delta_timestamp(writer, timestamp);
 
     auto write_expiring_liveness_info = [this, &writer] (uint32_t ttl, uint64_t ldt) {
         _c_stats.update_ttl(ttl);
-        _c_stats.update_local_deletion_time(ldt);
+        _c_stats.update_local_deletion_time_and_tombstone_histogram(ldt);
         write_delta_ttl(writer, ttl);
         write_delta_local_deletion_time(writer, ldt);
     };
@@ -1045,10 +1028,7 @@ void writer::write_collection(bytes_ostream& writer, const column_definition& cd
         if (has_complex_deletion) {
             auto dt = to_deletion_time(mview.tomb);
             write_delta_deletion_time(writer, dt);
-            if (mview.tomb) {
-                _c_stats.update_timestamp(dt.marked_for_delete_at);
-                _c_stats.update_local_deletion_time(dt.local_deletion_time);
-            }
+            _c_stats.update(mview.tomb);
         }
 
         write_vint(writer, mview.cells.size());
@@ -1091,7 +1071,7 @@ void writer::write_row_body(bytes_ostream& writer, const clustering_row& row, bo
     write_liveness_info(writer, row.marker());
     auto write_tombstone_and_update_stats = [this, &writer] (const tombstone& t) {
         auto dt = to_deletion_time(t);
-        update_deletion_time_stats(dt);
+        _c_stats.do_update(t);
         write_delta_deletion_time(writer, dt);
     };
     if (row.tomb().regular()) {
@@ -1280,11 +1260,11 @@ void writer::write_clustered(const rt_marker& marker, uint64_t prev_row_size) {
     auto write_marker_body = [this, &marker] (bytes_ostream& writer) {
         auto dt = to_deletion_time(marker.tomb);
         write_delta_deletion_time(writer, dt);
-        update_deletion_time_stats(dt);
+        _c_stats.update(marker.tomb);
         if (marker.boundary_tomb) {
             auto dt_boundary = to_deletion_time(*marker.boundary_tomb);
             write_delta_deletion_time(writer, dt_boundary);
-            update_deletion_time_stats(dt_boundary);
+            _c_stats.do_update(*marker.boundary_tomb);
         }
     };
 
