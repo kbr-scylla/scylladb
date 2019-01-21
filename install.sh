@@ -116,6 +116,7 @@ install -m755 lib/* -Dt "$root/opt/scylladb/lib"
 ln -sf /opt/scylladb/bin/scylla "$rprefix/bin/scylla"
 ln -sf /opt/scylladb/bin/iotune "$rprefix/bin/iotune"
 install -m755 dist/common/bin/scyllatop -Dt "$rprefix/bin"
+install -m755 dist/common/bin/scyllarepair -Dt "$rprefix/bin"
 install -m644 dist/common/scripts/scylla_blocktune.py -Dt "$rprefix"/lib/scylla/
 install -m755 dist/common/scripts/scylla-blocktune -Dt "$rprefix"/lib/scylla/
 install -m755 scylla-housekeeping -Dt "$rprefix"/lib/scylla/
