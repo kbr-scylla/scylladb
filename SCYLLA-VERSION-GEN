@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION=9999.enterprise-dev
+VERSION=9999.enterprise_dev
 
 if test -f version
 then
