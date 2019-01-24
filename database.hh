@@ -889,6 +889,10 @@ public:
         return *_config.read_concurrency_semaphore;
     }
 
+    reader_concurrency_semaphore& streaming_read_concurrency_semaphore() {
+        return *_config.streaming_read_concurrency_semaphore;
+    }
+
 private:
     future<row_locker::lock_holder> do_push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout, mutation_source&& source) const;
     std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update) const;
@@ -939,11 +943,6 @@ private:
     // filter manifest.json files out
     static bool manifest_json_filter(const fs::path&, const directory_entry& entry);
 
-    // Iterate over all partitions.  Protocol is the same as std::all_of(),
-    // so that iteration can be stopped by returning false.
-    // Func signature: bool (const decorated_key& dk, const mutation_partition& mp)
-    template <typename Func>
-    future<bool> for_all_partitions(schema_ptr, Func&& func) const;
     void check_valid_rp(const db::replay_position&) const;
 public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
@@ -1262,6 +1261,7 @@ private:
     query::querier_cache _querier_cache;
 
     std::unique_ptr<db::large_partition_handler> _large_partition_handler;
+    std::unique_ptr<db::large_partition_handler> _nop_large_partition_handler;
 
     query::result_memory_limiter _result_memory_limiter;
 
@@ -1413,6 +1413,10 @@ public:
         return _large_partition_handler.get();
     }
 
+    db::large_partition_handler* get_nop_large_partition_handler() const {
+        return _nop_large_partition_handler.get();
+    }
+
     future<> flush_all_memtables();
 
     // See #937. Truncation now requires a callback to get a time stamp
@@ -1435,15 +1439,6 @@ public:
     std::unordered_set<sstring> get_initial_tokens();
     std::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
-    reader_concurrency_semaphore& user_read_concurrency_sem() {
-        return _read_concurrency_sem;
-    }
-    reader_concurrency_semaphore& streaming_read_concurrency_sem() {
-        return _streaming_concurrency_sem;
-    }
-    reader_concurrency_semaphore& system_keyspace_read_concurrency_sem() {
-        return _system_read_concurrency_sem;
-    }
     semaphore& sstable_load_concurrency_sem() {
         return _sstable_load_concurrency_sem;
     }

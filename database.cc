@@ -151,6 +151,7 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _enable_incremental_backups(cfg.incremental_backups())
     , _querier_cache(_read_concurrency_sem, dbcfg.available_memory * 0.04)
     , _large_partition_handler(std::make_unique<db::cql_table_large_partition_handler>(_cfg->compaction_large_partition_warning_threshold_mb()*1024*1024))
+    , _nop_large_partition_handler(std::make_unique<db::nop_large_partition_handler>())
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>(*this))
 {
@@ -454,13 +455,9 @@ const utils::UUID& database::get_version() const {
     return _version;
 }
 
-template <typename Func>
 static future<>
-do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring& _cf_name, Func&& func) {
+do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring& _cf_name, std::function<future<> (db::schema_tables::schema_result_value_type&)> func) {
     using namespace db::schema_tables;
-    static_assert(std::is_same<future<>, std::result_of_t<Func(schema_result_value_type&)>>::value,
-                  "bad Func signature");
-
 
     auto cf_name = make_lw_shared<sstring>(_cf_name);
     return db::system_keyspace::query(proxy, db::schema_tables::NAME, *cf_name).then([] (auto rs) {
@@ -470,14 +467,14 @@ do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring
             names.emplace(keyspace_name);
         }
         return std::move(names);
-    }).then([&proxy, cf_name, func = std::forward<Func>(func)] (std::set<sstring>&& names) mutable {
-        return parallel_for_each(names.begin(), names.end(), [&proxy, cf_name, func = std::forward<Func>(func)] (sstring name) mutable {
+    }).then([&proxy, cf_name, func = std::move(func)] (std::set<sstring>&& names) mutable {
+        return parallel_for_each(names.begin(), names.end(), [&proxy, cf_name, func = std::move(func)] (sstring name) mutable {
             if (is_system_keyspace(name)) {
                 return make_ready_future<>();
             }
 
             return read_schema_partition_for_keyspace(proxy, *cf_name, name).then([func, cf_name] (auto&& v) mutable {
-                return do_with(std::move(v), [func = std::forward<Func>(func), cf_name] (auto& v) {
+                return do_with(std::move(v), [func = std::move(func), cf_name] (auto& v) {
                     return func(v).then_wrapped([cf_name, &v] (future<> f) {
                         try {
                             f.get();
@@ -810,7 +807,14 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.streaming_scheduling_group = _config.streaming_scheduling_group;
     cfg.statement_scheduling_group = _config.statement_scheduling_group;
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
-    cfg.large_partition_handler = db.get_large_partition_handler();
+
+    // avoid self-reporting
+    if (s.ks_name() == "system" && s.cf_name() == db::system_keyspace::LARGE_PARTITIONS) {
+        cfg.large_partition_handler = db.get_nop_large_partition_handler();
+    } else {
+        cfg.large_partition_handler = db.get_large_partition_handler();
+    }
+
     cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
     cfg.view_update_concurrency_semaphore_limit = _config.view_update_concurrency_semaphore_limit;
     cfg.data_listeners = &db.data_listeners();
@@ -1001,8 +1005,8 @@ compare_atomic_cell_for_merge(atomic_cell_view left, atomic_cell_view right) {
             // delegates to AbstractCell.reconcile() which compares values after
             // comparing timestamps, which in case of deleted cells will hold
             // serialized expiry.
-            return (uint32_t) left.deletion_time().time_since_epoch().count()
-                   < (uint32_t) right.deletion_time().time_since_epoch().count() ? -1 : 1;
+            return (uint64_t) left.deletion_time().time_since_epoch().count()
+                   < (uint64_t) right.deletion_time().time_since_epoch().count() ? -1 : 1;
         }
     }
     return 0;
@@ -1783,6 +1787,7 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             std::unique_ptr<const dht::partition_range> range;
             foreign_unique_ptr<utils::phased_barrier::operation> read_operation;
             std::optional<reader_concurrency_semaphore::inactive_read_handle> pause_handle_opt;
+            reader_concurrency_semaphore* semaphore;
         };
         distributed<database>& _db;
         std::vector<reader_context> _contexts;
@@ -1801,12 +1806,14 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             return _db.invoke_on(shard, [gs = global_schema_ptr(std::move(schema)), range = _contexts[shard].range.get(), fwd_mr] (database& db) {
                 auto schema = gs.get();
                 auto& cf = db.find_column_family(schema);
-                return make_ready_future<foreign_unique_ptr<utils::phased_barrier::operation>, foreign_unique_ptr<flat_mutation_reader>>(
+                return make_ready_future<foreign_unique_ptr<utils::phased_barrier::operation>, foreign_unique_ptr<flat_mutation_reader>, reader_concurrency_semaphore*>(
                         make_foreign(std::make_unique<utils::phased_barrier::operation>(cf.read_in_progress())),
-                        make_foreign(std::make_unique<flat_mutation_reader>(cf.make_streaming_reader(std::move(schema), *range, fwd_mr))));
+                        make_foreign(std::make_unique<flat_mutation_reader>(cf.make_streaming_reader(std::move(schema), *range, fwd_mr))),
+                        &cf.streaming_read_concurrency_semaphore());
             }).then([this, zis = shared_from_this(), shard] (foreign_unique_ptr<utils::phased_barrier::operation> read_operation,
-                    foreign_unique_ptr<flat_mutation_reader> reader) {
+                    foreign_unique_ptr<flat_mutation_reader> reader, reader_concurrency_semaphore* semaphore) {
                 _contexts[shard].read_operation = std::move(read_operation);
+                _contexts[shard].semaphore = semaphore;
                 return std::move(reader);
             });
         }
@@ -1819,15 +1826,15 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
         }
         virtual future<> pause(foreign_unique_ptr<flat_mutation_reader> reader) override {
             const auto shard = reader.get_owner_shard();
-            return _db.invoke_on(shard, [reader = std::move(reader)] (database& db) mutable {
-                return db.streaming_read_concurrency_sem().register_inactive_read(std::make_unique<inactive_read>(std::move(reader)));
+            return _db.invoke_on(shard, [sem = _contexts[shard].semaphore, reader = std::move(reader)] (database& db) mutable {
+                return sem->register_inactive_read(std::make_unique<inactive_read>(std::move(reader)));
             }).then([this, zis = shared_from_this(), shard] (reader_concurrency_semaphore::inactive_read_handle handle) {
                 _contexts[shard].pause_handle_opt = handle;
             });
         }
         virtual future<foreign_unique_ptr<flat_mutation_reader>> try_resume(shard_id shard) override {
-            return _db.invoke_on(shard, [handle = *_contexts[shard].pause_handle_opt] (database& db) mutable {
-                if (auto ir_ptr = db.streaming_read_concurrency_sem().unregister_inactive_read(handle)) {
+            return _db.invoke_on(shard, [sem = _contexts[shard].semaphore, handle = *_contexts[shard].pause_handle_opt] (database& db) mutable {
+                if (auto ir_ptr = sem->unregister_inactive_read(handle)) {
                     return std::move(static_cast<inactive_read&>(*ir_ptr).reader);
                 }
                 return foreign_unique_ptr<flat_mutation_reader>{};

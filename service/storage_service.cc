@@ -2065,9 +2065,11 @@ future<int64_t> storage_service::true_snapshots_size() {
     });
 }
 
+static std::atomic<bool> isolated = { false };
+
 future<> storage_service::start_rpc_server() {
     return run_with_api_lock(sstring("start_rpc_server"), [] (storage_service& ss) {
-        if (ss._thrift_server) {
+        if (ss._thrift_server || isolated.load()) {
             return make_ready_future<>();
         }
 
@@ -2121,7 +2123,7 @@ future<bool> storage_service::is_rpc_server_running() {
 
 future<> storage_service::start_native_transport() {
     return run_with_api_lock(sstring("start_native_transport"), [] (storage_service& ss) {
-        if (ss._cql_server) {
+        if (ss._cql_server || isolated.load()) {
             return make_ready_future<>();
         }
         auto cserver = make_shared<distributed<cql_transport::cql_server>>();
@@ -3095,8 +3097,6 @@ void storage_service::uninit_messaging_service() {
     auto& ms = netw::get_local_messaging_service();
     ms.unregister_replication_finished();
 }
-
-static std::atomic<bool> isolated = { false };
 
 void storage_service::do_isolate_on_error(disk_error type)
 {
