@@ -25,6 +25,7 @@
 #include "cql3/query_processor.hh"
 #include "schema.hh"
 #include "service/migration_manager.hh"
+#include "service/qos/qos_common.hh"
 #include "utils/UUID.hh"
 
 #include <seastar/core/future.hh>
@@ -38,6 +39,7 @@ class system_distributed_keyspace {
 public:
     static constexpr auto NAME = "system_distributed";
     static constexpr auto VIEW_BUILD_STATUS = "view_build_status";
+    static constexpr auto SERVICE_LEVELS = "service_levels";
 
 private:
     cql3::query_processor& _qp;
@@ -53,6 +55,10 @@ public:
     future<> start_view_build(sstring ks_name, sstring view_name) const;
     future<> finish_view_build(sstring ks_name, sstring view_name) const;
     future<> remove_view(sstring ks_name, sstring view_name) const;
+    future<qos::service_levels_info> get_service_levels() const;
+    future<qos::service_levels_info> get_service_level(sstring service_level_name) const;
+    future<> set_service_level(sstring service_level_name, qos::service_level_options slo) const;
+    future<> drop_service_level(sstring service_level_name) const;
 };
 
 }
