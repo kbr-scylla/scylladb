@@ -23,6 +23,7 @@
 #include "service/migration_manager.hh"
 #include "service/load_broadcaster.hh"
 #include "service/view_update_backlog_broker.hh"
+#include "service/qos/service_level_controller.hh"
 #include "streaming/stream_session.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
@@ -514,6 +515,16 @@ int main(int ac, char** av) {
             static sharded<auth::service> auth_service;
             static sharded<db::system_distributed_keyspace> sys_dist_ks;
             static sharded<db::view::view_update_generator> view_update_generator;
+            static sharded<qos::service_level_controller> sl_controller;
+
+            //starting service level controller
+            qos::service_level_options default_service_level_configuration;
+            default_service_level_configuration.shares = 1000;
+            sl_controller.start(default_service_level_configuration).get();
+            sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
+            //This starts the update loop - but no real update happens until the data accessor is not initialized.
+            sl_controller.local().update_from_distributed_data(std::chrono::seconds(10));
+
             supervisor::notify("initializing storage service");
             init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service);
             supervisor::notify("starting per-shard database core");
