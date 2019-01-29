@@ -39,6 +39,7 @@
 #include "gms/gossiper.hh"
 #include "gms/feature_service.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "auth/service.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
@@ -341,13 +342,18 @@ public:
             }
 
             const gms::inet_address listen("127.0.0.1");
+            auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto& ms = netw::get_messaging_service();
+            auto sl_controller = sharded<qos::service_level_controller>();
+            sl_controller.start(qos::service_level_options{1000}).get();
+            auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
+            sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
             // don't start listening so tests can be run in parallel
-            ms.start(listen, std::move(7000), false).get();
+            ms.start(std::ref(sl_controller), listen, std::move(7000), false).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
 
             auto auth_service = ::make_shared<sharded<auth::service>>();
-            auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
+
             auto stop_sys_dist_ks = defer([&sys_dist_ks] { sys_dist_ks.stop().get(); });
 
             auto feature_service = make_shared<sharded<gms::feature_service>>();
@@ -361,7 +367,7 @@ public:
             auto view_update_generator = ::make_shared<seastar::sharded<db::view::view_update_generator>>();
 
             auto& ss = service::get_storage_service();
-            ss.start(std::ref(*db), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), cfg_in.disabled_features).get();
+            ss.start(std::ref(*db), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), std::ref(sl_controller), cfg_in.disabled_features).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             database_config dbcfg;
@@ -496,13 +502,16 @@ class storage_service_for_tests::impl {
     sharded<auth::service> _auth_service;
     sharded<db::system_distributed_keyspace> _sys_dist_ks;
     sharded<db::view::view_update_generator> _view_update_generator;
+    sharded<qos::service_level_controller> _sl_controller;
+
 public:
     impl() {
         auto thread = seastar::thread_impl::get();
         assert(thread);
         _feature_service.start().get();
-        netw::get_messaging_service().start(gms::inet_address("127.0.0.1"), 7000, false).get();
-        service::get_storage_service().start(std::ref(_db), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service)).get();
+        _sl_controller.start(qos::service_level_options{1000}).get();
+        netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000, false).get();
+        service::get_storage_service().start(std::ref(_db), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), std::ref(_sl_controller)).get();
         service::get_storage_service().invoke_on_all([] (auto& ss) {
             ss.enable_all_features();
         }).get();
@@ -512,6 +521,7 @@ public:
         netw::get_messaging_service().stop().get();
         _db.stop().get();
         _feature_service.stop().get();
+        _sl_controller.stop().get();
     }
 };
 

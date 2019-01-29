@@ -86,6 +86,10 @@ using wrapping_partition_range = wrapping_range<dht::ring_position>;
 
 }
 
+namespace qos {
+    class service_level_controller;
+}
+
 namespace netw {
 
 /* All verb handler identifiers */
@@ -230,12 +234,13 @@ private:
     std::list<std::function<void(gms::inet_address ep)>> _connection_drop_notifiers;
     memory_config _mcfg;
     scheduling_config _scheduling_config;
+    qos::service_level_controller& _sl_controller;
 public:
     using clock_type = lowres_clock;
 public:
-    messaging_service(gms::inet_address ip = gms::inet_address("0.0.0.0"),
+    messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip = gms::inet_address("0.0.0.0"),
             uint16_t port = 7000, bool listen_now = true);
-    messaging_service(gms::inet_address ip, uint16_t port, encrypt_what, compress_what, tcp_nodelay_what,
+    messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip, uint16_t port, encrypt_what, compress_what, tcp_nodelay_what,
             uint16_t ssl_port, std::shared_ptr<seastar::tls::credentials_builder>,
             memory_config mcfg, scheduling_config scfg, bool sltba = false, bool listen_now = true);
     ~messaging_service();

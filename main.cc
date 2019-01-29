@@ -526,7 +526,7 @@ int main(int ac, char** av) {
             sl_controller.local().update_from_distributed_data(std::chrono::seconds(10));
 
             supervisor::notify("initializing storage service");
-            init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service);
+            init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service, sl_controller);
             supervisor::notify("starting per-shard database core");
 
             // Note: changed from using a move here, because we want the config object intact.
@@ -626,7 +626,8 @@ int main(int ac, char** av) {
             scfg.statement = dbcfg.statement_scheduling_group;
             scfg.streaming = dbcfg.streaming_scheduling_group;
             scfg.gossip = scheduling_group();
-            init_ms_fd_gossiper(feature_service
+            init_ms_fd_gossiper(sl_controller
+                    , feature_service
                     , listen_address
                     , storage_port
                     , ssl_storage_port

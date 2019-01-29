@@ -19,6 +19,7 @@
 #include "gms/gossip_digest_ack2.hh"
 #include "gms/gossip_digest.hh"
 #include "api/api.hh"
+#include "service/qos/service_level_controller.hh"
 
 using namespace std::chrono_literals;
 using namespace netw;
@@ -160,8 +161,9 @@ int main(int ac, char ** av) {
         ("cpuid", bpo::value<uint32_t>()->default_value(0), "Server cpuid");
 
     distributed<database> db;
+    distributed<qos::service_level_controller> sl_controller;
 
-    return app.run_deprecated(ac, av, [&app] {
+    return app.run_deprecated(ac, av, [&app, &sl_controller] {
         auto config = app.configuration();
         uint16_t api_port = config["api-port"].as<uint16_t>();
         bool stay_alive = config["stay-alive"].as<bool>();
@@ -170,7 +172,9 @@ int main(int ac, char ** av) {
         }
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
-        netw::get_messaging_service().start(listen).then([config, api_port, stay_alive] () {
+        sl_controller.start(qos::service_level_options{1000}).then([listen, &sl_controller] {
+            return netw::get_messaging_service().start(std::ref(sl_controller), listen);
+        }).then([config, api_port, stay_alive] () {
             auto testers = new distributed<tester>;
             testers->start().then([testers]{
                 auto& server = netw::get_local_messaging_service();

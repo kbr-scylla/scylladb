@@ -27,13 +27,14 @@ logging::logger startlog("init");
 // until proper shutdown is done.
 
 void init_storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service) {
-    service::init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service).get();
+        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, sharded<qos::service_level_controller>& sl_controller) {
+    service::init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service, sl_controller).get();
     // #293 - do not stop anything
     //engine().at_exit([] { return service::deinit_storage_service(); });
 }
 
-void init_ms_fd_gossiper(sharded<gms::feature_service>& features
+void init_ms_fd_gossiper(sharded<qos::service_level_controller>& sl_controller
+                , sharded<gms::feature_service>& features
                 , sstring listen_address_in
                 , uint16_t storage_port
                 , uint16_t ssl_storage_port
@@ -112,7 +113,7 @@ void init_ms_fd_gossiper(sharded<gms::feature_service>& features
     scfg.statement = scheduling_config.statement;
     scfg.streaming = scheduling_config.streaming;
     scfg.gossip = scheduling_config.gossip;
-    netw::get_messaging_service().start(listen, storage_port, ew, cw, tndw, ssl_storage_port, creds, mcfg, scfg, sltba, listen_now).get();
+    netw::get_messaging_service().start(std::ref(sl_controller), listen, storage_port, ew, cw, tndw, ssl_storage_port, creds, mcfg, scfg, sltba, listen_now).get();
 
     // #293 - do not stop anything
     //engine().at_exit([] { return netw::get_messaging_service().stop(); });

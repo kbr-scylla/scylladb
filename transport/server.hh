@@ -26,6 +26,7 @@
 #include <seastar/net/tls.hh>
 #include <seastar/core/metrics_registration.hh>
 #include "utils/fragmented_temporary_buffer.hh"
+#include "service/qos/service_level_controller.hh"
 
 namespace scollectd {
 
@@ -120,9 +121,10 @@ private:
     uint64_t _requests_blocked_memory = 0;
     cql_load_balance _lb;
     auth::service& _auth_service;
+    qos::service_level_controller& _sl_controller;
 public:
     cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, cql_load_balance lb, auth::service&,
-            cql_server_config config);
+            cql_server_config config, qos::service_level_controller& sl_controller);
     future<> listen(ipv4_addr addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
     future<> do_accepts(int which, bool keepalive, ipv4_addr server_addr);
     future<> stop();

@@ -19,6 +19,7 @@
 #include "cql3/statements/batch_statement.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "db/consistency_level_type.hh"
 #include "db/write_type.hh"
 #include <seastar/core/future-util.hh>
@@ -145,7 +146,7 @@ cql_load_balance parse_load_balance(sstring value)
 }
 
 cql_server::cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, cql_load_balance lb, auth::service& auth_service,
-        cql_server_config config)
+        cql_server_config config, qos::service_level_controller& sl_controller)
     : _proxy(proxy)
     , _query_processor(qp)
     , _config(config)
@@ -154,6 +155,7 @@ cql_server::cql_server(distributed<service::storage_proxy>& proxy, distributed<c
     , _notifier(std::make_unique<event_notifier>())
     , _lb(lb)
     , _auth_service(auth_service)
+    , _sl_controller(sl_controller)
 {
     namespace sm = seastar::metrics;
 

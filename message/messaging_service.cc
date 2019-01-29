@@ -24,6 +24,7 @@
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "streaming/prepare_message.hh"
 #include "gms/gossip_digest_syn.hh"
 #include "gms/gossip_digest_ack.hh"
@@ -261,8 +262,8 @@ void register_handler(messaging_service* ms, messaging_verb verb, Func&& func) {
     ms->rpc()->register_handler(verb, ms->scheduling_group_for_verb(verb), std::move(func));
 }
 
-messaging_service::messaging_service(gms::inet_address ip, uint16_t port, bool listen_now)
-    : messaging_service(std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
+messaging_service::messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip, uint16_t port, bool listen_now)
+    : messaging_service(sl_controller, std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
             scheduling_config{}, false, listen_now)
 {}
 
@@ -330,7 +331,8 @@ void messaging_service::start_listen() {
     }
 }
 
-messaging_service::messaging_service(gms::inet_address ip
+messaging_service::messaging_service(qos::service_level_controller& sl_controller
+        , gms::inet_address ip
         , uint16_t port
         , encrypt_what ew
         , compress_what cw
@@ -352,6 +354,7 @@ messaging_service::messaging_service(gms::inet_address ip
     , _credentials(credentials ? credentials->build_server_credentials() : nullptr)
     , _mcfg(mcfg)
     , _scheduling_config(scfg)
+    , _sl_controller(sl_controller)
 {
     _rpc->set_logger([] (const sstring& log) {
             rpc_logger.info("{}", log);

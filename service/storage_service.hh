@@ -71,6 +71,10 @@ namespace dht {
 class boot_strapper;
 }
 
+namespace qos {
+class service_level_controller;
+}
+
 namespace gms {
 class feature_service;
 };
@@ -127,6 +131,7 @@ private:
     gms::feature_service& _feature_service;
     distributed<database>& _db;
     sharded<auth::service>& _auth_service;
+    sharded<qos::service_level_controller>& _sl_controller;
     int _update_jobs{0};
     // Note that this is obviously only valid for the current shard. Users of
     // this facility should elect a shard to be the coordinator based on any
@@ -145,7 +150,8 @@ private:
     seastar::metrics::metric_groups _metrics;
     std::set<sstring> _disabled_features;
 public:
-    storage_service(distributed<database>& db, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, /* only for tests */ std::set<sstring> disabled_features = {});
+    storage_service(distributed<database>& db, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service,
+                sharded<qos::service_level_controller>&, /* only for tests */ std::set<sstring> disabled_features = {});
     void isolate_on_error();
     void isolate_on_commit_error();
 
@@ -2308,7 +2314,7 @@ private:
 };
 
 future<> init_storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service);
+        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
 }
