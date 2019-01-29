@@ -47,6 +47,12 @@ public:
 
     const ::io_priority_class&
     sstable_query_read_priority() {
+        if (_sl_controller) {
+            io_priority_class* pc = _sl_controller->get_current_priority_class();
+            if (pc) {
+                return *pc;
+            }
+        }
         return _sstable_query_read;
     }
 

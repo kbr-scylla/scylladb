@@ -158,6 +158,7 @@ private:
         service::client_state _client_state;
         std::unordered_map<uint16_t, cql_query_state> _query_states;
         unsigned _request_cpu = 0;
+        bool _tenant_switch = false;
 
         enum class tracing_request_type : uint8_t {
             not_requested,
@@ -198,6 +199,7 @@ private:
         future<response_type> process_execute(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_batch(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_register(uint16_t stream, request_reader in, service::client_state client_state);
+        future<> process_until_tenant_switch();
 
         std::unique_ptr<cql_server::response> make_unavailable_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t required, int32_t alive, const tracing::trace_state_ptr& tr_state);
         std::unique_ptr<cql_server::response> make_read_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state);

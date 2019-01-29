@@ -480,14 +480,24 @@ cql_server::connection::~connection() {
     _server.maybe_idle();
 }
 
+future<> cql_server::connection::process_until_tenant_switch() {
+    _tenant_switch = false;
+    return do_until([this] {
+        return _read_buf.eof() || _tenant_switch;
+    }, [this] {
+        return with_gate(_pending_requests_gate, [this] {
+            return process_request();
+        });
+    });
+}
 future<> cql_server::connection::process()
 {
     return do_until([this] {
         return _read_buf.eof();
     }, [this] {
-        return with_gate(_pending_requests_gate, [this] {
-            return process_request();
-        });
+        return _server._sl_controller.with_user_service_level(_client_state.user(), seastar::noncopyable_function<future<>()>([this] () {
+            return process_until_tenant_switch();
+        }));
     }).then_wrapped([this] (future<> f) {
         try {
             f.get();
@@ -532,6 +542,7 @@ void cql_server::connection::update_client_state(processing_result& response) {
     }
 
     if (response.user) {
+        _tenant_switch = true;
         if (response.user.get_owner_shard() != engine().cpu_id()) {
             if (!_client_state.user() || *_client_state.user() != *response.user) {
                 _client_state.set_login(make_shared<auth::authenticated_user>(*response.user));
@@ -737,6 +748,7 @@ future<response_type> cql_server::connection::process_auth_response(uint16_t str
             return audit::inspect_login(sasl_challenge->get_username(), client_state.get_client_address().addr(), failed).then(
                     [this, stream, challenge = std::move(challenge), client_state = std::move(client_state), sasl_challenge, ff = std::move(f)] () mutable {
                 client_state.set_login(make_shared<auth::authenticated_user>(std::move(ff.get0())));
+                _tenant_switch = true;
                 auto f = client_state.check_user_exists();
                 return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
                     auto tr_state = client_state.get_trace_state();
