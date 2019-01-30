@@ -28,7 +28,7 @@ override_dh_installinit:
 	dh_installinit --no-start --name node-exporter
 
 override_dh_strip:
-	dh_strip --dbg-package={{product}}-server-dbg
+	dh_strip -Xlibprotobuf.so.15 --dbg-package={{product}}-server-dbg
 
 override_dh_makeshlibs:
 
@@ -36,7 +36,7 @@ override_dh_shlibdeps:
 
 override_dh_fixperms:
 	dh_fixperms
-	chmod 755 $(CURDIR)/debian/{{product}}-server/opt/scylladb/lib/ld.so
+	chmod 755 $(CURDIR)/debian/{{product}}-server/opt/scylladb/libreloc/ld.so
 
 override_dh_strip_nondeterminism:
 

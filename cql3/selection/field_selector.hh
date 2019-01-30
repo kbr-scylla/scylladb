@@ -31,6 +31,7 @@
 
 #include "selector.hh"
 #include "types.hh"
+#include "types/user.hh"
 
 namespace cql3 {
 
