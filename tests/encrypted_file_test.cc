@@ -16,7 +16,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/thread.hh>
 
-#include "tests/test-utils.hh"
+#include <seastar/testing/test_case.hh>
 
 #include "ent/encryption/encryption.hh"
 #include "ent/encryption/symmetric_key.hh"

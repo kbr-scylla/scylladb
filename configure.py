@@ -773,11 +773,6 @@ scylla_tests_dependencies = scylla_core + idls + [
     'tests/mutation_source_test.cc',
 ]
 
-scylla_tests_seastar_deps = [
-    'seastar/tests/test-utils.cc',
-    'seastar/tests/test_runner.cc',
-]
-
 deps = {
     'scylla': idls + ['main.cc', 'release.cc'] + scylla_core + api,
 }
@@ -846,7 +841,6 @@ for t in scylla_tests:
     deps[t] = [t + '.cc']
     if t not in tests_not_using_seastar_test_framework:
         deps[t] += scylla_tests_dependencies
-        deps[t] += scylla_tests_seastar_deps
     else:
         deps[t] += scylla_core + idls + ['tests/cql_test_env.cc']
 
@@ -869,6 +863,7 @@ deps['tests/allocation_strategy_test'] = ['tests/allocation_strategy_test.cc', '
 deps['tests/log_heap_test'] = ['tests/log_heap_test.cc']
 deps['tests/anchorless_list_test'] = ['tests/anchorless_list_test.cc']
 deps['tests/perf/perf_fast_forward'] += ['release.cc']
+deps['tests/perf/perf_simple_query'] += ['release.cc']
 deps['tests/meta_test'] = ['tests/meta_test.cc']
 deps['tests/imr_test'] = ['tests/imr_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['tests/reusable_buffer_test'] = ['tests/reusable_buffer_test.cc']
@@ -878,6 +873,8 @@ deps['tests/small_vector_test'] = ['tests/small_vector_test.cc']
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
 warnings = [
+    '-Wall',
+    '-Werror',
     '-Wno-mismatched-tags',  # clang-only
     '-Wno-maybe-uninitialized',  # false positives on gcc 5
     '-Wno-tautological-compare',
@@ -891,7 +888,11 @@ warnings = [
     '-Wno-misleading-indentation',
     '-Wno-overflow',
     '-Wno-noexcept-type',
-    '-Wno-nonnull-compare'
+    '-Wno-nonnull-compare',
+    '-Wno-error=cpp',
+    '-Wno-ignored-attributes',
+    '-Wno-overloaded-virtual',
+    '-Wno-stringop-overflow',
 ]
 
 warnings = [w
@@ -1017,21 +1018,15 @@ seastar_flags = []
 if args.dpdk:
     # fake dependencies on dpdk, so that it is built before anything else
     seastar_flags += ['--enable-dpdk']
-elif args.dpdk_target:
-    seastar_flags += ['--dpdk-target', args.dpdk_target]
-if args.staticcxx:
-    seastar_flags += ['--static-stdc++']
-if args.staticboost:
-    seastar_flags += ['--static-boost']
-if args.staticyamlcpp:
-    seastar_flags += ['--static-yaml-cpp']
 if args.gcc6_concepts:
     seastar_flags += ['--enable-gcc6-concepts']
 if args.alloc_failure_injector:
     seastar_flags += ['--enable-alloc-failure-injector']
 
+args.user_cflags += ' ' + debug_compress_flag(compiler=args.cxx)
+args.user_cflags += ' ' + dbgflag
 seastar_cflags = args.user_cflags
-seastar_cflags += ' ' + debug_compress_flag(compiler=args.cxx)
+seastar_cflags += ' -Wno-error'
 if args.target != '':
     seastar_cflags += ' -march=' + args.target
 seastar_ldflags = args.user_ldflags
@@ -1052,10 +1047,6 @@ ninja = find_executable('ninja') or find_executable('ninja-build')
 if not ninja:
     print('Ninja executable (ninja or ninja-build) not found on PATH\n')
     sys.exit(1)
-status = subprocess.call([ninja] + list(pc.values()), cwd='seastar')
-if status:
-    print('Failed to generate {}\n'.format(pc))
-    sys.exit(1)
 
 def query_seastar_flags(seastar_pc_file, link_static_cxx=False):
     pc_file = os.path.join('seastar', seastar_pc_file)
@@ -1065,13 +1056,6 @@ def query_seastar_flags(seastar_pc_file, link_static_cxx=False):
     if link_static_cxx:
         libs = libs.replace('-lstdc++ ', '')
 
-    # Amend the incorrect flags in the pkg-config file to point to the
-    # right place. This is a temporary hack until we switch to the new
-    # pkg-config specification.
-    cflags = (cflags
-        .replace('-I. ', '')
-        .replace('-Iinclude ', '-I' + os.path.join('seastar', 'include') + ' '))
-
     return cflags, libs
 
 for mode in build_modes:
@@ -1080,6 +1064,7 @@ for mode in build_modes:
     modes[mode]['seastar_libs'] = seastar_libs
 
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
+args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp',
                  maybe_static(args.staticboost, '-lboost_date_time'), ])
@@ -1095,8 +1080,8 @@ if not args.staticboost:
 for pkg in pkgs:
     args.user_cflags += ' ' + pkg_config(pkg, '--cflags')
     libs += ' ' + pkg_config(pkg, '--libs')
-user_cflags = args.user_cflags
-user_ldflags = args.user_ldflags
+user_cflags = args.user_cflags + ' -fvisibility=hidden'
+user_ldflags = args.user_ldflags + ' -fvisibility=hidden'
 if args.staticcxx:
     user_ldflags += " -static-libgcc -static-libstdc++"
 if args.staticthrift:
@@ -1181,14 +1166,16 @@ with open(buildfile, 'w') as f:
         ''').format(**globals()))
     for mode in build_modes:
         modeval = modes[mode]
+        fmt_lib = 'libfmtd.a' if mode == 'debug' else 'libfmt.a'
         f.write(textwrap.dedent('''\
-            cxxflags_{mode} = {opt} -DXXH_PRIVATE_API -I. -I $builddir/{mode}/gen
+            cxxflags_{mode} = {opt} -DXXH_PRIVATE_API -DSEASTAR_TESTING_MAIN -I. -I $builddir/{mode}/gen
+            libs_{mode} = seastar/build/{mode}/_cooking/installed/lib/{fmt_lib}
             rule cxx.{mode}
-              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
+              command = $cxx -MD -MT $out -MF $out.d {sanitize} {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
               description = CXX $out
               depfile = $out.d
             rule link.{mode}
-              command = $cxx  $cxxflags_{mode} {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode} {seastar_libs}
+              command = $cxx  $cxxflags_{mode} {sanitize} {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode} {seastar_libs}
               description = LINK $out
               pool = link_pool
             rule link_stripped.{mode}
@@ -1214,7 +1201,7 @@ with open(buildfile, 'w') as f:
                             s/exceptions::syntax_exception e/exceptions::syntax_exception\& e/' $
                         build/{mode}/gen/${{stem}}Parser.cpp
                 description = ANTLR3 $in
-            ''').format(mode=mode, antlr3_exec=antlr3_exec, **modeval))
+            ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))
         f.write(
             'build {mode}: phony {artifacts}\n'.format(
                 mode=mode,
@@ -1226,6 +1213,7 @@ with open(buildfile, 'w') as f:
         serializers = {}
         thrifts = set()
         antlr3_grammars = set()
+        seastar_dep = 'seastar/build/{}/libseastar.a'.format(mode)
         for binary in build_artifacts:
             if binary in other:
                 continue
@@ -1250,8 +1238,11 @@ with open(buildfile, 'w') as f:
                 objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary.startswith('tests/'):
                     local_libs = '$libs'
-                    if binary not in tests_not_using_seastar_test_framework or binary in pure_boost_tests:
+                    if binary in pure_boost_tests:
                         local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')
+                    if binary not in tests_not_using_seastar_test_framework:
+                        pc_path = os.path.join('seastar', pc[mode].replace('seastar.pc', 'seastar-testing.pc'))
+                        local_libs += ' ' + pkg_config(pc_path, '--libs', '--static')
                     if has_thrift:
                         local_libs += ' ' + thrift_libs + ' ' + maybe_static(args.staticboost, '-lboost_system')
                     # Our code's debugging information is huge, and multiplied
@@ -1259,12 +1250,12 @@ with open(buildfile, 'w') as f:
                     # So we strip the tests by default; The user can very
                     # quickly re-link the test unstripped by adding a "_g"
                     # to the test name, e.g., "ninja build/release/testname_g"
-                    f.write('build $builddir/{}/{}: {}.{} {}\n'.format(mode, binary, tests_link_rule, mode, str.join(' ', objs)))
+                    f.write('build $builddir/{}/{}: {}.{} {} | {}\n'.format(mode, binary, tests_link_rule, mode, str.join(' ', objs), seastar_dep))
                     f.write('   libs = {}\n'.format(local_libs))
-                    f.write('build $builddir/{}/{}_g: link.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
+                    f.write('build $builddir/{}/{}_g: link.{} {} | {}\n'.format(mode, binary, mode, str.join(' ', objs), seastar_dep))
                     f.write('   libs = {}\n'.format(local_libs))
                 else:
-                    f.write('build $builddir/{}/{}: link.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
+                    f.write('build $builddir/{}/{}: link.{} {} | {}\n'.format(mode, binary, mode, str.join(' ', objs), seastar_dep))
                     if has_thrift:
                         f.write('   libs =  {} {} $libs\n'.format(thrift_libs, maybe_static(args.staticboost, '-lboost_system')))
             for src in srcs:
@@ -1287,8 +1278,8 @@ with open(buildfile, 'w') as f:
         compiles['$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'] = 'utils/gz/gen_crc_combine_table.cc'
         f.write('build {}: run {}\n'.format('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc',
                                             '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
-        f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
-                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
+        f.write('build {}: link.{} {} | {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
+                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o', seastar_dep))
         f.write(
             'build {mode}-objects: phony {objs}\n'.format(
                 mode=mode,
@@ -1305,7 +1296,7 @@ with open(buildfile, 'w') as f:
                 gen_headers += g.headers('$builddir/{}/gen'.format(mode))
             gen_headers += list(swaggers.keys())
             gen_headers += list(serializers.keys())
-            f.write('build {}: cxx.{} {} | {} || {}\n'.format(obj, mode, src, 'seastar/build/{}/libseastar.a'.format(mode), ' '.join(gen_headers)))
+            f.write('build {}: cxx.{} {} || {} {}\n'.format(obj, mode, src, seastar_dep, ' '.join(gen_headers)))
             if src in extra_cxxflags:
                 f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=extra_cxxflags[src], **modeval))
         for hh in swaggers:
@@ -1333,8 +1324,8 @@ with open(buildfile, 'w') as f:
         f.write('build seastar/build/{mode}/libseastar.a seastar/build/{mode}/apps/iotune/iotune: ninja | always\n'
                 .format(**locals()))
         f.write('  pool = seastar_pool\n')
-        f.write('  subdir = seastar\n')
-        f.write('  target = build/{mode}/libseastar.a build/{mode}/apps/iotune/iotune\n'.format(**locals()))
+        f.write('  subdir = seastar/build/{mode}\n'.format(**locals()))
+        f.write('  target = seastar seastar_testing app_iotune\n'.format(**locals()))
         f.write(textwrap.dedent('''\
             build build/{mode}/iotune: copy seastar/build/{mode}/apps/iotune/iotune
             ''').format(**locals()))

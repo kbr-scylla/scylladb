@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <seastar/core/print.hh>
 #include <seastar/net/ip.hh>
 #include "utils/serialization.hh"
 #include <sstream>

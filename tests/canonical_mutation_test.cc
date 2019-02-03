@@ -16,7 +16,7 @@
 #include "mutation_assertions.hh"
 
 #include "tests/test_services.hh"
-#include "tests/test-utils.hh"
+#include <seastar/testing/test_case.hh>
 
 #include <seastar/core/thread.hh>
 

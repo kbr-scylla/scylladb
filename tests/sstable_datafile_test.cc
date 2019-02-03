@@ -15,7 +15,7 @@
 #include "sstables/key.hh"
 #include "sstables/compress.hh"
 #include "sstables/compaction.hh"
-#include "tests/test-utils.hh"
+#include <seastar/testing/test_case.hh>
 #include "schema.hh"
 #include "schema_builder.hh"
 #include "database.hh"
@@ -3977,6 +3977,45 @@ SEASTAR_TEST_CASE(sstable_set_incremental_selector) {
         check(sel, decorated_keys[5], {0, 5});
         check(sel, decorated_keys[6], {0});
         check(sel, decorated_keys[7], {0});
+    }
+
+    return make_ready_future<>();
+}
+
+SEASTAR_TEST_CASE(sstable_set_erase) {
+    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
+    auto key_and_token_pair = token_generation_for_current_shard(1);
+
+    // check that sstable_set::erase is capable of working properly when a non-existing element is given.
+    {
+        auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, s->compaction_strategy_options());
+        sstable_set set = cs.make_sstable_set(s);
+
+        auto sst = sstable_for_overlapping_test(s, 0, key_and_token_pair[0].first, key_and_token_pair[0].first, 0);
+        set.insert(sst);
+        BOOST_REQUIRE(set.all()->size() == 1);
+
+        auto unleveled_sst = sstable_for_overlapping_test(s, 1, key_and_token_pair[0].first, key_and_token_pair[0].first, 0);
+        auto leveled_sst = sstable_for_overlapping_test(s, 2, key_and_token_pair[0].first, key_and_token_pair[0].first, 1);
+        set.erase(unleveled_sst);
+        set.erase(leveled_sst);
+        BOOST_REQUIRE(set.all()->size() == 1);
+        BOOST_REQUIRE(set.all()->count(sst));
+    }
+
+    {
+        auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
+        sstable_set set = cs.make_sstable_set(s);
+
+        auto sst = sstable_for_overlapping_test(s, 0, key_and_token_pair[0].first, key_and_token_pair[0].first, 0);
+        set.insert(sst);
+        BOOST_REQUIRE(set.all()->size() == 1);
+
+        auto sst2 = sstable_for_overlapping_test(s, 1, key_and_token_pair[0].first, key_and_token_pair[0].first, 0);
+        set.erase(sst2);
+        BOOST_REQUIRE(set.all()->size() == 1);
+        BOOST_REQUIRE(set.all()->count(sst));
     }
 
     return make_ready_future<>();

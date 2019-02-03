@@ -18,7 +18,7 @@
 #include <unordered_set>
 #include <set>
 
-#include "tests/test-utils.hh"
+#include <seastar/testing/test_case.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/scollectd_api.hh>
