@@ -28,7 +28,7 @@ using namespace encryption;
 static tmpdir dir;
 
 static future<file, ::shared_ptr<symmetric_key>> make_file(const sstring& name, open_flags mode, ::shared_ptr<symmetric_key> k = nullptr) {
-    return open_file_dma(dir.path + "/" + name, mode).then([k](file f) mutable {
+    return open_file_dma(sstring(dir.path() / std::string(name)), mode).then([k](file f) mutable {
         if (k == nullptr) {
             key_info info{"AES/CBC", 256};
             k = ::make_shared<symmetric_key>(info);

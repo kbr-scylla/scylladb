@@ -330,7 +330,7 @@ protected:
         , _sstable_level(sstable_level)
     {
         _info->cf = &cf;
-        for (auto sst : sstables) {
+        for (auto sst : _sstables) {
             _stats_collector.update(sst->get_encoding_stats_for_compaction());
         }
         _cf.get_compaction_manager().register_compaction(_info);
@@ -595,7 +595,7 @@ public:
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
             cfg.monitor = &_active_write_monitors.back();
-            cfg.large_partition_handler = _cf.get_large_partition_handler();
+            cfg.large_data_handler = _cf.get_large_data_handler();
             cfg.run_identifier = _run_identifier;
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, get_encoding_stats(), priority));
         }
@@ -830,7 +830,7 @@ public:
 
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
-            cfg.large_partition_handler = _cf.get_large_partition_handler();
+            cfg.large_data_handler = _cf.get_large_data_handler();
             auto&& priority = service::get_local_compaction_priority();
             writer.emplace(sst->get_writer(*_cf.schema(), partitions_per_sstable(_shard), cfg, get_encoding_stats(), priority, _shard));
         }

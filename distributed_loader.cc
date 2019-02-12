@@ -223,7 +223,12 @@ distributed_loader::flush_upload_dir(distributed<database>& db, distributed<db::
                     sst->read_toc().get();
                     schema_ptr s = cf.schema();
                     if (s->is_counter() && !sst->has_scylla_component()) {
-                        throw std::runtime_error("Loading non-Scylla SSTables containing counters is not supported. Use sstableloader instead.");
+                        sstring error = "Direct loading non-Scylla SSTables containing counters is not supported.";
+                        if (db.get_config().enable_dangerous_direct_import_of_cassandra_counters()) {
+                            dblog.info("{} But trying to continue on user's request.", error);
+                        } else {
+                            throw std::runtime_error(fmt::format("{} Use sstableloader instead.", error));
+                        }
                     }
                     if (s->is_view()) {
                         throw std::runtime_error("Loading Materialized View SSTables is not supported. Re-create the view instead.");
@@ -406,7 +411,7 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                             }
                         }).then([&cf, sstables] {
                             // schedule deletion of shared sstables after we're certain that new unshared ones were successfully forwarded to respective shards.
-                            sstables::delete_atomically(std::move(sstables), *cf->get_large_partition_handler()).handle_exception([op = sstables::background_jobs().start()] (std::exception_ptr eptr) {
+                            sstables::delete_atomically(std::move(sstables), *cf->get_large_data_handler()).handle_exception([op = sstables::background_jobs().start()] (std::exception_ptr eptr) {
                                 try {
                                     std::rethrow_exception(eptr);
                                 } catch (...) {

@@ -223,6 +223,12 @@ modes = {
         'opt': '-O3',
         'libs': '',
     },
+    'dev': {
+        'sanitize': '',
+        'sanitize_libs': '',
+        'opt': '-O1',
+        'libs': '',
+    },
 }
 
 scylla_tests = [
@@ -410,6 +416,8 @@ arg_parser.add_argument('--python', action='store', dest='python', default='pyth
                         help='Python3 path')
 add_tristate(arg_parser, name='hwloc', dest='hwloc', help='hwloc support')
 add_tristate(arg_parser, name='xen', dest='xen', help='Xen support')
+arg_parser.add_argument('--split-dwarf', dest='split_dwarf', action='store_true', default=False,
+                        help='use of split dwarf (https://gcc.gnu.org/wiki/DebugFission) to speed up linking')
 arg_parser.add_argument('--enable-gcc6-concepts', dest='gcc6_concepts', action='store_true', default=False,
                         help='enable experimental support for C++ Concepts as implemented in GCC 6')
 arg_parser.add_argument('--enable-alloc-failure-injector', dest='alloc_failure_injector', action='store_true', default=False,
@@ -571,7 +579,7 @@ scylla_core = (['database.cc',
                 'db/config.cc',
                 'db/extensions.cc',
                 'db/heat_load_balance.cc',
-                'db/large_partition_handler.cc',
+                'db/large_data_handler.cc',
                 'db/marshal/type_parser.cc',
                 'db/batchlog_manager.cc',
                 'db/view/view.cc',
@@ -771,6 +779,7 @@ scylla_tests_dependencies = scylla_core + idls + [
     'tests/cql_assertions.cc',
     'tests/result_set_assertions.cc',
     'tests/mutation_source_test.cc',
+    'tests/data_model.cc',
 ]
 
 deps = {
@@ -1022,9 +1031,13 @@ if args.gcc6_concepts:
     seastar_flags += ['--enable-gcc6-concepts']
 if args.alloc_failure_injector:
     seastar_flags += ['--enable-alloc-failure-injector']
+if args.split_dwarf:
+    seastar_flags += ['--split-dwarf']
 
-args.user_cflags += ' ' + debug_compress_flag(compiler=args.cxx)
-args.user_cflags += ' ' + dbgflag
+debug_flags = ' ' + debug_compress_flag(compiler=args.cxx) + ' ' + dbgflag
+modes['debug']['opt'] += debug_flags
+modes['release']['opt'] += debug_flags
+
 seastar_cflags = args.user_cflags
 seastar_cflags += ' -Wno-error'
 if args.target != '':
@@ -1066,7 +1079,7 @@ for mode in build_modes:
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
-                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp',
+                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
                  maybe_static(args.staticboost, '-lboost_date_time'), ])
 
 xxhash_dir = 'xxHash'
@@ -1170,16 +1183,17 @@ with open(buildfile, 'w') as f:
         f.write(textwrap.dedent('''\
             cxxflags_{mode} = {opt} -DXXH_PRIVATE_API -DSEASTAR_TESTING_MAIN -I. -I $builddir/{mode}/gen
             libs_{mode} = seastar/build/{mode}/_cooking/installed/lib/{fmt_lib}
+            seastar_libs_{mode} = {seastar_libs}
             rule cxx.{mode}
               command = $cxx -MD -MT $out -MF $out.d {sanitize} {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
               description = CXX $out
               depfile = $out.d
             rule link.{mode}
-              command = $cxx  $cxxflags_{mode} {sanitize} {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode} {seastar_libs}
+              command = $cxx  $cxxflags_{mode} {sanitize} {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode}
               description = LINK $out
               pool = link_pool
             rule link_stripped.{mode}
-              command = $cxx  $cxxflags_{mode} -s {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode} {seastar_libs}
+              command = $cxx  $cxxflags_{mode} -s {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode}
               description = LINK (stripped) $out
               pool = link_pool
             rule ar.{mode}
@@ -1237,7 +1251,7 @@ with open(buildfile, 'w') as f:
                 ]])
                 objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary.startswith('tests/'):
-                    local_libs = '$libs'
+                    local_libs = '$seastar_libs_{} $libs'.format(mode)
                     if binary in pure_boost_tests:
                         local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')
                     if binary not in tests_not_using_seastar_test_framework:
@@ -1257,7 +1271,7 @@ with open(buildfile, 'w') as f:
                 else:
                     f.write('build $builddir/{}/{}: link.{} {} | {}\n'.format(mode, binary, mode, str.join(' ', objs), seastar_dep))
                     if has_thrift:
-                        f.write('   libs =  {} {} $libs\n'.format(thrift_libs, maybe_static(args.staticboost, '-lboost_system')))
+                        f.write('   libs =  {} {} $seastar_libs_{} $libs\n'.format(thrift_libs, maybe_static(args.staticboost, '-lboost_system'), mode))
             for src in srcs:
                 if src.endswith('.cc'):
                     obj = '$builddir/' + mode + '/' + src.replace('.cc', '.o')
@@ -1278,8 +1292,8 @@ with open(buildfile, 'w') as f:
         compiles['$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'] = 'utils/gz/gen_crc_combine_table.cc'
         f.write('build {}: run {}\n'.format('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc',
                                             '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
-        f.write('build {}: link.{} {} | {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
-                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o', seastar_dep))
+        f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
+                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
         f.write(
             'build {mode}-objects: phony {objs}\n'.format(
                 mode=mode,

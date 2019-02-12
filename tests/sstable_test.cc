@@ -31,7 +31,7 @@
 
 using namespace sstables;
 
-static db::nop_large_partition_handler nop_lp_handler;
+static db::nop_large_data_handler nop_lp_handler;
 
 bytes as_bytes(const sstring& s) {
     return { reinterpret_cast<const int8_t*>(s.begin()), s.size() };
@@ -203,9 +203,9 @@ static future<> compare_files(sstdesc file1, sstdesc file2, component_type compo
 static future<> check_component_integrity(component_type component) {
     auto tmp = make_lw_shared<tmpdir>();
     auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    return write_sst_info(s, "tests/sstables/compressed", tmp->path, 1).then([component, tmp] {
+    return write_sst_info(s, "tests/sstables/compressed", tmp->path().string(), 1).then([component, tmp] {
         return compare_files(sstdesc{"tests/sstables/compressed", 1 },
-                             sstdesc{tmp->path, 2 },
+                             sstdesc{tmp->path().string(), 2 },
                              component);
     }).then([tmp] {});
 }
@@ -217,8 +217,8 @@ SEASTAR_TEST_CASE(check_compressed_info_func) {
 SEASTAR_TEST_CASE(check_summary_func) {
     auto tmp = make_lw_shared<tmpdir>();
     auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    return do_write_sst(s, "tests/sstables/compressed", tmp->path, 1).then([tmp, s] (auto sst1) {
-        auto sst2 = make_sstable(s, tmp->path, 2, la, big);
+    return do_write_sst(s, "tests/sstables/compressed", tmp->path().string(), 1).then([tmp, s] (auto sst1) {
+        auto sst2 = make_sstable(s, tmp->path().string(), 2, la, big);
         return sstables::test(sst2).read_summary().then([sst1, sst2] {
             summary& sst1_s = sstables::test(sst1).get_summary();
             summary& sst2_s = sstables::test(sst2).get_summary();
@@ -239,8 +239,8 @@ SEASTAR_TEST_CASE(check_filter_func) {
 SEASTAR_TEST_CASE(check_statistics_func) {
     auto tmp = make_lw_shared<tmpdir>();
     auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    return do_write_sst(s, "tests/sstables/compressed", tmp->path, 1).then([tmp, s] (auto sst1) {
-        auto sst2 = make_sstable(s, tmp->path, 2, la, big);
+    return do_write_sst(s, "tests/sstables/compressed", tmp->path().string(), 1).then([tmp, s] (auto sst1) {
+        auto sst2 = make_sstable(s, tmp->path().string(), 2, la, big);
         return sstables::test(sst2).read_statistics().then([sst1, sst2] {
             statistics& sst1_s = sstables::test(sst1).get_statistics();
             statistics& sst2_s = sstables::test(sst2).get_statistics();
@@ -259,8 +259,8 @@ SEASTAR_TEST_CASE(check_statistics_func) {
 SEASTAR_TEST_CASE(check_toc_func) {
     auto tmp = make_lw_shared<tmpdir>();
     auto s = make_lw_shared(schema({}, "ks", "cf", {}, {}, {}, {}, utf8_type));
-    return do_write_sst(s, "tests/sstables/compressed", tmp->path, 1).then([tmp, s] (auto sst1) {
-        auto sst2 = sstables::make_sstable(s, tmp->path, 2, la, big);
+    return do_write_sst(s, "tests/sstables/compressed", tmp->path().string(), 1).then([tmp, s] (auto sst1) {
+        auto sst2 = sstables::make_sstable(s, tmp->path().string(), 2, la, big);
         return sstables::test(sst2).read_toc().then([sst1, sst2] {
             auto& sst1_c = sstables::test(sst1).get_components();
             auto& sst2_c = sstables::test(sst2).get_components();
@@ -853,7 +853,7 @@ SEASTAR_TEST_CASE(reshuffle) {
             cfg.datadir = generation_dir;
             cfg.enable_commitlog = false;
             cfg.enable_incremental_backups = false;
-            cfg.large_partition_handler = &nop_lp_handler;
+            cfg.large_data_handler = &nop_lp_handler;
             auto cl_stats = make_lw_shared<cell_locker_stats>();
             auto cf = make_lw_shared<column_family>(uncompressed_schema(), cfg, column_family::no_commitlog(), *cm, *cl_stats, *tracker);
             cf->start();
@@ -1179,7 +1179,7 @@ SEASTAR_TEST_CASE(promoted_index_write) {
 SEASTAR_TEST_CASE(test_skipping_in_compressed_stream) {
     return seastar::async([] {
         tmpdir tmp;
-        auto file_path = tmp.path + "/test";
+        auto file_path = (tmp.path() / "test").string();
         file f = open_file_dma(file_path, open_flags::create | open_flags::wo).get0();
 
         file_input_stream_options opts;

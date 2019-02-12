@@ -51,6 +51,7 @@
 #include "utils/UUID_gen.hh"
 #include "encoding_stats.hh"
 #include "sstables/mc/writer.hh"
+#include "simple_schema.hh"
 
 using namespace sstables;
 
@@ -2873,9 +2874,9 @@ static std::vector<sstables::shared_sstable> open_sstables(schema_ptr s, sstring
 static flat_mutation_reader compacted_sstable_reader(schema_ptr s,
                      sstring table_name, std::vector<unsigned long> generations) {
     auto column_family_test_config = [] {
-        static db::nop_large_partition_handler nop_lp_handler;
+        static db::nop_large_data_handler nop_lp_handler;
         column_family::config cfg;
-        cfg.large_partition_handler = &nop_lp_handler;
+        cfg.large_data_handler = &nop_lp_handler;
         return cfg;
     };
     storage_service_for_tests ssft;
@@ -2890,14 +2891,14 @@ static flat_mutation_reader compacted_sstable_reader(schema_ptr s,
     tmpdir tmp;
     auto sstables = open_sstables(s, format("tests/sstables/3.x/uncompressed/{}", table_name), generations);
     auto new_generation = generations.back() + 1;
-    auto new_sstable = [s, path = tmp.path, new_generation] {
-        return sstables::test::make_test_sstable(4096, s, path, new_generation,
+    auto new_sstable = [s, &tmp, new_generation] {
+        return sstables::test::make_test_sstable(4096, s, tmp.path().string(), new_generation,
                          sstables::sstable_version_types::mc, sstable::format_types::big);
     };
 
     sstables::compact_sstables(sstables::compaction_descriptor(std::move(sstables)), *cf, new_sstable, replacer_fn_no_op()).get();
 
-    auto compacted_sst = open_sstable(s, tmp.path, new_generation);
+    auto compacted_sst = open_sstable(s, tmp.path().string(), new_generation);
     return compacted_sst->as_mutation_source().make_reader(s, query::full_partition_range, s->full_slice());
 }
 
@@ -3038,11 +3039,16 @@ SEASTAR_THREAD_TEST_CASE(compact_deleted_cell) {
 }
 
 static void compare_files(sstring filename1, sstring filename2) {
-    std::ifstream ifs1(filename1);
-    std::ifstream ifs2(filename2);
+    std::ifstream ifs1;
+    ifs1.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+    ifs1.open(filename1, std::ios_base::in | std::ios_base::binary);
 
-    std::istream_iterator<char> b1(ifs1), e1;
-    std::istream_iterator<char> b2(ifs2), e2;
+    std::ifstream ifs2;
+    ifs2.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+    ifs2.open(filename2);
+
+    std::istreambuf_iterator<char> b1(ifs1), e1;
+    std::istreambuf_iterator<char> b2(ifs2), e2;
     BOOST_CHECK_EQUAL_COLLECTIONS(b1, e1, b2, e2);
 }
 
@@ -3051,7 +3057,7 @@ static sstring get_write_test_path(sstring table_name) {
 }
 
 // This method should not be called for compressed sstables because compression is not deterministic
-static void compare_sstables(sstring result_path, sstring table_name) {
+static void compare_sstables(const seastar::compat::filesystem::path& result_path, sstring table_name) {
     for (auto file_type : {component_type::Data,
                            component_type::Index,
                            component_type::Digest,
@@ -3060,18 +3066,18 @@ static void compare_sstables(sstring result_path, sstring table_name) {
                 sstable::filename(get_write_test_path(table_name),
                                   "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
         auto result_filename =
-                sstable::filename(result_path, "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
+                sstable::filename(result_path.string(), "ks", table_name, sstables::sstable_version_types::mc, 1, big, file_type);
         compare_files(orig_filename, result_filename);
     }
 }
 
 static tmpdir write_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1, lw_shared_ptr<memtable> mt2) {
-    static db::nop_large_partition_handler nop_lp_handler;
+    static db::nop_large_data_handler nop_lp_handler;
     storage_service_for_tests ssft;
     tmpdir tmp;
-    auto sst = sstables::test::make_test_sstable(4096, s, tmp.path, 1, sstables::sstable_version_types::mc, sstable::format_types::big);
+    auto sst = sstables::test::make_test_sstable(4096, s, tmp.path().string(), 1, sstables::sstable_version_types::mc, sstable::format_types::big);
     sstable_writer_config cfg;
-    cfg.large_partition_handler = &nop_lp_handler;
+    cfg.large_data_handler = &nop_lp_handler;
     sst->write_components(make_combined_reader(s,
         mt1->make_flat_reader(s),
         mt2->make_flat_reader(s)), 1, s, cfg, mt1->get_encoding_stats()).get();
@@ -3083,26 +3089,26 @@ static tmpdir write_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1, lw_share
 static tmpdir write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt1, lw_shared_ptr<memtable> mt2,
                                          sstring table_name) {
     auto tmp = write_sstables(std::move(s), std::move(mt1), std::move(mt2));
-    compare_sstables(tmp.path, table_name);
+    compare_sstables(tmp.path(), table_name);
     return tmp;
 }
 
 static tmpdir write_sstables(schema_ptr s, lw_shared_ptr<memtable> mt) {
     storage_service_for_tests ssft;
     tmpdir tmp;
-    auto sst = sstables::test::make_test_sstable(4096, s, tmp.path, 1, sstables::sstable_version_types::mc, sstable::format_types::big);
+    auto sst = sstables::test::make_test_sstable(4096, s, tmp.path().string(), 1, sstables::sstable_version_types::mc, sstable::format_types::big);
     write_memtable_to_sstable_for_test(*mt, sst).get();
     return tmp;
 }
 
 static tmpdir write_and_compare_sstables(schema_ptr s, lw_shared_ptr<memtable> mt, sstring table_name) {
     auto tmp = write_sstables(std::move(s), std::move(mt));
-    compare_sstables(tmp.path, table_name);
+    compare_sstables(tmp.path(), table_name);
     return tmp;
 }
 
-static sstable_assertions validate_read(schema_ptr s, sstring path, std::vector<mutation> mutations) {
-    sstable_assertions sst(s, path);
+static sstable_assertions validate_read(schema_ptr s, const seastar::compat::filesystem::path& path, std::vector<mutation> mutations) {
+    sstable_assertions sst(s, path.string());
     sst.load();
 
     auto assertions = assert_that(sst.read_rows_flat());
@@ -3167,7 +3173,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_row) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3198,7 +3204,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_partition_key) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3228,7 +3234,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_clustering_key) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3275,7 +3281,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_wide_partitions) {
     }
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut1, mut2});
+    auto written_sst = validate_read(s, tmp.path(), {mut1, mut2});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3310,7 +3316,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_row) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3342,7 +3348,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_column) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3370,7 +3376,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_deleted_column) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3395,7 +3401,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_deleted_row) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3427,7 +3433,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_wide_update) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3455,7 +3461,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_incremental_update) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3490,7 +3496,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_partitions) {
     }
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, muts);
+    auto written_sst = validate_read(s, tmp.path(), muts);
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3516,7 +3522,7 @@ static void test_write_many_partitions(sstring table_name, tombstone partition_t
     bool compressed = cp.get_compressor() != nullptr;
     tmpdir tmp = compressed ? write_sstables(s, mt) : write_and_compare_sstables(s, mt, table_name);
     boost::sort(muts, mutation_decorated_key_less_comparator());
-    validate_read(s, tmp.path, muts);
+    validate_read(s, tmp.path(), muts);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_many_live_partitions) {
@@ -3590,7 +3596,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_rows) {
 
     mt->apply(mut);
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3637,7 +3643,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_missing_columns_large_set) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3687,7 +3693,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_counter_table) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut});
+    validate_read(s, tmp.path(), {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_different_types) {
@@ -3759,7 +3765,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_different_types) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3788,7 +3794,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_empty_clustering_values) {
 
     mt->apply(mut);
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3824,7 +3830,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_large_clustering_key) {
 
     mt->apply(mut);
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3851,7 +3857,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_compact_table) {
 
     mt->apply(mut);
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3883,7 +3889,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_user_defined_type_table) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3911,7 +3917,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_simple_range_tombstone) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -3955,7 +3961,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4000,7 +4006,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_non_adjacent_range_tombstones) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4073,7 +4079,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_mixed_rows_and_range_tombstones) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4107,7 +4113,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_many_range_tombstones) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut});
+    validate_read(s, tmp.path(), {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones_with_rows) {
@@ -4163,7 +4169,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones_with_rows) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4202,7 +4208,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_start_with_row) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4241,7 +4247,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_end_with_row) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4341,7 +4347,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_two_non_adjacent_range_tombstones) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    auto written_sst = validate_read(s, tmp.path, {mut});
+    auto written_sst = validate_read(s, tmp.path(), {mut});
     validate_stats_metadata(s, written_sst, table_name);
 }
 
@@ -4686,7 +4692,7 @@ SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
     }
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut1, mut2});
+    validate_read(s, tmp.path(), {mut1, mut2});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
@@ -4735,7 +4741,7 @@ SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
     }
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut1, mut2});
+    validate_read(s, tmp.path(), {mut1, mut2});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_static_row_with_missing_columns) {
@@ -4763,7 +4769,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_row_with_missing_columns) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut});
+    validate_read(s, tmp.path(), {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
@@ -4804,7 +4810,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut});
+    validate_read(s, tmp.path(), {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_static_interleaved_atomic_and_collection_columns) {
@@ -4846,7 +4852,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_interleaved_atomic_and_collection_col
     mt->apply(mut);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut});
+    validate_read(s, tmp.path(), {mut});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_empty_static_row) {
@@ -4883,7 +4889,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_empty_static_row) {
     mt->apply(mut2);
 
     tmpdir tmp = write_and_compare_sstables(s, mt, table_name);
-    validate_read(s, tmp.path, {mut2, mut1}); // Mutations are re-ordered according to decorated_key order
+    validate_read(s, tmp.path(), {mut2, mut1}); // Mutations are re-ordered according to decorated_key order
 }
 
 SEASTAR_THREAD_TEST_CASE(test_read_missing_summary) {
@@ -4902,7 +4908,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_missing_summary) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_sstable_reader_on_unknown_column) {
-    db::nop_large_partition_handler nop_lp_handler;
+    db::nop_large_data_handler nop_lp_handler;
     api::timestamp_type write_timestamp = 1525385507816568;
     auto wait_bg = seastar::defer([] { sstables::await_background_jobs().get(); });
     storage_service_for_tests ssft;
@@ -4938,13 +4944,13 @@ SEASTAR_THREAD_TEST_CASE(test_sstable_reader_on_unknown_column) {
         tmpdir dir;
         sstable_writer_config cfg;
         cfg.promoted_index_block_size = index_block_size;
-        cfg.large_partition_handler = &nop_lp_handler;
+        cfg.large_data_handler = &nop_lp_handler;
         auto sst = sstables::make_sstable(write_schema,
-            dir.path,
+            dir.path().string(),
             1 /* generation */,
             sstable_version_types::mc,
             sstables::sstable::format_types::big);
-        sst->write_components(mt->make_flat_reader(write_schema), 1, write_schema, cfg).get();
+        sst->write_components(mt->make_flat_reader(write_schema), 1, write_schema, cfg, mt->get_encoding_stats()).get();
         sst->load().get();
 
         BOOST_REQUIRE_EXCEPTION(
@@ -4960,4 +4966,84 @@ SEASTAR_THREAD_TEST_CASE(test_sstable_reader_on_unknown_column) {
                 return e.what() == "Column val1 missing in current schema in sstable " + sst->get_filename();
             });
     }
+}
+
+namespace {
+struct large_row_handler : public db::large_data_handler {
+    using callback_t = std::function<void(const schema& s, const sstables::key& partition_key,
+            const clustering_key_prefix* clustering_key, uint64_t row_size)>;
+    callback_t callback;
+
+    large_row_handler(uint64_t threshold, callback_t callback)
+        : large_data_handler(std::numeric_limits<uint64_t>::max(), threshold)
+        , callback(std::move(callback)) {}
+
+    virtual void log_large_row(const sstables::sstable& sst, const sstables::key& partition_key,
+            const clustering_key_prefix* clustering_key, uint64_t row_size) const override {
+        const schema_ptr s = sst.get_schema();
+        callback(*s, partition_key, clustering_key, row_size);
+    }
+
+    virtual future<> update_large_partitions(const schema& s, const sstring& sstable_name,
+            const sstables::key& partition_key, uint64_t partition_size) const override {
+        return make_ready_future<>();
+    }
+
+    virtual future<> delete_large_partitions_entry(const schema& s, const sstring& sstable_name) const override {
+        return make_ready_future<>();
+    }
+};
+}
+
+static void test_sstable_write_large_row_f(schema_ptr s, memtable& mt, const partition_key& pk,
+        std::vector<clustering_key*> expected, uint64_t threshold) {
+    tmpdir dir;
+    auto sst = sstables::make_sstable(
+            s, dir.path().string(), 1 /* generation */, sstable_version_types::mc, sstables::sstable::format_types::big);
+
+    unsigned i = 0;
+    auto f = [&i, &expected, &pk, &threshold](const schema& s, const sstables::key& partition_key,
+                     const clustering_key_prefix* clustering_key, uint64_t row_size) {
+        BOOST_REQUIRE_EQUAL(pk.components(s), partition_key.to_partition_key(s).components(s));
+        BOOST_REQUIRE(i < expected.size());
+        BOOST_REQUIRE(row_size > threshold);
+
+        if (clustering_key) {
+            BOOST_REQUIRE(expected[i]->equal(s, *clustering_key));
+        } else {
+            BOOST_REQUIRE_EQUAL(expected[i], nullptr);
+        }
+        ++i;
+    };
+
+    large_row_handler handler(threshold, f);
+    sstable_writer_config cfg;
+    cfg.large_data_handler = &handler;
+
+    // The test provides thresholds values for the large row handler. Whether the handler gets
+    // trigger depends on the size of rows after they are written in the MC format and that size
+    // depends on the encoding statistics (because of variable-length encoding). The original values
+    // were chosen with the default-constructed encoding_stats, so let's keep it that way.
+    sst->write_components(mt.make_flat_reader(s), 1, s, std::move(cfg), encoding_stats{}).get();
+    BOOST_REQUIRE_EQUAL(i, expected.size());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_sstable_write_large_row) {
+    storage_service_for_tests ssft;
+    simple_schema s;
+    mutation partition = s.new_mutation("pv");
+    const partition_key& pk = partition.key();
+    s.add_static_row(partition, "foo bar zed");
+
+    auto ck1 = s.make_ckey("cv1");
+    s.add_row(partition, ck1, "foo");
+
+    auto ck2 = s.make_ckey("cv2");
+    s.add_row(partition, ck2, "foo bar");
+
+    auto mt = make_lw_shared<memtable>(s.schema());
+    mt->apply(partition);
+
+    test_sstable_write_large_row_f(s.schema(), *mt, pk, {nullptr, &ck1, &ck2}, 21);
+    test_sstable_write_large_row_f(s.schema(), *mt, pk, {nullptr, &ck2}, 22);
 }
