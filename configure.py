@@ -263,6 +263,7 @@ scylla_tests = [
     'tests/sstable_3_x_test',
     'tests/sstable_mutation_test',
     'tests/sstable_resharding_test',
+    'tests/incremental_compaction_test',
     'tests/memtable_test',
     'tests/commitlog_test',
     'tests/cartesian_product_test',
@@ -868,6 +869,7 @@ for t in perf_tests:
 deps['tests/sstable_test'] += ['tests/sstable_utils.cc', 'tests/normalizing_reader.cc']
 deps['tests/sstable_datafile_test'] += ['tests/sstable_utils.cc', 'tests/normalizing_reader.cc']
 deps['tests/mutation_reader_test'] += ['tests/sstable_utils.cc']
+deps['tests/incremental_compaction_test'] += ['tests/sstable_utils.cc']
 
 deps['tests/bytes_ostream_test'] = ['tests/bytes_ostream_test.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['tests/input_stream_test'] = ['tests/input_stream_test.cc']
