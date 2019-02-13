@@ -76,7 +76,7 @@ static future<> test_random_data_disk(size_t n) {
 }
 
 static future<> test_random_data(size_t n) {
-    auto buf = generate_random(n, 1);
+    auto buf = generate_random(n, 8);
 
 
     // first, verify padded.
