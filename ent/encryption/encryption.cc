@@ -15,6 +15,8 @@
 #include <regex>
 #include <algorithm>
 
+#include <string.h>
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/md5.h>
@@ -215,7 +217,9 @@ public:
         if (!provider_class) {
             provider_class = opts(SECRET_KEY_PROVIDER_FACTORY_CLASS).value_or(REPLICATED_KEY_PROVIDER_FACTORY);
         }
-
+        if (provider_class->empty() || ::strcasecmp(provider_class->c_str(), "none") == 0) {
+            return {};
+        }
         static const std::unordered_map<sstring, std::unique_ptr<key_provider_factory>> providers = [] {
             std::unordered_map<sstring, std::unique_ptr<key_provider_factory>> map;
 
@@ -355,6 +359,9 @@ encryption_schema_extension::encryption_schema_extension(key_info info, shared_p
 ::shared_ptr<encryption_schema_extension> encryption_schema_extension::create(encryption_context& ctxt, std::map<sstring, sstring> map) {
     key_info info = get_key_info(map);
     auto provider = ctxt.get_provider(map);
+    if (!provider) {
+        return {};
+    }
     return ::make_shared<encryption_schema_extension>(std::move(info), std::move(provider), std::move(map));
 }
 
