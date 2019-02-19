@@ -539,6 +539,7 @@ int main(int ac, char** av) {
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
             dbcfg.available_memory = get_available_memory();
             db.start(std::ref(*cfg), dbcfg).get();
+
             engine().at_exit([&db, &return_value] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -659,7 +660,7 @@ int main(int ac, char** av) {
             // engine().at_exit([&mm] { return mm.stop(); });
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(db), qp_mcfg).get();
+            qp.start(std::ref(proxy), std::ref(db), qp_mcfg, std::ref(sl_controller)).get();
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
             supervisor::notify("initializing batchlog manager");

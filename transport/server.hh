@@ -89,8 +89,8 @@ struct cql_query_state {
     service::query_state query_state;
     std::unique_ptr<cql3::query_options> options;
 
-    cql_query_state(service::client_state& client_state)
-        : query_state(client_state)
+    cql_query_state(service::client_state& client_state, qos::service_level_controller& sl_controller)
+        : query_state(client_state, sl_controller)
     { }
 };
 

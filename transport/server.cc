@@ -774,7 +774,7 @@ cql_server::connection::init_cql_serialization_format() {
 future<response_type> cql_server::connection::process_query(uint16_t stream, request_reader in, service::client_state client_state)
 {
     auto query = in.read_long_string_view();
-    auto q_state = std::make_unique<cql_query_state>(client_state);
+    auto q_state = std::make_unique<cql_query_state>(client_state, _server._sl_controller);
     auto& query_state = q_state->query_state;
     q_state->options = in.read_options(_version, _cql_serialization_format, this->timeout_config());
     auto& options = *q_state->options;
@@ -848,7 +848,7 @@ future<response_type> cql_server::connection::process_execute(uint16_t stream, r
         throw exceptions::prepared_query_not_found_exception(id);
     }
 
-    auto q_state = std::make_unique<cql_query_state>(client_state);
+    auto q_state = std::make_unique<cql_query_state>(client_state, _server._sl_controller);
     auto& query_state = q_state->query_state;
     if (_version == 1) {
         std::vector<cql3::raw_value_view> values;
@@ -970,7 +970,7 @@ cql_server::connection::process_batch(uint16_t stream, request_reader in, servic
         values.emplace_back(std::move(tmp));
     }
 
-    auto q_state = std::make_unique<cql_query_state>(client_state);
+    auto q_state = std::make_unique<cql_query_state>(client_state, _server._sl_controller);
     auto& query_state = q_state->query_state;
     // #563. CQL v2 encodes query_options in v1 format for batch requests.
     q_state->options = std::make_unique<cql3::query_options>(cql3::query_options::make_batch_options(std::move(*in.read_options(_version < 3 ? 1 : _version, _cql_serialization_format, this->timeout_config())), std::move(values)));
