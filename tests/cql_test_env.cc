@@ -29,6 +29,7 @@
 #include "tmpdir.hh"
 #include "db/query_context.hh"
 #include "test_services.hh"
+#include "unit_test_service_levels_accessor.hh"
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
 #include "distributed_loader.hh"
@@ -100,6 +101,7 @@ private:
     ::shared_ptr<sharded<auth::service>> _auth_service;
     ::shared_ptr<sharded<db::view::view_builder>> _view_builder;
     ::shared_ptr<sharded<db::view::view_update_generator>> _view_update_generator;
+    sharded<qos::service_level_controller>& _sl_controller;
 private:
     struct core_local_state {
         service::client_state client_state;
@@ -120,7 +122,7 @@ private:
         if (_db->local().has_keyspace(ks_name)) {
             _core_local.local().client_state.set_keyspace(_db->local(), ks_name);
         }
-        return ::make_shared<service::query_state>(_core_local.local().client_state);
+        return ::make_shared<service::query_state>(_core_local.local().client_state, _sl_controller.local());
     }
 public:
     single_node_cql_env(
@@ -128,12 +130,14 @@ public:
             ::shared_ptr<distributed<database>> db,
             ::shared_ptr<sharded<auth::service>> auth_service,
             ::shared_ptr<sharded<db::view::view_builder>> view_builder,
-            ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator)
+            ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator,
+             sharded<qos::service_level_controller> &sl_controller)
             : _feature_service(std::move(_feature_service))
             , _db(db)
             , _auth_service(std::move(auth_service))
             , _view_builder(std::move(view_builder))
             , _view_update_generator(std::move(view_update_generator))
+            , _sl_controller(sl_controller)
     { }
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(const sstring& text) override {
@@ -348,6 +352,12 @@ public:
             sl_controller.start(qos::service_level_options{1000}).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
+            sl_controller.invoke_on_all([&sys_dist_ks, &sl_controller] (qos::service_level_controller& service) {
+                qos::service_level_controller::service_level_distributed_data_accessor_ptr service_level_data_accessor =
+                        ::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                                make_shared<qos::unit_test_service_levels_accessor>(sl_controller,sys_dist_ks));
+                return service.set_distributed_data_accessor(std::move(service_level_data_accessor));
+            }).get();
             // don't start listening so tests can be run in parallel
             ms.start(std::ref(sl_controller), listen, std::move(7000), false).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
@@ -468,7 +478,7 @@ public:
                 // The default user may already exist if this `cql_test_env` is starting with previously populated data.
             }
 
-            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator);
+            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator, std::ref(sl_controller));
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 
