@@ -130,7 +130,7 @@ public:
 
     static ::shared_ptr<statements::raw::parsed_statement> parse_statement(const std::string_view& query);
 
-    query_processor(service::storage_proxy& proxy, database& db, memory_config mcfg);
+    query_processor(service::storage_proxy& proxy, database& db, memory_config mcfg, sharded<qos::service_level_controller> &sl_controller);
 
     ~query_processor();
 

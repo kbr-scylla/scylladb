@@ -69,6 +69,8 @@
 #include "database.hh"
 #include <seastar/core/metrics.hh>
 #include "audit/audit.hh"
+#include "service/qos/service_level_controller.hh"
+#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 
 using token = dht::token;
 using UUID = utils::UUID;
@@ -121,10 +123,12 @@ int get_generation_number() {
 }
 
 storage_service::storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, std::set<sstring> disabled_features)
+        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, sharded<qos::service_level_controller>& sl_controller,
+        std::set<sstring> disabled_features)
         : _feature_service(feature_service)
         , _db(db)
         , _auth_service(auth_service)
+        , _sl_controller(sl_controller)
         , _disabled_features(std::move(disabled_features))
         , _range_tombstones_feature(_feature_service, RANGE_TOMBSTONES_FEATURE)
         , _large_partitions_feature(_feature_service, LARGE_PARTITIONS_FEATURE)
@@ -518,6 +522,12 @@ void storage_service::join_token_ring(int delay) {
                 std::ref(cql3::get_query_processor()),
                 std::ref(service::get_migration_manager())).get();
         _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start).get();
+        // now, that the system distributed keyspace is initialized and started,
+        // pass an accessor to the service level controller so it can interact with it
+        _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
+            sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                    ::make_shared<qos::standard_service_level_distributed_data_accessor>(_sys_dist_ks.local())));
+        }).get();
     }
     // We bootstrap if we haven't successfully bootstrapped before, as long as we are not a seed.
     // If we are a seed, or if the user manually sets auto_bootstrap to false,
@@ -1368,6 +1378,9 @@ future<> storage_service::drain_on_shutdown() {
             tracing::tracing::tracing_instance().stop().get();
             slogger.info("Drain on shutdown: tracing is stopped");
 
+            //unregister the system distributed accessors before stopping the system_dystributed_keyspace service
+            ss._sl_controller.invoke_on_all(&qos::service_level_controller::set_distributed_data_accessor,
+                    shared_ptr<qos::service_level_controller::service_level_distributed_data_accessor>()).get();
             ss._sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::stop).get();
             slogger.info("Drain on shutdown: system distributed keyspace stopped");
 
@@ -2148,7 +2161,7 @@ future<bool> storage_service::is_rpc_server_running() {
 }
 
 future<> storage_service::start_native_transport() {
-    return run_with_api_lock(sstring("start_native_transport"), [] (storage_service& ss) {
+    return run_with_api_lock(sstring("start_native_transport"), [this] (storage_service& ss) {
         if (ss._cql_server || isolated.load()) {
             return make_ready_future<>();
         }
@@ -2163,8 +2176,8 @@ future<> storage_service::start_native_transport() {
         cql_server_config.timeout_config = make_timeout_config(cfg);
         cql_server_config.max_request_size = ss._db.local().get_available_memory() / 10;
         cql_transport::cql_load_balance lb = cql_transport::parse_load_balance(cfg.load_balance());
-        return seastar::net::dns::resolve_name(addr).then([&ss, cserver, addr, &cfg, lb, keepalive, ceo = std::move(ceo), cql_server_config] (seastar::net::inet_address ip) {
-                return cserver->start(std::ref(service::get_storage_proxy()), std::ref(cql3::get_query_processor()), lb, std::ref(ss._auth_service), cql_server_config).then([cserver, &cfg, addr, ip, ceo, keepalive]() {
+        return seastar::net::dns::resolve_name(addr).then([&ss, cserver, addr, &cfg, lb, keepalive, ceo = std::move(ceo), cql_server_config, this] (seastar::net::inet_address ip) {
+                return cserver->start(std::ref(service::get_storage_proxy()), std::ref(cql3::get_query_processor()), lb, std::ref(ss._auth_service), cql_server_config, std::ref(_sl_controller)).then([cserver, &cfg, addr, ip, ceo, keepalive]() {
                 // #293 - do not stop anything
                 //engine().at_exit([cserver] {
                 //    return cserver->stop();
@@ -3308,8 +3321,8 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
 }
 
 future<> init_storage_service(distributed<database>& db, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service) {
-    return service::get_storage_service().start(std::ref(db), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service));
+        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, sharded<qos::service_level_controller>& sl_controller) {
+    return service::get_storage_service().start(std::ref(db), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), std::ref(sl_controller));
 }
 
 future<> deinit_storage_service() {

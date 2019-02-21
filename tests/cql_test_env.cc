@@ -29,6 +29,7 @@
 #include "tmpdir.hh"
 #include "db/query_context.hh"
 #include "test_services.hh"
+#include "unit_test_service_levels_accessor.hh"
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
 #include "distributed_loader.hh"
@@ -39,6 +40,7 @@
 #include "gms/gossiper.hh"
 #include "gms/feature_service.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "auth/service.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
@@ -99,6 +101,7 @@ private:
     ::shared_ptr<sharded<auth::service>> _auth_service;
     ::shared_ptr<sharded<db::view::view_builder>> _view_builder;
     ::shared_ptr<sharded<db::view::view_update_generator>> _view_update_generator;
+    sharded<qos::service_level_controller>& _sl_controller;
 private:
     struct core_local_state {
         service::client_state client_state;
@@ -119,7 +122,7 @@ private:
         if (_db->local().has_keyspace(ks_name)) {
             _core_local.local().client_state.set_keyspace(_db->local(), ks_name);
         }
-        return ::make_shared<service::query_state>(_core_local.local().client_state);
+        return ::make_shared<service::query_state>(_core_local.local().client_state, _sl_controller.local());
     }
 public:
     single_node_cql_env(
@@ -127,12 +130,14 @@ public:
             ::shared_ptr<distributed<database>> db,
             ::shared_ptr<sharded<auth::service>> auth_service,
             ::shared_ptr<sharded<db::view::view_builder>> view_builder,
-            ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator)
+            ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator,
+             sharded<qos::service_level_controller> &sl_controller)
             : _feature_service(std::move(_feature_service))
             , _db(db)
             , _auth_service(std::move(auth_service))
             , _view_builder(std::move(view_builder))
             , _view_update_generator(std::move(view_update_generator))
+            , _sl_controller(sl_controller)
     { }
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(const sstring& text) override {
@@ -341,13 +346,24 @@ public:
             }
 
             const gms::inet_address listen("127.0.0.1");
+            auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto& ms = netw::get_messaging_service();
+            auto sl_controller = sharded<qos::service_level_controller>();
+            sl_controller.start(qos::service_level_options{1000}).get();
+            auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
+            sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
+            sl_controller.invoke_on_all([&sys_dist_ks, &sl_controller] (qos::service_level_controller& service) {
+                qos::service_level_controller::service_level_distributed_data_accessor_ptr service_level_data_accessor =
+                        ::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                                make_shared<qos::unit_test_service_levels_accessor>(sl_controller,sys_dist_ks));
+                return service.set_distributed_data_accessor(std::move(service_level_data_accessor));
+            }).get();
             // don't start listening so tests can be run in parallel
-            ms.start(listen, std::move(7000), false).get();
+            ms.start(std::ref(sl_controller), listen, std::move(7000), false).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
 
             auto auth_service = ::make_shared<sharded<auth::service>>();
-            auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
+
             auto stop_sys_dist_ks = defer([&sys_dist_ks] { sys_dist_ks.stop().get(); });
 
             auto feature_service = make_shared<sharded<gms::feature_service>>();
@@ -361,7 +377,7 @@ public:
             auto view_update_generator = ::make_shared<seastar::sharded<db::view::view_update_generator>>();
 
             auto& ss = service::get_storage_service();
-            ss.start(std::ref(*db), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), cfg_in.disabled_features).get();
+            ss.start(std::ref(*db), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), std::ref(sl_controller), cfg_in.disabled_features).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             database_config dbcfg;
@@ -397,7 +413,7 @@ public:
 
             auto& qp = cql3::get_query_processor();
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(*db), qp_mcfg).get();
+            qp.start(std::ref(proxy), std::ref(*db), qp_mcfg, std::ref(sl_controller)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             db::batchlog_manager_config bmcfg;
@@ -462,7 +478,7 @@ public:
                 // The default user may already exist if this `cql_test_env` is starting with previously populated data.
             }
 
-            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator);
+            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator, std::ref(sl_controller));
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 
@@ -496,13 +512,16 @@ class storage_service_for_tests::impl {
     sharded<auth::service> _auth_service;
     sharded<db::system_distributed_keyspace> _sys_dist_ks;
     sharded<db::view::view_update_generator> _view_update_generator;
+    sharded<qos::service_level_controller> _sl_controller;
+
 public:
     impl() {
         auto thread = seastar::thread_impl::get();
         assert(thread);
         _feature_service.start().get();
-        netw::get_messaging_service().start(gms::inet_address("127.0.0.1"), 7000, false).get();
-        service::get_storage_service().start(std::ref(_db), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service)).get();
+        _sl_controller.start(qos::service_level_options{1000}).get();
+        netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000, false).get();
+        service::get_storage_service().start(std::ref(_db), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), std::ref(_sl_controller)).get();
         service::get_storage_service().invoke_on_all([] (auto& ss) {
             ss.enable_all_features();
         }).get();
@@ -512,6 +531,7 @@ public:
         netw::get_messaging_service().stop().get();
         _db.stop().get();
         _feature_service.stop().get();
+        _sl_controller.stop().get();
     }
 };
 

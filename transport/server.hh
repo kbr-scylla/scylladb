@@ -26,6 +26,7 @@
 #include <seastar/net/tls.hh>
 #include <seastar/core/metrics_registration.hh>
 #include "utils/fragmented_temporary_buffer.hh"
+#include "service/qos/service_level_controller.hh"
 
 namespace scollectd {
 
@@ -88,8 +89,8 @@ struct cql_query_state {
     service::query_state query_state;
     std::unique_ptr<cql3::query_options> options;
 
-    cql_query_state(service::client_state& client_state)
-        : query_state(client_state)
+    cql_query_state(service::client_state& client_state, qos::service_level_controller& sl_controller)
+        : query_state(client_state, sl_controller)
     { }
 };
 
@@ -120,9 +121,10 @@ private:
     uint64_t _requests_blocked_memory = 0;
     cql_load_balance _lb;
     auth::service& _auth_service;
+    qos::service_level_controller& _sl_controller;
 public:
     cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, cql_load_balance lb, auth::service&,
-            cql_server_config config);
+            cql_server_config config, qos::service_level_controller& sl_controller);
     future<> listen(ipv4_addr addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
     future<> do_accepts(int which, bool keepalive, ipv4_addr server_addr);
     future<> stop();
@@ -156,6 +158,7 @@ private:
         service::client_state _client_state;
         std::unordered_map<uint16_t, cql_query_state> _query_states;
         unsigned _request_cpu = 0;
+        bool _tenant_switch = false;
 
         enum class tracing_request_type : uint8_t {
             not_requested,
@@ -196,6 +199,7 @@ private:
         future<response_type> process_execute(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_batch(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_register(uint16_t stream, request_reader in, service::client_state client_state);
+        future<> process_until_tenant_switch();
 
         std::unique_ptr<cql_server::response> make_unavailable_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t required, int32_t alive, const tracing::trace_state_ptr& tr_state);
         std::unique_ptr<cql_server::response> make_read_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state);

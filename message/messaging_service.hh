@@ -86,6 +86,10 @@ using wrapping_partition_range = wrapping_range<dht::ring_position>;
 
 }
 
+namespace qos {
+    class service_level_controller;
+}
+
 namespace netw {
 
 /* All verb handler identifiers */
@@ -224,18 +228,20 @@ private:
     std::array<std::unique_ptr<rpc_protocol_server_wrapper>, 2> _server;
     ::shared_ptr<seastar::tls::server_credentials> _credentials;
     std::array<std::unique_ptr<rpc_protocol_server_wrapper>, 2> _server_tls;
-    std::array<clients_map, 4> _clients;
+    std::vector<clients_map> _clients{4};
     uint64_t _dropped_messages[static_cast<int32_t>(messaging_verb::LAST)] = {};
     bool _stopping = false;
     std::list<std::function<void(gms::inet_address ep)>> _connection_drop_notifiers;
     memory_config _mcfg;
     scheduling_config _scheduling_config;
+    std::unordered_map<sstring, size_t> _service_level_to_client_idx;
+    qos::service_level_controller& _sl_controller;
 public:
     using clock_type = lowres_clock;
 public:
-    messaging_service(gms::inet_address ip = gms::inet_address("0.0.0.0"),
+    messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip = gms::inet_address("0.0.0.0"),
             uint16_t port = 7000, bool listen_now = true);
-    messaging_service(gms::inet_address ip, uint16_t port, encrypt_what, compress_what, tcp_nodelay_what,
+    messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip, uint16_t port, encrypt_what, compress_what, tcp_nodelay_what,
             uint16_t ssl_port, std::shared_ptr<seastar::tls::credentials_builder>,
             memory_config mcfg, scheduling_config scfg, bool sltba = false, bool listen_now = true);
     ~messaging_service();
@@ -432,6 +438,7 @@ public:
     void foreach_server_connection_stats(std::function<void(const rpc::client_info&, const rpc::stats&)>&& f) const;
 private:
     bool remove_rpc_client_one(clients_map& clients, msg_addr id, bool dead_only);
+    unsigned get_rpc_client_idx(messaging_verb verb);
 public:
     // Return rpc::protocol::client for a shard which is a ip + cpuid pair.
     shared_ptr<rpc_protocol_client_wrapper> get_rpc_client(messaging_verb verb, msg_addr id);
@@ -443,6 +450,7 @@ public:
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
     scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
+    unsigned add_service_level_config(sstring service_level_name);
 };
 
 extern distributed<messaging_service> _the_messaging_service;

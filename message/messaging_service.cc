@@ -24,6 +24,7 @@
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "streaming/prepare_message.hh"
 #include "gms/gossip_digest_syn.hh"
 #include "gms/gossip_digest_ack.hh"
@@ -261,8 +262,8 @@ void register_handler(messaging_service* ms, messaging_verb verb, Func&& func) {
     ms->rpc()->register_handler(verb, ms->scheduling_group_for_verb(verb), std::move(func));
 }
 
-messaging_service::messaging_service(gms::inet_address ip, uint16_t port, bool listen_now)
-    : messaging_service(std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
+messaging_service::messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip, uint16_t port, bool listen_now)
+    : messaging_service(sl_controller, std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
             scheduling_config{}, false, listen_now)
 {}
 
@@ -289,6 +290,11 @@ void messaging_service::start_listen() {
     //        local or remote datacenter, and whether or not the connection will be used for gossip. We can fix
     //        the first by wrapping its server_socket, but not the second.
     auto limits = rpc_resource_limits(_mcfg.rpc_memory_limit);
+    limits.isolate_connection = [this] (sstring isolation_cookie) {
+        rpc::isolation_config cfg;
+        cfg.sched_group = _sl_controller.get_scheduling_group(isolation_cookie);
+        return cfg;
+    };
     if (!_server[0]) {
         auto listen = [&] (const gms::inet_address& a) {
             auto addr = ipv4_addr{a.raw_addr(), _port};
@@ -330,7 +336,8 @@ void messaging_service::start_listen() {
     }
 }
 
-messaging_service::messaging_service(gms::inet_address ip
+messaging_service::messaging_service(qos::service_level_controller& sl_controller
+        , gms::inet_address ip
         , uint16_t port
         , encrypt_what ew
         , compress_what cw
@@ -341,7 +348,7 @@ messaging_service::messaging_service(gms::inet_address ip
         , scheduling_config scfg
         , bool sltba
         , bool listen_now)
-    : _listen_address(ip)
+    :_listen_address(ip)
     , _port(port)
     , _ssl_port(ssl_port)
     , _encrypt_what(ew)
@@ -352,6 +359,7 @@ messaging_service::messaging_service(gms::inet_address ip
     , _credentials(credentials ? credentials->build_server_credentials() : nullptr)
     , _mcfg(mcfg)
     , _scheduling_config(scfg)
+    , _sl_controller(sl_controller)
 {
     _rpc->set_logger([] (const sstring& log) {
             rpc_logger.info("{}", log);
@@ -478,8 +486,20 @@ static constexpr std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> 
 
 static std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> s_rpc_client_idx_table = make_rpc_client_idx_table();
 
-static unsigned get_rpc_client_idx(messaging_verb verb) {
-    return s_rpc_client_idx_table[static_cast<size_t>(verb)];
+unsigned messaging_service::get_rpc_client_idx(messaging_verb verb) {
+    auto idx = s_rpc_client_idx_table[static_cast<size_t>(verb)];
+    std::optional<sstring> service_level = _sl_controller.get_active_service_level();
+    if (service_level) {
+        auto it = _service_level_to_client_idx.find(*service_level);
+        unsigned new_idx;
+        if (it != _service_level_to_client_idx.end()) {
+            new_idx = it->second;
+        } else {
+            new_idx = add_service_level_config(*service_level);
+        }
+        return new_idx + (idx != 0);
+    }
+    return idx;
 }
 
 scheduling_group
@@ -490,7 +510,7 @@ messaging_service::scheduling_group_for_verb(messaging_verb verb) const {
         &scheduling_config::streaming,
         &scheduling_config::statement,
     };
-    return _scheduling_config.*(idx_to_group[get_rpc_client_idx(verb)]);
+    return _scheduling_config.*(idx_to_group[s_rpc_client_idx_table[(size_t)verb]]);
 }
 
 /**
@@ -548,7 +568,6 @@ shared_ptr<messaging_service::rpc_protocol_client_wrapper> messaging_service::ge
         }
         remove_error_rpc_client(verb, id);
     }
-
     auto must_encrypt = [&id, this] {
         if (_encrypt_what == encrypt_what::none) {
             return false;
@@ -602,7 +621,15 @@ shared_ptr<messaging_service::rpc_protocol_client_wrapper> messaging_service::ge
         opts.compressor_factory = &compressor_factory;
     }
     opts.tcp_nodelay = must_tcp_nodelay;
-
+    // isolate connections meant for statements
+    if (idx > 3) {
+        std::optional<sstring> service_level = _sl_controller.get_active_service_level();
+        // this check is redundant since if we have an index greater than 3 it means that we are in an active service level for sure,
+        // but i put it here for compeleteness - it doesn't happen a lot anyway (only on new rpc creation).
+        if (service_level) {
+            opts.isolation_cookie = *service_level;
+        }
+    }
     auto client = must_encrypt ?
                     ::make_shared<rpc_protocol_client_wrapper>(*_rpc, std::move(opts),
                                     remote_addr, ipv4_addr(), _credentials) :
@@ -1025,6 +1052,19 @@ void messaging_service::unregister_repair_get_full_row_hashes() {
 }
 future<std::unordered_set<repair_hash>> messaging_service::send_repair_get_full_row_hashes(msg_addr id, uint32_t repair_meta_id) {
     return send_message<future<std::unordered_set<repair_hash>>>(this, messaging_verb::REPAIR_GET_FULL_ROW_HASHES, std::move(id), repair_meta_id);
+}
+
+unsigned messaging_service::add_service_level_config(sstring service_level_name) {
+    auto idx = _clients.size();
+    auto undo = defer([&] {
+        _clients.resize(idx);
+        _service_level_to_client_idx.erase(service_level_name);
+    });
+    _clients.emplace_back();
+    _clients.emplace_back();
+    _service_level_to_client_idx[service_level_name] = idx;
+    undo.cancel();
+    return idx;
 }
 
 // Wrapper for REPAIR_GET_COMBINED_ROW_HASH

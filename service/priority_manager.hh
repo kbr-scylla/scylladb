@@ -12,8 +12,8 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/distributed.hh>
 #include <seastar/core/reactor.hh>
-
 #include "seastarx.hh"
+#include "qos/service_level_controller.hh"
 
 namespace service {
 class priority_manager {
@@ -23,7 +23,7 @@ class priority_manager {
     ::io_priority_class _stream_write_priority;
     ::io_priority_class _sstable_query_read;
     ::io_priority_class _compaction_priority;
-
+    qos::service_level_controller* _sl_controller;
 public:
     const ::io_priority_class&
     commitlog_priority() {
@@ -47,6 +47,12 @@ public:
 
     const ::io_priority_class&
     sstable_query_read_priority() {
+        if (_sl_controller) {
+            io_priority_class* pc = _sl_controller->get_current_priority_class();
+            if (pc) {
+                return *pc;
+            }
+        }
         return _sstable_query_read;
     }
 
@@ -55,6 +61,9 @@ public:
         return _compaction_priority;
     }
 
+    void set_service_level_controller(qos::service_level_controller* sl_controller) {
+        _sl_controller = sl_controller;
+    }
     priority_manager()
         : _commitlog_priority(engine().register_one_priority_class("commitlog", 1000))
         , _mt_flush_priority(engine().register_one_priority_class("memtable_flush", 1000))
@@ -62,7 +71,7 @@ public:
         , _stream_write_priority(engine().register_one_priority_class("streaming_write", 200))
         , _sstable_query_read(engine().register_one_priority_class("query", 1000))
         , _compaction_priority(engine().register_one_priority_class("compaction", 1000))
-
+        , _sl_controller(nullptr)
     {}
 };
 

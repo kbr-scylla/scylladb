@@ -23,6 +23,7 @@
 #include "service/migration_manager.hh"
 #include "service/load_broadcaster.hh"
 #include "service/view_update_backlog_broker.hh"
+#include "service/qos/service_level_controller.hh"
 #include "streaming/stream_session.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
@@ -514,8 +515,18 @@ int main(int ac, char** av) {
             static sharded<auth::service> auth_service;
             static sharded<db::system_distributed_keyspace> sys_dist_ks;
             static sharded<db::view::view_update_generator> view_update_generator;
+            static sharded<qos::service_level_controller> sl_controller;
+
+            //starting service level controller
+            qos::service_level_options default_service_level_configuration;
+            default_service_level_configuration.shares = 1000;
+            sl_controller.start(default_service_level_configuration).get();
+            sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
+            //This starts the update loop - but no real update happens until the data accessor is not initialized.
+            sl_controller.local().update_from_distributed_data(std::chrono::seconds(10));
+
             supervisor::notify("initializing storage service");
-            init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service);
+            init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service, sl_controller);
             supervisor::notify("starting per-shard database core");
 
             // Note: changed from using a move here, because we want the config object intact.
@@ -528,6 +539,7 @@ int main(int ac, char** av) {
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
             dbcfg.available_memory = get_available_memory();
             db.start(std::ref(*cfg), dbcfg).get();
+
             engine().at_exit([&db, &return_value] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -615,7 +627,8 @@ int main(int ac, char** av) {
             scfg.statement = dbcfg.statement_scheduling_group;
             scfg.streaming = dbcfg.streaming_scheduling_group;
             scfg.gossip = scheduling_group();
-            init_ms_fd_gossiper(feature_service
+            init_ms_fd_gossiper(sl_controller
+                    , feature_service
                     , listen_address
                     , storage_port
                     , ssl_storage_port
@@ -647,7 +660,7 @@ int main(int ac, char** av) {
             // engine().at_exit([&mm] { return mm.stop(); });
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(db), qp_mcfg).get();
+            qp.start(std::ref(proxy), std::ref(db), qp_mcfg, std::ref(sl_controller)).get();
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
             supervisor::notify("initializing batchlog manager");

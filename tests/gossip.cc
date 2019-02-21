@@ -18,11 +18,13 @@
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
 #include "service/storage_service.hh"
+#include "service/qos/service_level_controller.hh"
 #include "utils/fb_utilities.hh"
 #include "locator/snitch_base.hh"
 #include "log.hh"
 #include <seastar/core/thread.hh>
 #include <chrono>
+
 
 namespace bpo = boost::program_options;
 
@@ -65,8 +67,10 @@ int main(int ac, char ** av) {
             feature_service.start().get();
             sharded<db::system_distributed_keyspace> sys_dist_ks;
             sharded<db::view::view_update_generator> view_update_generator;
-            service::init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service).get();
-            netw::get_messaging_service().start(listen).get();
+            sharded<qos::service_level_controller> sl_controller;
+            sl_controller.start(qos::service_level_options{1000}).get();
+            service::init_storage_service(db, auth_service, sys_dist_ks, view_update_generator, feature_service, sl_controller).get();
+            netw::get_messaging_service().start(std::ref(sl_controller), listen).get();
             auto& server = netw::get_local_messaging_service();
             auto port = server.port();
             auto listen = server.listen_address();
