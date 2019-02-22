@@ -222,7 +222,7 @@ modes = {
     'debug': {
         'sanitize': '-fsanitize=address -fsanitize=leak -fsanitize=undefined',
         'sanitize_libs': '-lasan -lubsan',
-        'opt': '-Og -DDEBUG -DDEBUG_SHARED_PTR -DDEFAULT_ALLOCATOR -DDEBUG_LSA_SANITIZER',
+        'opt': '-O0 -DDEBUG -DDEBUG_SHARED_PTR -DDEFAULT_ALLOCATOR -DDEBUG_LSA_SANITIZER',
         'libs': '',
     },
     'release': {
@@ -391,7 +391,7 @@ arg_parser.add_argument('--pie', dest='pie', action='store_true',
                         help='Build position-independent executable (PIE)')
 arg_parser.add_argument('--so', dest='so', action='store_true',
                         help='Build shared object (SO) instead of executable')
-arg_parser.add_argument('--mode', action='store', choices=list(modes.keys()) + ['all'], default='all')
+arg_parser.add_argument('--mode', action='append', choices=list(modes.keys()), dest='selected_modes')
 arg_parser.add_argument('--with', dest='artifacts', action='append', choices=all_artifacts, default=[])
 arg_parser.add_argument('--cflags', action='store', dest='user_cflags', default='',
                         help='Extra flags for the C++ compiler')
@@ -444,6 +444,7 @@ cassandra_interface = Thrift(source='interface/cassandra.thrift', service='Cassa
 scylla_core = (['database.cc',
                 'table.cc',
                 'atomic_cell.cc',
+                'hashers.cc',
                 'schema.cc',
                 'frozen_schema.cc',
                 'schema_registry.cc',
@@ -801,6 +802,7 @@ scylla_tests_dependencies = scylla_core + idls + [
     'tests/result_set_assertions.cc',
     'tests/mutation_source_test.cc',
     'tests/data_model.cc',
+    'tests/test_services.cc',
 ]
 
 deps = {
@@ -887,7 +889,7 @@ deps['tests/mutation_reader_test'] += ['tests/sstable_utils.cc']
 
 deps['tests/bytes_ostream_test'] = ['tests/bytes_ostream_test.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['tests/input_stream_test'] = ['tests/input_stream_test.cc']
-deps['tests/UUID_test'] = ['utils/UUID_gen.cc', 'tests/UUID_test.cc', 'utils/uuid.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
+deps['tests/UUID_test'] = ['utils/UUID_gen.cc', 'tests/UUID_test.cc', 'utils/uuid.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
 deps['tests/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'tests/murmur_hash_test.cc']
 deps['tests/allocation_strategy_test'] = ['tests/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['tests/log_heap_test'] = ['tests/log_heap_test.cc']
@@ -1029,7 +1031,8 @@ globals().update(vars(args))
 total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
 link_pool_depth = max(int(total_memory / 7e9), 1)
 
-build_modes = modes if args.mode == 'all' else [args.mode]
+selected_modes = args.selected_modes or modes.keys()
+build_modes =  {m: modes[m] for m in selected_modes}
 build_artifacts = all_artifacts if not args.artifacts else args.artifacts
 
 status = subprocess.call("./SCYLLA-VERSION-GEN")

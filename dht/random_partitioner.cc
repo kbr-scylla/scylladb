@@ -8,7 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "md5_hasher.hh"
+#include "hashers.hh"
 #include "random_partitioner.hh"
 #include "utils/class_registrator.hh"
 #include "utils/div_ceil.hh"

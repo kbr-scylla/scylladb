@@ -28,11 +28,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#define CRYPTOPP_ENABLE_NAMESPACE_WEAK 1
-
 #include "cql3/query_processor.hh"
 
-#include <cryptopp/md5.h>
 #include <seastar/core/metrics.hh>
 
 #include "cql3/CqlParser.hpp"
@@ -41,6 +38,7 @@
 #include "cql3/util.hh"
 #include "db/config.hh"
 #include "database.hh"
+#include "hashers.hh"
 
 namespace cql3 {
 
@@ -379,14 +377,6 @@ query_processor::get_stored_prepared_statement(
     }
 }
 
-static bytes md5_calculate(const std::string_view& s) {
-    constexpr size_t size = CryptoPP::Weak1::MD5::DIGESTSIZE;
-    CryptoPP::Weak::MD5 hash;
-    unsigned char digest[size];
-    hash.CalculateDigest(digest, reinterpret_cast<const unsigned char*>(s.data()), s.size());
-    return std::move(bytes{reinterpret_cast<const int8_t*>(digest), size});
-}
-
 static sstring hash_target(const std::string_view& query_string, const sstring& keyspace) {
     return keyspace + std::string(query_string);
 }
@@ -394,7 +384,7 @@ static sstring hash_target(const std::string_view& query_string, const sstring& 
 prepared_cache_key_type query_processor::compute_id(
         const std::string_view& query_string,
         const sstring& keyspace) {
-    return prepared_cache_key_type(md5_calculate(hash_target(query_string, keyspace)));
+    return prepared_cache_key_type(md5_hasher::calculate(hash_target(query_string, keyspace)));
 }
 
 prepared_cache_key_type query_processor::compute_thrift_id(
