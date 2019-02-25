@@ -302,7 +302,9 @@ public:
         return ser::serialize_to_buffer<bytes>(_options, 0);
     }
     future<> validate(const schema&) const override {
-        return _provider->validate();
+        return _provider->validate().then([this] {
+            return key_for_write().discard_result();
+        });
     }
 };
 
