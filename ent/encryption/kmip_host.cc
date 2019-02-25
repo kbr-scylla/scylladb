@@ -221,6 +221,7 @@ public:
 
     future<> connect();
     future<> wait_for_io();
+    future<> close();
 private:
     static int io_callback(KMIP*, void*, int, void*, unsigned int, unsigned int*);
 
@@ -370,6 +371,12 @@ void kmip_host::impl::connection::attach(KMIP_CMD* cmd) {
                                     reinterpret_cast<void *>(this)));
 }
 
+future<> kmip_host::impl::connection::close() {
+    return _output.close().finally([this] {
+        return _input.close();
+    });
+}
+
 template<typename T, int(*FreeFunc)(T *)>
 class kmip_host::impl::kmip_handle {
 public:
@@ -450,11 +457,13 @@ future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func && f) {
             });
         case 0:
             release(cmd, cp);
-            break;
+            return make_ready_future<opt_int>(res);
         default:
-            break;
+            // error. connection is dicarded. close it.
+            return cp->close().then([cp, res]() {
+                return make_ready_future<opt_int>(res);
+            });
         }
-        return make_ready_future<opt_int>(res);
     });
 }
 
