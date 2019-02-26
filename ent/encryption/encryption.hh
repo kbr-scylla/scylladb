@@ -133,6 +133,9 @@ public:
     virtual void cache_provider(const sstring& id, shared_ptr<key_provider>) = 0;
 
     virtual const encryption_config& config() const = 0;
+    virtual shared_ptr<symmetric_key> get_config_encryption_key() const = 0;
+
+    sstring maybe_decrypt_config_value(const sstring&) const;
 };
 
 future<> register_extensions(const db::config&, const encryption_config&, db::extensions&);
