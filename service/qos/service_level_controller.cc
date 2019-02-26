@@ -381,7 +381,8 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             return make_ready_future();
         }
     } else {
-        return do_with(service_level{.slo = slo, .is_static = is_static}, std::move(name), [this] (service_level& sl, sstring& name) {
+        return do_with(service_level{slo /*slo*/, default_scheduling_group() /*sg*/, default_priority_class() /*pc*/,
+                false /*marked_for_deletion*/, is_static /*is_static*/}, std::move(name), [this] (service_level& sl, sstring& name) {
             return make_ready_future().then([this, &sl] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
                     scheduling_group sg;
