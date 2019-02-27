@@ -455,6 +455,9 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     auto features = get_config_supported_features();
     _token_metadata.update_host_id(local_host_id, get_broadcast_address());
     auto broadcast_rpc_address = utils::fb_utilities::get_broadcast_rpc_address();
+    auto& proxy = service::get_storage_proxy();
+    // Ensure we know our own actual Schema UUID in preparation for updates
+    auto schema_version = update_schema_version(proxy).get0();
     app_states.emplace(gms::application_state::NET_VERSION, value_factory.network_version());
     app_states.emplace(gms::application_state::HOST_ID, value_factory.host_id(local_host_id));
     app_states.emplace(gms::application_state::RPC_ADDRESS, value_factory.rpcaddress(broadcast_rpc_address));
@@ -464,6 +467,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     app_states.emplace(gms::application_state::SCHEMA_TABLES_VERSION, versioned_value(db::schema_tables::version));
     app_states.emplace(gms::application_state::RPC_READY, value_factory.cql_ready(false));
     app_states.emplace(gms::application_state::VIEW_BACKLOG, versioned_value(""));
+    app_states.emplace(gms::application_state::SCHEMA, value_factory.schema(schema_version));
     slogger.info("Starting up server gossip");
 
     auto& gossiper = gms::get_local_gossiper();
@@ -474,9 +478,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     // gossip snitch infos (local DC and rack)
     gossip_snitch_info().get();
 
-    auto& proxy = service::get_storage_proxy();
     // gossip Schema.emptyVersion forcing immediate check for schema updates (see MigrationManager#maybeScheduleSchemaPull)
-    update_schema_version_and_announce(proxy).get();// Ensure we know our own actual Schema UUID in preparation for updates
 #if 0
     if (!MessagingService.instance().isListening())
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
@@ -2175,6 +2177,7 @@ future<> storage_service::start_native_transport() {
         cql_transport::cql_server_config cql_server_config;
         cql_server_config.timeout_config = make_timeout_config(cfg);
         cql_server_config.max_request_size = ss._db.local().get_available_memory() / 10;
+        cql_server_config.allow_shard_aware_drivers = cfg.enable_shard_aware_drivers();
         cql_transport::cql_load_balance lb = cql_transport::parse_load_balance(cfg.load_balance());
         return seastar::net::dns::resolve_name(addr).then([&ss, cserver, addr, &cfg, lb, keepalive, ceo = std::move(ceo), cql_server_config, this] (seastar::net::inet_address ip) {
                 return cserver->start(std::ref(service::get_storage_proxy()), std::ref(cql3::get_query_processor()), lb, std::ref(ss._auth_service), cql_server_config, std::ref(_sl_controller)).then([cserver, &cfg, addr, ip, ceo, keepalive]() {

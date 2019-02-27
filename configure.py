@@ -124,27 +124,6 @@ def flag_supported(flag, compiler):
     return try_compile(flags=['-Werror'] + split, compiler=compiler)
 
 
-def debug_flag(compiler):
-    src_with_auto = textwrap.dedent('''\
-        template <typename T>
-        struct x { auto f() {} };
-
-        x<int> a;
-        ''')
-    if try_compile(source=src_with_auto, flags=['-g', '-std=gnu++1y'], compiler=compiler):
-        return '-g'
-    else:
-        print('Note: debug information disabled; upgrade your compiler')
-        return ''
-
-
-def debug_compress_flag(compiler):
-    if try_compile(compiler=compiler, flags=['-gz']):
-        return '-gz'
-    else:
-        return ''
-
-
 def gold_supported(compiler):
     src_main = 'int main(int argc, char **argv) { return 0; }'
     if try_compile_and_link(source=src_main, flags=['-fuse-ld=gold'], compiler=compiler):
@@ -901,6 +880,7 @@ deps['tests/imr_test'] = ['tests/imr_test.cc', 'utils/logalloc.cc', 'utils/dynam
 deps['tests/reusable_buffer_test'] = ['tests/reusable_buffer_test.cc']
 deps['tests/utf8_test'] = ['utils/utf8.cc', 'tests/utf8_test.cc']
 deps['tests/small_vector_test'] = ['tests/small_vector_test.cc']
+deps['tests/multishard_mutation_query_test'] += ['tests/test_table.cc']
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
@@ -943,7 +923,7 @@ modes['release']['opt'] += ' ' + ' '.join(optimization_flags)
 
 gold_linker_flag = gold_supported(compiler=args.cxx)
 
-dbgflag = debug_flag(args.cxx) if args.debuginfo else ''
+dbgflag = '-g' if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
 
 if args.so:
@@ -1058,7 +1038,7 @@ if args.alloc_failure_injector:
 if args.split_dwarf:
     seastar_flags += ['--split-dwarf']
 
-debug_flags = ' ' + debug_compress_flag(compiler=args.cxx) + ' ' + dbgflag
+debug_flags = ' -gz ' + dbgflag
 modes['debug']['opt'] += debug_flags
 modes['release']['opt'] += debug_flags
 
