@@ -159,7 +159,7 @@ public:
                 });
 	    }
 
-            const sstring& get_username() override {
+            const sstring& get_username() const override {
                 return _sasl->get_username();
             }
 
