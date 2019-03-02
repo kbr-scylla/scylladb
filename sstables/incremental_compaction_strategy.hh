@@ -59,7 +59,10 @@ using sstable_run_bucket_and_length = std::pair<std::vector<sstables::sstable_ru
 class incremental_compaction_strategy : public compaction_strategy_impl {
     incremental_compaction_strategy_options _options;
     compaction_backlog_tracker _backlog_tracker;
-    static constexpr size_t _fragment_size = 1000*1024*1024;
+
+    static constexpr int32_t DEFAULT_MAX_FRAGMENT_SIZE_IN_MB = 1000;
+    const sstring FRAGMENT_SIZE_OPTION = "sstable_size_in_mb";
+    size_t _fragment_size = DEFAULT_MAX_FRAGMENT_SIZE_IN_MB*1024*1024;
 
     std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs) const;
 

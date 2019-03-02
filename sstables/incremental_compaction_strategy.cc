@@ -173,6 +173,14 @@ incremental_compaction_strategy::incremental_compaction_strategy(const std::map<
     , _options(options)
     , _backlog_tracker(std::make_unique<incremental_backlog_tracker>())
 {
+    using namespace cql3::statements;
+    auto option_value = compaction_strategy_impl::get_value(options, FRAGMENT_SIZE_OPTION);
+    _fragment_size = property_definitions::to_int(FRAGMENT_SIZE_OPTION, option_value, DEFAULT_MAX_FRAGMENT_SIZE_IN_MB);
+
+    if (_fragment_size < 100) {
+        clogger.warn("SStable size of {}MB is configured. The value may lead to sstable run having an substatial amount of fragments, leading to undesired overhead.",
+                     _fragment_size);
+    }
 }
 
 }
