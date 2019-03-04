@@ -180,7 +180,7 @@ bytes encrypted_file_impl::iv_for(uint64_t pos) const {
     assert(iv_len >= _key->block_size());
     assert(iv_len >= sizeof(uint64_t));
 
-    bytes b(bytes::initialized_later(), iv_len);
+    bytes b(bytes::initialized_later(), std::max(iv_len, _block_key->block_size()));
     std::fill(b.begin(), b.end() - sizeof(uint64_t), 0);
 
     // write block pos as little endian IV-len integer
@@ -189,6 +189,8 @@ bytes encrypted_file_impl::iv_for(uint64_t pos) const {
 
     // encrypt the encoded block number to build an IV
     _block_key->encrypt_unpadded(b.data(), b.size(), b.data());
+
+    b.resize(iv_len);
 
     return b;
 }
