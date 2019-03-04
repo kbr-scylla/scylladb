@@ -135,7 +135,13 @@ void encryption::symmetric_key::transform_unpadded_impl(const uint8_t* input,
     }
 
     int outl = 0;
-    if (!EVP_EncryptUpdate(*this, output, &outl, input, int(input_len)) || outl != int(input_len)) {
+    auto res = m == mode::decrypt ?
+                    EVP_DecryptUpdate(*this, output, &outl, input,
+                                    int(input_len)) :
+                    EVP_EncryptUpdate(*this, output, &outl, input,
+                                    int(input_len));
+
+    if (!res || outl != int(input_len)) {
         throw std::runtime_error("transformation failed");
     }
 }
