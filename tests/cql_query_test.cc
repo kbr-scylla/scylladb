@@ -3344,7 +3344,7 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         e.execute_cql("CREATE SERVICE_LEVEL sl_1;").get();
         auto msg = e.execute_cql("LIST SERVICE_LEVEL sl_1;").get0();
         assert_that(msg).is_rows().with_rows({
-            {utf8_type->decompose("sl_1"), int32_type->decompose(1)},
+            {utf8_type->decompose("sl_1"), int32_type->decompose(1000)},
         });
         //create and alter service levels
         e.execute_cql("CREATE SERVICE_LEVEL sl_2 WITH SHARES = 200;").get();

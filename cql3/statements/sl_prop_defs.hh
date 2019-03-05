@@ -21,7 +21,7 @@ namespace statements {
 class sl_prop_defs : public property_definitions {
 public:
     static constexpr auto KW_SHARES = "shares";
-    static constexpr int SHARES_DEFAULT_VAL = 1;
+    static constexpr int SHARES_DEFAULT_VAL = 1000;
     static constexpr int SHARES_MIN_VAL = 1;
     static constexpr int SHARES_MAX_VAL = 1000;
 private:
