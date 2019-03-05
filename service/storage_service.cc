@@ -524,12 +524,6 @@ void storage_service::join_token_ring(int delay) {
                 std::ref(cql3::get_query_processor()),
                 std::ref(service::get_migration_manager())).get();
         _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start).get();
-        // now, that the system distributed keyspace is initialized and started,
-        // pass an accessor to the service level controller so it can interact with it
-        _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
-            sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-                    ::make_shared<qos::standard_service_level_distributed_data_accessor>(_sys_dist_ks.local())));
-        }).get();
     }
     // We bootstrap if we haven't successfully bootstrapped before, as long as we are not a seed.
     // If we are a seed, or if the user manually sets auto_bootstrap to false,
@@ -676,6 +670,13 @@ void storage_service::join_token_ring(int delay) {
         // start participating in the ring.
         db::system_keyspace::set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED).get();
         set_tokens(_bootstrap_tokens);
+
+        // now, that the system distributed keyspace is initialized and started,
+        // pass an accessor to the service level controller so it can interact with it
+        _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
+            sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                    ::make_shared<qos::standard_service_level_distributed_data_accessor>(_sys_dist_ks.local())));
+        }).get();
         // remove the existing info about the replaced node.
         if (!current.empty()) {
             auto& gossiper = gms::get_local_gossiper();
