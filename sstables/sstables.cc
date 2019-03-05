@@ -1829,7 +1829,7 @@ sharding_metadata
 create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key, const dht::decorated_key& last_key, shard_id shard) {
     auto prange = dht::partition_range::make(dht::ring_position(first_key), dht::ring_position(last_key));
     auto sm = sharding_metadata();
-    for (auto&& range : dht::split_range_to_single_shard(*schema, prange, shard)) {
+    for (auto&& range : dht::split_range_to_single_shard(*schema, prange, shard).get0()) {
         if (true) { // keep indentation
             // we know left/right are not infinite
             auto&& left = range.start()->value();
@@ -3148,7 +3148,7 @@ static future<>
 maybe_delete_large_data_entry(shared_sstable sst, const db::large_data_handler& large_data_handler)
 {
     auto name = sst->get_filename();
-    return large_data_handler.maybe_delete_large_partitions_entry(*sst->get_schema(), name, sst->data_size())
+    return large_data_handler.maybe_delete_large_data_entries(*sst->get_schema(), name, sst->data_size())
             .then_wrapped([name = std::move(name)] (future<> f) {
         if (f.failed()) {
             // Just log and ignore failures to delete large data entries.

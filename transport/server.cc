@@ -749,7 +749,7 @@ future<response_type> cql_server::connection::process_auth_response(uint16_t str
                     [this, stream, challenge = std::move(challenge), client_state = std::move(client_state), sasl_challenge, ff = std::move(f)] () mutable {
                 client_state.set_login(make_shared<auth::authenticated_user>(std::move(ff.get0())));
                 _tenant_switch = true;
-                auto f = client_state.check_user_exists();
+                auto f = client_state.check_user_can_login();
                 return f.then([this, stream, client_state = std::move(client_state), challenge = std::move(challenge)]() mutable {
                     auto tr_state = client_state.get_trace_state();
                     return make_ready_future<response_type>(std::make_pair(make_auth_success(stream, std::move(challenge), tr_state), std::move(client_state)));
