@@ -288,7 +288,10 @@ int kmip_host::impl::connection::send(void* data, unsigned int len, unsigned int
         kmip_log.trace("{}: send done. flushing...", *this);
         return _output.flush();
     });
-    if (!f.available()) {
+    // if the call failed already, we still want to
+    // drop back to "wait_for_io()", because we cannot throw
+    // exceptions through the kmipc code frames.
+    if (!f.available() || f.failed()) {
         _pending.emplace(std::move(f));
     }
     return KMIP_ERROR_NONE;
@@ -320,7 +323,10 @@ int kmip_host::impl::connection::recv(void* data, unsigned int len, unsigned int
            _in_buffer = std::move(buf);
         });
 
-        if (!f.available()) {
+        // if the call failed already, we still want to
+        // drop back to "wait_for_io()", because we cannot throw
+        // exceptions through the kmipc code frames.
+        if (!f.available() || f.failed()) {
             _pending.emplace(std::move(f));
         }
     }
@@ -456,13 +462,29 @@ future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func && f) {
         case KMIP_ERROR_RETRY:
             return cp->wait_for_io().then([] {
                 return opt_int();
+            }).handle_exception([cp](auto ep) {
+                // get here if we had any wire exceptions below.
+                // make sure to force flush and stuff here as well.
+                return cp->close().then_wrapped([ep = std::move(ep)](auto f) mutable {
+                    try {
+                        f.get();
+                    } catch (...) {
+                    }
+                    return make_exception_future<opt_int>(std::move(ep));
+                });
             });
         case 0:
             release(cmd, cp);
             return make_ready_future<opt_int>(res);
         default:
             // error. connection is dicarded. close it.
-            return cp->close().then([cp, res]() {
+            return cp->close().then_wrapped([cp, res](auto f) {
+                // ignore any exception thrown from the close.
+                // ensure we provide the kmip error instead.
+                try {
+                    f.get();
+                } catch (...) {
+                }
                 return make_ready_future<opt_int>(res);
             });
         }
