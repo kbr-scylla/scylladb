@@ -843,6 +843,10 @@ void keyspace::update_from(::lw_shared_ptr<keyspace_metadata> ksm) {
    create_replication_strategy(_metadata->strategy_options());
 }
 
+static bool is_system_table(const schema& s) {
+    return s.ks_name() == db::system_keyspace::NAME || s.ks_name() == db::system_distributed_keyspace::NAME;
+}
+
 column_family::config
 keyspace::make_column_family_config(const schema& s, const database& db) const {
     column_family::config cfg;
@@ -873,8 +877,7 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
 
     // avoid self-reporting
-    if (s.ks_name() == "system" &&
-            (s.cf_name() == db::system_keyspace::LARGE_PARTITIONS || s.cf_name() == db::system_keyspace::LARGE_ROWS)) {
+    if (is_system_table(s)) {
         cfg.large_data_handler = db.get_nop_large_data_handler();
     } else {
         cfg.large_data_handler = db.get_large_data_handler();
@@ -1272,7 +1275,7 @@ future<> dirty_memory_manager::shutdown() {
 }
 
 future<> memtable_list::request_flush() {
-    if (!may_flush()) {
+    if (empty() || !may_flush()) {
         return make_ready_future<>();
     } else if (!_flush_coalescing) {
         _flush_coalescing = shared_promise<>();
@@ -1625,23 +1628,47 @@ schema_ptr database::find_indexed_table(const sstring& ks_name, const sstring& i
     return nullptr;
 }
 
+future<> database::close_tables(table_kind kind_to_close) {
+    return parallel_for_each(_column_families, [this, kind_to_close](auto& val_pair) {
+        table_kind k = is_system_table(*val_pair.second->schema()) ? table_kind::system : table_kind::user;
+        if (k == kind_to_close) {
+            return val_pair.second->stop();
+        } else {
+            return make_ready_future<>();
+        }
+    });
+}
+
+future<> stop_database(sharded<database>& sdb) {
+    return sdb.invoke_on_all([](database& db) {
+        return db.get_compaction_manager().stop();
+    }).then([&sdb] {
+        // Closing a table can cause us to find a large partition. Since we want to record that, we have to close
+        // system.large_partitions after the regular tables.
+        return sdb.invoke_on_all([](database& db) {
+            return db.close_tables(database::table_kind::user);
+        });
+    }).then([&sdb] {
+        return sdb.invoke_on_all([](database& db) {
+            return db.close_tables(database::table_kind::system);
+        });
+    }).then([&sdb] {
+        return sdb.invoke_on_all([](database& db) {
+            db.stop_large_data_handler();
+        });
+    });
+}
+
 void database::stop_large_data_handler() { _large_data_handler->stop(); }
 
 future<>
 database::stop() {
     assert(_large_data_handler->stopped());
+    assert(_compaction_manager->stopped());
 
-    return _compaction_manager->stop().then([this] {
-        // try to ensure that CL has done disk flushing
-        if (_commitlog != nullptr) {
-            return _commitlog->shutdown();
-        }
-        return make_ready_future<>();
-    }).then([this] {
-        return parallel_for_each(_column_families, [this] (auto& val_pair) {
-            return val_pair.second->stop();
-        });
-    }).then([this] {
+    // try to ensure that CL has done disk flushing
+    future<> maybe_shutdown_commitlog = _commitlog != nullptr ? _commitlog->shutdown() : make_ready_future<>();
+    return maybe_shutdown_commitlog.then([this] {
         return _view_update_concurrency_sem.wait(max_memory_pending_view_updates());
     }).then([this] {
         if (_commitlog != nullptr) {
@@ -1673,9 +1700,8 @@ future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) 
 
 future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_func tsf, bool with_snapshot) {
     return cf.run_async([this, &ks, &cf, tsf = std::move(tsf), with_snapshot] {
-        const auto durable = ks.metadata()->durable_writes();
         const auto auto_snapshot = with_snapshot && get_config().auto_snapshot();
-        const auto should_flush = durable || auto_snapshot;
+        const auto should_flush = auto_snapshot;
 
         // Force mutations coming in to re-acquire higher rp:s
         // This creates a "soft" ordering, in that we will guarantee that

@@ -546,9 +546,7 @@ int main(int ac, char** av) {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
                 // call stop on each db instance, but leave the shareded<database> pointers alive.
-                return db.invoke_on_all([](auto& db) {
-                    db.stop_large_data_handler();
-                }).then([&db]{
+                return stop_database(db).then([&db] {
                     return db.invoke_on_all([](auto& db) {
                         return db.stop();
                     });
@@ -774,7 +772,9 @@ int main(int ac, char** av) {
             db::hints::manager::rebalance(cfg->view_hints_directory()).get();
 
             proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {
-                local_proxy.start_hints_manager(gms::get_local_gossiper().shared_from_this(), service::get_local_storage_service().shared_from_this());
+                auto& ss = service::get_local_storage_service();
+                ss.register_subscriber(&local_proxy);
+                local_proxy.start_hints_manager(gms::get_local_gossiper().shared_from_this(), ss.shared_from_this());
             }).get();
 
             supervisor::notify("starting messaging service");
