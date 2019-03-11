@@ -10,6 +10,8 @@
  */
 #include <deque>
 #include <unordered_map>
+#include <regex>
+#include <algorithm>
 
 #include <seastar/net/dns.hh>
 #include <seastar/net/api.hh>
@@ -761,9 +763,17 @@ kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::u
         host_options opts;
         map_wrapper<std::unordered_map<sstring, sstring>> m(map);
 
-        // todo: split etc.
         try {
-            opts.hosts.emplace_back(m("hosts").value());
+            static const std::regex wsc("\\s*,\\s*"); // comma+whitespace
+
+            std::string hosts = m("hosts").value();
+
+            auto i = std::sregex_token_iterator(hosts.begin(), hosts.end(), wsc, -1);
+            auto e = std::sregex_token_iterator();
+
+            std::for_each(i, e, [&](const std::string & s) {
+                opts.hosts.emplace_back(s);
+            });
         } catch (std::bad_optional_access&) {
             throw std::invalid_argument("No KMIP host names provided");
         }
