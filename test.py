@@ -39,6 +39,7 @@ boost_tests = [
     'schema_change_test',
     'sstable_mutation_test',
     'sstable_resharding_test',
+    'incremental_compaction_test',
     'commitlog_test',
     'hash_test',
     'test-serialization',
