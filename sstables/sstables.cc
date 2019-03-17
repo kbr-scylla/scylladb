@@ -1092,6 +1092,27 @@ void sstable::write_compression(const io_priority_class& pc) {
     write_simple<component_type::CompressionInfo>(_components->compression, pc);
 }
 
+void sstable::validate_partitioner() {
+    auto entry = _components->statistics.contents.find(metadata_type::Validation);
+    if (entry == _components->statistics.contents.end()) {
+        throw std::runtime_error("Validation metadata not available");
+    }
+    auto& p = entry->second;
+    if (!p) {
+        throw std::runtime_error("Validation is malformed");
+    }
+
+    validation_metadata& v = *static_cast<validation_metadata *>(p.get());
+    if (v.partitioner.value != to_bytes(dht::global_partitioner().name())) {
+        throw std::runtime_error(
+                fmt::format(FMT_STRING("SSTable {} uses {} partitioner which is different than {} partitioner used by the database"),
+                            get_filename(),
+                            sstring(reinterpret_cast<char*>(v.partitioner.value.data()), v.partitioner.value.size()),
+                            dht::global_partitioner().name()));
+    }
+
+}
+
 void sstable::validate_min_max_metadata() {
     auto entry = _components->statistics.contents.find(metadata_type::Stats);
     if (entry == _components->statistics.contents.end()) {
@@ -1373,6 +1394,7 @@ future<> sstable::load(const io_priority_class& pc) {
                     read_summary(pc)).then([this] {
                 validate_min_max_metadata();
                 validate_max_local_deletion_time();
+                validate_partitioner();
                 return open_data();
             });
         });
@@ -1387,6 +1409,7 @@ future<> sstable::load(sstables::foreign_sstable_open_info info) {
         _shards = std::move(info.owners);
         validate_min_max_metadata();
         validate_max_local_deletion_time();
+        validate_partitioner();
         return update_info_for_opened_data();
     });
 }
@@ -2119,7 +2142,7 @@ stop_iteration components_writer::consume_end_of_partition() {
     // compute size of the current row.
     _sst._c_stats.partition_size = _out.offset() - _sst._c_stats.start_offset;
 
-    _large_data_handler->maybe_update_large_partitions(_sst, *_partition_key, _sst._c_stats.partition_size).get();
+    _large_data_handler->maybe_record_large_partitions(_sst, *_partition_key, _sst._c_stats.partition_size).get();
 
     // update is about merging column_stats with the data being stored by collector.
     _sst._collector.update(std::move(_sst._c_stats));
@@ -3145,28 +3168,20 @@ sstable::unlink()
 }
 
 static future<>
-maybe_delete_large_data_entry(shared_sstable sst, const db::large_data_handler& large_data_handler)
+maybe_delete_large_data_entry(shared_sstable sst, db::large_data_handler& large_data_handler)
 {
     auto name = sst->get_filename();
-    return large_data_handler.maybe_delete_large_data_entries(*sst->get_schema(), name, sst->data_size())
-            .then_wrapped([name = std::move(name)] (future<> f) {
-        if (f.failed()) {
-            // Just log and ignore failures to delete large data entries.
-            // They are not critical to the operation of the database.
-            sstlog.warn("Failed to delete large data entry for {}: {}. Ignoring.", name, f.get_exception());
-        }
-        return make_ready_future<>();
-    });
+    return large_data_handler.maybe_delete_large_data_entries(*sst->get_schema(), name, sst->data_size());
 }
 
 static future<>
-delete_sstable_and_maybe_large_data_entries(shared_sstable sst, const db::large_data_handler& large_data_handler)
+delete_sstable_and_maybe_large_data_entries(shared_sstable sst, db::large_data_handler& large_data_handler)
 {
     return when_all(sst->unlink(), maybe_delete_large_data_entry(sst, large_data_handler)).discard_result();
 }
 
 future<>
-delete_atomically(std::vector<shared_sstable> ssts, const db::large_data_handler& large_data_handler) {
+delete_atomically(std::vector<shared_sstable> ssts, db::large_data_handler& large_data_handler) {
     return seastar::async([ssts = std::move(ssts), &large_data_handler] {
         sstring sstdir;
         min_max_tracker<int64_t> gen_tracker;

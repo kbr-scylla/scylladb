@@ -286,6 +286,12 @@ struct cf_stats {
 
     // How many times view building was paused (e.g. due to node unavailability)
     int64_t view_building_paused = 0;
+
+    // How many view updates were processed for all tables
+    uint64_t total_view_updates_pushed_local = 0;
+    uint64_t total_view_updates_pushed_remote = 0;
+    uint64_t total_view_updates_failed_local = 0;
+    uint64_t total_view_updates_failed_remote = 0;
 };
 
 class table;
@@ -1362,7 +1368,7 @@ public:
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
-    void stop_large_data_handler();
+    future<> stop_large_data_handler();
     unsigned shard_of(const dht::token& t);
     unsigned shard_of(const mutation& m);
     unsigned shard_of(const frozen_mutation& m);
