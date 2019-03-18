@@ -8,7 +8,6 @@ dist/common/scripts/* usr/lib/scylla
 scylla-blocktune usr/lib/scylla
 scylla-housekeeping usr/lib/scylla
 tools/scyllatop usr/lib/scylla
-tools/scyllarepair usr/lib/scylla
 swagger-ui/dist usr/lib/scylla/swagger-ui
 api/api-doc usr/lib/scylla/api
 build/release/scylla usr/bin

@@ -141,7 +141,6 @@ cp -r swagger-ui/dist "$rprefix"/lib/scylla/swagger-ui
 install -d -m755 -d "$rprefix"/lib/scylla/api
 cp -r api/api-doc "$rprefix"/lib/scylla/api
 cp -r tools/scyllatop "$rprefix"/lib/scylla/scyllatop
-cp -r tools/scyllarepair "$rprefix"/lib/scylla/scyllarepair
 install -d "$rprefix"/sbin
 cp -P dist/common/sbin/* "$rprefix"/sbin
 install -m755 scylla-gdb.py -Dt "$rprefix"/lib/scylla/
