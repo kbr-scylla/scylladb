@@ -37,7 +37,7 @@
 
 namespace encryption {
 
-static auto const KSNAME = "scylla";
+static auto constexpr KSNAME = "system_replicated_keys";
 static auto constexpr TABLENAME = "encrypted_keys";
 
 static logger log("replicated_key_provider");
