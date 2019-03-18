@@ -34,6 +34,7 @@
 #include "utils/UUID_gen.hh"
 #include "utils/hash.hh"
 #include "service/storage_service.hh"
+#include "sstables/compaction_manager.hh"
 
 namespace encryption {
 
@@ -83,6 +84,14 @@ public:
     future<key_ptr, opt_bytes> key(const key_info&, opt_bytes = {}) override;
     future<> validate() const override;
     future<> maybe_initialize_tables();
+
+    bool should_delay_read(const opt_bytes& id) const override {
+        if (!id || _initialized) {
+            return false;
+        }
+        auto& qp = cql3::get_query_processor();
+        return !qp.local_is_initialized() || qp.local().db().local().get_compaction_manager().stopped();
+    }
 
 private:
     void store_key(const key_id&, const UUID&, key_ptr);
