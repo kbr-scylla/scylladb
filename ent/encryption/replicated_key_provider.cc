@@ -98,6 +98,8 @@ private:
     template<typename... Args>
     static future<::shared_ptr<cql3::untyped_result_set>> query(sstring, Args&& ...);
 
+    future<> force_blocking_flush();
+
     shared_ptr<system_key> _system_key;
     shared_ptr<key_provider> _local_provider;
     std::unordered_map<key_id, std::pair<UUID, key_ptr>, key_id_hash> _keys;
@@ -124,6 +126,13 @@ future<::shared_ptr<cql3::untyped_result_set>> replicated_key_provider::query(ss
     });
 }
 
+future<> replicated_key_provider::force_blocking_flush() {
+    return cql3::get_local_query_processor().db().invoke_on_all([](database& db) {
+        // if (!Boolean.getBoolean("cassandra.unsafesystem"))
+        column_family& cf = db.find_column_family(KSNAME, TABLENAME);
+        return cf.flush();
+    });
+}
 
 void replicated_key_provider::store_key(const key_id& id, const UUID& uuid, key_ptr k) {
     _keys[id] = std::make_pair(uuid, k);
@@ -247,8 +256,10 @@ future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt
                 auto ks = base64_encode(b);
                 return query(sprint("INSERT INTO %s.%s (key_file, cipher, strength, key_id, key) VALUES (?, ?, ?, ?, ?)", KSNAME, TABLENAME)
                                 , _system_key->name(), cipher, int32_t(id.info.len), uuid, ks
-                );
-            }).then([k, uuid](auto&&) {
+                ).then([this](auto&&) {
+                    return force_blocking_flush();
+                });
+            }).then([k, uuid]() {
                 return make_ready_future<UUID, key_ptr>(uuid, k);
             });
         }
