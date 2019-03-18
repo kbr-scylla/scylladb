@@ -529,7 +529,7 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
     options opts(cfg.system_info_encryption().begin(), cfg.system_info_encryption().end());
     opt_wrapper sie(opts);
     future<> f = make_ready_future<>();
-    if (sie("enabled").value_or("false") == "true") {
+    if (!::strcasecmp(sie("enabled").value_or("false").c_str(), "true")) {
         // commitlog/system table encryption should not use replicated keys,
         // We default to local keys, but KMIP should be ok as well.
         // TODO: maybe forbid replicated.
