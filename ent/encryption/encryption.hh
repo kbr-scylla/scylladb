@@ -101,6 +101,9 @@ public:
     virtual future<> validate() const {
         return make_ready_future<>();
     }
+    virtual bool should_delay_read(const opt_bytes&) const {
+        return false;
+    }
 };
 
 class key_provider_factory {
