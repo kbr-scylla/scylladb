@@ -194,7 +194,8 @@ future<> audit::log(const audit_info* audit_info, service::query_state& query_st
     net::ipv4_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
     db::consistency_level cl = options.get_consistency();
     thread_local static sstring no_username("undefined");
-    const sstring& username = client_state.user() ? client_state.user()->name.value_or(no_username) : no_username;
+    static const sstring anonymous_username("anonymous");
+    const sstring& username = client_state.user() ? client_state.user()->name.value_or(anonymous_username) : no_username;
     net::ipv4_address client_ip = client_state.get_client_address().addr();
     return _storage_helper_ptr->write(audit_info, node_ip, client_ip, cl, username, error);
 }
