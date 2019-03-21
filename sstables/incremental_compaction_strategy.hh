@@ -83,6 +83,8 @@ public:
 
     virtual compaction_descriptor get_sstables_for_compaction(column_family& cf, std::vector<sstables::shared_sstable> candidates) override;
 
+    virtual compaction_descriptor get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) override;
+
     virtual int64_t estimated_pending_compactions(column_family& cf) const override;
 
     virtual compaction_strategy_type type() const {

@@ -149,6 +149,14 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
     return sstables::compaction_descriptor();
 }
 
+compaction_descriptor
+incremental_compaction_strategy::get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
+    if (candidates.empty()) {
+        return compaction_descriptor();
+    }
+    return compaction_descriptor(std::move(candidates), 0, _fragment_size);
+}
+
 int64_t incremental_compaction_strategy::estimated_pending_compactions(column_family& cf) const {
     size_t min_threshold = cf.schema()->min_compaction_threshold();
     size_t max_threshold = cf.schema()->max_compaction_threshold();
