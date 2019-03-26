@@ -28,14 +28,21 @@ std::ostream& encryption::operator<<(std::ostream& os, const key_info& info) {
 }
 
 bool encryption::key_info::compatible(const key_info& rhs) const {
-    if (len != rhs.len) {
-        return false;
-    }
     sstring malg, halg;
     std::tie(malg, std::ignore, std::ignore) = parse_key_spec(alg);
     std::tie(halg, std::ignore, std::ignore) = parse_key_spec(rhs.alg);
     if (malg != halg) {
         return false;
+    }
+    // If lengths differ we need to actual create keys to
+    // check what the true lengths are. Since openssl and
+    // java designators count different for DES etc.
+    if (len != rhs.len) {
+        symmetric_key k1(*this);
+        symmetric_key k2(rhs);
+        if (k1.key().size() != k2.key().size()) {
+            return false;
+        }
     }
     return true;
 }
@@ -84,19 +91,65 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
     if (mode.empty()) {
         mode = "cbc";
     }
+    // camel case vs. dash
+    if (type == "desede") {
+        type = "des-ede";
+        // and 168-bits desede is ede3 in openssl...
+        if (info.len > 16*8) {
+            type = "des-ede3";
+        }
+    }
 
     auto str = sprint("%s-%d-%s", type, info.len, mode);
     auto cipher = EVP_get_cipherbyname(str.c_str());
 
     if (!cipher) {
+        str = sprint("%s-%s", type, mode);
+        cipher = EVP_get_cipherbyname(str.c_str());
+    }
+    if (!cipher) {
+        str = sprint("%s-%d", type, info.len);
+        cipher = EVP_get_cipherbyname(str.c_str());
+    }
+    if (!cipher) {
+        str = type;
+        cipher = EVP_get_cipherbyname(str.c_str());
+    }
+    if (!cipher) {
         throw std::invalid_argument("Invalid algorithm: " + info.alg);
     }
 
+    size_t len = EVP_CIPHER_key_length(cipher);
+
+    if ((_info.len/8) != len) {
+        if (!EVP_CipherInit_ex(*this, cipher, nullptr, nullptr, nullptr, 0)) {
+            throw std::runtime_error("Could not initialize cipher");
+        }
+        auto dlen = _info.len/8;
+        // Openssl describes des-56 length as 64 (counts parity),
+        // des-ede-112 as 128 etc...
+        // do some special casing...
+        if ((type == "des" || type == "des-ede" || type == "des-ede3") && (dlen & 7) != 0) {
+            dlen = align_up(dlen, 8u);
+        }
+        // if we had to find a cipher without explicit key length (like rc2),
+        // try to set the key length to the desired strength.
+        if (!EVP_CIPHER_CTX_set_key_length(*this, dlen)) {
+            throw std::invalid_argument(sprint("Invalid length %d for resolved type %s (wanted %d)", len*8, str, _info.len));
+        }
+
+        len = EVP_CIPHER_key_length(cipher);
+    }
+
+
     if (_key.empty()) {
-        _key.resize(_info.len / 8);
+        _key.resize(len);
         if (!RAND_bytes(reinterpret_cast<uint8_t*>(_key.data()), _key.size())) {
             throw std::runtime_error("Could not generate key: " + info.alg);
         }
+    }
+    if (_key.size() < len) {
+        throw std::invalid_argument(sprint("Invalid key data length %d for resolved type %s (%d)", _key.size()*8, str, len*8));
     }
 
     if (!EVP_CipherInit_ex(*this, cipher, nullptr,
