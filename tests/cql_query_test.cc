@@ -32,6 +32,7 @@
 #include "types/list.hh"
 #include "types/set.hh"
 #include "db/config.hh"
+#include "sstables/compaction_manager.hh"
 #include "service/qos/qos_common.hh"
 
 using namespace std::literals::chrono_literals;
@@ -51,9 +52,12 @@ SEASTAR_THREAD_TEST_CASE(test_large_data) {
         sstring blob(1024*1024, 'x');
         e.execute_cql("insert into tbl (a, b) values (42, 'foo');").get();
         e.execute_cql("insert into tbl (a, b) values (44, '" + blob + "');").get();
-        e.db().invoke_on_all([] (database& dbi) {
-            return dbi.flush_all_memtables();
-        }).get();
+        auto flush = [&] {
+            e.db().invoke_on_all([] (database& dbi) {
+                return dbi.flush_all_memtables();
+            }).get();
+        };
+        flush();
 
         shared_ptr<cql_transport::messages::result_message> msg = e.execute_cql("select partition_key, row_size from system.large_rows where table_name = 'tbl' allow filtering;").get0();
         auto res = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(msg);
@@ -79,6 +83,27 @@ SEASTAR_THREAD_TEST_CASE(test_large_data) {
             .is_rows()
             .with_size(1)
             .with_row({"44", "b", "tbl"});
+
+        e.execute_cql("delete from tbl where a = 44;").get();
+
+        // In order to guarantee that system.large_rows has been updated, we have to
+        // * flush, so that a thumbstone for the above delete is created.
+        // * do a major compaction, so that the thumbstone is combined with the old entry.
+        // * stop the db, as only then do we wait for sstable deletions.
+        flush();
+        e.db().invoke_on_all([] (database& dbi) {
+            return parallel_for_each(dbi.get_column_families(), [&dbi] (auto& table) {
+                return dbi.get_compaction_manager().submit_major_compaction(&*table.second);
+            });
+        }).get();
+        stop_database(e.db()).get();
+
+        assert_that(e.execute_cql("select partition_key from system.large_rows where table_name = 'tbl' allow filtering;").get0())
+            .is_rows()
+            .is_empty();
+        assert_that(e.execute_cql("select partition_key from system.large_cells where table_name = 'tbl' allow filtering;").get0())
+            .is_rows()
+            .is_empty();
 
         return make_ready_future<>();
     }, cfg).get();
@@ -3424,4 +3449,30 @@ SEASTAR_TEST_CASE(test_user_based_sla_queries) {
         assert_that(msg).is_rows().with_rows({
         });
     });
+}
+
+SEASTAR_TEST_CASE(test_describe_varchar) {
+   // Test that, like cassandra, a varchar column is represented as a text column.
+   return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("create table tbl (id int PRIMARY KEY, t text, v varchar);").get();
+        auto ks = utf8_type->decompose("ks");
+        auto tbl = utf8_type->decompose("tbl");
+        auto id = utf8_type->decompose("id");
+        auto t = utf8_type->decompose("t");
+        auto v = utf8_type->decompose("v");
+        auto none = utf8_type->decompose("NONE");
+        auto partition_key = utf8_type->decompose("partition_key");
+        auto regular = utf8_type->decompose("regular");
+        auto pos_0 = int32_type->decompose(0);
+        auto pos_m1 = int32_type->decompose(-1);
+        auto int_t = utf8_type->decompose("int");
+        auto text_t = utf8_type->decompose("text");
+        assert_that(e.execute_cql("select * from system_schema.columns where keyspace_name = 'ks';").get0())
+            .is_rows()
+            .with_rows({
+                    {ks, tbl, id, none, id, partition_key, pos_0, int_t},
+                    {ks, tbl, t, none, t, regular, pos_m1, text_t},
+                    {ks, tbl, v, none, v, regular, pos_m1, text_t}
+                });
+   });
 }
