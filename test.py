@@ -119,6 +119,7 @@ boost_tests = [
     'small_vector_test',
     'data_listeners_test',
     'truncation_migration_test',
+    'symmetric_key_test',
 ]
 
 other_tests = [

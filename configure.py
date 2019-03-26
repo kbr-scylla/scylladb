@@ -364,6 +364,7 @@ scylla_tests = [
     'tests/small_vector_test',
     'tests/data_listeners_test',
     'tests/truncation_migration_test',
+    'tests/symmetric_key_test',
 ]
 
 perf_tests = [
