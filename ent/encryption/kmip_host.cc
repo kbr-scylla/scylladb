@@ -746,7 +746,7 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
             }
 
             if (alg.empty()) {
-                throw std::invalid_argument("Cound not find algorithm");
+                throw std::invalid_argument("Could not find algorithm");
             }
             if (mode.empty() != padd.empty()) {
                 throw std::invalid_argument("Invalid block mode/padding");
@@ -830,8 +830,13 @@ future<shared_ptr<symmetric_key>> kmip_host::get_key_by_id(const id_type& id, st
 
     if (info) {
         f = f.then([info](shared_ptr<symmetric_key> k) {
+            // keys we get back are typically void
+            // of block mode/padding info (because this is meaningless
+            // from the standpoint of the kmip server).
+            // Check and re-init the actual key used based
+            // on what the user wants so we adhere to block mode etc.
             if (!info->compatible(k->info())) {
-                throw std::invalid_argument(sprint("Incompatible key :{}", k->info()));
+                throw std::invalid_argument(sprint("Incompatible key: %s", k->info()));
             }
             if (k->info() != *info) {
                 k = ::make_shared<symmetric_key>(*info, k->key());
