@@ -40,6 +40,7 @@
 #include "kmip_host.hh"
 #include "bytes.hh"
 #include "utils/class_registrator.hh"
+#include "cql3/query_processor.hh"
 #include "db/extensions.hh"
 #include "db/system_keyspace.hh"
 #include "utils/class_registrator.hh"
@@ -47,6 +48,7 @@
 #include "serializer_impl.hh"
 #include "schema.hh"
 #include "sstables/sstables.hh"
+#include "service/storage_service.hh"
 #include "db/commitlog/commitlog_extensions.hh"
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
@@ -299,6 +301,15 @@ public:
         return get_system_key(name)->get_key().then([this](auto k) {
             _cfg_encryption_key = std::move(k);
         });
+    }
+    distributed<cql3::query_processor>& get_query_processor() const override {
+        return cql3::get_query_processor();
+    }
+    distributed<service::storage_service>& get_storage_service() const override {
+        return service::get_storage_service();
+    }
+    distributed<database>& get_database() const override {
+        return get_storage_service().local().db();
     }
 };
 
