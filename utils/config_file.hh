@@ -16,7 +16,6 @@
 #include <string_view>
 
 #include <boost/program_options.hpp>
-#include <boost/filesystem.hpp>
 
 #include <seastar/core/sstring.hh>
 #include <seastar/core/future.hh>

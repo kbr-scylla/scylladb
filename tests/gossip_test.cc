@@ -25,6 +25,8 @@
 #include "database.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "service/qos/service_level_controller.hh"
+#include "db/config.hh"
+
 namespace db::view {
 class view_update_generator;
 }
@@ -32,6 +34,7 @@ class view_update_generator;
 SEASTAR_TEST_CASE(test_boot_shutdown){
     return seastar::async([] {
         distributed<database> db;
+        db::config cfg;
         sharded<auth::service> auth_service;
         sharded<db::system_distributed_keyspace> sys_dist_ks;
         sharded<db::view::view_update_generator> view_update_generator;
@@ -45,12 +48,15 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         auto stop_feature_service = defer([&] { feature_service.stop().get(); });
 
         locator::i_endpoint_snitch::create_snitch("SimpleSnitch").get();
-        auto stop_snitch = defer([&] { gms::get_failure_detector().stop().get(); });
+        auto stop_snitch = defer([&] { locator::i_endpoint_snitch::stop_snitch().get(); });
 
         netw::get_messaging_service().start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000, false /* don't bind */).get();
         auto stop_messaging_service = defer([&] { netw::get_messaging_service().stop().get(); });
 
-        service::get_storage_service().start(std::ref(db), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), std::ref(sl_controller)).get();
+        gms::get_gossiper().start(std::ref(feature_service), std::ref(cfg)).get();
+        auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
+
+        service::get_storage_service().start(std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), std::ref(sl_controller)).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         db.start().get();
@@ -59,10 +65,5 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
             stop_database(db).get();
         });
 
-        gms::get_failure_detector().start().get();
-        auto stop_failure_detector = defer([&] { gms::get_failure_detector().stop().get(); });
-
-        gms::get_gossiper().start(std::ref(feature_service)).get();
-        auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
     });
 }

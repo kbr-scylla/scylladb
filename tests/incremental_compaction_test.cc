@@ -75,7 +75,7 @@ static std::vector<std::pair<sstring, dht::token>> token_generation_for_current_
 }
 
 SEASTAR_TEST_CASE(incremental_compaction_test) {
-    return seastar::async([] {
+    return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
         storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
@@ -85,8 +85,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto s = builder.build();
 
         auto tmp = make_lw_shared<tmpdir>();
-        auto sst_gen = [s, tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
-            auto sst = make_sstable(s, tmp->path().string(), (*gen)++, la, big);
+        auto sst_gen = [&env, s, tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+            auto sst = env.make_sstable(s, tmp->path().string(), (*gen)++, la, big);
             sst->set_unshared();
             return sst;
         };

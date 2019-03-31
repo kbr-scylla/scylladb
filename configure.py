@@ -221,22 +221,17 @@ def find_headers(repodir, excluded_dirs):
 
 modes = {
     'debug': {
-        'sanitize': '-fsanitize=address -fsanitize=leak -fsanitize=undefined',
-        'sanitize_libs': '-lasan -lubsan',
-        'opt': '-O0 -DDEBUG -DDEBUG_LSA_SANITIZER',
-        'libs': '',
+        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER',
+        # Disable vptr because of https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88684
+        'cxx_ld_flags': '-O0 -fsanitize=address -fsanitize=leak -fsanitize=undefined -fno-sanitize=vptr',
     },
     'release': {
-        'sanitize': '',
-        'sanitize_libs': '',
-        'opt': '-O3',
-        'libs': '',
+        'cxxflags': '',
+        'cxx_ld_flags': '-O3',
     },
     'dev': {
-        'sanitize': '',
-        'sanitize_libs': '',
-        'opt': '-O1',
-        'libs': '',
+        'cxxflags': '',
+        'cxx_ld_flags': '-O1',
     },
 }
 
@@ -372,6 +367,7 @@ perf_tests = [
     'tests/perf/perf_checksum',
     'tests/perf/perf_mutation_fragment',
     'tests/perf/perf_idl',
+    'tests/perf/perf_vint',
 ]
 
 apps = [
@@ -414,6 +410,8 @@ arg_parser.add_argument('--dpdk-target', action='store', dest='dpdk_target', def
                         help='Path to DPDK SDK target location (e.g. <DPDK SDK dir>/x86_64-native-linuxapp-gcc)')
 arg_parser.add_argument('--debuginfo', action='store', dest='debuginfo', type=int, default=1,
                         help='Enable(1)/disable(0)compiler debug information generation')
+arg_parser.add_argument('--compress-exec-debuginfo', action='store', dest='compress_exec_debuginfo', type=int, default=1,
+                        help='Enable(1)/disable(0) debug information compression in executables')
 arg_parser.add_argument('--static-stdc++', dest='staticcxx', action='store_true',
                         help='Link libgcc and libstdc++ statically')
 arg_parser.add_argument('--static-thrift', dest='staticthrift', action='store_true',
@@ -479,6 +477,7 @@ scylla_core = (['database.cc',
                 'compress.cc',
                 'sstables/mp_row_consumer.cc',
                 'sstables/sstables.cc',
+                'sstables/sstables_manager.cc',
                 'sstables/mc/writer.cc',
                 'sstables/sstable_version.cc',
                 'sstables/compress.cc',
@@ -805,13 +804,16 @@ idls = ['idl/gossip_digest.idl.hh',
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
 
-scylla_tests_dependencies = scylla_core + idls + [
+scylla_tests_generic_dependencies = [
     'tests/cql_test_env.cc',
+    'tests/test_services.cc',
+]
+
+scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependencies + [
     'tests/cql_assertions.cc',
     'tests/result_set_assertions.cc',
     'tests/mutation_source_test.cc',
     'tests/data_model.cc',
-    'tests/test_services.cc',
 ]
 
 deps = {
@@ -882,7 +884,7 @@ for t in scylla_tests:
     if t not in tests_not_using_seastar_test_framework:
         deps[t] += scylla_tests_dependencies
     else:
-        deps[t] += scylla_core + idls + ['tests/cql_test_env.cc']
+        deps[t] += scylla_core + idls + scylla_tests_generic_dependencies
 
 perf_tests_seastar_deps = [
     'seastar/tests/perf/perf_tests.cc'
@@ -911,6 +913,7 @@ deps['tests/reusable_buffer_test'] = ['tests/reusable_buffer_test.cc']
 deps['tests/utf8_test'] = ['utils/utf8.cc', 'tests/utf8_test.cc']
 deps['tests/small_vector_test'] = ['tests/small_vector_test.cc']
 deps['tests/multishard_mutation_query_test'] += ['tests/test_table.cc']
+deps['tests/vint_serialization_test'] = ['tests/vint_serialization_test.cc', 'vint-serialization.cc', 'bytes.cc']
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
@@ -949,7 +952,7 @@ optimization_flags = [
 optimization_flags = [o
                       for o in optimization_flags
                       if flag_supported(flag=o, compiler=args.cxx)]
-modes['release']['opt'] += ' ' + ' '.join(optimization_flags)
+modes['release']['cxx_ld_flags'] += ' ' + ' '.join(optimization_flags)
 
 gold_linker_flag = gold_supported(compiler=args.cxx)
 
@@ -1072,9 +1075,14 @@ if args.alloc_failure_injector:
 if args.split_dwarf:
     seastar_flags += ['--split-dwarf']
 
-debug_flags = ' -gz ' + dbgflag
-modes['debug']['opt'] += debug_flags
-modes['release']['opt'] += debug_flags
+# We never compress debug info in debug mode
+modes['debug']['cxxflags'] += ' -gz'
+# We compress it by default in release mode
+flag_dest = 'cxx_ld_flags' if args.compress_exec_debuginfo else 'cxxflags'
+modes['release'][flag_dest] += ' -gz'
+
+modes['debug']['cxxflags'] += ' ' + dbgflag
+modes['release']['cxxflags'] += ' ' + dbgflag
 
 seastar_cflags = args.user_cflags
 seastar_cflags += ' -Wno-error'
@@ -1082,7 +1090,7 @@ if args.target != '':
     seastar_cflags += ' -march=' + args.target
 seastar_ldflags = args.user_ldflags
 seastar_flags += ['--compiler', args.cxx, '--c-compiler', args.cc, '--cflags=%s' % (seastar_cflags), '--ldflags=%s' % (seastar_ldflags),
-                  '--c++-dialect=gnu++17', '--use-std-optional-variant-stringview=1', '--optflags=%s' % (modes['release']['opt']), ]
+                  '--c++-dialect=gnu++17', '--use-std-optional-variant-stringview=1', '--optflags=%s' % (modes['release']['cxx_ld_flags']), ]
 
 libdeflate_cflags = seastar_cflags
 
@@ -1117,7 +1125,7 @@ for mode in build_modes:
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
-                 maybe_static(args.staticboost, '-lboost_filesystem'), ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
+                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
                  maybe_static(args.staticboost, '-lboost_date_time'), ])
 
 xxhash_dir = 'xxHash'
@@ -1219,19 +1227,21 @@ with open(buildfile, 'w') as f:
         modeval = modes[mode]
         fmt_lib = 'fmt'
         f.write(textwrap.dedent('''\
-            cxxflags_{mode} = {opt} -I. -I $builddir/{mode}/gen
+            cxx_ld_flags_{mode} = {cxx_ld_flags}
+            ld_flags_{mode} = $cxx_ld_flags_{mode}
+            cxxflags_{mode} = $cxx_ld_flags_{mode} {cxxflags} -I. -I $builddir/{mode}/gen
             libs_{mode} = -l{fmt_lib}
             seastar_libs_{mode} = {seastar_libs}
             rule cxx.{mode}
-              command = $cxx -MD -MT $out -MF $out.d {sanitize} {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
+              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
               description = CXX $out
               depfile = $out.d
             rule link.{mode}
-              command = $cxx  $cxxflags_{mode} {sanitize} {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode}
+              command = $cxx  $ld_flags_{mode} $ldflags -o $out $in $libs $libs_{mode}
               description = LINK $out
               pool = link_pool
             rule link_stripped.{mode}
-              command = $cxx  $cxxflags_{mode} -s {sanitize_libs} $ldflags -o $out $in $libs $libs_{mode}
+              command = $cxx  $ld_flags_{mode} -s $ldflags -o $out $in $libs $libs_{mode}
               description = LINK (stripped) $out
               pool = link_pool
             rule ar.{mode}
@@ -1254,7 +1264,7 @@ with open(buildfile, 'w') as f:
                         build/{mode}/gen/${{stem}}Parser.cpp
                 description = ANTLR3 $in
             rule checkhh.{mode}
-              command = $cxx -MD -MT $out -MF $out.d {sanitize} {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -x c++ --include=$in -c -o $out /dev/null
+              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -x c++ --include=$in -c -o $out /dev/null
               description = CHECKHH $in
               depfile = $out.d
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))

@@ -65,8 +65,6 @@ using namespace std::chrono_literals;
 static sstring some_keyspace("ks");
 static sstring some_column_family("cf");
 
-static db::nop_large_data_handler nop_lp_handler;
-
 static atomic_cell make_atomic_cell(bytes value) {
     return atomic_cell::make_live(*bytes_type, 0, std::move(value));
 }
@@ -329,12 +327,11 @@ SEASTAR_TEST_CASE(test_multiple_memtables_one_partition) {
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
     auto cf_stats = make_lw_shared<::cf_stats>();
-    column_family::config cfg;
+    column_family::config cfg = column_family_test_config();
     cfg.enable_disk_reads = false;
     cfg.enable_disk_writes = false;
     cfg.enable_incremental_backups = false;
     cfg.cf_stats = &*cf_stats;
-    cfg.large_data_handler = &nop_lp_handler;
 
     with_column_family(s, cfg, [s] (column_family& cf) {
         const column_definition& r1_col = *s->get_column_definition("r1");
@@ -381,13 +378,12 @@ SEASTAR_TEST_CASE(test_flush_in_the_middle_of_a_scan) {
 
     auto cf_stats = make_lw_shared<::cf_stats>();
 
-    column_family::config cfg;
+    column_family::config cfg = column_family_test_config();
     cfg.enable_disk_reads = true;
     cfg.enable_disk_writes = true;
     cfg.enable_cache = true;
     cfg.enable_incremental_backups = false;
     cfg.cf_stats = &*cf_stats;
-    cfg.large_data_handler = &nop_lp_handler;
 
     return with_column_family(s, cfg, [s](column_family& cf) {
         return seastar::async([s, &cf] {
@@ -461,12 +457,12 @@ SEASTAR_TEST_CASE(test_multiple_memtables_multiple_partitions) {
 
     auto cf_stats = make_lw_shared<::cf_stats>();
 
-    column_family::config cfg;
+    column_family::config cfg = column_family_test_config();
     cfg.enable_disk_reads = false;
     cfg.enable_disk_writes = false;
     cfg.enable_incremental_backups = false;
     cfg.cf_stats = &*cf_stats;
-    cfg.large_data_handler = &nop_lp_handler;
+
     with_column_family(s, cfg, [s] (auto& cf) mutable {
         std::map<int32_t, std::map<int32_t, int32_t>> shadow, result;
 
@@ -1699,6 +1695,24 @@ SEASTAR_THREAD_TEST_CASE(test_external_memory_usage) {
             BOOST_CHECK_EQUAL(m.partition().external_memory_usage(*s.schema()), after - before);
         });
     }
+}
+
+SEASTAR_THREAD_TEST_CASE(test_cell_equals) {
+    auto now = gc_clock::now();
+    auto ttl = gc_clock::duration(0);
+
+    auto c1 = atomic_cell_or_collection(atomic_cell::make_live(*bytes_type, 1, bytes(1, 'a'), now, ttl));
+    auto c2 = atomic_cell_or_collection(atomic_cell::make_dead(1, now));
+    BOOST_REQUIRE(!c1.equals(*bytes_type, c2));
+    BOOST_REQUIRE(!c2.equals(*bytes_type, c1));
+
+    auto c3 = atomic_cell_or_collection(atomic_cell::make_live_counter_update(1, 2));
+    auto c4 = atomic_cell_or_collection(atomic_cell::make_live(*bytes_type, 1, bytes(1, 'a')));
+    BOOST_REQUIRE(!c3.equals(*bytes_type, c4));
+    BOOST_REQUIRE(!c4.equals(*bytes_type, c3));
+
+    BOOST_REQUIRE(!c1.equals(*bytes_type, c4));
+    BOOST_REQUIRE(!c4.equals(*bytes_type, c1));
 }
 
 SEASTAR_THREAD_TEST_CASE(test_cell_external_memory_usage) {
