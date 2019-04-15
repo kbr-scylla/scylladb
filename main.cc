@@ -552,12 +552,14 @@ int main(int ac, char** av) {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
                 // call stop on each db instance, but leave the shareded<database> pointers alive.
+                startlog.info("Shutdown database started");
                 return stop_database(db).then([&db] {
                     return db.invoke_on_all([](auto& db) {
                         return db.stop();
                     });
                 }).then([] {
-                        return sstables::await_background_jobs_on_all_shards();
+                    startlog.info("Shutdown database finished");
+                    return sstables::await_background_jobs_on_all_shards();
                 }).then([&return_value] {
                         startlog.info("Scylla version {} shutdown complete.", scylla_version());
                         ::_exit(return_value);
@@ -801,7 +803,8 @@ int main(int ac, char** av) {
                     });
                 });
             }).get();
-            repair_init_messaging_service_handler(sys_dist_ks, view_update_generator).get();
+            repair_service rs(gossiper);
+            repair_init_messaging_service_handler(rs, sys_dist_ks, view_update_generator).get();
             supervisor::notify("starting storage service", true);
             auto& ss = service::get_local_storage_service();
             ss.init_messaging_service_part().get();

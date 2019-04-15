@@ -34,8 +34,11 @@
 
 namespace db {
 
+/// CQL consistency levels.
+///
+/// Values are guaranteed to be dense and in the tight range [MIN_VALUE, MAX_VALUE].
 enum class consistency_level {
-    ANY,
+    ANY, MIN_VALUE = ANY,
     ONE,
     TWO,
     THREE,
@@ -45,7 +48,7 @@ enum class consistency_level {
     EACH_QUORUM,
     SERIAL,
     LOCAL_SERIAL,
-    LOCAL_ONE
+    LOCAL_ONE, MAX_VALUE = LOCAL_ONE
 };
 
 std::ostream& operator<<(std::ostream& os, consistency_level cl);

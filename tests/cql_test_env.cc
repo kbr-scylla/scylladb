@@ -8,6 +8,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <boost/range/algorithm/transform.hpp>
+#include <iterator>
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
 #include <sstables/sstables.hh>
@@ -15,6 +17,7 @@
 #include "cql_test_env.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/query_options.hh"
+#include "cql3/statements/batch_statement.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/shared_ptr.hh>
 #include "utils/UUID_gen.hh"
@@ -129,7 +132,7 @@ public:
             ::shared_ptr<sharded<db::view::view_builder>> view_builder,
             ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator,
              sharded<qos::service_level_controller> &sl_controller)
-            : _feature_service(std::move(_feature_service))
+            : _feature_service(std::move(feature_service))
             , _db(db)
             , _auth_service(std::move(auth_service))
             , _view_builder(std::move(view_builder))
@@ -166,7 +169,8 @@ public:
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_prepared(
         cql3::prepared_cache_key_type id,
-        std::vector<cql3::raw_value> values) override
+        std::vector<cql3::raw_value> values,
+        db::consistency_level cl) override
     {
         auto prepared = local_qp().get_prepared(id);
         if (!prepared) {
@@ -175,7 +179,7 @@ public:
         auto stmt = prepared->statement;
         assert(stmt->get_bound_terms() == values.size());
 
-        auto options = ::make_shared<cql3::query_options>(std::move(values));
+        auto options = ::make_shared<cql3::query_options>(cl, infinite_timeout_config, std::move(values));
         options->prepare(prepared->bound_names);
 
         auto qs = make_query_state();
@@ -486,6 +490,31 @@ public:
             }
 
             func(env).get();
+        });
+    }
+
+    future<::shared_ptr<cql_transport::messages::result_message>> execute_batch(
+        const std::vector<sstring_view>& queries, std::unique_ptr<cql3::query_options> qo) override {
+        using cql3::statements::batch_statement;
+        using cql3::statements::modification_statement;
+        std::vector<batch_statement::single_statement> modifications;
+        boost::transform(queries, back_inserter(modifications), [this](const auto& query) {
+            auto stmt = local_qp().get_statement(query, _core_local.local().client_state);
+            if (!dynamic_cast<modification_statement*>(stmt->statement.get())) {
+                throw exceptions::invalid_request_exception(
+                    "Invalid statement in batch: only UPDATE, INSERT and DELETE statements are allowed.");
+            }
+            return batch_statement::single_statement(static_pointer_cast<modification_statement>(stmt->statement));
+        });
+        auto batch = ::make_shared<batch_statement>(
+            batch_statement::type::UNLOGGED,
+            std::move(modifications),
+            cql3::attributes::none(),
+            local_qp().get_cql_stats());
+        auto qs = make_query_state();
+        auto& lqo = *qo;
+        return local_qp().process_batch(batch, *qs, lqo, {}).finally([qs, batch, qo = std::move(qo), this] {
+            _core_local.local().client_state.merge(qs->get_client_state());
         });
     }
 };

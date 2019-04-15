@@ -100,15 +100,6 @@ logging::logger slogger("schema_tables");
 
 const sstring version = "3";
 
-struct push_back_and_return {
-    std::vector<mutation> muts;
-
-    std::vector<mutation> operator()(mutation&& m) {
-        muts.emplace_back(std::move(m));
-        return std::move(muts);
-    }
-};
-
 struct qualified_name {
     sstring keyspace_name;
     sstring table_name;
@@ -1372,7 +1363,7 @@ template<typename V>
 static std::vector<V> get_list(const query::result_set_row& row, const sstring& name) {
     std::vector<V> list;
 
-    auto values = row.get_nonnull<list_type_impl::native_type>(name);
+    const auto& values = row.get_nonnull<const list_type_impl::native_type&>(name);
     for (auto&& v : values) {
         list.emplace_back(value_cast<V>(v));
     };
@@ -1451,16 +1442,14 @@ void add_type_to_schema_mutation(user_type type, api::timestamp_type timestamp, 
     mutations.emplace_back(std::move(m));
 }
 
-future<std::vector<mutation>> make_create_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp)
+std::vector<mutation> make_create_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
     add_type_to_schema_mutation(type, timestamp, mutations);
-
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
-future<std::vector<mutation>> make_drop_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp)
+std::vector<mutation> make_drop_type_mutations(lw_shared_ptr<keyspace_metadata> keyspace, user_type type, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
     schema_ptr s = types();
@@ -1470,21 +1459,19 @@ future<std::vector<mutation>> make_drop_type_mutations(lw_shared_ptr<keyspace_me
     m.partition().apply_delete(*s, ckey, tombstone(timestamp, gc_clock::now()));
     mutations.emplace_back(std::move(m));
 
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 /*
  * Table metadata serialization/deserialization.
  */
 
-future<std::vector<mutation>> make_create_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp)
+std::vector<mutation> make_create_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
     add_table_or_view_to_schema_mutation(table, timestamp, true, mutations);
 
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 static void add_table_params_to_mutations(mutation& m, const clustering_key& ckey, schema_ptr table, api::timestamp_type timestamp) {
@@ -1756,7 +1743,7 @@ static void make_update_columns_mutations(schema_ptr old_table,
     }
 }
 
-future<std::vector<mutation>> make_update_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace,
+std::vector<mutation> make_update_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace,
     schema_ptr old_table,
     schema_ptr new_table,
     api::timestamp_type timestamp,
@@ -1780,8 +1767,7 @@ future<std::vector<mutation>> make_update_table_mutations(lw_shared_ptr<keyspace
             addTriggerToSchemaMutation(newTable, trigger, timestamp, mutation);
 
 #endif
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 static void make_drop_table_or_view_mutations(schema_ptr schema_table,
@@ -1810,7 +1796,7 @@ static void make_drop_table_or_view_mutations(schema_ptr schema_table,
     }
 }
 
-future<std::vector<mutation>> make_drop_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp)
+std::vector<mutation> make_drop_table_mutations(lw_shared_ptr<keyspace_metadata> keyspace, schema_ptr table, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
     make_drop_table_or_view_mutations(tables(), std::move(table), timestamp, mutations);
@@ -1824,8 +1810,7 @@ future<std::vector<mutation>> make_drop_table_mutations(lw_shared_ptr<keyspace_m
     for (String indexName : Keyspace.open(keyspace.name).getColumnFamilyStore(table.cfName).getBuiltIndexes())
         indexCells.addTombstone(indexCells.getComparator().makeCellName(indexName), ldt, timestamp);
 #endif
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 static future<schema_mutations> read_table_mutations(distributed<service::storage_proxy>& proxy, const qualified_name& table, schema_ptr s)
@@ -2417,16 +2402,14 @@ schema_mutations make_schema_mutations(schema_ptr s, api::timestamp_type timesta
     return s->is_view() ? make_view_mutations(view_ptr(s), timestamp, with_columns) : make_table_mutations(s, timestamp, with_columns);
 }
 
-future<std::vector<mutation>> make_create_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp)
+std::vector<mutation> make_create_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
     // And also the serialized base table.
     auto base = keyspace->cf_meta_data().at(view->view_info()->base_name());
     add_table_or_view_to_schema_mutation(base, timestamp, true, mutations);
     add_table_or_view_to_schema_mutation(view, timestamp, true, mutations);
-
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 /**
@@ -2434,7 +2417,7 @@ future<std::vector<mutation>> make_create_view_mutations(lw_shared_ptr<keyspace_
  * case, the new base schema isn't yet loaded, thus can't be accessed from this
  * function.
  */
-future<std::vector<mutation>> make_update_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace,
+std::vector<mutation> make_update_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace,
                                                  view_ptr old_view,
                                                  view_ptr new_view,
                                                  api::timestamp_type timestamp,
@@ -2448,16 +2431,13 @@ future<std::vector<mutation>> make_update_view_mutations(lw_shared_ptr<keyspace_
     }
     add_table_or_view_to_schema_mutation(new_view, timestamp, false, mutations);
     make_update_columns_mutations(old_view, new_view, timestamp, false, mutations);
-
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
-future<std::vector<mutation>> make_drop_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp) {
+std::vector<mutation> make_drop_view_mutations(lw_shared_ptr<keyspace_metadata> keyspace, view_ptr view, api::timestamp_type timestamp) {
     std::vector<mutation> mutations;
     make_drop_table_or_view_mutations(views(), view, timestamp, mutations);
-    // Include the serialized keyspace in case the target node missed a CREATE KEYSPACE migration (see CASSANDRA-5631).
-    return read_keyspace_mutation(service::get_storage_proxy(), keyspace->name()).then(push_back_and_return{std::move(mutations)});
+    return mutations;
 }
 
 #if 0

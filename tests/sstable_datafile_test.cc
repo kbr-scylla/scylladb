@@ -2205,22 +2205,23 @@ SEASTAR_TEST_CASE(check_overlapping) {
 }
 
 SEASTAR_TEST_CASE(check_read_indexes) {
-  test_env env;
-  return for_each_sstable_version([&env] (const sstables::sstable::version_types version) {
-    auto builder = schema_builder("test", "summary_test")
-        .with_column("a", int32_type, column_kind::partition_key);
-    builder.set_min_index_interval(256);
-    auto s = builder.build();
+  return test_env::do_with_async([] (test_env& env) {
+      for_each_sstable_version([&env] (const sstables::sstable::version_types version) {
+        auto builder = schema_builder("test", "summary_test")
+            .with_column("a", int32_type, column_kind::partition_key);
+        builder.set_min_index_interval(256);
+        auto s = builder.build();
 
-    auto sst = env.make_sstable(s, get_test_dir("summary_test", s), 1, version, big);
+        auto sst = env.make_sstable(s, get_test_dir("summary_test", s), 1, version, big);
 
-    auto fut = sst->load();
-    return fut.then([sst] {
-        return sstables::test(sst).read_indexes().then([sst] (index_list list) {
-            BOOST_REQUIRE(list.size() == 130);
-            return make_ready_future<>();
+        auto fut = sst->load();
+        return fut.then([sst] {
+            return sstables::test(sst).read_indexes().then([sst] (index_list list) {
+                BOOST_REQUIRE(list.size() == 130);
+                return make_ready_future<>();
+            });
         });
-    });
+      }).get();
   });
 }
 
@@ -2440,37 +2441,38 @@ SEASTAR_TEST_CASE(check_multi_schema) {
     //        d int,
     //        e blob
     //);
-    test_env env;
-    return for_each_sstable_version([&env] (const sstables::sstable::version_types version) {
-        auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
-        auto builder = schema_builder("test", "test_multi_schema")
-            .with_column("a", int32_type, column_kind::partition_key)
-            .with_column("c", set_of_ints_type)
-            .with_column("d", int32_type)
-            .with_column("e", bytes_type);
-        auto s = builder.build();
+    return test_env::do_with_async([] (test_env& env) {
+        return for_each_sstable_version([&env] (const sstables::sstable::version_types version) {
+            auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
+            auto builder = schema_builder("test", "test_multi_schema")
+                .with_column("a", int32_type, column_kind::partition_key)
+                .with_column("c", set_of_ints_type)
+                .with_column("d", int32_type)
+                .with_column("e", bytes_type);
+            auto s = builder.build();
 
-        auto sst = env.make_sstable(s, get_test_dir("multi_schema_test", s), 1, version, big);
-        auto f = sst->load();
-        return f.then([sst, s] {
-            auto reader = make_lw_shared(sstable_reader(sst, s));
-            return read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s] (mutation_opt m) {
-                BOOST_REQUIRE(m);
-                BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, 0)));
-                auto& rows = m->partition().clustered_rows();
-                BOOST_REQUIRE_EQUAL(rows.calculate_size(), 1);
-                auto& row = rows.begin()->row();
-                BOOST_REQUIRE(!row.deleted_at());
-                auto& cells = row.cells();
-                BOOST_REQUIRE_EQUAL(cells.size(), 1);
-                auto& cdef = *s->get_column_definition("e");
-                BOOST_REQUIRE_EQUAL(cells.cell_at(cdef.id).as_atomic_cell(cdef).value(), int32_type->decompose(5));
-                return (*reader)(db::no_timeout);
-            }).then([reader, s] (mutation_fragment_opt m) {
-                BOOST_REQUIRE(!m);
+            auto sst = env.make_sstable(s, get_test_dir("multi_schema_test", s), 1, version, big);
+            auto f = sst->load();
+            return f.then([sst, s] {
+                auto reader = make_lw_shared(sstable_reader(sst, s));
+                return read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s] (mutation_opt m) {
+                    BOOST_REQUIRE(m);
+                    BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, 0)));
+                    auto& rows = m->partition().clustered_rows();
+                    BOOST_REQUIRE_EQUAL(rows.calculate_size(), 1);
+                    auto& row = rows.begin()->row();
+                    BOOST_REQUIRE(!row.deleted_at());
+                    auto& cells = row.cells();
+                    BOOST_REQUIRE_EQUAL(cells.size(), 1);
+                    auto& cdef = *s->get_column_definition("e");
+                    BOOST_REQUIRE_EQUAL(cells.cell_at(cdef.id).as_atomic_cell(cdef).value(), int32_type->decompose(5));
+                    return (*reader)(db::no_timeout);
+                }).then([reader, s] (mutation_fragment_opt m) {
+                    BOOST_REQUIRE(!m);
+                });
             });
-        });
-        return make_ready_future<>();
+            return make_ready_future<>();
+        }).get();
     });
 }
 
@@ -4888,5 +4890,76 @@ SEASTAR_TEST_CASE(test_reads_cassandra_static_compact) {
         assert_that(sst->as_mutation_source().make_reader(s))
             .produces(m)
             .produces_end_of_stream();
+    });
+}
+
+SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
+    return test_env::do_with_async([] (test_env& env) {
+        storage_service_for_tests ssft;
+        cell_locker_stats cl_stats;
+
+        auto builder = schema_builder("tests", "backlog_correctness_after_stop_tracking_compaction")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("value", int32_type);
+        auto s = builder.build();
+
+        auto tmp = make_lw_shared<tmpdir>();
+        auto sst_gen = [&env, s, tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+            auto sst = env.make_sstable(s, tmp->path().string(), (*gen)++, la, big);
+            sst->set_unshared();
+            return sst;
+        };
+
+        column_family_for_tests cf(s);
+        cf->set_compaction_strategy(sstables::compaction_strategy_type::leveled);
+
+        {
+            auto tokens = token_generation_for_current_shard(4);
+            auto make_insert = [&] (auto p) {
+                auto key = partition_key::from_exploded(*s, {to_bytes(p.first)});
+                mutation m(s, key);
+                m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), 1 /* ts */);
+                BOOST_REQUIRE(m.decorated_key().token() == p.second);
+                return m;
+            };
+            auto mut1 = make_insert(tokens[0]);
+            auto mut2 = make_insert(tokens[1]);
+            auto mut3 = make_insert(tokens[2]);
+            auto mut4 = make_insert(tokens[3]);
+            std::vector<shared_sstable> ssts = {
+                    make_sstable_containing(sst_gen, {mut1, mut2}),
+                    make_sstable_containing(sst_gen, {mut3, mut4})
+            };
+
+            for (auto& sst : ssts) {
+                cf->get_compaction_strategy().get_backlog_tracker().add_sstable(sst);
+            }
+
+            // Start compaction, then stop tracking compaction, switch to TWCS, wait for compaction to finish and check for backlog.
+            // That's done to assert backlog will work for compaction that is finished and was stopped tracking.
+
+            auto fut = sstables::compact_sstables(sstables::compaction_descriptor(ssts), *cf, sst_gen, replacer_fn_no_op());
+
+            bool stopped_tracking = false;
+            for (auto& info : cf._data->cm.get_compactions()) {
+                if (info->cf == &*cf) {
+                    info->stop_tracking();
+                    stopped_tracking = true;
+                }
+            }
+            BOOST_REQUIRE(stopped_tracking);
+
+            cf->set_compaction_strategy(sstables::compaction_strategy_type::time_window);
+            for (auto& sst : ssts) {
+                cf->get_compaction_strategy().get_backlog_tracker().add_sstable(sst);
+            }
+
+            auto ret = fut.get0();
+            BOOST_REQUIRE(ret.new_sstables.size() == 1);
+            BOOST_REQUIRE(ret.tracking == false);
+        }
+        // triggers code that iterates through registered compactions.
+        cf._data->cm.backlog();
+        cf->get_compaction_strategy().get_backlog_tracker().backlog();
     });
 }
