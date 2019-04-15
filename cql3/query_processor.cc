@@ -313,7 +313,9 @@ query_processor::process_statement_prepared(
     }
 
     return fut.then([this, statement = std::move(statement), &query_state, &options] () mutable {
-        return process_authorized_statement(std::move(statement), query_state, options);
+        return audit::inspect(statement, query_state, options, false).then([this, statement, &query_state, &options] () mutable {
+            return process_authorized_statement(std::move(statement), query_state, options);
+        });
     });
 }
 
