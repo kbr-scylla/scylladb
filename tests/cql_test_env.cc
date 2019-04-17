@@ -383,7 +383,7 @@ public:
             auto view_update_generator = ::make_shared<seastar::sharded<db::view::view_update_generator>>();
 
             auto& ss = service::get_storage_service();
-            ss.start(std::ref(*db), std::ref(gms::get_gossiper()), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), std::ref(sl_controller), cfg_in.disabled_features).get();
+            ss.start(std::ref(*db), std::ref(gms::get_gossiper()), std::ref(*auth_service), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), std::ref(sl_controller), true, cfg_in.disabled_features).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             database_config dbcfg;
@@ -554,7 +554,7 @@ public:
         _gossiper.start(std::ref(_feature_service), std::ref(_cfg)).get();
         _sl_controller.start(qos::service_level_options{1000}).get();
         netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000, false).get();
-        service::get_storage_service().start(std::ref(_db), std::ref(_gossiper), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), std::ref(_sl_controller)).get();
+        service::get_storage_service().start(std::ref(_db), std::ref(_gossiper), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), std::ref(_sl_controller), true).get();
         service::get_storage_service().invoke_on_all([] (auto& ss) {
             ss.enable_all_features();
         }).get();

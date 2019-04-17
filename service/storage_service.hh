@@ -61,6 +61,7 @@
 #include "disk-error-handler.hh"
 #include "gms/feature.hh"
 #include <seastar/core/metrics_registration.hh>
+#include "sstables/version.hh"
 
 namespace cql_transport {
     class cql_server;
@@ -99,6 +100,19 @@ enum class disk_error { regular, commit };
 
 struct bind_messaging_port_tag {};
 using bind_messaging_port = bool_class<bind_messaging_port_tag>;
+
+class feature_enabled_listener : public gms::feature::listener {
+    storage_service& _s;
+    seastar::semaphore& _sem;
+    sstables::sstable_version_types _format;
+public:
+    feature_enabled_listener(storage_service& s, seastar::semaphore& sem, sstables::sstable_version_types format)
+        : _s(s)
+        , _sem(sem)
+        , _format(format)
+    { }
+    void on_enabled() override;
+};
 
 /**
  * This abstraction contains the token/identifier of this node
@@ -153,7 +167,7 @@ private:
     std::set<sstring> _disabled_features;
 public:
     storage_service(distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service,
-                sharded<qos::service_level_controller>&, /* only for tests */ std::set<sstring> disabled_features = {});
+                sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false, /* only for tests */ std::set<sstring> disabled_features = {});
     void isolate_on_error();
     void isolate_on_commit_error();
 
@@ -257,6 +271,8 @@ public:
 private:
     mode _operation_mode = mode::STARTING;
     friend std::ostream& operator<<(std::ostream& os, const mode& mode);
+    friend future<> read_sstables_format(distributed<storage_service>&);
+    friend class feature_enabled_listener;
 #if 0
     /* the probability for tracing any particular request, 0 disables tracing and 1 enables for all */
     private double traceProbability = 0.0;
@@ -310,7 +326,14 @@ private:
     gms::feature _row_level_repair_feature;
     gms::feature _truncation_table;
     gms::feature _correct_static_compact_in_mc;
+    gms::feature _unbounded_range_tombstones_feature;
+
+    sstables::sstable_version_types _sstables_format = sstables::sstable_version_types::ka;
+    seastar::semaphore _feature_listeners_sem = {1};
+    feature_enabled_listener _la_feature_listener;
+    feature_enabled_listener _mc_feature_listener;
 public:
+    sstables::sstable_version_types sstables_format() const { return _sstables_format; }
     void enable_all_features();
 
     void finish_bootstrapping() {
@@ -470,6 +493,7 @@ private:
     bool should_bootstrap();
     void prepare_to_join(std::vector<inet_address> loaded_endpoints, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features, bind_messaging_port do_bind = bind_messaging_port::yes);
     void join_token_ring(int delay);
+    void wait_for_feature_listeners_to_finish();
 public:
     future<> join_ring();
     bool is_joined();
@@ -2239,6 +2263,8 @@ public:
 
     sstring get_config_supported_features();
     std::set<sstring> get_config_supported_features_set();
+    sstring get_known_features();
+    std::set<sstring> get_known_features_set();
 
     bool cluster_supports_range_tombstones() {
         return bool(_range_tombstones_feature);
@@ -2309,6 +2335,9 @@ public:
     const gms::feature& cluster_supports_correct_static_compact_in_mc() const {
         return _correct_static_compact_in_mc;
     }
+    bool cluster_supports_unbounded_range_tombstones() const {
+        return bool(_unbounded_range_tombstones_feature);
+    }
 private:
     future<> set_cql_ready(bool ready);
 private:
@@ -2322,5 +2351,7 @@ private:
 future<> init_storage_service(distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
+
+future<> read_sstables_format(distributed<storage_service>& ss);
 
 }

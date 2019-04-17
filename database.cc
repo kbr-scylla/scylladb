@@ -97,13 +97,7 @@ user_types_metadata*
 seastar::internal::lw_shared_ptr_accessors<user_types_metadata, void>::to_value(seastar::lw_shared_ptr_counter_base*);
 
 sstables::sstable::version_types get_highest_supported_format() {
-    if (service::get_local_storage_service().cluster_supports_mc_sstable()) {
-        return sstables::sstable::version_types::mc;
-    } else if (service::get_local_storage_service().cluster_supports_la_sstable()) {
-        return sstables::sstable::version_types::la;
-    } else {
-        return sstables::sstable::version_types::ka;
-    }
+    return service::get_local_storage_service().sstables_format();
 }
 
 // Used for tests where the CF exists without a database object. We need to pass a valid
@@ -574,8 +568,8 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
         return create_keyspace(ksm);
     }).then([&proxy, this] {
         return do_parse_schema_tables(proxy, db::schema_tables::TYPES, [this, &proxy] (schema_result_value_type &v) {
-            auto&& user_types = create_types_from_schema_partition(v);
             auto& ks = this->find_keyspace(v.first);
+            auto&& user_types = create_types_from_schema_partition(*ks.metadata(), v.second);
             for (auto&& type : user_types) {
                 ks.add_user_type(type);
             }

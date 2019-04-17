@@ -29,7 +29,7 @@ namespace qos {
 struct service_level {
      service_level_options slo;
      scheduling_group sg;
-     io_priority_class pc;
+     io_priority_class pc = default_priority_class();
      bool marked_for_deletion;
      bool is_static;
 };
