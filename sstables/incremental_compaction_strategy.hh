@@ -94,6 +94,8 @@ public:
     virtual compaction_backlog_tracker& get_backlog_tracker() override {
         return _backlog_tracker;
     }
+
+    virtual std::vector<resharding_descriptor> get_resharding_jobs(column_family& cf, std::vector<shared_sstable> candidates) override;
 };
 
 }
