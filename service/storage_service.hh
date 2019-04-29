@@ -330,6 +330,7 @@ private:
     gms::feature _unbounded_range_tombstones_feature;
     gms::feature _view_virtual_columns;
     gms::feature _digest_insensitive_to_expiry;
+    gms::feature _in_memory_tables;
 
     sstables::sstable_version_types _sstables_format = sstables::sstable_version_types::ka;
     seastar::semaphore _feature_listeners_sem = {1};
@@ -2270,8 +2271,8 @@ public:
     sstring get_known_features();
     std::set<sstring> get_known_features_set();
 
-    bool cluster_supports_range_tombstones() {
-        return bool(_range_tombstones_feature);
+    gms::feature& cluster_supports_range_tombstones() {
+        return _range_tombstones_feature;
     }
 
     bool cluster_supports_large_partitions() const {
@@ -2310,8 +2311,8 @@ public:
         return bool(_write_failure_reply_feature);
     }
 
-    bool cluster_supports_xxhash_digest_algorithm() const {
-        return bool(_xxhash_feature);
+    gms::feature& cluster_supports_xxhash_digest_algorithm() {
+        return _xxhash_feature;
     }
 
     bool cluster_supports_roles() const {
@@ -2347,6 +2348,9 @@ public:
     }
     const gms::feature& cluster_supports_digest_insensitive_to_expiry() const {
         return _digest_insensitive_to_expiry;
+    }
+    const gms::feature& cluster_supports_in_memory_tables() const {
+        return _in_memory_tables;
     }
     // Returns schema features which all nodes in the cluster advertise as supported.
     db::schema_features cluster_schema_features() const;

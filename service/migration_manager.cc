@@ -81,6 +81,9 @@ void migration_manager::init_messaging_service()
 
     _feature_listeners.push_back(ss.cluster_supports_view_virtual_columns().when_enabled(update_schema));
     _feature_listeners.push_back(ss.cluster_supports_digest_insensitive_to_expiry().when_enabled(update_schema));
+    _feature_listeners.push_back(ss.cluster_supports_in_memory_tables().when_enabled(update_schema));
+    _feature_listeners.push_back(ss.cluster_supports_xxhash_digest_algorithm().when_enabled(update_schema));
+    _feature_listeners.push_back(ss.cluster_supports_range_tombstones().when_enabled(update_schema));
 
     auto& ms = netw::get_local_messaging_service();
     ms.register_definitions_update([this] (const rpc::client_info& cinfo, std::vector<frozen_mutation> m) {
