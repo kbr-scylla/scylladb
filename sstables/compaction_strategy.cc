@@ -784,4 +784,8 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
     return compaction_strategy(std::move(impl));
 }
 
+std::unique_ptr<sstable_set_impl> incremental_compaction_strategy::make_sstable_set(schema_ptr schema) const {
+    return make_partitioned_sstable_set(std::move(schema), false);
+}
+
 }
