@@ -96,7 +96,7 @@ schema_ptr view_virtual_columns();
 schema_ptr dropped_columns();
 schema_ptr indexes();
 schema_ptr tables();
-schema_ptr scylla_tables();
+schema_ptr scylla_tables(schema_features features = schema_features::full());
 schema_ptr views();
 
 }
