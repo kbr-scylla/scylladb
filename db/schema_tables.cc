@@ -638,6 +638,16 @@ future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<ser
     return map_reduce(all_table_names(features), map, std::vector<frozen_mutation>{}, reduce);
 }
 
+
+std::vector<mutation>
+adjust_schema_for_schema_features(std::vector<mutation> schema, schema_features features) {
+    for (auto& m : schema) {
+        m = redact_columns_for_missing_features(m, features);
+    }
+    return std::move(schema);
+}
+
+
 future<schema_result>
 read_schema_for_keyspaces(distributed<service::storage_proxy>& proxy, const sstring& schema_table_name, const std::set<sstring>& keyspace_names)
 {
