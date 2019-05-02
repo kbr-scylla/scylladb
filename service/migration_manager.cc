@@ -844,7 +844,8 @@ future<> migration_manager::announce(std::vector<mutation> mutations, bool annou
 future<> migration_manager::push_schema_mutation(const gms::inet_address& endpoint, const std::vector<mutation>& schema)
 {
     netw::messaging_service::msg_addr id{endpoint, 0};
-    auto fm = std::vector<frozen_mutation>(schema.begin(), schema.end());
+    auto adjusted_schema = db::schema_tables::adjust_schema_for_schema_features(schema, get_local_storage_service().cluster_schema_features());
+    auto fm = std::vector<frozen_mutation>(adjusted_schema.begin(), adjusted_schema.end());
     return netw::get_local_messaging_service().send_definitions_update(id, std::move(fm));
 }
 
