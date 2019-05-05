@@ -30,6 +30,7 @@
 #include "db/schema_tables.hh"
 
 #include "service/migration_manager.hh"
+#include "service/storage_service.hh"
 #include "partition_slice_builder.hh"
 #include "dht/i_partitioner.hh"
 #include "system_keyspace.hh"
@@ -186,7 +187,7 @@ future<> save_system_schema(const sstring & ksname) {
     auto ksm = ks.metadata();
 
     // delete old, possibly obsolete entries in schema tables
-    return parallel_for_each(all_table_names(), [ksm] (sstring cf) {
+    return parallel_for_each(all_table_names(schema_features::full()), [ksm] (sstring cf) {
         auto deletion_timestamp = schema_creation_timestamp() - 1;
         return db::execute_cql(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
             deletion_timestamp), ksm->name()).discard_result();
@@ -559,7 +560,7 @@ schema_ptr aggregates() {
  * Read schema from system keyspace and calculate MD5 digest of every row, resulting digest
  * will be converted into UUID which would act as content-based version of the schema.
  */
-future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy)
+future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy, schema_features features)
 {
     auto map = [&proxy] (sstring table) {
         return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table] (auto rs) {
@@ -581,8 +582,8 @@ future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>&
             feed_hash_for_schema_digest(hash, m);
         }
     };
-    return do_with(md5_hasher(), [map, reduce] (auto& hash) {
-        return do_for_each(all_table_names(), [&hash, map, reduce] (auto& table) {
+    return do_with(md5_hasher(), all_table_names(features), [features, map, reduce] (auto& hash, auto& tables) {
+        return do_for_each(tables, [&hash, map, reduce] (auto& table) {
             return map(table).then([&hash, reduce] (auto&& mutations) {
                 reduce(hash, mutations);
             });
@@ -592,7 +593,7 @@ future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>&
     });
 }
 
-future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy)
+future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy, schema_features features)
 {
     auto map = [&proxy] (sstring table) {
         return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table] (auto rs) {
@@ -613,7 +614,7 @@ future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<ser
         std::move(mutations.begin(), mutations.end(), std::back_inserter(result));
         return std::move(result);
     };
-    return map_reduce(all_table_names(), map, std::vector<frozen_mutation>{}, reduce);
+    return map_reduce(all_table_names(features), map, std::vector<frozen_mutation>{}, reduce);
 }
 
 future<schema_result>
@@ -702,11 +703,11 @@ future<> merge_unlock() {
  * @throws ConfigurationException If one of metadata attributes has invalid value
  * @throws IOException If data was corrupted during transportation or failed to apply fs operations
  */
-future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations)
+future<> merge_schema(service::storage_service& ss, distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations)
 {
-    return merge_lock().then([&proxy, mutations = std::move(mutations)] () mutable {
-        return do_merge_schema(proxy, std::move(mutations), true).then([&proxy] {
-            return update_schema_version_and_announce(proxy);
+    return merge_lock().then([&ss, &proxy, mutations = std::move(mutations)] () mutable {
+        return do_merge_schema(proxy, std::move(mutations), true).then([&ss, &proxy] {
+            return update_schema_version_and_announce(proxy, ss.cluster_schema_features());
         });
     }).finally([] {
         return merge_unlock();
@@ -1023,8 +1024,8 @@ static std::map<std::vector<bytes>, const query::result_set_row*> build_row_map(
     for (const auto& row: rows) {
         std::vector<bytes> key;
         for (const auto& column : primary_key) {
-            const data_value &val = row.get_data_value(column.name_as_text());
-            key.push_back(val.serialize());
+            const data_value *val = row.get_data_value(column.name_as_text());
+            key.push_back(val->serialize());
         }
         ret.insert(std::pair(std::move(key), &row));
     }
@@ -1336,7 +1337,7 @@ std::vector<mutation> make_create_keyspace_mutations(lw_shared_ptr<keyspace_meta
 std::vector<mutation> make_drop_keyspace_mutations(lw_shared_ptr<keyspace_metadata> keyspace, api::timestamp_type timestamp)
 {
     std::vector<mutation> mutations;
-    for (auto&& schema_table : all_tables()) {
+    for (auto&& schema_table : all_tables(schema_features::full())) {
         auto pkey = partition_key::from_exploded(*schema_table, {utf8_type->decompose(keyspace->name())});
         mutation m{schema_table, pkey};
         m.partition().apply(tombstone{timestamp, gc_clock::now()});
@@ -1366,7 +1367,7 @@ lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const sch
     // We get called from multiple shards with result set originating on only one of them.
     // Cannot use copying accessors for "deep" types like map, because we will hit shared_ptr asserts
     // (or screw up shared pointers)
-    const auto& replication = value_cast<map_type_impl::native_type>(row.get_data_value("replication"));
+    const auto& replication = row.get_nonnull<map_type_impl::native_type>("replication");
 
     std::map<sstring, sstring> strategy_options;
     for (auto& p : replication) {
@@ -1379,15 +1380,15 @@ lw_shared_ptr<keyspace_metadata> create_keyspace_from_schema_partition(const sch
 }
 
 template<typename K, typename V>
-static std::map<K, V> get_map(const query::result_set_row& row, const sstring& name) {
-    std::map<K, V> map;
-
-    auto values = row.get_nonnull<map_type_impl::native_type>(name);
-    for (auto&& entry : values) {
-        map.emplace(value_cast<K>(entry.first), value_cast<V>(entry.second));
-    };
-
-    return map;
+static std::optional<std::map<K, V>> get_map(const query::result_set_row& row, const sstring& name) {
+    if (auto values = row.get<map_type_impl::native_type>(name)) {
+        std::map<K, V> map;
+        for (auto&& entry : *values) {
+            map.emplace(value_cast<K>(entry.first), value_cast<V>(entry.second));
+        };
+        return map;
+    }
+    return std::nullopt;
 }
 
 template<typename V>
@@ -1917,24 +1918,22 @@ static future<schema_ptr> create_table_from_table_row(distributed<service::stora
 static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_builder& builder, const query::result_set_row& table_row)
 {
     // These row reads have been purposefully reordered to match the origin counterpart. For easier matching.
-    if (table_row.has("bloom_filter_fp_chance")) {
-        builder.set_bloom_filter_fp_chance(table_row.get_nonnull<double>("bloom_filter_fp_chance"));
+    if (auto val = table_row.get<double>("bloom_filter_fp_chance")) {
+        builder.set_bloom_filter_fp_chance(*val);
     } else {
         builder.set_bloom_filter_fp_chance(builder.get_bloom_filter_fp_chance());
     }
 
-    if (table_row.has("caching")) {
-        auto map = get_map<sstring, sstring>(table_row, "caching");
-        builder.set_caching_options(caching_options::from_map(map));
+    if (auto map = get_map<sstring, sstring>(table_row, "caching")) {
+        builder.set_caching_options(caching_options::from_map(*map));
     }
 
-    if (table_row.has("comment")) {
-        builder.set_comment(table_row.get_nonnull<sstring>("comment"));
+    if (auto val = table_row.get<sstring>("comment")) {
+        builder.set_comment(*val);
     }
 
-    if (table_row.has("compaction")) {
-        auto map = get_map<sstring, sstring>(table_row, "compaction");
-
+    if (auto opt_map = get_map<sstring, sstring>(table_row, "compaction")) {
+        auto &map = *opt_map;
         auto i = map.find("class");
         if (i != map.end()) {
             try {
@@ -1959,22 +1958,21 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
         builder.set_compaction_strategy_options(map);
     }
 
-    if (table_row.has("compression")) {
-        auto map = get_map<sstring, sstring>(table_row, "compression");
-        compression_parameters cp(map);
+    if (auto map = get_map<sstring, sstring>(table_row, "compression")) {
+        compression_parameters cp(*map);
         builder.set_compressor_params(cp);
     }
 
-    if (table_row.has("dclocal_read_repair_chance")) {
-        builder.set_dc_local_read_repair_chance(table_row.get_nonnull<double>("dclocal_read_repair_chance"));
+    if (auto val = table_row.get<double>("dclocal_read_repair_chance")) {
+        builder.set_dc_local_read_repair_chance(*val);
     }
 
-    if (table_row.has("default_time_to_live")) {
-        builder.set_default_time_to_live(gc_clock::duration(table_row.get_nonnull<int32_t>("default_time_to_live")));
+    if (auto val = table_row.get<int32_t>("default_time_to_live")) {
+        builder.set_default_time_to_live(gc_clock::duration(*val));
     }
 
-    if (table_row.has("extensions")) {
-        auto map = get_map<sstring, bytes>(table_row, "extensions");
+    if (auto val = get_map<sstring, bytes>(table_row, "extensions")) {
+        auto &map = *val;
         schema::extensions_map result;
         auto& exts = ctxt.extensions().schema_extensions();
         for (auto&p : map) {
@@ -2011,32 +2009,32 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
         builder.set_extensions(std::move(result));
     }
 
-    if (table_row.has("gc_grace_seconds")) {
-        builder.set_gc_grace_seconds(table_row.get_nonnull<int32_t>("gc_grace_seconds"));
+    if (auto val = table_row.get<int32_t>("gc_grace_seconds")) {
+        builder.set_gc_grace_seconds(*val);
     }
 
-    if (table_row.has("min_index_interval")) {
-        builder.set_min_index_interval(table_row.get_nonnull<int>("min_index_interval"));
+    if (auto val = table_row.get<int>("min_index_interval")) {
+        builder.set_min_index_interval(*val);
     }
 
-    if (table_row.has("memtable_flush_period_in_ms")) {
-        builder.set_memtable_flush_period(table_row.get_nonnull<int32_t>("memtable_flush_period_in_ms"));
+    if (auto val = table_row.get<int32_t>("memtable_flush_period_in_ms")) {
+        builder.set_memtable_flush_period(*val);
     }
 
-    if (table_row.has("max_index_interval")) {
-        builder.set_max_index_interval(table_row.get_nonnull<int>("max_index_interval"));
+    if (auto val = table_row.get<int>("max_index_interval")) {
+        builder.set_max_index_interval(*val);
     }
 
-    if (table_row.has("read_repair_chance")) {
-        builder.set_read_repair_chance(table_row.get_nonnull<double>("read_repair_chance"));
+    if (auto val = table_row.get<double>("read_repair_chance")) {
+        builder.set_read_repair_chance(*val);
     }
 
-    if (table_row.has("crc_check_chance")) {
-        builder.set_crc_check_chance(table_row.get_nonnull<double>("crc_check_chance"));
+    if (auto val = table_row.get<double>("crc_check_chance")) {
+        builder.set_crc_check_chance(*val);
     }
 
-    if (table_row.has("speculative_retry")) {
-        builder.set_speculative_retry(table_row.get_nonnull<sstring>("speculative_retry"));
+    if (auto val = table_row.get<sstring>("speculative_retry")) {
+        builder.set_speculative_retry(*val);
     }
 }
 
@@ -2093,10 +2091,8 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
         table_rs = query::result_set(*sm.scylla_tables());
         if (!table_rs.empty()) {
             query::result_set_row table_row = table_rs.row(0);
-
-            if (table_row.has("in_memory")) {
-                builder.set_in_memory(table_row.get_nonnull<bool>("in_memory"));
-            }
+            auto in_mem = table_row.get<bool>("in_memory");
+            builder.set_in_memory(in_mem.value_or(false));
         }
     }
     v3_columns columns(std::move(column_defs), is_dense, is_compound);
@@ -2262,8 +2258,8 @@ static std::vector<column_definition> create_columns_from_column_rows(const quer
         auto name_bytes = row.get_nonnull<bytes>("column_name_bytes");
         column_id position = row.get_nonnull<int32_t>("position");
 
-        if (row.has("clustering_order")) {
-            auto order = row.get_nonnull<sstring>("clustering_order");
+        if (auto val = row.get<sstring>("clustering_order")) {
+            auto order = *val;
             std::transform(order.begin(), order.end(), order.begin(), ::toupper);
             if (order == "DESC") {
                 type = reversed_type_impl::get_instance(type);
@@ -2706,21 +2702,26 @@ data_type parse_type(sstring str)
     return db::marshal::type_parser::parse(str);
 }
 
-std::vector<schema_ptr> all_tables() {
+std::vector<schema_ptr> all_tables(schema_features features) {
     // Don't forget to update this list when new schema tables are added.
     // The listed schema tables are the ones synchronized between nodes,
     // and forgetting one of them in this list can cause bugs like #4339.
-    return {
+    //
+    // This list must be kept backwards-compatible because it's used
+    // for schema digest calculation. Refs #4457.
+    std::vector<schema_ptr> result = {
         keyspaces(), tables(), scylla_tables(), columns(), dropped_columns(), triggers(),
-        views(), indexes(), types(), functions(), aggregates(), view_virtual_columns()
+        views(), types(), functions(), aggregates(), indexes()
     };
+    if (features.contains<schema_feature::VIEW_VIRTUAL_COLUMNS>()) {
+        result.emplace_back(view_virtual_columns());
+    }
+    return result;
 }
 
-const std::vector<sstring>& all_table_names() {
-    static thread_local std::vector<sstring> all =
-            boost::copy_range<std::vector<sstring>>(all_tables() |
-            boost::adaptors::transformed([] (auto schema) { return schema->cf_name(); }));
-    return all;
+std::vector<sstring> all_table_names(schema_features features) {
+    return boost::copy_range<std::vector<sstring>>(all_tables(features) |
+           boost::adaptors::transformed([] (auto schema) { return schema->cf_name(); }));
 }
 
 namespace legacy {
