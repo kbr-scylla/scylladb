@@ -184,24 +184,52 @@ SEASTAR_TEST_CASE(test_truncating_extend) {
         f.flush().get();
         BOOST_REQUIRE_EQUAL(s, w);
 
-        // truncate smaller, unaligned
-        auto l = w - 44;
-        auto r = w + 8 * a;
-        f.truncate(l).get();
-        f.truncate(r).get();
+        for (size_t i = 1; i < 64; ++i) {
+            // truncate smaller, unaligned
+            auto l = w - i;
+            auto r = w + 8 * a;
+            f.truncate(l).get();
+            BOOST_REQUIRE_EQUAL(l, f.stat().get0().st_size);
 
-        auto tmp = temporary_buffer<uint8_t>::aligned(a, r);
-        auto n = f.dma_read(0, tmp.get_write(), tmp.size()).get0();
+            {
+                auto tmp = temporary_buffer<uint8_t>::aligned(a, align_up(l, a));
+                auto n = f.dma_read(0, tmp.get_write(), tmp.size()).get0();
+
+                BOOST_REQUIRE_EQUAL(l, n);
+                BOOST_REQUIRE_EQUAL_COLLECTIONS(tmp.get(), tmp.get() + l, buf.get(), buf.get() + l);
+
+                auto k = align_down(l, a);
+
+                while (k > 0) {
+                    n = f.dma_read(0, tmp.get_write(), k).get0();
+
+                    BOOST_REQUIRE_EQUAL(k, n);
+                    BOOST_REQUIRE_EQUAL_COLLECTIONS(tmp.get(), tmp.get() + k, buf.get(), buf.get() + k);
+
+                    n = f.dma_read(k, tmp.get_write(), tmp.size()).get0();
+                    BOOST_REQUIRE_EQUAL(l - k, n);
+                    BOOST_REQUIRE_EQUAL_COLLECTIONS(tmp.get(), tmp.get() + n, buf.get() + k, buf.get() + k + n);
+
+                    k -= a;
+                }
+            }
+
+            f.truncate(r).get();
+            BOOST_REQUIRE_EQUAL(r, f.stat().get0().st_size);
+
+            auto tmp = temporary_buffer<uint8_t>::aligned(a, align_up(r, a));
+            auto n = f.dma_read(0, tmp.get_write(), tmp.size()).get0();
+
+            BOOST_REQUIRE_EQUAL(r, n);
+            BOOST_REQUIRE_EQUAL_COLLECTIONS(tmp.get(), tmp.get() + l, buf.get(), buf.get() + l);
+
+            while (l < r) {
+                BOOST_REQUIRE_EQUAL(tmp[l], 0);
+                ++l;
+            }
+        }
 
         f.close().get();
-
-        BOOST_REQUIRE_EQUAL(r, n);
-        BOOST_REQUIRE_EQUAL_COLLECTIONS(tmp.get(), tmp.get() + l, buf.get(), buf.get() + l);
-
-        while (l < r) {
-            BOOST_REQUIRE_EQUAL(tmp[l], 0);
-            ++l;
-        }
     });
 }
 
