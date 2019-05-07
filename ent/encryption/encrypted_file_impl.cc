@@ -350,7 +350,7 @@ future<> encrypted_file_impl::truncate(uint64_t length) {
                         }
                         return write_dma(t.aligned_size, t.buf.get(), ar, default_priority_class()).then([&, r](size_t w) {
                             t.aligned_size += w;
-                            std::fill(t.buf.get_write(), t.buf.get_write() + r, 0);
+                            std::fill(t.buf.get_write(), t.buf.get_write() + std::min(r + _key->block_size(), t.buf.size()), 0);
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
                     });
