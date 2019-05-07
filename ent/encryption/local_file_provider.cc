@@ -83,7 +83,7 @@ private:
     future<key_ptr> load_or_create(const key_info&);
     future<key_ptr> load_or_create_local(const key_info&);
     future<> read_key_file();
-    future<> write_key_file(key_info, key_ptr);
+    future<key_ptr> write_key_file(key_info);
 
     std::unordered_map<key_info, key_ptr, key_info_hash> _keys;
     encryption_context& _ctxt;
@@ -167,11 +167,7 @@ local_file_provider::load_or_create_local(const key_info& info) {
             return make_ready_future<key_ptr>(k);
         }
         // create it.
-        auto k = make_shared<symmetric_key>(info);
-        return write_key_file(info, k).then([this, info, k] {
-            _keys.emplace(info, k);
-            return make_ready_future<key_ptr>(k);
-        });
+        return write_key_file(info);
     });
 }
 
@@ -183,6 +179,7 @@ future<> local_file_provider::read_key_file() {
     static const std::regex key_line_expr(R"foo((\w+\/\w+\/\w+)\:(\d+)\:(\S+)\s*)foo");
 
     return with_semaphore(_sem, 1, [this] {
+        // could do this twice, but it is only reading
         return read_text_file_fully(_path).then([this](temporary_buffer<char> buf) {
             auto i = std::cregex_iterator(buf.begin(), buf.end(), key_line_expr);
             auto e = std::cregex_iterator();
@@ -220,8 +217,17 @@ future<> local_file_provider::read_key_file() {
     });
 }
 
-future<> local_file_provider::write_key_file(key_info info, key_ptr k) {
-    return with_semaphore(_sem, 1, [this, info, k] {
+future<key_ptr> local_file_provider::write_key_file(key_info info) {
+    return with_semaphore(_sem, 1, [this, info] {
+        // we can get here more than once if shards race.
+        // however, we only need to use/write the first key matching
+        // the required info.
+        if (_keys.count(info)) {
+            return make_ready_future<key_ptr>(_keys.at(info));
+        }
+
+        auto k = make_shared<symmetric_key>(info);
+
         std::ostringstream ss;
         for (auto& p : _keys) {
             ss << p.first.alg << ":" << p.first.len << ":" << base64_encode(p.second->key()) << std::endl;
@@ -237,8 +243,12 @@ future<> local_file_provider::write_key_file(key_info info, key_ptr k) {
             return write_text_file_fully(tmpnam, s).then([this, tmpnam] {
                 return rename_file(tmpnam, _path);
             });
+        }).then([this, k, info] {
+            // don't cache until written
+            _keys[info] = k;
+            return make_ready_future<key_ptr>(k);
         });
-    }).handle_exception([this](auto ep) {
+    }).handle_exception([this](auto ep) -> key_ptr{
         try {
             std::rethrow_exception(ep);
         } catch (...) {
