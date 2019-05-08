@@ -2648,7 +2648,7 @@ SEASTAR_TEST_CASE(test_random_row_population) {
             auto rd = cache.make_reader(s.schema(), pr, slice ? *slice : s.schema()->full_slice());
             rd.set_max_buffer_size(1);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         std::vector<query::clustering_range> ranges;
@@ -2763,7 +2763,7 @@ SEASTAR_TEST_CASE(test_continuity_is_populated_when_read_overlaps_with_older_ver
             auto rd = cache.make_reader(s.schema(), pr);
             rd.set_max_buffer_size(1);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         {
@@ -2891,7 +2891,7 @@ SEASTAR_TEST_CASE(test_continuity_population_with_multicolumn_clustering_key) {
             auto rd = cache.make_reader(s, pr, slice ? *slice : s->full_slice());
             rd.set_max_buffer_size(1);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         {
@@ -2998,7 +2998,7 @@ SEASTAR_TEST_CASE(test_concurrent_setting_of_continuity_on_read_upper_bound) {
             auto rd = cache.make_reader(s.schema(), pr, slice ? *slice : s.schema()->full_slice());
             rd.set_max_buffer_size(1);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         {
@@ -3062,7 +3062,7 @@ SEASTAR_TEST_CASE(test_tombstone_merging_of_overlapping_tombstones_in_many_versi
             auto rd = cache.make_reader(s.schema());
             rd.set_max_buffer_size(1);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         apply(cache, underlying, m1);
@@ -3100,7 +3100,7 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
             auto rd = cache.make_reader(s, pr, slice);
             rd.set_max_buffer_size(3);
             rd.fill_buffer(db::no_timeout).get();
-            return std::move(rd);
+            return rd;
         };
 
         const int n_readers = 3;

@@ -3500,7 +3500,7 @@ static std::vector<sstring_view> split_field_strings(sstring_view v) {
         prev_ch = v[i];
     }
     result.push_back(v.substr(prev, v.size() - prev));
-    return std::move(result);
+    return result;
 }
 
 // Replace "\:" with ":" and "\@" with "@".
@@ -3510,7 +3510,7 @@ static std::string unescape(sstring_view s) {
     std::string result(s);
     result = std::regex_replace(result, escaped_colon_re, ":");
     result = std::regex_replace(result, escaped_at_re, "@");
-    return std::move(result);
+    return result;
 }
 
 // Concat list of bytes into a single bytes.
@@ -3528,7 +3528,7 @@ static bytes concat_fields(const std::vector<bytes>& fields, const std::vector<i
             it = std::copy(std::begin(fields[i]), std::end(fields[i]), it);
         }
     }
-    return std::move(result);
+    return result;
 }
 
 bytes

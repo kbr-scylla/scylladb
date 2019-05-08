@@ -814,6 +814,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'tests/result_set_assertions.cc',
     'tests/mutation_source_test.cc',
     'tests/data_model.cc',
+    'tests/exception_utils.cc',
 ]
 
 deps = {
@@ -836,7 +837,6 @@ pure_boost_tests = set([
     'tests/idl_test',
     'tests/cartesian_product_test',
     'tests/streaming_histogram_test',
-    'tests/duration_test',
     'tests/vint_serialization_test',
     'tests/compress_test',
     'tests/chunked_vector_test',

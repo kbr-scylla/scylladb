@@ -277,7 +277,7 @@ private:
                     if (def->type->is_reversed()) {
                         ranges.back().reverse();
                     }
-                    return std::move(ranges);
+                    return ranges;
                 }
 
                 ranges.reserve(cartesian_product_size(vec_of_values));
@@ -306,7 +306,7 @@ private:
                     }
                 }
 
-                return std::move(ranges);
+                return ranges;
             }
 
             auto values = r->values(options);
@@ -326,7 +326,7 @@ private:
             ranges.emplace_back(range_type::make_singular(ValueType::from_optional_exploded(*_schema, std::move(prefix))));
         }
 
-        return std::move(ranges);
+        return ranges;
     }
 
 public:
