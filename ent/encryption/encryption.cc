@@ -347,8 +347,8 @@ public:
             return std::move(k);
         });
     }
-    future<::shared_ptr<symmetric_key>, opt_bytes> key_for_write() const {
-        return _provider->key(_info);
+    future<::shared_ptr<symmetric_key>, opt_bytes> key_for_write(opt_bytes id = {}) const {
+        return _provider->key(_info, std::move(id));
     }
 
     bytes serialize() const override {
@@ -396,19 +396,25 @@ public:
 
     future<file> wrap_file(sstables::sstable& sst, sstables::component_type type, file f, open_flags flags) override {
         switch (type) {
-        case sstables::component_type::Data:
-            break;
-        default:
+        case sstables::component_type::Scylla:
+        case sstables::component_type::TemporaryTOC:
+        case sstables::component_type::TOC:
             return make_ready_future<file>();
+        default:
+            break;
         }
 
         static const sstring key_id_attribute = "scylla_key_id";
+        static const sstring encrypted_components_attribute = "encrypted_components";
 
         static const sstables::disk_string<uint32_t> encryption_attribute_ds{
             bytes{encryption_attribute.begin(), encryption_attribute.end()}
         };
         static const sstables::disk_string<uint32_t> key_id_attribute_ds{
             bytes{key_id_attribute.begin(), key_id_attribute.end()}
+        };
+        static const sstables::disk_string<uint32_t> encrypted_components_attribute_ds{
+            bytes{encrypted_components_attribute.begin(), encrypted_components_attribute.end()}
         };
 
         if (flags == open_flags::ro) {
@@ -418,7 +424,17 @@ public:
                 auto* exta  = sc.scylla_metadata->get_extension_attributes();
                 if (exta) {
                     auto i = exta->map.find(encryption_attribute_ds);
-                    if (i != exta->map.end()) {
+                    // note: earlier builds of encryption extension would only encrypt data component,
+                    // so iff we are opening old sstables we need to check if this component is actually
+                    // encrypted. We use a bitmask attribute for this.
+
+                    bool ok = i != exta->map.end();
+                    if (ok && type != sstables::component_type::Data) {
+                        ok = exta->map.count(encrypted_components_attribute_ds) &&
+                                        (ser::deserialize_from_buffer(exta->map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0) & (1 << int(type)));
+                    }
+
+                    if (ok) {
                         auto esx = encryption_schema_extension::parse(*_ctxt, i->second.value);
                         opt_bytes id;
 
@@ -440,17 +456,39 @@ public:
             auto s = sst.get_schema();
             auto e = s->extensions().find(encryption_attribute);
             if (e != s->extensions().end()) {
-                auto esx = static_pointer_cast<encryption_schema_extension>(e->second);
-                return esx->key_for_write().then([esx, f, &sst](::shared_ptr<symmetric_key> k, opt_bytes id) {
-                    auto& sc = sst.get_shared_components();
-                    if (!sc.scylla_metadata) {
-                        sc.scylla_metadata.emplace();
-                    }
+                auto& sc = sst.get_shared_components();
+                if (!sc.scylla_metadata) {
+                    sc.scylla_metadata.emplace();
+                }
+                auto& ext = sc.scylla_metadata->get_or_create_extension_attributes();
+                opt_bytes id;
 
-                    auto& ext = sc.scylla_metadata->get_or_create_extension_attributes();
-                    ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
+                // We are writing more than one component. If we used a named key before
+                // we need to make sure we use the exact same one for all components,
+                // even if something like KMIP key invalidation replaced it.
+                // This will also speed up key lookup in some cases, as both repl
+                // and kmip cache id bound keys.
+                if (ext.map.count(key_id_attribute_ds)) {
+                    id = ext.map.at(key_id_attribute_ds).value;
+                }
+
+                auto esx = static_pointer_cast<encryption_schema_extension>(e->second);
+
+                return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](::shared_ptr<symmetric_key> k, opt_bytes id) {
+                    if (!ext.map.count(encryption_attribute_ds)) {
+                        ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
+                    }
                     if (id) {
                         ext.map.emplace(key_id_attribute_ds, sstables::disk_string<uint32_t>{*id});
+                    }
+                    if (type != sstables::component_type::Data) {
+                        uint32_t mask = 0;
+                        if (ext.map.count(encrypted_components_attribute_ds)) {
+                            mask = ser::deserialize_from_buffer(ext.map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
+                        }
+                        mask |= (1 << int(type));
+                        // just a marker. see above
+                        ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
                     }
                     return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
                 });
