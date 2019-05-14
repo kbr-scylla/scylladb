@@ -108,7 +108,7 @@ class aws_instance:
         return self._type.split(".")[0]
 
     def is_supported_instance_class(self):
-        if self.instance_class() in ['i2', 'i3']:
+        if self.instance_class() in ['i2', 'i3', 'i3en']:
             return True
         return False
 
@@ -117,7 +117,7 @@ class aws_instance:
         instance_size = self.instance_size()
         if instance_class in ['c3', 'c4', 'd2', 'i2', 'r3']:
             return 'ixgbevf'
-        if instance_class in ['c5', 'c5d', 'f1', 'g3', 'h1', 'i3', 'm5', 'm5d', 'p2', 'p3', 'r4', 'x1']:
+        if instance_class in ['c5', 'c5d', 'f1', 'g3', 'h1', 'i3', 'i3en', 'm5', 'm5d', 'p2', 'p3', 'r4', 'x1']:
             return 'ena'
         if instance_class == 'm4':
             if instance_size == '16xlarge':
@@ -302,7 +302,7 @@ def is_debian_variant():
 
 def is_redhat_variant():
     d = os_release['ID_LIKE'] if 'ID_LIKE' in os_release else os_release['ID']
-    return ('rhel' in d) or ('fedora' in d)
+    return ('rhel' in d) or ('fedora' in d) or ('ol') in d
 
 def is_gentoo_variant():
     return ('gentoo' in os_release['ID'])

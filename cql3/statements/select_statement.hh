@@ -65,6 +65,7 @@ protected:
     ::shared_ptr<parameters> _parameters;
     ::shared_ptr<selection::selection> _selection;
     ::shared_ptr<restrictions::statement_restrictions> _restrictions;
+    ::shared_ptr<std::vector<size_t>> _group_by_cell_indices; ///< Indices in result row of cells holding GROUP BY values.
     bool _is_reversed;
     ::shared_ptr<term> _limit;
     ::shared_ptr<term> _per_partition_limit;
@@ -91,6 +92,7 @@ public:
             ::shared_ptr<parameters> parameters,
             ::shared_ptr<selection::selection> selection,
             ::shared_ptr<restrictions::statement_restrictions> restrictions,
+            ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
             bool is_reversed,
             ordering_comparator_type ordering_comparator,
             ::shared_ptr<term> limit,
@@ -129,6 +131,8 @@ public:
 
     ::shared_ptr<restrictions::statement_restrictions> get_restrictions() const;
 
+    bool has_group_by() { return _group_by_cell_indices && !_group_by_cell_indices->empty(); }
+
 protected:
     uint32_t do_get_limit(const query_options& options, ::shared_ptr<term> limit) const;
     uint32_t get_limit(const query_options& options) const {
@@ -150,6 +154,7 @@ public:
                      ::shared_ptr<parameters> parameters,
                      ::shared_ptr<selection::selection> selection,
                      ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                     ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                      bool is_reversed,
                      ordering_comparator_type ordering_comparator,
                      ::shared_ptr<term> limit,
@@ -170,6 +175,7 @@ public:
                                                                     ::shared_ptr<parameters> parameters,
                                                                     ::shared_ptr<selection::selection> selection,
                                                                     ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                                                                    ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                                                                     bool is_reversed,
                                                                     ordering_comparator_type ordering_comparator,
                                                                     ::shared_ptr<term> limit,
@@ -181,6 +187,7 @@ public:
                                    ::shared_ptr<parameters> parameters,
                                    ::shared_ptr<selection::selection> selection,
                                    ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                                   ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                                    bool is_reversed,
                                    ordering_comparator_type ordering_comparator,
                                    ::shared_ptr<term> limit,
