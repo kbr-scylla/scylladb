@@ -40,6 +40,7 @@
 #include "kmip_host.hh"
 #include "bytes.hh"
 #include "utils/class_registrator.hh"
+#include "cql3/query_processor.hh"
 #include "db/extensions.hh"
 #include "db/system_keyspace.hh"
 #include "utils/class_registrator.hh"
@@ -47,6 +48,7 @@
 #include "serializer_impl.hh"
 #include "schema.hh"
 #include "sstables/sstables.hh"
+#include "service/storage_service.hh"
 #include "db/commitlog/commitlog_extensions.hh"
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
@@ -300,13 +302,22 @@ public:
             _cfg_encryption_key = std::move(k);
         });
     }
+    distributed<cql3::query_processor>& get_query_processor() const override {
+        return cql3::get_query_processor();
+    }
+    distributed<service::storage_service>& get_storage_service() const override {
+        return service::get_storage_service();
+    }
+    distributed<database>& get_database() const override {
+        return get_storage_service().local().db();
+    }
 };
 
 class encryption_schema_extension : public schema_extension {
     key_info _info;
     shared_ptr<key_provider> _provider;
     std::map<sstring, sstring> _options;
-
+    std::optional<size_t> _key_block_size;
 public:
     encryption_schema_extension(key_info, shared_ptr<key_provider>, std::map<sstring, sstring>);
 
@@ -348,6 +359,16 @@ public:
             return key_for_write().discard_result();
         });
     }
+
+    bool should_delay_read(const opt_bytes& id) {
+        return _provider->should_delay_read(id);
+    }
+    size_t key_block_size() {
+        if (!_key_block_size) {
+            _key_block_size = symmetric_key(_info).block_size();
+        }
+        return *_key_block_size;
+    }
 };
 
 encryption_schema_extension::encryption_schema_extension(key_info info, shared_ptr<key_provider> provider, std::map<sstring, sstring> options)
@@ -371,6 +392,7 @@ public:
     encryption_file_io_extension(::shared_ptr<encryption_context> ctxt)
         : _ctxt(std::move(ctxt))
     {}
+
 
     future<file> wrap_file(sstables::sstable& sst, sstables::component_type type, file f, open_flags flags) override {
         switch (type) {
@@ -403,7 +425,11 @@ public:
                         if (exta->map.count(key_id_attribute_ds)) {
                             id = exta->map.at(key_id_attribute_ds).value;
                         }
-
+                        if (esx->should_delay_read(id)) {
+                            return make_ready_future<file>(make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
+                                return esx->key_for_read(id);
+                            }));
+                        }
                         return esx->key_for_read(std::move(id)).then([esx, f](::shared_ptr<symmetric_key> k) {
                             return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
                         });
@@ -514,7 +540,7 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
     options opts(cfg.system_info_encryption().begin(), cfg.system_info_encryption().end());
     opt_wrapper sie(opts);
     future<> f = make_ready_future<>();
-    if (sie("enabled").value_or("false") == "true") {
+    if (!::strcasecmp(sie("enabled").value_or("false").c_str(), "true")) {
         // commitlog/system table encryption should not use replicated keys,
         // We default to local keys, but KMIP should be ok as well.
         // TODO: maybe forbid replicated.

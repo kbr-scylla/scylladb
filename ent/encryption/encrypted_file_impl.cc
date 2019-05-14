@@ -144,15 +144,20 @@ encrypted_file_impl::encrypted_file_impl(file f, ::shared_ptr<symmetric_key> key
     _disk_write_dma_alignment = std::max<unsigned>(_file.disk_write_dma_alignment(), block_size);
 }
 
+static future<uint64_t> calculate_file_length(const file& f, size_t key_block_size) {
+    return f.size().then([key_block_size](uint64_t s) {
+        if (!is_aligned(s, key_block_size)) {
+            s -= key_block_size;
+        }
+        return s;
+    });
+}
+
 future<> encrypted_file_impl::verify_file_length() {
     if (_file_length) {
         return make_ready_future();
     }
-    return _file.size().then([this](uint64_t s) {
-        auto kb = _key->block_size();
-        if (!is_aligned(s, kb)) {
-            s -= kb;
-        }
+    return calculate_file_length(_file, _key->block_size()).then([this](uint64_t s) {
         _file_length = s;
     });
 }
@@ -402,6 +407,134 @@ std::unique_ptr<file_handle_impl> encrypted_file_impl::dup() {
 shared_ptr<file_impl> make_encrypted_file(file f, ::shared_ptr<symmetric_key> k) {
     return ::make_shared<encrypted_file_impl>(std::move(f), std::move(k));
 }
+
+class indirect_encrypted_file_impl : public file_impl {
+    ::shared_ptr<file_impl> _impl;
+    file _f;
+    size_t _key_block_size;
+    get_key_func _get;
+
+    future<> get() {
+        if (_impl) {
+           return make_ready_future<>();
+        }
+        return _get().then([this](::shared_ptr<symmetric_key> k) {
+            _impl = make_encrypted_file(_f, std::move(k));
+        });
+    }
+public:
+    indirect_encrypted_file_impl(file f, size_t key_block_size, get_key_func get)
+        : _f(f), _key_block_size(key_block_size), _get(std::move(get))
+    {}
+
+    future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override {
+        return get().then([this, pos, buffer, len, &pc]() {
+            return _impl->write_dma(pos, buffer, len, pc);
+        });
+    }
+    future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
+        return get().then([this, pos, iov = std::move(iov), &pc]() mutable {
+            return _impl->write_dma(pos, std::move(iov), pc);
+        });
+    }
+    future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override {
+        return get().then([this, pos, buffer, len, &pc]() {
+            return _impl->read_dma(pos, buffer, len, pc);
+        });
+    }
+    future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
+        return get().then([this, pos, iov = std::move(iov), &pc]() mutable {
+            return _impl->read_dma(pos, std::move(iov), pc);
+        });
+    }
+    future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override {
+        return get().then([this, offset, range_size, &pc]() {
+            return _impl->dma_read_bulk(offset, range_size, pc);
+        });
+    }
+    future<> flush(void) override {
+        if (_impl) {
+            return _impl->flush();
+        }
+        return _f.flush();
+    }
+    future<struct stat> stat(void) override {
+        if (_impl) {
+            return _impl->stat();
+        }
+        return _f.stat().then([this](struct stat s) {
+           return calculate_file_length(_f, _key_block_size).then([s](uint64_t fs) mutable {
+               s.st_size = fs;
+               return s;
+           });
+        });
+    }
+    future<> truncate(uint64_t length) override {
+        if (_impl) {
+            return _impl->truncate(length);
+        }
+        return _f.truncate(length);
+    }
+    future<> discard(uint64_t offset, uint64_t length) override {
+        if (_impl) {
+            return _impl->discard(offset, length);
+        }
+        return _f.discard(offset, length);
+    }
+    future<> allocate(uint64_t position, uint64_t length) override {
+        if (_impl) {
+            return _impl->allocate(position, length);
+        }
+        return _f.allocate(position, length);
+    }
+    future<uint64_t> size(void) override {
+        if (_impl) {
+            return _impl->size();
+        }
+        return calculate_file_length(_f, _key_block_size);
+    }
+    future<> close() override {
+        if (_impl) {
+            return _impl->close();
+        }
+        return _f.close();
+    }
+    std::unique_ptr<file_handle_impl> dup() {
+        if (_impl) {
+            return _impl->dup();
+        }
+        class my_file_handle_impl : public seastar::file_handle_impl {
+            seastar::file_handle _handle;
+            size_t _key_block_size;
+            get_key_func _get;
+        public:
+            my_file_handle_impl(seastar::file_handle h, size_t key_block_size, get_key_func get)
+                : _handle(std::move(h))
+                , _key_block_size(key_block_size)
+                , _get(std::move(get))
+            {}
+            std::unique_ptr<file_handle_impl> clone() const override {
+                return std::make_unique<my_file_handle_impl>(_handle, _key_block_size, _get);
+            }
+            seastar::shared_ptr<file_impl> to_file() && override {
+                return make_delayed_encrypted_file(_handle.to_file(), _key_block_size, _get);
+            }
+        };
+        return std::make_unique<my_file_handle_impl>(_f.dup(), _key_block_size, _get);
+    }
+
+    subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) override {
+        if (_impl) {
+            return _impl->list_directory(std::move(next));
+        }
+        return _f.list_directory(std::move(next));
+    }
+};
+
+shared_ptr<seastar::file_impl> make_delayed_encrypted_file(file f, size_t key_block_size, get_key_func get) {
+    return ::make_shared<indirect_encrypted_file_impl>(std::move(f), key_block_size, std::move(get));
+}
+
 
 }
 

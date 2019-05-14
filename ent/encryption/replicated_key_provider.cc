@@ -25,6 +25,7 @@
 #include <seastar/core/reactor.hh>
 
 #include "replicated_key_provider.hh"
+#include "encryption.hh"
 #include "local_file_provider.hh"
 #include "symmetric_key.hh"
 #include "database.hh"
@@ -34,10 +35,11 @@
 #include "utils/UUID_gen.hh"
 #include "utils/hash.hh"
 #include "service/storage_service.hh"
+#include "sstables/compaction_manager.hh"
 
 namespace encryption {
 
-static auto const KSNAME = "scylla";
+static auto constexpr KSNAME = "system_replicated_keys";
 static auto constexpr TABLENAME = "encrypted_keys";
 
 static logger log("replicated_key_provider");
@@ -74,8 +76,9 @@ public:
         }
     };
 
-    replicated_key_provider(shared_ptr<system_key> system_key, shared_ptr<key_provider> local_provider)
-        : _system_key(std::move(system_key))
+    replicated_key_provider(encryption_context& ctxt, shared_ptr<system_key> system_key, shared_ptr<key_provider> local_provider)
+        : _ctxt(ctxt)
+        , _system_key(std::move(system_key))
         , _local_provider(std::move(local_provider))
     {}
 
@@ -83,6 +86,14 @@ public:
     future<key_ptr, opt_bytes> key(const key_info&, opt_bytes = {}) override;
     future<> validate() const override;
     future<> maybe_initialize_tables();
+
+    bool should_delay_read(const opt_bytes& id) const override {
+        if (!id || _initialized) {
+            return false;
+        }
+        auto& qp = _ctxt.get_query_processor();
+        return !qp.local_is_initialized() || _ctxt.get_database().local().get_compaction_manager().stopped();
+    }
 
 private:
     void store_key(const key_id&, const UUID&, key_ptr);
@@ -96,8 +107,11 @@ private:
     future<> write_key_file();
 
     template<typename... Args>
-    static future<::shared_ptr<cql3::untyped_result_set>> query(sstring, Args&& ...);
+    future<::shared_ptr<cql3::untyped_result_set>> query(sstring, Args&& ...);
 
+    future<> force_blocking_flush();
+
+    encryption_context& _ctxt;
     shared_ptr<system_key> _system_key;
     shared_ptr<key_provider> _local_provider;
     std::unordered_map<key_id, std::pair<UUID, key_ptr>, key_id_hash> _keys;
@@ -113,17 +127,24 @@ static const timeout_config rkp_db_timeout_config {
 
 template<typename... Args>
 future<::shared_ptr<cql3::untyped_result_set>> replicated_key_provider::query(sstring q, Args&& ...params) {
-    static auto query_internal = [](const sstring& q, auto&& ...params) {
-        return cql3::get_local_query_processor().execute_internal(q, { (params)...});
-    };
-    static auto query_normal = [](const sstring& q, auto&& ...params) {
-        return cql3::get_local_query_processor().process(q, db::consistency_level::ONE, rkp_db_timeout_config, { (params)...}, false);
-    };
-    return service::get_local_storage_service().is_starting().then([t = std::make_tuple<sstring, Args...>(std::move(q), std::forward<Args>(params)...)](bool starting) {
+    return _ctxt.get_storage_service().local().is_starting().then([this, t = std::make_tuple<sstring, Args...>(std::move(q), std::forward<Args>(params)...)](bool starting) {
+        auto query_internal = [this](const sstring& q, auto&& ...params) {
+            return _ctxt.get_query_processor().local().execute_internal(q, { (params)...});
+        };
+        auto query_normal = [this](const sstring& q, auto&& ...params) {
+            return _ctxt.get_query_processor().local().process(q, db::consistency_level::ONE, rkp_db_timeout_config, { (params)...}, false);
+        };
         return starting ? seastar::apply(query_internal, t) : seastar::apply(query_normal, t);
     });
 }
 
+future<> replicated_key_provider::force_blocking_flush() {
+    return _ctxt.get_database().invoke_on_all([](database& db) {
+        // if (!Boolean.getBoolean("cassandra.unsafesystem"))
+        column_family& cf = db.find_column_family(KSNAME, TABLENAME);
+        return cf.flush();
+    });
+}
 
 void replicated_key_provider::store_key(const key_id& id, const UUID& uuid, key_ptr k) {
     _keys[id] = std::make_pair(uuid, k);
@@ -247,8 +268,10 @@ future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt
                 auto ks = base64_encode(b);
                 return query(sprint("INSERT INTO %s.%s (key_file, cipher, strength, key_id, key) VALUES (?, ?, ?, ?, ?)", KSNAME, TABLENAME)
                                 , _system_key->name(), cipher, int32_t(id.info.len), uuid, ks
-                );
-            }).then([k, uuid](auto&&) {
+                ).then([this](auto&&) {
+                    return force_blocking_flush();
+                });
+            }).then([k, uuid]() {
                 return make_ready_future<UUID, key_ptr>(uuid, k);
             });
         }
@@ -278,7 +301,7 @@ future<> replicated_key_provider::validate() const {
 }
 
 future<> replicated_key_provider::maybe_initialize_tables() {
-    auto& db = cql3::get_local_query_processor().db();
+    auto& db = _ctxt.get_database().local();
     auto f = make_ready_future();
 
     if (db.has_schema(KSNAME, TABLENAME)) {
@@ -334,7 +357,7 @@ shared_ptr<key_provider> replicated_key_provider_factory::get_provider(encryptio
     auto name = system_key->name() + ":" + local_key_file.string();
     auto p = ctxt.get_cached_provider(name);
     if (!p) {
-        p = seastar::make_shared<replicated_key_provider>(std::move(system_key), local_file_provider_factory::find(ctxt, local_key_file.string()));
+        p = seastar::make_shared<replicated_key_provider>(ctxt, std::move(system_key), local_file_provider_factory::find(ctxt, local_key_file.string()));
         ctxt.cache_provider(name, p);
     }
 

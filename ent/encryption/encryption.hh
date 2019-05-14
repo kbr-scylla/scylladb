@@ -16,13 +16,23 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/distributed.hh>
 
 #include "../../bytes.hh"
 #include "../../compress.hh"
 
+class database;
+
 namespace db {
 class config;
 class extensions;
+}
+
+namespace cql3 {
+class query_processor;
+}
+namespace service {
+class storage_service;
 }
 
 namespace encryption {
@@ -101,6 +111,9 @@ public:
     virtual future<> validate() const {
         return make_ready_future<>();
     }
+    virtual bool should_delay_read(const opt_bytes&) const {
+        return false;
+    }
 };
 
 class key_provider_factory {
@@ -134,6 +147,10 @@ public:
 
     virtual const encryption_config& config() const = 0;
     virtual shared_ptr<symmetric_key> get_config_encryption_key() const = 0;
+
+    virtual distributed<cql3::query_processor>& get_query_processor() const = 0;
+    virtual distributed<service::storage_service>& get_storage_service() const = 0;
+    virtual distributed<database>& get_database() const = 0;
 
     sstring maybe_decrypt_config_value(const sstring&) const;
 };
