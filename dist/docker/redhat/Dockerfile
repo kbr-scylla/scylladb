@@ -32,7 +32,7 @@ RUN curl http://downloads.scylladb.com/rpm/centos/scylla-2.1.repo -o /etc/yum.re
     yum -y install epel-release && \
     yum -y clean expire-cache && \
     yum -y update && \
-    yum -y install scylla hostname supervisor openssh-server openssh-clients && \
+    yum -y install scylla-enterprise hostname supervisor openssh-server openssh-clients && \
     yum clean all && \
     cat /scylla_bashrc >> /etc/bashrc && \
     mkdir -p /etc/supervisor.conf.d && \
