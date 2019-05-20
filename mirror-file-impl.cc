@@ -259,12 +259,13 @@ future<> link_mirrored_file(sstring oldpath, sstring newpath) {
 }
 
 // hook into configuration to register memory and extension
-static class in_memory_config_type: public configurable {
+class in_memory_config_type: public configurable {
     const sstring _name;
     const sstring _desc;
     utils::config_file::named_value<uint32_t> _size;
 public:
-    in_memory_config_type() : _name("in_memory_storage_size_mb"), _desc("in memory storage size for sstables in MB (0 to disable)"), _size(_name, 0, _desc) {}
+    explicit in_memory_config_type(utils::config_file& cfg) : _name("in_memory_storage_size_mb"), _desc("in memory storage size for sstables in MB (0 to disable)"), _size(&cfg, _name, utils::config_file::value_status::Used, 0, _desc)
+ {}
     void append_options(db::config& cfg, boost::program_options::options_description_easy_init& init) override {
         cfg.add(_size);
     }
@@ -285,4 +286,8 @@ public:
         }
         return make_ready_future<>();
     }
-} in_memory_config;
+};
+
+std::any get_in_memory_config_hook(utils::config_file& cfg) {
+    return make_lw_shared<in_memory_config_type>(std::ref(cfg));
+}

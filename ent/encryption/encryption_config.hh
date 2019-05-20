@@ -22,10 +22,10 @@ public:
     typedef std::unordered_map<sstring, string_map> string_string_map;
 
     named_value<sstring> system_key_directory;
-    named_value<bool, value_status::Used> config_encryption_active;
-    named_value<sstring, value_status::Used> config_encryption_key_name;
+    named_value<bool> config_encryption_active;
+    named_value<sstring> config_encryption_key_name;
     named_value<string_map> system_info_encryption;
-    named_value<string_string_map, value_status::Used> kmip_hosts;
+    named_value<string_string_map> kmip_hosts;
 };
 
 }

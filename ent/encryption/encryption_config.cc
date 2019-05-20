@@ -24,8 +24,7 @@ encryption::encryption_config::encryption_config()
                                 system_info_encryption, kmip_hosts })
 // BEGIN entry definitions
 
-                                , system_key_directory("system_key_directory",
-                                "resources/system_keys",
+        , system_key_directory(this, "system_key_directory", value_status::Used, "resources/system_keys",
                                 R"foo(The directory where system keys are kept
 
 Keys used for sstable encryption must be distributed to all nodes
@@ -33,13 +32,12 @@ ENT must be able to read and write to the directory.
 
 This directory should have 700 permissions and belong to the scylla user)foo")
 
-                                , config_encryption_active("config_encryption_active", false, "")
+		, config_encryption_active(this, "config_encryption_active", value_status::Used, false, "")
 
-                                , config_encryption_key_name("config_encryption_key_name", "system_key",
+        , config_encryption_key_name(this, "config_encryption_key_name", value_status::Used, "system_key",
                                 "Set to the local encryption key filename or KMIP key URL to use for configuration file property value decryption")
 
-                                , system_info_encryption(
-                                "system_info_encryption",
+        , system_info_encryption(this, "system_info_encryption", value_status::Used,
                                 { { "enabled", "false" }, { "cipher_algorithm",
                                                 "AES" }, {
                                                 "secret_key_strength", "128" },
@@ -59,7 +57,7 @@ on disk.
 
 It is recommended to use remote encryption keys from a KMIP server when using Transparent Data Encryption (TDE) features.
 Local key support is provided when a KMIP server is not available.)foo")
-                                , kmip_hosts("kmip_hosts", { },
+		, kmip_hosts(this, "kmip_hosts", value_status::Used, { },
                                 R"foo(The unique name of this kmip host/cluster which is specified in the table schema.
 host.yourdomain.com={ hosts=[<host1>, <host2>...], keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
 
@@ -74,6 +72,7 @@ The longer keys are cached, the fewer requests are made to the key server, but t
 it takes for changes (ie: revocation) to propagate to the node
 
 )foo")
+		  
 // END entry definitions
 {}
 

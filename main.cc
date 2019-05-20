@@ -120,6 +120,9 @@ static future<>
 read_config(bpo::variables_map& opts, db::config& cfg) {
     sstring file;
 
+    std::any get_in_memory_config_hook(utils::config_file& cfg);
+    static std::any in_memory_hook = get_in_memory_config_hook(cfg);
+
     if (opts.count("options-file") > 0) {
         file = opts["options-file"].as<sstring>();
     } else {
