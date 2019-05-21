@@ -27,7 +27,7 @@ if [ -z "$TARGET" ]; then
     TARGET=$ID
 fi
 
-if [ "$SCYLLA_VERSION" = "666.development" ]; then
+if [ "$SCYLLA_VERSION" = "9999.enterprise_dev" ]; then
     if [ "$TARGET" = "ubuntu" ] || [ "$TARGET" = "debian" ]; then
         TARGET=`lsb_release -c|awk '{print $2}'`
     fi
