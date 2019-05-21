@@ -50,6 +50,7 @@ future<> service_level_controller::start() {
         return do_add_service_level(default_service_level_name, _global_controller_db->default_service_level_config, true).then([this] () {
             return container().invoke_on_all([] (service_level_controller& sl) {
                 sl._default_service_level =  sl.get_service_level(default_service_level_name);
+                sl.register_with_priority_manager();
             });
         });
     });
@@ -73,6 +74,8 @@ void service_level_controller::set_distributed_data_accessor(service_level_distr
 future<> service_level_controller::stop() {
     // unregister from the service level distributed data accessor.
     _sl_data_accessor = nullptr;
+    //unregister from the priority manager
+    service::get_local_priority_manager().set_service_level_controller(nullptr);
     if (engine().cpu_id() == global_controller) {
         // abort the loop of the distributed data checking if it is running
         _global_controller_db->dist_data_update_aborter.request_abort();
