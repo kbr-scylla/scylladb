@@ -35,6 +35,7 @@
 #include "size_tiered_compaction_strategy.hh"
 #include "timestamp.hh"
 #include "exceptions/exceptions.hh"
+#include "sstables/sstables.hh"
 #include <boost/range/algorithm/partial_sort.hpp>
 #include <boost/range/adaptors.hpp>
 
