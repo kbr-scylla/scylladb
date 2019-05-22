@@ -221,11 +221,9 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
     if (sl_it != _service_levels_db.end()) {
         if (sl_it->second.slo.shares != slo.shares) {
             sl_it->second.sg.set_shares(slo.shares);
-            if (engine().cpu_id() == global_controller) {
-                 f = f.then([pc = sl_it->second.pc, shares = slo.shares] () {
-                     return engine().update_shares_for_class(pc, shares);
-                 });
-            }
+            f = f.then([pc = sl_it->second.pc, shares = slo.shares] () {
+                return engine().update_shares_for_class(pc, shares);
+            });
         }
 
         sl_it->second.slo = slo;
