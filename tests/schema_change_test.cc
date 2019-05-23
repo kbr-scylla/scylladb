@@ -499,9 +499,6 @@ SEASTAR_TEST_CASE(test_prepared_statement_is_invalidated_by_schema_change) {
     });
 }
 
-// Disabled until we fix in_memory tables and the SLA related tables
-#if 0
-
 // We don't want schema digest to change between Scylla versions because that results in a schema disagreement
 // during rolling upgrade.
 SEASTAR_TEST_CASE(test_schema_digest_does_not_change) {
@@ -520,6 +517,11 @@ SEASTAR_TEST_CASE(test_schema_digest_does_not_change) {
         fs::copy(std::string(data_dir), std::string(tmp.path().string()), fs::copy_options::recursive);
         db_cfg.data_file_directories({tmp.path().string()}, db::config::config_source::CommandLine);
     }
+
+    // The schema we test against here was created in the open-source branch,
+    // so it doesn't contain enterprise-only tables.
+    db_cfg.create_role_attributes_table = false;
+    db_cfg.create_service_levels_table = false;
 
     return do_with_cql_env_thread([regenerate](cql_test_env& e) {
         if (regenerate) {
@@ -581,5 +583,3 @@ SEASTAR_TEST_CASE(test_schema_digest_does_not_change) {
         expect_version("ks", "tbl_view_2", utils::UUID("2dcd4a37-cbb5-399b-b3c9-8eb1398b096b"));
     }, db_cfg).then([tmp = std::move(tmp)] {});
 }
-
-#endif
