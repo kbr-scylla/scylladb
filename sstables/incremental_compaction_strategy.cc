@@ -136,14 +136,21 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
 
     auto buckets = get_buckets(cf.get_sstable_set().select(candidates));
 
-    if (is_any_bucket_interesting(buckets, min_threshold)) {
-        std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
-
-        auto all = boost::accumulate(most_interesting, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>& v, const sstable_run& run) {
+    auto get_all = [](std::vector<sstables::sstable_run> runs) mutable {
+        return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>& v, const sstable_run& run) {
             v.insert(v.end(), run.all().begin(), run.all().end());
             return std::move(v);
         });
-        return sstables::compaction_descriptor(std::move(all), 0, _fragment_size);
+    };
+
+    if (is_any_bucket_interesting(buckets, min_threshold)) {
+        std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
+        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), 0, _fragment_size);
+    }
+    // If we are not enforcing min_threshold explicitly, try any pair of sstable runs in the same tier.
+    if (!cf.compaction_enforce_min_threshold() && is_any_bucket_interesting(buckets, 2)) {
+        std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), 2, max_threshold);
+        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), 0, _fragment_size);
     }
 
     return sstables::compaction_descriptor();
