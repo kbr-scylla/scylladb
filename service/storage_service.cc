@@ -103,6 +103,7 @@ static const sstring CORRECT_STATIC_COMPACT_IN_MC = "CORRECT_STATIC_COMPACT_IN_M
 static const sstring UNBOUNDED_RANGE_TOMBSTONES_FEATURE = "UNBOUNDED_RANGE_TOMBSTONES";
 static const sstring VIEW_VIRTUAL_COLUMNS = "VIEW_VIRTUAL_COLUMNS";
 static const sstring DIGEST_INSENSITIVE_TO_EXPIRY = "DIGEST_INSENSITIVE_TO_EXPIRY";
+static const sstring IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 
 static const sstring SSTABLE_FORMAT_PARAM_NAME = "sstable_format";
 
@@ -158,6 +159,7 @@ storage_service::storage_service(distributed<database>& db, gms::gossiper& gossi
         , _unbounded_range_tombstones_feature(_feature_service, UNBOUNDED_RANGE_TOMBSTONES_FEATURE)
         , _view_virtual_columns(_feature_service, VIEW_VIRTUAL_COLUMNS)
         , _digest_insensitive_to_expiry(_feature_service, DIGEST_INSENSITIVE_TO_EXPIRY)
+        , _in_memory_tables(_feature_service, IN_MEMORY_TABLES)
         , _la_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::la)
         , _mc_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::mc)
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
@@ -205,6 +207,7 @@ void storage_service::enable_all_features() {
         std::ref(_unbounded_range_tombstones_feature),
         std::ref(_view_virtual_columns),
         std::ref(_digest_insensitive_to_expiry),
+        std::ref(_in_memory_tables),
     })
     {
         if (features.count(f.name())) {
@@ -309,6 +312,7 @@ std::set<sstring> storage_service::get_config_supported_features_set() {
         CORRECT_STATIC_COMPACT_IN_MC,
         VIEW_VIRTUAL_COLUMNS,
         DIGEST_INSENSITIVE_TO_EXPIRY,
+        IN_MEMORY_TABLES,
     };
 
     // Do not respect config in the case database is not started
@@ -3490,6 +3494,19 @@ db::schema_features storage_service::cluster_schema_features() const {
     db::schema_features f;
     f.set_if<db::schema_feature::VIEW_VIRTUAL_COLUMNS>(bool(_view_virtual_columns));
     f.set_if<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>(bool(_digest_insensitive_to_expiry));
+    // We wish to be able to migrate from 2.3 and 3.0, as well as enterprise-2018.1.
+    // So we set the IN_MEMORY_TABLES feature if either the cluster feature IN_MEMORY_TABLES is present
+    // (indicating 2019.1 or later) or if the cluster XXHASH feature is not present (indicating enterprise-2018.1).
+    //
+    // Equivalently, we disable the feature if we don't have the cluster in-memory feature and do have the xxhash
+    // feature (indicating a recent open-source version).
+    bool some_features_were_propagated = bool(_range_tombstones_feature);
+    bool older_than_2019_1_or_2_3 = !_xxhash_feature;
+    bool upgrading_from_2018_1 = some_features_were_propagated && older_than_2019_1_or_2_3;
+    slogger.info("range_tombstones: {} xxhash: {} in_memory: {} result: {}",
+            bool(_range_tombstones_feature), bool(_xxhash_feature), bool(_in_memory_tables),
+            bool(_in_memory_tables) || upgrading_from_2018_1);
+    f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(_in_memory_tables) || upgrading_from_2018_1);
     return f;
 }
 

@@ -277,6 +277,9 @@ public:
 
     const db::extensions& extensions() const;
 
+    bool create_role_attributes_table = true; // Some upgrade tests don't want enterprise-only tables
+    bool create_service_levels_table = true; // Some upgrade tests don't want enterprise-only tables
+
     static const sstring default_tls_priority;
 private:
     template<typename T>

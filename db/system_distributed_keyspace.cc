@@ -25,6 +25,7 @@
 #include "database.hh"
 #include "db/consistency_level_type.hh"
 #include "db/system_keyspace.hh"
+#include "db/config.hh"
 #include "schema_builder.hh"
 #include "timeout_config.hh"
 #include "types.hh"
@@ -66,11 +67,14 @@ schema_ptr service_levels() {
     return schema;
 }
 
-static std::vector<schema_ptr> all_tables() {
-    return {
+static std::vector<schema_ptr> all_tables(const db::config& cfg) {
+    auto ret = std::vector<schema_ptr>({
             view_build_status(),
-            service_levels(),
-    };
+    });
+    if (cfg.create_service_levels_table) {
+        ret.push_back(service_levels());
+    }
+    return ret;
 }
 
 system_distributed_keyspace::system_distributed_keyspace(cql3::query_processor& qp, service::migration_manager& mm)
@@ -97,7 +101,7 @@ future<> system_distributed_keyspace::start() {
                 true);
         return _mm.announce_new_keyspace(ksm, api::min_timestamp, false);
     }).then([this] {
-        return do_with(all_tables(), [this] (std::vector<schema_ptr>& tables) {
+        return do_with(all_tables(_qp.db().get_config()), [this] (std::vector<schema_ptr>& tables) {
             return do_for_each(tables, [this] (schema_ptr table) {
                 return ignore_existing([this, table = std::move(table)] {
                     return _mm.announce_new_column_family(std::move(table), api::min_timestamp, false);

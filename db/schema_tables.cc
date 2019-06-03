@@ -274,19 +274,24 @@ schema_ptr tables() {
 }
 
 // Holds Scylla-specific table metadata.
-schema_ptr scylla_tables() {
-    static thread_local auto schema = [] {
+schema_ptr scylla_tables(schema_features features) {
+    static auto make = [] (bool has_in_memory) -> schema_ptr {
         auto id = generate_legacy_id(NAME, SCYLLA_TABLES);
-        return schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id))
+        auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id));
+        sb
             .with_column("keyspace_name", utf8_type, column_kind::partition_key)
             .with_column("table_name", utf8_type, column_kind::clustering_key)
             .with_column("version", uuid_type)
-            .with_column("in_memory", boolean_type)
             .set_gc_grace_seconds(schema_gc_grace)
             .with_version(generate_schema_version(id))
-            .build();
-    }();
-    return schema;
+            ;
+        if (has_in_memory) {
+            sb.with_column("in_memory", boolean_type);
+        }
+        return sb.build();
+    };
+    static thread_local schema_ptr schemas[2] = { make(false), make(true) };
+    return schemas[features.contains(schema_feature::IN_MEMORY_TABLES)];
 }
 
 // The "columns" table lists the definitions of all columns in all tables
@@ -556,14 +561,28 @@ schema_ptr aggregates() {
     }
 #endif
 
+static
+mutation
+redact_columns_for_missing_features(mutation m, schema_features features) {
+    if (features.contains(schema_feature::IN_MEMORY_TABLES)) {
+        return std::move(m);
+    }
+    if (m.schema()->cf_name() != SCYLLA_TABLES) {
+        return std::move(m);
+    }
+    slogger.debug("adjusting schema_tables mutation due to possible in-progress cluster upgrade");
+    m.upgrade(scylla_tables(features));
+    return std::move(m);
+}
+
 /**
  * Read schema from system keyspace and calculate MD5 digest of every row, resulting digest
  * will be converted into UUID which would act as content-based version of the schema.
  */
 future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy, schema_features features)
 {
-    auto map = [&proxy] (sstring table) {
-        return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table] (auto rs) {
+    auto map = [&proxy, features] (sstring table) {
+        return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table, features] (auto rs) {
             auto s = proxy.local().get_db().local().find_schema(NAME, table);
             std::vector<mutation> mutations;
             for (auto&& p : rs->partitions()) {
@@ -572,6 +591,7 @@ future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>&
                 if (is_system_keyspace(partition_key)) {
                     continue;
                 }
+                mut = redact_columns_for_missing_features(std::move(mut), features);
                 mutations.emplace_back(std::move(mut));
             }
             return mutations;
@@ -595,8 +615,8 @@ future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>&
 
 future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy, schema_features features)
 {
-    auto map = [&proxy] (sstring table) {
-        return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table] (auto rs) {
+    auto map = [&proxy, features] (sstring table) {
+        return db::system_keyspace::query_mutations(proxy, NAME, table).then([&proxy, table, features] (auto rs) {
             auto s = proxy.local().get_db().local().find_schema(NAME, table);
             std::vector<frozen_mutation> results;
             for (auto&& p : rs->partitions()) {
@@ -605,7 +625,8 @@ future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<ser
                 if (is_system_keyspace(partition_key)) {
                     continue;
                 }
-                results.emplace_back(std::move(p.mut()));
+                mut = redact_columns_for_missing_features(std::move(mut), features);
+                results.emplace_back(freeze(mut));
             }
             return results;
         });
@@ -616,6 +637,16 @@ future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<ser
     };
     return map_reduce(all_table_names(features), map, std::vector<frozen_mutation>{}, reduce);
 }
+
+
+std::vector<mutation>
+adjust_schema_for_schema_features(std::vector<mutation> schema, schema_features features) {
+    for (auto& m : schema) {
+        m = redact_columns_for_missing_features(m, features);
+    }
+    return std::move(schema);
+}
+
 
 future<schema_result>
 read_schema_for_keyspaces(distributed<service::storage_proxy>& proxy, const sstring& schema_table_name, const std::set<sstring>& keyspace_names)
