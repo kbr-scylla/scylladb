@@ -65,7 +65,7 @@ public:
         const bool _is_distinct;
         const bool _allow_filtering;
         const bool _is_json;
-        bool _bypass_cache;
+        bool _bypass_cache = false;
     public:
         parameters();
         parameters(orderings_type orderings,
