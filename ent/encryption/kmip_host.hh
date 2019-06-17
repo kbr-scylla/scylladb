@@ -39,6 +39,7 @@ public:
         sstring certfile;
         sstring keyfile;
         sstring truststore;
+        sstring priority_string;
 
         std::optional<std::chrono::milliseconds> key_cache_expiry;
         std::optional<size_t> max_pooled_connections_per_host;

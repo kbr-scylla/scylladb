@@ -31,6 +31,7 @@
 #include "utils/loading_cache.hh"
 #include "utils/UUID.hh"
 #include "utils/UUID_gen.hh"
+#include "db/config.hh"
 
 using namespace std::chrono_literals;
 
@@ -247,6 +248,12 @@ future<> kmip_host::impl::connection::connect() {
     auto f = make_ready_future();
 
     kmip_log.debug("connecting {}", _host);
+
+    if (!_options.priority_string.empty()) {
+        cred->set_priority_string(_options.priority_string);
+    } else {
+        cred->set_priority_string(db::config::default_tls_priority);
+    }
 
     if (!_options.certfile.empty()) {
         f = f.then([this, cred] {
@@ -803,6 +810,7 @@ kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::u
         opts.certfile = m("certificate").value_or("");
         opts.keyfile = m("keyfile").value_or("");
         opts.truststore = m("truststore").value_or("");
+        opts.priority_string = m("priority_string").value_or("");
 
         opts.username = m("username").value_or("");
         opts.password = ctxt.maybe_decrypt_config_value(m("password").value_or(""));
