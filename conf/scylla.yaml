@@ -831,3 +831,74 @@ murmur3_partitioner_ignore_msb_bits: 12
 # will be reserved to store sstables for tables with in_memory
 # property set to 'true'.
 # in_memory_storage_size_mb: 0
+
+#
+# System information encryption settings
+#
+# If enabled, system tables that may contain sensitive information (system.batchlog,
+# system.paxos), hints files and commit logs are encrypted with the
+# encryption settings below.
+#
+# When enabling system table encryption on a node with existing data, run
+# `nodetool upgradesstables -a` on the listed tables to encrypt existing data.
+#
+# When tracing is enabled, sensitive info will be written into the tables in the
+# system_traces keyspace. Those tables should be configured to encrypt their data
+# on disk.
+#
+# It is recommended to use remote encryption keys from a KMIP server when using
+# Transparent Data Encryption (TDE) features.
+# Local key support is provided when a KMIP server is not available.
+#
+# See the scylla documentation for more info on available key providers and 
+# their properties.
+#
+# system_info_encryption:
+#   enabled: false
+#   cipher_algorithm: AES
+#   secret_key_strength: 128  
+#   key_provider: LocalFileSystemKeyProviderFactory
+#   secret_key_file: <key file>
+#
+# system_info_encryption:
+#   enabled: false
+#   cipher_algorithm: AES
+#   secret_key_strength: 128  
+#   key_provider: KmipKeyProviderFactory
+#   kmip_host: <kmip host group>
+#   template_name: <kmip key template name> (optional)
+#   key_namespace: <kmip key namespace> (optional)
+#
+
+#
+# The directory where system keys are kept
+# This directory should have 700 permissions and belong to the scylla user
+#
+# system_key_directory: resources/system_keys
+#
+
+#
+# KMIP host(s).
+#
+# The unique name of kmip host/cluster that can be referenced in table schema.
+#
+# host.yourdomain.com={ hosts=[<host1>, <host2>...], keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
+#
+# The KMIP connection management only supports failover, so all requests will go through a
+# single KMIP server. There is no load balancing, as no KMIP servers (at the time of this writing)
+# support read replication, or other strategies for availability.
+#
+# Hosts are tried in the order they appear here. Add them in the same sequence they'll fail over in.
+#
+# kmip_hosts:
+#   <name>:
+#       hosts: <address1> [, <address2>...]
+#       certificate: <identifying certificate> (optional)
+#       keyfile: <identifying key> (optional)
+#       truststore: <truststore for SSL connection> (optional)
+#       priority_string: <kmip tls priority string> (optional)
+#       username: <login> (optional>
+#       password: <password> (optional)
+#   <name>:
+#       ...
+#

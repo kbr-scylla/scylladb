@@ -27,9 +27,6 @@ encryption::encryption_config::encryption_config()
         , system_key_directory(this, "system_key_directory", value_status::Used, "resources/system_keys",
                                 R"foo(The directory where system keys are kept
 
-Keys used for sstable encryption must be distributed to all nodes
-ENT must be able to read and write to the directory.
-
 This directory should have 700 permissions and belong to the scylla user)foo")
 
 		, config_encryption_active(this, "config_encryption_active", value_status::Used, false, "")
@@ -41,7 +38,7 @@ This directory should have 700 permissions and belong to the scylla user)foo")
                                 { { "enabled", "false" }, { "cipher_algorithm",
                                                 "AES" }, {
                                                 "secret_key_strength", "128" },
-                                                { "chunk_length_kb", "64" } },
+                                                },
                                 R"foo(System information encryption settings
 
 If enabled, system tables that may contain sensitive information (system.batchlog,
@@ -49,27 +46,30 @@ system.paxos), hints files and commit logs are encrypted with the
 encryption settings below.
 
 When enabling system table encryption on a node with existing data, run
-`nodetool upgradesstables -a` on the listed tables to encrypt existing data (NOT IMPLEMENTED)
+`nodetool upgradesstables -a` on the listed tables to encrypt existing data.
 
 When tracing is enabled, sensitive info will be written into the tables in the
 system_traces keyspace. Those tables should be configured to encrypt their data
 on disk.
 
-It is recommended to use remote encryption keys from a KMIP server when using Transparent Data Encryption (TDE) features.
-Local key support is provided when a KMIP server is not available.)foo")
+It is recommended to use remote encryption keys from a KMIP server when using 
+Transparent Data Encryption (TDE) features.
+Local key support is provided when a KMIP server is not available.
+
+See the scylla documentation for available key providers and their properties.
+)foo")
 		, kmip_hosts(this, "kmip_hosts", value_status::Used, { },
-                                R"foo(The unique name of this kmip host/cluster which is specified in the table schema.
+                                R"foo(KMIP host(s). 
+
+The unique name of kmip host/cluster that can be referenced in table schema.
+
 host.yourdomain.com={ hosts=[<host1>, <host2>...], keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
 
-The current implementation of KMIP connection management only supports failover, so all requests will
-go through a single KMIP server. There is no load balancing. This is because there aren't any KMIP servers
-available (that we've found) that support read replication, or other strategies for availability.
+The KMIP connection management only supports failover, so all requests will go through a 
+single KMIP server. There is no load balancing, as no KMIP servers (at the time of this writing)
+support read replication, or other strategies for availability.
 
-Hosts are tried in the order they appear here. So add them in the same sequence they'll fail over in
-
-Keys read from the KMIP hosts are cached locally for the period of time specified below.
-The longer keys are cached, the fewer requests are made to the key server, but the longer
-it takes for changes (ie: revocation) to propagate to the node
+Hosts are tried in the order they appear here. Add them in the same sequence they'll fail over in.
 
 )foo")
 		  
