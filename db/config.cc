@@ -672,7 +672,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , audit_tables(this, "audit_tables", value_status::Used, "", "Comma separated list of table names (<keyspace>.<table>) that will be audited.")
     , audit_keyspaces(this, "audit_keyspaces", value_status::Used, "", "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited")
     , audit_syslog_write_buffer_size(this, "audit_syslog_write_buffer_size", value_status::Used, 1048576, "The size (in bytes) of a write buffer used when writting to syslog socket.")
-      
+    , alternator_port(this, "alternator_port", value_status::Used, 0, "Alternator API port")
+
     , default_log_level(this, "default_log_level", value_status::Used)
     , logger_log_level(this, "logger_log_level", value_status::Used)
     , log_to_stdout(this, "log_to_stdout", value_status::Used)
