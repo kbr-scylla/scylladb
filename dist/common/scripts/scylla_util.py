@@ -361,6 +361,10 @@ def rmtree(path):
     else:
         os.remove(path)
 
+def current_umask():
+    current = os.umask(0)
+    os.umask(current)
+    return current
 
 def dist_name():
     return platform.dist()[0]
@@ -393,7 +397,7 @@ def colorprint(msg, **kwargs):
 
 def get_mode_cpuset(nic, mode):
     try:
-        mode_cpu_mask = out('/usr/lib/scylla/perftune.py --tune net --nic {} --mode {} --get-cpu-mask'.format(nic, mode))
+        mode_cpu_mask = out('/opt/scylladb/scripts/perftune.py --tune net --nic {} --mode {} --get-cpu-mask'.format(nic, mode))
         return hex2list(mode_cpu_mask)
     except subprocess.CalledProcessError:
         return '-1'
@@ -430,7 +434,7 @@ def get_scylla_dirs():
 
 def perftune_base_command():
     disk_tune_param = "--tune disks " + " ".join("--dir {}".format(d) for d in get_scylla_dirs())
-    return '/usr/lib/scylla/perftune.py {}'.format(disk_tune_param)
+    return '/opt/scylladb/scripts/perftune.py {}'.format(disk_tune_param)
 
 
 def get_cur_cpuset():
@@ -459,12 +463,14 @@ def create_perftune_conf(nic='eth0'):
     if os.path.exists('/etc/scylla.d/perftune.yaml'):
         return
     mode = get_tune_mode(nic)
-    yaml = out('/usr/lib/scylla/perftune.py --tune net --nic "{nic}" --mode {mode} --dump-options-file'.format(nic=nic, mode=mode))
+    yaml = out('/opt/scylladb/scripts/perftune.py --tune net --nic "{nic}" --mode {mode} --dump-options-file'.format(nic=nic, mode=mode))
     with open('/etc/scylla.d/perftune.yaml', 'w') as f:
         f.write(yaml)
 
 
 def is_valid_nic(nic):
+    if len(nic) == 0:
+        return False
     return os.path.exists('/sys/class/net/{}'.format(nic))
 
 # Remove this when we do not support SET_NIC configuration value anymore

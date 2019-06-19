@@ -48,6 +48,7 @@
 #include "types/map.hh"
 #include "types/list.hh"
 #include "types/set.hh"
+#include "types/listlike_partial_deserializing_iterator.hh"
 
 template<typename T>
 sstring time_point_to_string(const T& tp)
@@ -196,11 +197,14 @@ struct integer_type_impl : simple_type_impl<T> {
             return this->make_value(*x);
         }
     }
-    T compose_value(const bytes& b) const {
-        if (b.size() != sizeof(T)) {
-            throw marshal_exception(format("Size mismatch for type {}: got {:d} bytes", this->name(), b.size()));
+    T compose_value(bytes_view bv) const {
+        if (bv.size() != sizeof(T)) {
+            throw marshal_exception(format("Size mismatch for type {}: got {:d} bytes", this->name(), bv.size()));
         }
-        return (T)net::ntoh(*reinterpret_cast<const T*>(b.begin()));
+        return (T)net::ntoh(*reinterpret_cast<const T*>(bv.data()));
+    }
+    T compose_value(const bytes& b) const {
+        return compose_value(bytes_view(b));
     }
     bytes decompose_value(T v) const {
         bytes b(bytes::initialized_later(), sizeof(v));
@@ -233,8 +237,8 @@ struct integer_type_impl : simple_type_impl<T> {
         }
         return to_sstring(compose_value(b));
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return to_sstring(compose_value(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return to_sstring(compose_value(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (value.isString()) {
@@ -364,8 +368,11 @@ struct string_type_impl : public concrete_type<sstring> {
     virtual sstring to_string(const bytes& b) const override {
         return sstring(reinterpret_cast<const char*>(b.begin()), b.size());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    sstring to_string(bytes_view bv) const {
+        return sstring(reinterpret_cast<const char *>(bv.data()), bv.size());
+    }
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         return from_string(value.asString());
@@ -439,8 +446,11 @@ struct bytes_type_impl final : public concrete_type<bytes> {
     virtual sstring to_string(const bytes& b) const override {
         return to_hex(b);
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string("0x" + to_string(b));
+    sstring to_string(bytes_view bv) const {
+        return to_hex(bv);
+    }
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string("0x" + to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isString()) {
@@ -522,16 +532,19 @@ struct boolean_type_impl : public simple_type_impl<bool> {
         }
     }
     virtual sstring to_string(const bytes& b) const override {
-        if (b.empty()) {
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        if (bv.empty()) {
             return "";
         }
-        if (b.size() != 1) {
-            throw marshal_exception(format("Unable to serialize boolean, got {:d} bytes", b.size()));
+        if (bv.size() != 1) {
+            throw marshal_exception(format("Unable to serialize boolean, got {:d} bytes", bv.size()));
         }
-        return boolean_to_string(*b.begin());
+        return boolean_to_string(bv.front());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return to_string(b);
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return to_string(bv);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isBool()) {
@@ -591,14 +604,17 @@ public:
     }
     virtual bytes from_string(sstring_view s) const override;
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return time_point_to_string(from_value(v).get());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isString() && !value.isIntegral()) {
@@ -712,14 +728,17 @@ struct timeuuid_type_impl : public concrete_type<utils::UUID> {
         return v.serialize();
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return from_value(v).get().to_sstring();
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isString()) {
@@ -889,14 +908,17 @@ public:
         return b;
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return time_point_to_string(from_value(v).get());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isString() && !value.isIntegral()) {
@@ -1009,14 +1031,17 @@ struct simple_date_type_impl : public simple_type_impl<uint32_t> {
         return static_cast<uint32_t>(days);
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return simple_date_to_string(from_value(v).get());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         return from_string(value.asString());
@@ -1114,14 +1139,17 @@ struct time_type_impl : public simple_type_impl<int64_t> {
         return result.count();
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
-        if (v.is_null()) {
-            return "";
-        }
-        return time_to_string(from_value(v).get());
+        return to_string(bytes_view(b));
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return to_string(b);
+    sstring to_string(bytes_view bv) const {
+         auto v = deserialize(bv);
+         if (v.is_null()) {
+             return "";
+         }
+         return time_to_string(from_value(v).get());
+     }
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return to_string(bv);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         return from_string(value.asString());
@@ -1206,14 +1234,17 @@ struct uuid_type_impl : concrete_type<utils::UUID> {
         return v.serialize();
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return from_value(v).get().to_sstring();
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         return from_string(value.asString());
@@ -1318,14 +1349,17 @@ struct inet_addr_type_impl : concrete_type<inet_address> {
         return b;
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
         return inet_to_string(from_value(v).get());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        return quote_json_string(to_string(b));
+    virtual sstring to_json_string(bytes_view bv) const override {
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         return from_string(value.asString());
@@ -1466,8 +1500,8 @@ struct floating_type_impl : public simple_type_impl<T> {
         }
         return to_sstring(this->from_value(v));
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        auto v = deserialize(b);
+    virtual sstring to_json_string(bytes_view bv) const override {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
@@ -1475,7 +1509,7 @@ struct floating_type_impl : public simple_type_impl<T> {
         if (std::isnan(d) || std::isinf(d)) {
             return "null";
         }
-        return to_sstring(this->from_value(v));
+        return to_sstring(d);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (value.isString()) {
@@ -1605,13 +1639,12 @@ public:
         }
         return from_value(v).get().str();
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        auto v = deserialize(b);
+    virtual sstring to_json_string(bytes_view bv) const override {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
         return from_value(v).get().str();
-        return to_string(b);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (value.isString()) {
@@ -1720,8 +1753,8 @@ public:
         }
         return from_value(v).get().to_string();
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        auto v = deserialize(b);
+    virtual sstring to_json_string(bytes_view bv) const override {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
@@ -1783,9 +1816,9 @@ public:
     virtual sstring to_string(const bytes& b) const override {
         fail(unimplemented::cause::COUNTERS);
     }
-    virtual sstring to_json_string(const bytes& b) const override {
+    virtual sstring to_json_string(bytes_view bv) const override {
         // It will be called only from cql3 layer while processing query results.
-        return counter_cell_view::total_value_type()->to_json_string(b);
+        return counter_cell_view::total_value_type()->to_json_string(bv);
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isIntegral()) {
@@ -1946,19 +1979,22 @@ public:
         }
     }
     virtual sstring to_string(const bytes& b) const override {
-        auto v = deserialize(b);
+        return to_string(bytes_view(b));
+    }
+    sstring to_string(bytes_view bv) const {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             return "";
         }
 
         return ::to_string(from_value(v).get());
     }
-    virtual sstring to_json_string(const bytes& b) const override {
-        auto v = deserialize(b);
+    virtual sstring to_json_string(bytes_view bv) const override {
+        auto v = deserialize(bv);
         if (v.is_null()) {
             throw exceptions::invalid_request_exception("Cannot create JSON string - deserialization error");
         }
-        return quote_json_string(to_string(b));
+        return quote_json_string(to_string(bv));
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
         if (!value.isString()) {
@@ -2025,7 +2061,7 @@ struct empty_type_impl : abstract_type {
     virtual sstring to_string(const bytes& b) const override {
         return "";
     }
-    virtual sstring to_json_string(const bytes& b) const override {
+    virtual sstring to_json_string(bytes_view bv) const override {
         return "null";
     }
     virtual bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const override {
@@ -2461,23 +2497,22 @@ map_type_impl::to_string(const bytes& b) const {
 }
 
 sstring
-map_type_impl::to_json_string(const bytes& b) const {
+map_type_impl::to_json_string(bytes_view bv) const {
     std::ostringstream out;
-    auto v = bytes_view(b);
     auto sf = cql_serialization_format::internal();
 
     out << '{';
-    auto size = read_collection_size(v, sf);
+    auto size = read_collection_size(bv, sf);
     for (int i = 0; i < size; ++i) {
-        auto kb = read_collection_value(v, sf);
-        auto vb = read_collection_value(v, sf);
+        auto kb = read_collection_value(bv, sf);
+        auto vb = read_collection_value(bv, sf);
 
         if (i > 0) {
             out << ", ";
         }
 
         // Valid keys in JSON map must be quoted strings
-        sstring  string_key = _keys->to_json_string(bytes(kb.begin(), kb.end()));
+        sstring  string_key = _keys->to_json_string(kb);
         bool is_unquoted = string_key.empty() || string_key[0] != '"';
         if (is_unquoted) {
             out << '"';
@@ -2487,7 +2522,7 @@ map_type_impl::to_json_string(const bytes& b) const {
             out << '"';
         }
         out << ": ";
-        out << _values->to_json_string(bytes(vb.begin(), vb.end()));
+        out << _values->to_json_string(vb);
     }
     out << '}';
     return out.str();
@@ -2843,57 +2878,6 @@ collection_type_impl::reserialize(cql_serialization_format from, cql_serializati
     return ret;
 }
 
-// iterator that takes a set or list in serialized form, and emits
-// each element, still in serialized form
-class listlike_partial_deserializing_iterator
-          : public std::iterator<std::input_iterator_tag, bytes_view> {
-    bytes_view* _in;
-    int _remain;
-    bytes_view _cur;
-    cql_serialization_format _sf;
-private:
-    struct end_tag {};
-    listlike_partial_deserializing_iterator(bytes_view& in, cql_serialization_format sf)
-            : _in(&in), _sf(sf) {
-        _remain = read_collection_size(*_in, _sf);
-        parse();
-    }
-    listlike_partial_deserializing_iterator(end_tag)
-            : _remain(0), _sf(cql_serialization_format::internal()) {  // _sf is bogus, but doesn't matter
-    }
-public:
-    bytes_view operator*() const { return _cur; }
-    listlike_partial_deserializing_iterator& operator++() {
-        --_remain;
-        parse();
-        return *this;
-    }
-    void operator++(int) {
-        --_remain;
-        parse();
-    }
-    bool operator==(const listlike_partial_deserializing_iterator& x) const {
-        return _remain == x._remain;
-    }
-    bool operator!=(const listlike_partial_deserializing_iterator& x) const {
-        return _remain != x._remain;
-    }
-    static listlike_partial_deserializing_iterator begin(bytes_view& in, cql_serialization_format sf) {
-        return { in, sf };
-    }
-    static listlike_partial_deserializing_iterator end(bytes_view in, cql_serialization_format sf) {
-        return { end_tag() };
-    }
-private:
-    void parse() {
-        if (_remain) {
-            _cur = read_collection_value(*_in, _sf);
-        } else {
-            _cur = {};
-        }
-    }
-};
-
 set_type
 set_type_impl::get_instance(data_type elements, bool is_multi_cell) {
     return intern::get_instance(elements, is_multi_cell);
@@ -3031,20 +3015,19 @@ set_type_impl::to_string(const bytes& b) const {
 }
 
 sstring
-set_type_impl::to_json_string(const bytes& b) const {
+set_type_impl::to_json_string(bytes_view bv) const {
     using llpdi = listlike_partial_deserializing_iterator;
     std::ostringstream out;
     bool first = true;
-    auto v = bytes_view(b);
     auto sf = cql_serialization_format::internal();
     out << '[';
-    std::for_each(llpdi::begin(v, sf), llpdi::end(v, sf), [&first, &out, this] (bytes_view e) {
+    std::for_each(llpdi::begin(bv, sf), llpdi::end(bv, sf), [&first, &out, this] (bytes_view e) {
         if (first) {
             first = false;
         } else {
             out << ", ";
         }
-        out << _elements->to_json_string(bytes(e.begin(), e.end()));
+        out << _elements->to_json_string(e);
     });
     out << ']';
     return out.str();
@@ -3269,20 +3252,19 @@ list_type_impl::to_string(const bytes& b) const {
 }
 
 sstring
-list_type_impl::to_json_string(const bytes& b) const {
+list_type_impl::to_json_string(bytes_view bv) const {
     using llpdi = listlike_partial_deserializing_iterator;
     std::ostringstream out;
     bool first = true;
-    auto v = bytes_view(b);
     auto sf = cql_serialization_format::internal();
     out << '[';
-    std::for_each(llpdi::begin(v, sf), llpdi::end(v, sf), [&first, &out, this] (bytes_view e) {
+    std::for_each(llpdi::begin(bv, sf), llpdi::end(bv, sf), [&first, &out, this] (bytes_view e) {
         if (first) {
             first = false;
         } else {
             out << ", ";
         }
-        out << _elements->to_json_string(bytes(e.begin(), e.end()));
+        out << _elements->to_json_string(e);
     });
     out << ']';
     return out.str();
@@ -3554,20 +3536,19 @@ tuple_type_impl::to_string(const bytes& b) const {
     throw std::runtime_error(format("{} not implemented", __PRETTY_FUNCTION__));
 }
 
-sstring tuple_type_impl::to_json_string(const bytes &b) const {
+sstring tuple_type_impl::to_json_string(bytes_view bv) const {
     std::ostringstream out;
     out << '[';
 
     auto ti = _types.begin();
-    auto v = bytes_view(b);
-    auto vi = tuple_deserializing_iterator::start(v);
-    while (ti != _types.end() && vi != tuple_deserializing_iterator::finish(v)) {
+    auto vi = tuple_deserializing_iterator::start(bv);
+    while (ti != _types.end() && vi != tuple_deserializing_iterator::finish(bv)) {
         if (ti != _types.begin()) {
             out << ", ";
         }
         if (*vi) {
             //TODO(sarna): We can avoid copying if to_json_string accepted bytes_view
-            out << (*ti)->to_json_string(bytes(**vi));
+            out << (*ti)->to_json_string(**vi);
         } else {
             out << "null";
         }
@@ -3595,22 +3576,21 @@ bytes tuple_type_impl::from_json_object(const Json::Value& value, cql_serializat
     return build_value(std::move(raw_tuple));
 }
 
-sstring user_type_impl::to_json_string(const bytes& b) const {
+sstring user_type_impl::to_json_string(bytes_view bv) const {
     std::ostringstream out;
     out << '{';
 
     auto ti = _types.begin();
     auto ni = _string_field_names.begin();
-    auto v = bytes_view(b);
-    auto vi = tuple_deserializing_iterator::start(v);
-    while (ti != _types.end() && vi != tuple_deserializing_iterator::finish(v)) {
+    auto vi = tuple_deserializing_iterator::start(bv);
+    while (ti != _types.end() && vi != tuple_deserializing_iterator::finish(bv)) {
         if (ti != _types.begin()) {
             out << ", ";
         }
         out << quote_json_string(*ni) << ": ";
         if (*vi) {
             //TODO(sarna): We can avoid copying if to_json_string accepted bytes_view
-            out << (*ti)->to_json_string(bytes(**vi));
+            out << (*ti)->to_json_string(**vi);
         } else {
             out << "null";
         }

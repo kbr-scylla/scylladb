@@ -222,8 +222,7 @@ def find_headers(repodir, excluded_dirs):
 modes = {
     'debug': {
         'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER',
-        # Disable vptr because of https://gcc.gnu.org/bugzilla/show_bug.cgi?id=88684
-        'cxx_ld_flags': '-O0 -fsanitize=address -fsanitize=leak -fsanitize=undefined -fno-sanitize=vptr',
+        'cxx_ld_flags': '',
     },
     'release': {
         'cxxflags': '',
@@ -360,6 +359,7 @@ scylla_tests = [
     'tests/data_listeners_test',
     'tests/truncation_migration_test',
     'tests/symmetric_key_test',
+    'tests/like_matcher_test',
 ]
 
 perf_tests = [
@@ -737,6 +737,7 @@ scylla_core = (['database.cc',
                 'distributed_loader.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
+                'utils/like_matcher.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -847,14 +848,12 @@ pure_boost_tests = set([
     'tests/enum_set_test',
     'tests/cql_auth_syntax_test',
     'tests/meta_test',
-    'tests/imr_test',
-    'tests/partition_data_test',
-    'tests/reusable_buffer_test',
     'tests/observable_test',
     'tests/json_test',
     'tests/auth_passwords_test',
     'tests/top_k_test',
     'tests/small_vector_test',
+    'tests/like_matcher_test',
 ])
 
 tests_not_using_seastar_test_framework = set([
@@ -866,8 +865,6 @@ tests_not_using_seastar_test_framework = set([
     'tests/perf/perf_hash',
     'tests/perf/perf_cql_parser',
     'tests/message',
-    'tests/perf/perf_simple_query',
-    'tests/perf/perf_fast_forward',
     'tests/perf/perf_cache_eviction',
     'tests/row_cache_stress_test',
     'tests/memory_footprint',
@@ -1129,7 +1126,7 @@ args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
-                 maybe_static(args.staticboost, '-lboost_date_time'), ])
+                 maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
 xxhash_dir = 'xxHash'
 
@@ -1349,6 +1346,7 @@ with open(buildfile, 'w') as f:
                                             '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
         f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
                                                 '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
+        f.write('   libs = $seastar_libs_{}\n'.format(mode))
         f.write(
             'build {mode}-objects: phony {objs}\n'.format(
                 mode=mode,

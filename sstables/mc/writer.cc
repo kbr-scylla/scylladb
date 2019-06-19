@@ -676,7 +676,7 @@ private:
 
     // Writes single atomic cell
     void write_cell(bytes_ostream& writer, const clustering_key_prefix* clustering_key, atomic_cell_view cell, const column_definition& cdef,
-        const row_time_properties& properties, bytes_view cell_path = {});
+        const row_time_properties& properties, std::optional<bytes_view> cell_path = {});
 
     // Writes information about row liveness (formerly 'row marker')
     void write_liveness_info(bytes_ostream& writer, const row_marker& marker);
@@ -970,7 +970,7 @@ void writer::consume(tombstone t) {
 }
 
 void writer::write_cell(bytes_ostream& writer, const clustering_key_prefix* clustering_key, atomic_cell_view cell,
-         const column_definition& cdef, const row_time_properties& properties, bytes_view cell_path) {
+         const column_definition& cdef, const row_time_properties& properties, std::optional<bytes_view> cell_path) {
 
     uint64_t current_pos = writer.size();
     bool is_deleted = !cell.is_live();
@@ -1012,9 +1012,9 @@ void writer::write_cell(bytes_ostream& writer, const clustering_key_prefix* clus
         }
     }
 
-    if (!cell_path.empty()) {
-        write_vint(writer, cell_path.size());
-        write(_sst.get_version(), writer, cell_path);
+    if (bool(cell_path)) {
+        write_vint(writer, cell_path->size());
+        write(_sst.get_version(), writer, *cell_path);
     }
 
     if (cdef.is_counter()) {
@@ -1363,6 +1363,8 @@ stop_iteration writer::consume_end_of_partition() {
     _c_stats.partition_size = _data_writer->offset() - _c_stats.start_offset;
 
     _sst.get_large_data_handler().maybe_record_large_partitions(_sst, *_partition_key, _c_stats.partition_size).get();
+    _sst.get_large_data_handler().maybe_log_too_many_rows(_sst, *_partition_key, _c_stats.rows_count);
+
 
     // update is about merging column_stats with the data being stored by collector.
     _sst.get_metadata_collector().update(std::move(_c_stats));

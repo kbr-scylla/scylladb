@@ -120,6 +120,7 @@ boost_tests = [
     'data_listeners_test',
     'truncation_migration_test',
     'symmetric_key_test',
+    'like_matcher_test',
 ]
 
 other_tests = [

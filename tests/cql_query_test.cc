@@ -44,6 +44,33 @@ SEASTAR_TEST_CASE(test_large_partitions) {
     return do_with_cql_env([](cql_test_env& e) { return make_ready_future<>(); }, cfg);
 }
 
+static void flush(cql_test_env& e) {
+    e.db().invoke_on_all([](database& dbi) {
+        return dbi.flush_all_memtables();
+    }).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_large_collection) {
+    db::config cfg{};
+    cfg.compaction_large_cell_warning_threshold_mb(1);
+    do_with_cql_env([](cql_test_env& e) {
+        e.execute_cql("create table tbl (a int, b list<text>, primary key (a))").get();
+        e.execute_cql("insert into tbl (a, b) values (42, []);").get();
+        sstring blob(1024, 'x');
+        for (unsigned i = 0; i < 1024; ++i) {
+            e.execute_cql("update tbl set b = ['" + blob + "'] + b where a = 42;").get();
+        }
+
+        flush(e);
+        assert_that(e.execute_cql("select partition_key, column_name from system.large_cells where table_name = 'tbl' allow filtering;").get0())
+            .is_rows()
+            .with_size(1)
+            .with_row({"42", "b", "tbl"});
+
+        return make_ready_future<>();
+    }, cfg).get();
+}
+
 SEASTAR_THREAD_TEST_CASE(test_large_data) {
     db::config cfg{};
     cfg.compaction_large_row_warning_threshold_mb(1);
@@ -53,12 +80,7 @@ SEASTAR_THREAD_TEST_CASE(test_large_data) {
         sstring blob(1024*1024, 'x');
         e.execute_cql("insert into tbl (a, b) values (42, 'foo');").get();
         e.execute_cql("insert into tbl (a, b) values (44, '" + blob + "');").get();
-        auto flush = [&] {
-            e.db().invoke_on_all([] (database& dbi) {
-                return dbi.flush_all_memtables();
-            }).get();
-        };
-        flush();
+        flush(e);
 
         shared_ptr<cql_transport::messages::result_message> msg = e.execute_cql("select partition_key, row_size from system.large_rows where table_name = 'tbl' allow filtering;").get0();
         auto res = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(msg);
@@ -91,7 +113,7 @@ SEASTAR_THREAD_TEST_CASE(test_large_data) {
         // * flush, so that a thumbstone for the above delete is created.
         // * do a major compaction, so that the thumbstone is combined with the old entry.
         // * stop the db, as only then do we wait for sstable deletions.
-        flush();
+        flush(e);
         e.db().invoke_on_all([] (database& dbi) {
             return parallel_for_each(dbi.get_column_families(), [&dbi] (auto& table) {
                 return dbi.get_compaction_manager().submit_major_compaction(&*table.second);
@@ -2481,8 +2503,8 @@ SEASTAR_TEST_CASE(test_in_restriction) {
             return e.execute_cql("select r1 from tir2 where (c1,r1) in ((0, 1),(1,2),(0,1),(1,2),(3,3)) ALLOW FILTERING;");
         }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
-                {int32_type->decompose(1)},
-                {int32_type->decompose(2)},
+                {int32_type->decompose(1), int32_type->decompose(0)},
+                {int32_type->decompose(2), int32_type->decompose(1)},
             });
         }).then([&e] {
              return e.prepare("select r1 from tir2 where (c1,r1) in ? ALLOW FILTERING;");
@@ -2507,8 +2529,8 @@ SEASTAR_TEST_CASE(test_in_restriction) {
             return e.execute_prepared(prepared_id,raw_values);
         }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
-                {int32_type->decompose(1)},
-                {int32_type->decompose(2)},
+                {int32_type->decompose(1), int32_type->decompose(0)},
+                {int32_type->decompose(2), int32_type->decompose(1)},
             });
         });
     });
@@ -3860,7 +3882,7 @@ SEASTAR_TEST_CASE(test_group_by_text_key) {
         require_rows(e, "select avg(v) from t2 group by p", {{I(25), T(" ")}});
         require_rows(e, "select avg(v) from t2 group by p, c1", {{I(15), T(" "), T("")}, {I(35), T(" "), T("a")}});
         require_rows(e, "select sum(v) from t2 where c1='' group by p, c2 allow filtering",
-                     {{I(10), T(" "), T("")}, {I(20), T(" "), T("b")}});
+                     {{I(10), T(""), T(" "), T("")}, {I(20), T(""), T(" "), T("b")}});
         return make_ready_future<>();
     });
 }

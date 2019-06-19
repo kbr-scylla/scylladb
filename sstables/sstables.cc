@@ -2103,6 +2103,7 @@ stop_iteration components_writer::consume_end_of_partition() {
     _sst._c_stats.partition_size = _out.offset() - _sst._c_stats.start_offset;
 
     _sst.get_large_data_handler().maybe_record_large_partitions(_sst, *_partition_key, _sst._c_stats.partition_size).get();
+    _sst.get_large_data_handler().maybe_log_too_many_rows(_sst, *_partition_key, _sst._c_stats.rows_count);
 
     // update is about merging column_stats with the data being stored by collector.
     _sst._collector.update(std::move(_sst._c_stats));
@@ -3125,7 +3126,7 @@ sstable::unlink()
     });
 
     name = get_filename();
-    auto update_large_data_fut = get_large_data_handler().maybe_delete_large_data_entries(*get_schema(), std::move(name), data_size())
+    auto update_large_data_fut = get_large_data_handler().maybe_delete_large_data_entries(*get_schema(), name, data_size())
             .then_wrapped([name = std::move(name)] (future<> f) {
         if (f.failed()) {
             // Just log and ignore failures to delete large data entries.
