@@ -178,7 +178,7 @@ def alarm_handler(signum, frame):
 
 
 if __name__ == "__main__":
-    all_modes = ['debug', 'release', 'dev']
+    all_modes = ['debug', 'release', 'dev', 'sanitize']
 
     sysmem = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
     testmem = 2e9
@@ -207,14 +207,14 @@ if __name__ == "__main__":
     print_progress = print_status_verbose if args.verbose else print_progress_succint
 
     custom_seastar_args = {
-        "sstable_test": ['-c1'],
-        'sstable_datafile_test': ['-c1'],
-        "sstable_3_x_test": ['-c1'],
+        "sstable_test": ['-c1', '-m2G'],
+        'sstable_datafile_test': ['-c1', '-m2G'],
+        "sstable_3_x_test": ['-c1', '-m2G'],
         "mutation_reader_test": ['-c{}'.format(min(os.cpu_count(), 3)), '-m2G'],
     }
 
     test_to_run = []
-    modes_to_run = all_modes if not args.modes else args.modes
+    modes_to_run =  ['debug', 'release', 'dev'] if not args.modes else args.modes
     for mode in modes_to_run:
         prefix = os.path.join('build', mode, 'tests')
         standard_args = '--overprovisioned --unsafe-bypass-fsync 1 --blocked-reactor-notify-ms 2000000'.split()
