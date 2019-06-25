@@ -293,9 +293,16 @@ future<temporary_buffer<uint8_t>> encrypted_file_impl::dma_read_bulk(uint64_t of
         auto front = offset & (block_size - 1);
         offset -= front;
         range_size += front;
-        return _file.dma_read_bulk<uint8_t>(offset, range_size, pc).then([this, offset, front](temporary_buffer<uint8_t> result) {
+        // enterprise #925
+        // If caller is clever and asks for the last chunk of file
+        // explicitly (as in offset = N, range_size = size() - N),
+        // or any other unaligned size, we need to add enough padding
+        // to get the actual full block to decode.
+        auto block_size = align_up(range_size, _key->block_size());
+        return _file.dma_read_bulk<uint8_t>(offset, block_size, pc).then([this, offset, front, range_size](temporary_buffer<uint8_t> result) {
             auto s = transform(offset, result.get(), result.size(), result.get_write(), mode::decrypt);
-            result.trim(s);
+            // never give back more than asked for.
+            result.trim(std::min(s, range_size));
             result.trim_front(front);
             return result;
         });
