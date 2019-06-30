@@ -44,6 +44,8 @@
 #include "tests/normalizing_reader.hh"
 #include "sstable_run_based_compaction_strategy_for_tests.hh"
 #include "compatible_ring_position.hh"
+#include "sstables/incremental_backlog_tracker.hh"
+#include "sstables/size_tiered_backlog_tracker.hh"
 
 #include <stdio.h>
 #include <ftw.h>
@@ -5030,4 +5032,43 @@ SEASTAR_TEST_CASE(basic_interval_map_testing_for_sstable_set) {
     subtract(957694089857623813, 6052133625299168475, 1);
 
     return make_ready_future<>();
+}
+
+SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
+    return test_env::do_with([] (test_env& env) {
+        static constexpr uint64_t default_fragment_size = 1UL*1024UL*1024UL*1024UL;
+
+        auto backlog = [&] (compaction_backlog_tracker backlog_tracker, uint64_t max_fragment_size) {
+            column_family_for_tests cf;
+
+            uint64_t current_sstable_size = default_fragment_size;
+            uint64_t data_set_size = 0;
+            static constexpr uint64_t target_data_set_size = 1000UL*1024UL*1024UL*1024UL;
+
+            while (data_set_size < target_data_set_size) {
+                utils::UUID run_identifier = utils::make_random_uuid();
+
+                auto expected_fragments = std::max(1UL, current_sstable_size / max_fragment_size);
+                uint64_t fragment_size = std::max(default_fragment_size, current_sstable_size / expected_fragments);
+
+                for (auto i = 0UL; i < expected_fragments; i++) {
+                    auto sst = env.make_sstable(cf->schema(), "", 0, sstables::sstable::version_types::mc, big);
+                    sstables::test(sst).set_data_file_size(fragment_size);
+                    sstables::test(sst).set_run_identifier(run_identifier);
+                    backlog_tracker.add_sstable(std::move(sst));
+                }
+                data_set_size += current_sstable_size;
+                current_sstable_size *= 2;
+            }
+
+            return backlog_tracker.backlog();
+        };
+
+        auto ics_backlog = backlog(compaction_backlog_tracker(std::make_unique<incremental_backlog_tracker>()), default_fragment_size);
+        auto stcs_backlog = backlog(compaction_backlog_tracker(std::make_unique<size_tiered_backlog_tracker>()), std::numeric_limits<size_t>::max());
+
+        // don't expect ics and stcs to yield different backlogs for the same workload.
+        BOOST_CHECK_CLOSE(ics_backlog, stcs_backlog, 0.0001);
+        return make_ready_future<>();
+    });
 }

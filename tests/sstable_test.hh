@@ -186,6 +186,10 @@ public:
         _sst->_run_identifier = utils::make_random_uuid();
     }
 
+    void set_run_identifier(utils::UUID identifier) {
+        _sst->_run_identifier = identifier;
+    }
+
     void rewrite_toc_without_scylla_component() {
         _sst->_recognized_components.erase(component_type::Scylla);
         remove_file(_sst->filename(component_type::TOC)).get();
