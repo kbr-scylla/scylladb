@@ -349,7 +349,7 @@ scylla_tests = [
     'tests/imr_test',
     'tests/partition_data_test',
     'tests/reusable_buffer_test',
-    'tests/multishard_writer_test',
+    'tests/mutation_writer_test',
     'tests/observable_test',
     'tests/transport_test',
     'tests/fragmented_temporary_buffer_test',
@@ -469,6 +469,7 @@ scylla_core = (['database.cc',
                 'utils/large_bitset.cc',
                 'utils/buffer_input_stream.cc',
                 'utils/limiting_data_source.cc',
+                'utils/updateable_value.cc',
                 'mutation_partition.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
@@ -724,7 +725,7 @@ scylla_core = (['database.cc',
                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
                 'querier.cc',
                 'data/cell.cc',
-                'multishard_writer.cc',
+                'mutation_writer/multishard_writer.cc',
                 'ent/encryption/encryption_config.cc',
                 'ent/encryption/encryption.cc',
                 'ent/encryption/symmetric_key.cc',
@@ -742,6 +743,7 @@ scylla_core = (['database.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
+                'mutation_writer/timestamp_based_splitting_writer.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -831,6 +833,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'tests/mutation_source_test.cc',
     'tests/data_model.cc',
     'tests/exception_utils.cc',
+    'tests/random_schema.cc',
 ]
 
 deps = {

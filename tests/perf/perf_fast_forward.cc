@@ -1762,7 +1762,8 @@ int main(int argc, char** argv) {
         ;
 
     return app.run(argc, argv, [] {
-        db::config db_cfg;
+        auto db_cfg_ptr = make_shared<db::config>();
+        auto& db_cfg = *db_cfg_ptr;
 
         if (app.configuration().count("list-tests")) {
             std::cout << "Test groups:\n";
@@ -1824,7 +1825,7 @@ int main(int argc, char** argv) {
             });
         };
 
-        return init().then([db_cfg = std::move(db_cfg)] {
+        return init().then([db_cfg_ptr] {
           return do_with_cql_env([] (cql_test_env& env) {
             return seastar::async([&env] {
                 cql_env = &env;
@@ -1906,7 +1907,7 @@ int main(int argc, char** argv) {
                     run_tests(test_group::type::small_partition);
                 }
             });
-        }, db_cfg).then([] {
+        }, db_cfg_ptr).then([] {
             return errors_found ? -1 : 0;
         });
       });

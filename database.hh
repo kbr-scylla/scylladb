@@ -80,6 +80,7 @@
 #include "cache_temperature.hh"
 #include <unordered_set>
 #include "disk-error-handler.hh"
+#include "utils/updateable_value.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -312,7 +313,7 @@ public:
         bool enable_cache = true;
         bool enable_commitlog = true;
         bool enable_incremental_backups = false;
-        bool compaction_enforce_min_threshold = false;
+        utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
@@ -1088,7 +1089,7 @@ public:
         bool enable_disk_writes = true;
         bool enable_cache = true;
         bool enable_incremental_backups = false;
-        bool compaction_enforce_min_threshold = false;
+        utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
@@ -1222,7 +1223,7 @@ private:
     lw_shared_ptr<db_stats> _stats;
     std::unique_ptr<cell_locker_stats> _cl_stats;
 
-    std::unique_ptr<db::config> _cfg;
+    const db::config& _cfg;
 
     dirty_memory_manager _system_dirty_memory_manager;
     dirty_memory_manager _dirty_memory_manager;
@@ -1285,6 +1286,8 @@ private:
     friend db::data_listeners;
     std::unique_ptr<db::data_listeners> _data_listeners;
 
+    bool _supports_infinite_bound_range_deletions = false;
+
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
@@ -1316,7 +1319,6 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&);
-    database();
     database(const db::config&, database_config dbcfg);
     database(database&&) = delete;
     ~database();
@@ -1425,7 +1427,7 @@ public:
     }
 
     const db::config& get_config() const {
-        return *_cfg;
+        return _cfg;
     }
     const db::extensions& extensions() const;
 
@@ -1498,6 +1500,14 @@ public:
 
     db::data_listeners& data_listeners() const {
         return *_data_listeners;
+    }
+
+    void enable_infinite_bound_range_deletions() {
+        _supports_infinite_bound_range_deletions = true;
+    }
+
+    bool supports_infinite_bound_range_deletions() {
+        return _supports_infinite_bound_range_deletions;
     }
 };
 

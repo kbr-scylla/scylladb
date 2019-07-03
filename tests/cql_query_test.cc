@@ -39,8 +39,8 @@
 using namespace std::literals::chrono_literals;
 
 SEASTAR_TEST_CASE(test_large_partitions) {
-    db::config cfg{};
-    cfg.compaction_large_partition_warning_threshold_mb(0);
+    auto cfg = make_shared<db::config>();
+    cfg->compaction_large_partition_warning_threshold_mb(0);
     return do_with_cql_env([](cql_test_env& e) { return make_ready_future<>(); }, cfg);
 }
 
@@ -51,8 +51,8 @@ static void flush(cql_test_env& e) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_large_collection) {
-    db::config cfg{};
-    cfg.compaction_large_cell_warning_threshold_mb(1);
+    auto cfg = make_shared<db::config>();
+    cfg->compaction_large_cell_warning_threshold_mb(1);
     do_with_cql_env([](cql_test_env& e) {
         e.execute_cql("create table tbl (a int, b list<text>, primary key (a))").get();
         e.execute_cql("insert into tbl (a, b) values (42, []);").get();
@@ -72,9 +72,9 @@ SEASTAR_THREAD_TEST_CASE(test_large_collection) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_large_data) {
-    db::config cfg{};
-    cfg.compaction_large_row_warning_threshold_mb(1);
-    cfg.compaction_large_cell_warning_threshold_mb(1);
+    auto cfg = make_shared<db::config>();
+    cfg->compaction_large_row_warning_threshold_mb(1);
+    cfg->compaction_large_cell_warning_threshold_mb(1);
     do_with_cql_env([](cql_test_env& e) {
         e.execute_cql("create table tbl (a int, b text, primary key (a))").get();
         sstring blob(1024*1024, 'x');
@@ -1054,18 +1054,12 @@ SEASTAR_TEST_CASE(test_range_deletion_scenarios) {
             e.execute_cql(format("insert into cf (p, c, v) values (1, {:d}, 'abc');", i)).get();
         }
 
-        try {
-            e.execute_cql("delete from cf where p = 1 and c <= 3").get();
-            BOOST_FAIL("should've thrown");
-        } catch (...) { }
-        try {
-            e.execute_cql("delete from cf where p = 1 and c >= 0").get();
-            BOOST_FAIL("should've thrown");
-        } catch (...) { }
+        e.execute_cql("delete from cf where p = 1 and c <= 3").get();
+        e.execute_cql("delete from cf where p = 1 and c >= 8").get();
 
-        e.execute_cql("delete from cf where p = 1 and c >= 0 and c <= 3").get();
+        e.execute_cql("delete from cf where p = 1 and c >= 0 and c <= 5").get();
         auto msg = e.execute_cql("select * from cf").get0();
-        assert_that(msg).is_rows().with_size(6);
+        assert_that(msg).is_rows().with_size(2);
         e.execute_cql("delete from cf where p = 1 and c > 3 and c < 10").get();
         msg = e.execute_cql("select * from cf").get0();
         assert_that(msg).is_rows().with_size(0);
@@ -3781,7 +3775,7 @@ void require_rows(cql_test_env& e,
                   const std::vector<std::vector<bytes_opt>>& expected,
                   const source_location& loc = source_location::current()) {
     try {
-        assert_that(cquery_nofail(e, qstr, loc)).is_rows().with_rows_ignore_order(expected);
+        assert_that(cquery_nofail(e, qstr, nullptr, loc)).is_rows().with_rows_ignore_order(expected);
     }
     catch (const std::exception& e) {
         BOOST_FAIL(format("query '{}' failed: {}\n{}:{}: originally from here",
