@@ -72,7 +72,7 @@ static category_set parse_audit_categories(const sstring& data) {
             }
         }
     }
-    return std::move(result);
+    return result;
 }
 
 static std::map<sstring, std::set<sstring>> parse_audit_tables(const sstring& data) {
@@ -91,7 +91,7 @@ static std::map<sstring, std::set<sstring>> parse_audit_tables(const sstring& da
             result[parts[0]].insert(std::move(parts[1]));
         }
     }
-    return std::move(result);
+    return result;
 }
 
 static std::set<sstring> parse_audit_keyspaces(const sstring& data) {
@@ -104,7 +104,7 @@ static std::set<sstring> parse_audit_keyspaces(const sstring& data) {
             result.insert(std::move(token));
         }
     }
-    return std::move(result);
+    return result;
 }
 
 future<> audit::create_audit(const db::config& cfg) {
