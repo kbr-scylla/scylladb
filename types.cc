@@ -349,6 +349,9 @@ struct string_type_impl : public concrete_type<sstring> {
     virtual bool is_byte_order_comparable() const override {
         return true;
     }
+    virtual bool is_string() const override {
+        return true;
+    }
     virtual size_t hash(bytes_view v) const override {
         return std::hash<bytes_view>()(v);
     }
@@ -3436,12 +3439,12 @@ static std::vector<sstring_view> split_field_strings(sstring_view v) {
 
 // Replace "\:" with ":" and "\@" with "@".
 static std::string unescape(sstring_view s) {
-    static thread_local std::regex escaped_colon_re("\\\\:");
-    static thread_local std::regex escaped_at_re("\\\\@");
-    std::string result(s);
-    result = std::regex_replace(result, escaped_colon_re, ":");
-    result = std::regex_replace(result, escaped_at_re, "@");
-    return result;
+    return std::regex_replace(std::string(s), std::regex("\\\\([@:])"), "$1");
+}
+
+// Replace ":" with "\:" and "@" with "\@".
+static std::string escape(sstring_view s) {
+    return std::regex_replace(std::string(s), std::regex("[@:]"), "\\$0");
 }
 
 // Concat list of bytes into a single bytes.
@@ -3481,8 +3484,29 @@ tuple_type_impl::from_string(sstring_view s) const {
 }
 
 sstring
-tuple_type_impl::to_string_impl(const data_value&) const {
-    throw std::runtime_error(format("{} not implemented", __PRETTY_FUNCTION__));
+tuple_type_impl::to_string_impl(const data_value& v) const {
+    const auto& b = from_value(v);
+    if (b.empty()) {
+        return "";
+    }
+
+    std::ostringstream out;
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (i > 0) {
+            out << ":";
+        }
+
+        const auto& val = b[i];
+        if (val.is_null()) {
+            out << "@";
+        } else {
+            // We use ':' as delimiter and '@' to represent null, so they need to be escaped in the tuple's fields.
+            auto typ = type(i);
+            out << escape(typ->to_string(typ->decompose(val)));
+        }
+    }
+
+    return out.str();
 }
 
 sstring tuple_type_impl::to_json_string(bytes_view bv) const {
