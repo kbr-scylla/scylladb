@@ -150,7 +150,9 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
                 }
 
                 for (; current_it != sl_controller._service_levels_db.end(); current_it++) {
-                    service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
+                    if (!current_it->second.is_static) {
+                        service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
+                    }
                 }
                 std::copy(new_state_it, service_levels.end(), std::inserter(service_levels_for_add_or_update,
                         service_levels_for_add_or_update.end()));
