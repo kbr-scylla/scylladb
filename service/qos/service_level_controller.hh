@@ -75,7 +75,7 @@ private:
 
     static constexpr shard_id global_controller = 0;
 
-    std::unordered_map<sstring, service_level> _service_levels_db;
+    std::map<sstring, service_level> _service_levels_db;
     std::unordered_map<sstring, sstring> _role_to_service_level;
     std::pair<const sstring*, service_level*> _sl_lookup[max_scheduling_groups()];
     service_level _default_service_level;
