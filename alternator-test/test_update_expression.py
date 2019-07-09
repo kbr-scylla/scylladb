@@ -35,7 +35,6 @@ def test_update_expression_set_multi(test_table_s):
     assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'x': 4, 'y': 4}
 
 # SET can be used to copy an existing attribute to a new one
-@pytest.mark.xfail(reason="attribute copy (read-before-write) not yet implemented")
 def test_update_expression_set_copy(test_table_s):
     p = random_string()
     test_table_s.put_item(Item={'p': p, 'a': 'hello'})
@@ -54,6 +53,31 @@ def test_update_expression_set_copy(test_table_s):
     assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': 'hello', 'b': 'hello'}
     with pytest.raises(ClientError, match='ValidationException'):
         test_table_s.update_item(Key={'p': p}, UpdateExpression='SET z = z')
+
+# Test for read-before-write action where the value to be read is nested inside a - operator
+def test_update_expression_set_nested_copy(test_table_s):
+    p = random_string()
+    test_table_s.update_item(Key={'p': p}, UpdateExpression='SET #n = :two',
+         ExpressionAttributeNames={'#n': 'n'}, ExpressionAttributeValues={':two': 2})
+    test_table_s.update_item(Key={'p': p}, UpdateExpression='SET #nn = :seven - #n',
+         ExpressionAttributeNames={'#nn': 'nn', '#n': 'n'}, ExpressionAttributeValues={':seven': 7})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'n': 2, 'nn': 5}
+
+    test_table_s.update_item(Key={'p': p}, UpdateExpression='SET #nnn = :nnn',
+         ExpressionAttributeNames={'#nnn': 'nnn'}, ExpressionAttributeValues={':nnn': [2,4]})
+    test_table_s.update_item(Key={'p': p}, UpdateExpression='SET #nnnn = list_append(:val1, #nnn)',
+         ExpressionAttributeNames={'#nnnn': 'nnnn', '#nnn': 'nnn'}, ExpressionAttributeValues={':val1': [1,3]})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'n': 2, 'nn': 5, 'nnn': [2,4], 'nnnn': [1,3,2,4]}
+
+# Test for getting a key value with read-before-write
+def test_update_expression_set_key(test_table_sn):
+    p = random_string()
+    test_table_sn.update_item(Key={'p': p, 'c': 7});
+    test_table_sn.update_item(Key={'p': p, 'c': 7}, UpdateExpression='SET #n = #p',
+         ExpressionAttributeNames={'#n': 'n', '#p': 'p'})
+    test_table_sn.update_item(Key={'p': p, 'c': 7}, UpdateExpression='SET #nn = #c + #c',
+         ExpressionAttributeNames={'#nn': 'nn', '#c': 'c'})
+    assert test_table_sn.get_item(Key={'p': p, 'c': 7}, ConsistentRead=True)['Item'] == {'p': p, 'c': 7, 'n': p, 'nn': 14}
 
 # Simple test for the "REMOVE" action
 def test_update_expression_remove(test_table_s):
@@ -228,7 +252,7 @@ def test_update_expression_multi_overlap_nested(test_table_s):
 # In the previous test we saw that *modifying* the same item twice in the same
 # update is forbidden; But it is allowed to *read* an item in the same update
 # that also modifies it, and we check this here.
-@pytest.mark.xfail(reason="attribute copy (read-before-write) not yet implemented")
+@pytest.mark.xfail(reason="bug in SET + REMOVE mutations in Scylla collections")
 def test_update_expression_multi_with_copy(test_table_s):
     p = random_string()
     test_table_s.put_item(Item={'p': p, 'a': 'hello'})
@@ -361,7 +385,6 @@ def test_update_expression_plus_precision(test_table_s):
 
 # Test support for "SET a = b + :val2" et al., i.e., a version of the
 # above test_update_expression_plus_basic with read before write.
-@pytest.mark.xfail(reason="attribute copy (read-before-write) not yet implemented")
 def test_update_expression_plus_rmw(test_table_s):
     p = random_string()
     test_table_s.put_item(Item={'p': p, 'a': 2})
@@ -424,7 +447,6 @@ def test_update_expression_list_append_basic(test_table_s):
 
 # Additional list_append() tests, also using attribute paths as parameters
 # (i.e., read-modify-write).
-@pytest.mark.xfail(reason="attribute copy (read-before-write) not yet implemented")
 def test_update_expression_list_append(test_table_s):
     p = random_string()
     test_table_s.update_item(Key={'p': p},

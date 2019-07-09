@@ -37,6 +37,7 @@
 #include "cql3/constants.hh"
 #include <optional>
 #include "utils/big_decimal.hh"
+#include <boost/algorithm/cxx11/any_of.hpp>
 
 #include <boost/range/adaptors.hpp>
 
@@ -427,10 +428,13 @@ future<json::json_return_type> executor::batch_write_item(std::string content) {
 // If one of the above checks fails, a validation exception is thrown.
 // FIXME: currently, we only support top-level attribute updates, and this
 // function returns the column name;
+struct allow_key_columns_tag;
+using allow_key_columns = bool_class<allow_key_columns_tag>;
 static std::string resolve_update_path(const parsed::path& p,
         const Json::Value& update_info,
         const schema_ptr& schema,
-        std::unordered_set<std::string>& used_attribute_names) {
+        std::unordered_set<std::string>& used_attribute_names,
+        allow_key_columns allow_key_columns) {
     if (p.has_operators()) {
         throw api_error("ValidationException", "UpdateItem does not yet support nested updates (FIXME)");
     }
@@ -446,7 +450,7 @@ static std::string resolve_update_path(const parsed::path& p,
         column_name = value.asString();
     }
     const column_definition* cdef = schema->get_column_definition(to_bytes(column_name));
-    if (cdef && cdef->is_primary_key()) {
+    if (!allow_key_columns && cdef && cdef->is_primary_key()) {
         throw api_error("ValidationException",
                 format("UpdateItem cannot update key column {}", column_name));
     }
@@ -543,7 +547,11 @@ template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 // of other values, this function calculates the resulting value.
 static Json::Value calculate_value(const parsed::value& v,
         const Json::Value& expression_attribute_values,
-        std::unordered_set<std::string>& used_attribute_values) {
+        std::unordered_set<std::string>& used_attribute_names,
+        std::unordered_set<std::string>& used_attribute_values,
+        const Json::Value& update_info,
+        schema_ptr schema,
+        const std::unique_ptr<Json::Value>& previous_item) {
     return std::visit(overloaded {
         [&] (const std::string& valref) -> Json::Value {
             const Json::Value& value = expression_attribute_values.get(valref, Json::nullValue);
@@ -560,8 +568,8 @@ static Json::Value calculate_value(const parsed::value& v,
                     throw api_error("ValidationException",
                             format("UpdateExpression: list_append() accepts 2 parameters, got {}", f._parameters.size()));
                 }
-                Json::Value v1 = calculate_value(f._parameters[0], expression_attribute_values, used_attribute_values);
-                Json::Value v2 = calculate_value(f._parameters[1], expression_attribute_values, used_attribute_values);
+                Json::Value v1 = calculate_value(f._parameters[0], expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                Json::Value v2 = calculate_value(f._parameters[1], expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
                 return list_concatenate(v1, v2);
             } else if (f._function_name == "if_not_exists") {
                 // FIXME
@@ -572,8 +580,11 @@ static Json::Value calculate_value(const parsed::value& v,
             }
         },
         [&] (const parsed::path& p) -> Json::Value {
-            // FIXME: support path value (read before write).
-            throw api_error("ValidationException", "UpdateExpression: unsupported value type");
+            if (!previous_item) {
+                return Json::nullValue;
+            }
+            std::string update_path = resolve_update_path(p, update_info, schema, used_attribute_names, allow_key_columns::yes);
+            return (*previous_item)["Item"].get(update_path, Json::nullValue);
         }
     }, v._value);
 }
@@ -582,18 +593,22 @@ static Json::Value calculate_value(const parsed::value& v,
 // either a single value, or v1+v2 or v1-v2.
 static Json::Value calculate_value(const parsed::set_rhs& rhs,
         const Json::Value& expression_attribute_values,
-        std::unordered_set<std::string>& used_attribute_values) {
+        std::unordered_set<std::string>& used_attribute_names,
+        std::unordered_set<std::string>& used_attribute_values,
+        const Json::Value& update_info,
+        schema_ptr schema,
+        const std::unique_ptr<Json::Value>& previous_item) {
     switch(rhs._op) {
     case 'v':
-        return calculate_value(rhs._v1, expression_attribute_values, used_attribute_values);
+        return calculate_value(rhs._v1, expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
     case '+': {
-        Json::Value v1 = calculate_value(rhs._v1, expression_attribute_values, used_attribute_values);
-        Json::Value v2 = calculate_value(rhs._v2, expression_attribute_values, used_attribute_values);
+        Json::Value v1 = calculate_value(rhs._v1, expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+        Json::Value v2 = calculate_value(rhs._v2, expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
         return number_add(v1, v2);
     }
     case '-': {
-        Json::Value v1 = calculate_value(rhs._v1, expression_attribute_values, used_attribute_values);
-        Json::Value v2 = calculate_value(rhs._v2, expression_attribute_values, used_attribute_values);
+        Json::Value v1 = calculate_value(rhs._v1, expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+        Json::Value v2 = calculate_value(rhs._v2, expression_attribute_values, used_attribute_names, used_attribute_values, update_info, schema, previous_item);
         return number_subtract(v1, v2);
     }
     }
@@ -669,128 +684,6 @@ std::unordered_set<std::string> calculate_attrs_to_get(const Json::Value& req) {
     return {};
 }
 
-
-future<json::json_return_type> executor::update_item(std::string content) {
-    _stats.api_operations.update_item++;
-    Json::Value update_info = json::to_json_value(content);
-    elogger.trace("update_item {}", update_info.toStyledString());
-    schema_ptr schema = get_table(_proxy, update_info);
-    // FIXME: handle missing Key.
-    const Json::Value& key = update_info["Key"];
-    partition_key pk = pk_from_json(key, schema);
-    clustering_key ck = ck_from_json(key, schema);
-    check_key(key, schema);
-
-    mutation m(schema, pk);
-    collection_type_impl::mutation attrs_mut;
-    auto ts = api::new_timestamp();
-
-    const Json::Value& attribute_updates = update_info["AttributeUpdates"];
-    const Json::Value& update_expression = update_info["UpdateExpression"];
-
-    // DynamoDB forbids having both old-style AttributeUpdates and new-style
-    // UpdateExpression in the same request
-    if (attribute_updates && update_expression) {
-        throw api_error("ValidationException",
-                format("UpdateItem does not allow both AttributeUpdates and UpdateExpression to be given together"));
-    }
-
-    if (update_expression) {
-        parsed::update_expression expression;
-        try {
-            expression = parse_update_expression(update_expression.asString());
-        } catch(expressions_syntax_error& e) {
-            throw api_error("ValidationException", e.what());
-        }
-        if (expression.empty()) {
-            throw api_error("ValidationException", "Empty expression in UpdateExpression is not allowed");
-        }
-        std::unordered_set<std::string> seen_column_names;
-        std::unordered_set<std::string> used_attribute_values;
-        std::unordered_set<std::string> used_attribute_names;
-        for (auto& action : expression.actions()) {
-            std::string column_name = resolve_update_path(action._path, update_info, schema, used_attribute_names);
-            // DynamoDB forbids multiple updates in the same expression to
-            // modify overlapping document paths. Updates of one expression
-            // have the same timestamp, so it's unclear which would "win".
-            // FIXME: currently, without full support for document paths,
-            // we only check if the paths' roots are the same.
-            if (!seen_column_names.insert(column_name).second) {
-                throw api_error("ValidationException",
-                        format("Invalid UpdateExpression: two document paths overlap with each other: {} and {}.",
-                                column_name, column_name));
-            }
-            std::visit(overloaded {
-                [&] (const parsed::update_expression::action::set& a) {
-                    auto value = calculate_value(a._rhs, update_info["ExpressionAttributeValues"], used_attribute_values);
-                    bytes val = serialize_item(value);
-                    attrs_mut.cells.emplace_back(to_bytes(column_name), atomic_cell::make_live(*bytes_type, ts, std::move(val), atomic_cell::collection_member::yes));
-                },
-                [&] (const parsed::update_expression::action::remove& a) {
-                    attrs_mut.cells.emplace_back(to_bytes(column_name), atomic_cell::make_dead(ts, gc_clock::now()));
-                },
-                [&] (const parsed::update_expression::action::add& a) {
-                    // FIXME: implement ADD.
-                    throw api_error("ValidationException", "UpdateExpression: ADD not yet supported.");
-                },
-                [&] (const parsed::update_expression::action::del& a) {
-                    // FIXME: implement DELETE.
-                    throw api_error("ValidationException", "UpdateExpression: DELETE not yet supported.");
-                }
-            }, action._action);
-        }
-        verify_all_are_used(update_info, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
-        verify_all_are_used(update_info, "ExpressionAttributeValues", used_attribute_values, "UpdateExpression");
-    }
-
-    for (auto it = attribute_updates.begin(); it != attribute_updates.end(); ++it) {
-        // Note that it.key() is the name of the column, *it is the operation
-        bytes column_name = to_bytes(it.key().asString());
-        const column_definition* cdef = schema->get_column_definition(column_name);
-        if (cdef && cdef->is_primary_key()) {
-            throw api_error("ValidationException",
-                    format("UpdateItem cannot update key column {}", it.key().asString()));
-        }
-        std::string action = (*it)["Action"].asString();
-        if (action == "DELETE") {
-            // FIXME: Currently we support only the simple case where the
-            // "Value" field is missing. If it were not missing, we would
-            // we need to verify the old type and/or value is same as
-            // specified before deleting... We don't do this yet.
-            if (!it->get("Value", "").asString().empty()) {
-                throw api_error("ValidationException",
-                        format("UpdateItem DELETE with checking old value not yet supported"));
-            }
-            attrs_mut.cells.emplace_back(column_name, atomic_cell::make_dead(ts, gc_clock::now()));
-        } else if (action == "PUT") {
-            const Json::Value& value = (*it)["Value"];
-            if (value.size() != 1) {
-                throw api_error("ValidationException",
-                        format("Value field in AttributeUpdates must have just one item", it.key().asString()));
-            }
-            bytes val = serialize_item(value);
-            attrs_mut.cells.emplace_back(column_name, atomic_cell::make_live(*bytes_type, ts, val, atomic_cell::collection_member::yes));
-        } else {
-            // FIXME: need to support "ADD" as well.
-            throw api_error("ValidationException",
-                format("Unknown Action value '{}' in AttributeUpdates", action));
-        }
-    }
-    auto serialized_map = attrs_type()->serialize_mutation_form(std::move(attrs_mut));
-    auto& row = m.partition().clustered_row(*schema, ck);
-    row.cells().apply(attrs_column(*schema), std::move(serialized_map));
-    // To allow creation of an item with no attributes, we need a row marker.
-    // Note that unlike Scylla, even an "update" operation needs to add a row
-    // marker. TODO: a row marker isn't really needed for a DELETE operation.
-    row.apply(row_marker(ts));
-
-    elogger.trace("Applying mutation {}", m);
-    return _proxy.mutate(std::vector<mutation>{std::move(m)}, db::consistency_level::LOCAL_QUORUM, db::no_timeout, tracing::trace_state_ptr()).then([] () {
-        // Without special options on what to return, UpdateItem returns nothing.
-        return make_ready_future<json::json_return_type>(json_string(""));
-    });
-}
-
 static std::optional<Json::Value> describe_single_item(schema_ptr schema, const query::partition_slice& slice, const cql3::selection::selection& selection, foreign_ptr<lw_shared_ptr<query::result>> query_result, std::unordered_set<std::string>&& attrs_to_get) {
     Json::Value item(Json::objectValue);
 
@@ -831,6 +724,7 @@ static std::optional<Json::Value> describe_single_item(schema_ptr schema, const 
     }
     return item;
 }
+
 static Json::Value describe_item(schema_ptr schema, const query::partition_slice& slice, const cql3::selection::selection& selection, foreign_ptr<lw_shared_ptr<query::result>> query_result, std::unordered_set<std::string>&& attrs_to_get) {
     std::optional<Json::Value> opt_item = describe_single_item(std::move(schema), slice, selection, std::move(query_result), std::move(attrs_to_get));
     if (!opt_item) {
@@ -841,6 +735,202 @@ static Json::Value describe_item(schema_ptr schema, const query::partition_slice
     Json::Value item_descr(Json::objectValue);
     item_descr["Item"] = *opt_item;
     return item_descr;
+}
+
+static bool holds_path(const parsed::value& v) {
+    return std::visit(overloaded {
+        [&] (const std::string& valref) -> bool {
+            return false;
+        },
+        [&] (const parsed::value::function_call& f) -> bool {
+            return boost::algorithm::any_of(f._parameters, [&] (const parsed::value& param) {
+                return holds_path(param);
+            });
+        },
+        [&] (const parsed::path& p) -> bool {
+            return true;
+        }
+    }, v._value);
+}
+
+static bool check_needs_read_before_write(const std::vector<parsed::update_expression::action>& actions) {
+    return boost::algorithm::any_of(actions, [](const parsed::update_expression::action& action) {
+        return std::visit(overloaded {
+            [&] (const parsed::update_expression::action::set& a) -> bool {
+                return holds_path(a._rhs._v1) || (a._rhs._op != 'v' && holds_path(a._rhs._v2));
+            },
+            [&] (const parsed::update_expression::action::remove& a) -> bool {
+                return false;
+            },
+            [&] (const parsed::update_expression::action::add& a) -> bool {
+                return true;
+            },
+            [&] (const parsed::update_expression::action::del& a) -> bool {
+                return true;
+            }
+        }, action._action);
+    });
+}
+
+// FIXME: Getting the previous item does not offer any synchronization guarantees nor linearizability.
+// It should be overridden once we can leverage a consensus protocol.
+static future<std::unique_ptr<Json::Value>> maybe_get_previous_item(service::storage_proxy& proxy, schema_ptr schema, const partition_key& pk, const clustering_key& ck,
+        const Json::Value& update_expression, const parsed::update_expression& expression) {
+    const bool needs_read_before_write = update_expression && check_needs_read_before_write(expression.actions());
+    if (!needs_read_before_write) {
+        return make_ready_future<std::unique_ptr<Json::Value>>();
+    }
+
+    dht::partition_range_vector partition_ranges{dht::partition_range(dht::global_partitioner().decorate_key(*schema, pk))};
+    std::vector<query::clustering_range> bounds;
+    if (schema->clustering_key_size() == 0) {
+        bounds.push_back(query::clustering_range::make_open_ended_both_sides());
+    } else {
+        bounds.push_back(query::clustering_range::make_singular(ck));
+    }
+
+    query::column_id_vector regular_columns{attrs_column(*schema).id};
+    auto selection = cql3::selection::selection::wildcard(schema);
+
+    auto partition_slice = query::partition_slice(std::move(bounds), {}, std::move(regular_columns), selection->get_query_options());
+    auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, query::max_partitions);
+
+    auto cl = db::consistency_level::LOCAL_QUORUM;
+
+    //TODO(sarna): RBW stats
+    return proxy.query(schema, std::move(command), std::move(partition_ranges), cl, service::storage_proxy::coordinator_query_options(db::no_timeout)).then(
+            [schema, partition_slice = std::move(partition_slice), selection = std::move(selection)] (service::storage_proxy::coordinator_query_result qr) {
+        auto previous_item = describe_item(schema, partition_slice, *selection, std::move(qr.query_result), {});
+        return make_ready_future<std::unique_ptr<Json::Value>>(std::make_unique<Json::Value>(std::move(previous_item)));
+    });
+}
+
+future<json::json_return_type> executor::update_item(std::string content) {
+    _stats.api_operations.update_item++;
+    Json::Value update_info = json::to_json_value(content);
+    elogger.trace("update_item {}", update_info.toStyledString());
+    schema_ptr schema = get_table(_proxy, update_info);
+    // FIXME: handle missing Key.
+    const Json::Value& key = update_info["Key"];
+    partition_key pk = pk_from_json(key, schema);
+    clustering_key ck = ck_from_json(key, schema);
+    check_key(key, schema);
+
+    mutation m(schema, pk);
+    collection_type_impl::mutation attrs_mut;
+    auto ts = api::new_timestamp();
+
+    const Json::Value& attribute_updates = update_info["AttributeUpdates"];
+    const Json::Value& update_expression = update_info["UpdateExpression"];
+
+    // DynamoDB forbids having both old-style AttributeUpdates and new-style
+    // UpdateExpression in the same request
+    if (attribute_updates && update_expression) {
+        throw api_error("ValidationException",
+                format("UpdateItem does not allow both AttributeUpdates and UpdateExpression to be given together"));
+    }
+
+    parsed::update_expression expression;
+    if (update_expression) {
+        try {
+            expression = parse_update_expression(update_expression.asString());
+        } catch(expressions_syntax_error& e) {
+            throw api_error("ValidationException", e.what());
+        }
+        if (expression.empty()) {
+            throw api_error("ValidationException", "Empty expression in UpdateExpression is not allowed");
+        }
+    }
+
+    return maybe_get_previous_item(_proxy, schema, pk, ck, update_expression, expression).then(
+            [this, schema, expression = std::move(expression), update_expression = std::move(update_expression), ck = std::move(ck),
+             update_info = std::move(update_info), m = std::move(m), attrs_mut = std::move(attrs_mut), attribute_updates = std::move(attribute_updates), ts] (std::unique_ptr<Json::Value> previous_item) mutable {
+        if (update_expression) {
+            std::unordered_set<std::string> seen_column_names;
+            std::unordered_set<std::string> used_attribute_values;
+            std::unordered_set<std::string> used_attribute_names;
+            for (auto& action : expression.actions()) {
+                std::string column_name = resolve_update_path(action._path, update_info, schema, used_attribute_names, allow_key_columns::no);
+                // DynamoDB forbids multiple updates in the same expression to
+                // modify overlapping document paths. Updates of one expression
+                // have the same timestamp, so it's unclear which would "win".
+                // FIXME: currently, without full support for document paths,
+                // we only check if the paths' roots are the same.
+                if (!seen_column_names.insert(column_name).second) {
+                    throw api_error("ValidationException",
+                            format("Invalid UpdateExpression: two document paths overlap with each other: {} and {}.",
+                                    column_name, column_name));
+                }
+                std::visit(overloaded {
+                    [&] (const parsed::update_expression::action::set& a) {
+                        auto value = calculate_value(a._rhs, update_info["ExpressionAttributeValues"], used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                        bytes val = serialize_item(value);
+                        attrs_mut.cells.emplace_back(to_bytes(column_name), atomic_cell::make_live(*bytes_type, ts, std::move(val), atomic_cell::collection_member::yes));
+                    },
+                    [&] (const parsed::update_expression::action::remove& a) {
+                        attrs_mut.cells.emplace_back(to_bytes(column_name), atomic_cell::make_dead(ts, gc_clock::now()));
+                    },
+                    [&] (const parsed::update_expression::action::add& a) {
+                        // FIXME: implement ADD.
+                        throw api_error("ValidationException", "UpdateExpression: ADD not yet supported.");
+                    },
+                    [&] (const parsed::update_expression::action::del& a) {
+                        // FIXME: implement DELETE.
+                        throw api_error("ValidationException", "UpdateExpression: DELETE not yet supported.");
+                    }
+                }, action._action);
+            }
+            verify_all_are_used(update_info, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
+            verify_all_are_used(update_info, "ExpressionAttributeValues", used_attribute_values, "UpdateExpression");
+        }
+
+        for (auto it = attribute_updates.begin(); it != attribute_updates.end(); ++it) {
+            // Note that it.key() is the name of the column, *it is the operation
+            bytes column_name = to_bytes(it.key().asString());
+            const column_definition* cdef = schema->get_column_definition(column_name);
+            if (cdef && cdef->is_primary_key()) {
+                throw api_error("ValidationException",
+                        format("UpdateItem cannot update key column {}", it.key().asString()));
+            }
+            std::string action = (*it)["Action"].asString();
+            if (action == "DELETE") {
+                // FIXME: Currently we support only the simple case where the
+                // "Value" field is missing. If it were not missing, we would
+                // we need to verify the old type and/or value is same as
+                // specified before deleting... We don't do this yet.
+                if (!it->get("Value", "").asString().empty()) {
+                    throw api_error("ValidationException",
+                            format("UpdateItem DELETE with checking old value not yet supported"));
+                }
+                attrs_mut.cells.emplace_back(column_name, atomic_cell::make_dead(ts, gc_clock::now()));
+            } else if (action == "PUT") {
+                const Json::Value& value = (*it)["Value"];
+                if (value.size() != 1) {
+                    throw api_error("ValidationException",
+                            format("Value field in AttributeUpdates must have just one item", it.key().asString()));
+                }
+                bytes val = serialize_item(value);
+                attrs_mut.cells.emplace_back(column_name, atomic_cell::make_live(*bytes_type, ts, val, atomic_cell::collection_member::yes));
+            } else {
+                // FIXME: need to support "ADD" as well.
+                throw api_error("ValidationException",
+                    format("Unknown Action value '{}' in AttributeUpdates", action));
+            }
+        }
+        auto serialized_map = attrs_type()->serialize_mutation_form(std::move(attrs_mut));
+        auto& row = m.partition().clustered_row(*schema, ck);
+        row.cells().apply(attrs_column(*schema), std::move(serialized_map));
+        // To allow creation of an item with no attributes, we need a row marker.
+        // Note that unlike Scylla, even an "update" operation needs to add a row
+        // marker. TODO: a row marker isn't really needed for a DELETE operation.
+        row.apply(row_marker(ts));
+
+        elogger.trace("Applying mutation {}", m);
+        return _proxy.mutate(std::vector<mutation>{std::move(m)}, db::consistency_level::LOCAL_QUORUM, db::no_timeout, tracing::trace_state_ptr()).then([] () {
+            // Without special options on what to return, UpdateItem returns nothing.
+            return make_ready_future<json::json_return_type>(json_string(""));
+        });
+    });
 }
 
 // Check according to the request's "ConsistentRead" field, which consistency
