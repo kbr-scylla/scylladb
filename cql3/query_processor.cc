@@ -426,7 +426,7 @@ query_processor::get_statement(const sstring_view& query, const service::client_
     if (audit_info) {
         audit_info->set_query_string(query);
     }
-    return std::move(res);
+    return res;
 }
 
 ::shared_ptr<raw::parsed_statement>
