@@ -231,7 +231,7 @@ void cql_server::event_notifier::on_join_cluster(const gms::inet_address& endpoi
     for (auto&& conn : _topology_change_listeners) {
         using namespace cql_transport;
         if (!conn->_pending_requests_gate.is_closed()) {
-            conn->write_response(conn->make_topology_change_event(event::topology_change::new_node(endpoint, conn->_server_addr.port)));
+            conn->write_response(conn->make_topology_change_event(event::topology_change::new_node(endpoint, conn->_server_addr.port())));
         };
     }
 }
@@ -241,7 +241,7 @@ void cql_server::event_notifier::on_leave_cluster(const gms::inet_address& endpo
     for (auto&& conn : _topology_change_listeners) {
         using namespace cql_transport;
         if (!conn->_pending_requests_gate.is_closed()) {
-            conn->write_response(conn->make_topology_change_event(event::topology_change::removed_node(endpoint, conn->_server_addr.port)));
+            conn->write_response(conn->make_topology_change_event(event::topology_change::removed_node(endpoint, conn->_server_addr.port())));
         };
     }
 }
@@ -254,7 +254,7 @@ void cql_server::event_notifier::on_up(const gms::inet_address& endpoint)
         for (auto&& conn : _status_change_listeners) {
             using namespace cql_transport;
             if (!conn->_pending_requests_gate.is_closed()) {
-                conn->write_response(conn->make_status_change_event(event::status_change::node_up(endpoint, conn->_server_addr.port)));
+                conn->write_response(conn->make_status_change_event(event::status_change::node_up(endpoint, conn->_server_addr.port())));
             };
         }
     }
@@ -268,7 +268,7 @@ void cql_server::event_notifier::on_down(const gms::inet_address& endpoint)
         for (auto&& conn : _status_change_listeners) {
             using namespace cql_transport;
             if (!conn->_pending_requests_gate.is_closed()) {
-                conn->write_response(conn->make_status_change_event(event::status_change::node_down(endpoint, conn->_server_addr.port)));
+                conn->write_response(conn->make_status_change_event(event::status_change::node_down(endpoint, conn->_server_addr.port())));
             };
         }
     }

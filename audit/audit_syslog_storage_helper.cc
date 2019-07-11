@@ -63,8 +63,8 @@ future<> audit_syslog_storage_helper::stop() {
 }
 
 future<> audit_syslog_storage_helper::write(const audit_info* audit_info,
-                                            net::ipv4_address node_ip,
-                                            net::ipv4_address client_ip,
+                                            socket_address node_ip,
+                                            socket_address client_ip,
                                             db::consistency_level cl,
                                             const sstring& username,
                                             bool error) {
@@ -94,8 +94,8 @@ future<> audit_syslog_storage_helper::write(const audit_info* audit_info,
 }
 
 future<> audit_syslog_storage_helper::write_login(const sstring& username,
-                                                  net::ipv4_address node_ip,
-                                                  net::ipv4_address client_ip,
+                                                  socket_address node_ip,
+                                                  socket_address client_ip,
                                                   bool error) {
     if (_syslog_fd == -1) {
         logger.error("Can't log audit message to syslog. Socket not connected.");

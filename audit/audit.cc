@@ -191,17 +191,17 @@ future<> audit::shutdown() {
 
 future<> audit::log(const audit_info* audit_info, service::query_state& query_state, const cql3::query_options& options, bool error) {
     const service::client_state& client_state = query_state.get_client_state();
-    net::ipv4_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
+    socket_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
     db::consistency_level cl = options.get_consistency();
     thread_local static sstring no_username("undefined");
     static const sstring anonymous_username("anonymous");
     const sstring& username = client_state.user() ? client_state.user()->name.value_or(anonymous_username) : no_username;
-    net::ipv4_address client_ip = client_state.get_client_address().addr();
+    socket_address client_ip = client_state.get_client_address().addr();
     return _storage_helper_ptr->write(audit_info, node_ip, client_ip, cl, username, error);
 }
 
-future<> audit::log_login(const sstring& username, net::ipv4_address client_ip, bool error) {
-    net::ipv4_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
+future<> audit::log_login(const sstring& username, socket_address client_ip, bool error) {
+    socket_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
     return _storage_helper_ptr->write_login(username, node_ip, client_ip, error);
 }
 
@@ -220,7 +220,7 @@ future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state
     return make_ready_future<>();
 }
 
-future<> inspect_login(const sstring& username, net::ipv4_address client_ip, bool error) {
+future<> inspect_login(const sstring& username, socket_address client_ip, bool error) {
     if (!audit::audit_instance().local_is_initialized() || !audit::local_audit_instance().should_log_login()) {
         return make_ready_future<>();
     }

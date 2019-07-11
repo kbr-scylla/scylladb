@@ -21,14 +21,14 @@ public:
     virtual future<> start(const db::config& cfg) = 0;
     virtual future<> stop() = 0;
     virtual future<> write(const audit_info* audit_info,
-                           net::ipv4_address node_ip,
-                           net::ipv4_address client_ip,
+                           socket_address node_ip,
+                           socket_address client_ip,
                            db::consistency_level cl,
                            const sstring& username,
                            bool error) = 0;
     virtual future<> write_login(const sstring& username,
-                                 net::ipv4_address node_ip,
-                                 net::ipv4_address client_ip,
+                                 socket_address node_ip,
+                                 socket_address client_ip,
                                  bool error) = 0;
 };
 

@@ -22,13 +22,13 @@ class audit_cf_storage_helper : public storage_helper {
     table_helper _table;
     service::query_state _dummy_query_state;
     static cql3::query_options make_data(const audit_info* audit_info,
-                                         net::ipv4_address node_ip,
-                                         net::ipv4_address client_ip,
+                                         socket_address node_ip,
+                                         socket_address client_ip,
                                          db::consistency_level cl,
                                          const sstring& username,
                                          bool error);
-    static cql3::query_options make_login_data(net::ipv4_address node_ip,
-                                               net::ipv4_address client_ip,
+    static cql3::query_options make_login_data(socket_address node_ip,
+                                               socket_address client_ip,
                                                const sstring& username,
                                                bool error);
 public:
@@ -37,14 +37,14 @@ public:
     virtual future<> start(const db::config& cfg) override;
     virtual future<> stop() override;
     virtual future<> write(const audit_info* audit_info,
-                           net::ipv4_address node_ip,
-                           net::ipv4_address client_ip,
+                           socket_address node_ip,
+                           socket_address client_ip,
                            db::consistency_level cl,
                            const sstring& username,
                            bool error) override;
     virtual future<> write_login(const sstring& username,
-                                 net::ipv4_address node_ip,
-                                 net::ipv4_address client_ip,
+                                 socket_address node_ip,
+                                 socket_address client_ip,
                                  bool error) override;
 };
 

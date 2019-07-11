@@ -230,7 +230,7 @@ public:
                 bool failed = f.failed();
                 sstring username = creds.count(auth::authenticator::USERNAME_KEY) > 0
                                    ? creds.at(auth::authenticator::USERNAME_KEY) : "unknown";
-                return audit::inspect_login(username, net::ipv4_address(), failed).then([this, f = std::move(f)] () mutable {
+                return audit::inspect_login(username, socket_address(), failed).then([this, f = std::move(f)] () mutable {
                     if (f.failed()) {
                         std::rethrow_exception(f.get_exception());
                     }

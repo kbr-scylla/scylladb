@@ -50,6 +50,7 @@ enum class cql_compression {
 enum cql_frame_flags {
     compression = 0x01,
     tracing     = 0x02,
+    warning     = 0x08,
 };
 
 struct [[gnu::packed]] cql_binary_frame_v1 {
@@ -126,8 +127,8 @@ private:
 public:
     cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, cql_load_balance lb, auth::service&,
             cql_server_config config, qos::service_level_controller& sl_controller);
-    future<> listen(ipv4_addr addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
-    future<> do_accepts(int which, bool keepalive, ipv4_addr server_addr);
+    future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
+    future<> do_accepts(int which, bool keepalive, socket_address server_addr);
     future<> stop();
 public:
     using response = cql_transport::response;
@@ -146,7 +147,7 @@ private:
         };
 
         cql_server& _server;
-        ipv4_addr _server_addr;
+        socket_address _server_addr;
         connected_socket _fd;
         input_stream<char> _read_buf;
         output_stream<char> _write_buf;
@@ -177,7 +178,7 @@ private:
                 tracing_request_type>;
         static thread_local execution_stage_type _process_request_stage;
     public:
-        connection(cql_server& server, ipv4_addr server_addr, connected_socket&& fd, socket_address addr);
+        connection(cql_server& server, socket_address server_addr, connected_socket&& fd, socket_address addr);
         ~connection();
         future<> process();
         future<> process_request();
