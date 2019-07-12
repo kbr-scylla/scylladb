@@ -624,7 +624,6 @@ def test_update_expression_unknown_function(test_table_s):
             UpdateExpression='SET a = _f(b,c,d)')
 
 # Test "ADD" operation for numbers
-@pytest.mark.xfail(reason="ADD not yet implemented")
 def test_update_expression_add_numbers(test_table_s):
     p = random_string()
     test_table_s.put_item(Item={'p': p, 'a': 3, 'b': 'hi'})
@@ -648,7 +647,6 @@ def test_update_expression_add_numbers(test_table_s):
             ExpressionAttributeValues={':val1': 1})
 
 # Test "ADD" operation for sets
-@pytest.mark.xfail(reason="ADD not yet implemented")
 def test_update_expression_add_sets(test_table_s):
     p = random_string()
     test_table_s.put_item(Item={'p': p, 'a': set(['dog', 'cat', 'mouse']), 'b': 'hi'})
@@ -656,6 +654,17 @@ def test_update_expression_add_sets(test_table_s):
         UpdateExpression='ADD a :val1',
         ExpressionAttributeValues={':val1': set(['pig'])})
     assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['a'] == set(['dog', 'cat', 'mouse', 'pig'])
+
+    # TODO: right now this test won't detect duplicated values in the returned result,
+    # because boto3 parses a set out of the returned JSON anyway. This check should leverage
+    # lower level API (if exists) to ensure that the JSON contains no duplicates
+    # in the set representation. It has been verified manually.
+    test_table_s.put_item(Item={'p': p, 'a': set(['beaver', 'lynx', 'coati']), 'b': 'hi'})
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='ADD a :val1',
+        ExpressionAttributeValues={':val1': set(['coati', 'beaver', 'badger'])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['a'] == set(['beaver', 'badger', 'lynx', 'coati'])
+
     # The value to be added needs to be a set of the same type - it can't
     # be a single element or anything else. If the value has the wrong type,
     # we get an error like "Invalid UpdateExpression: Incorrect operand type

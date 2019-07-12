@@ -511,6 +511,29 @@ static const Json::Value* unwrap_list(const Json::Value& v) {
     return &(*it);
 }
 
+static std::string get_item_type_string(const Json::Value& v) {
+    if (!v.isObject() || v.size() != 1) {
+        throw api_error("ValidationException", format("Item has invalid format: {}", v.toStyledString()));
+    }
+    auto it = v.begin();
+    return it.key().asString();
+}
+
+// Check if a given JSON object encodes a set (i.e., it is a {"SS": [...]}, or "NS", "BS"
+// and returns set's type and a pointer to that set. If the object does not encode a set,
+// returned value is {"", nullptr}
+static const std::pair<std::string, const Json::Value*> unwrap_set(const Json::Value& v) {
+    if (!v.isObject() || v.size() != 1) {
+        return {"", nullptr};
+    }
+    auto it = v.begin();
+    const auto& it_key = it.key().asString();
+    if (it_key != "SS" && it_key != "BS" && it_key != "NS") {
+        return {"", nullptr};
+    }
+    return std::make_pair(it_key, &(*it));
+}
+
 // Take two JSON-encoded list values (remember that a list value is
 // {"L": [...the actual list]}) and return the concatenation, again as
 // a list value.
@@ -526,6 +549,29 @@ static Json::Value list_concatenate(const Json::Value& v1, const Json::Value& v2
     }
     Json::Value ret(Json::objectValue);
     ret["L"] = std::move(cat);
+    return ret;
+}
+
+// Take two JSON-encoded set values (e.g. {"SS": [...the actual set]}) and return the sum of both sets,
+// again as a set value.
+static Json::Value set_sum(const Json::Value& v1, const Json::Value& v2) {
+    auto [set1_type, set1] = unwrap_set(v1);
+    auto [set2_type, set2] = unwrap_set(v2);
+    if (set1_type != set2_type) {
+        throw api_error("ValidationException", format("Mismatched set types: {} and {}", set1_type, set2_type));
+    }
+    if (!set1 || !set2) {
+        throw api_error("ValidationException", "UpdateExpression: set_sum() given a non-set");
+    }
+    Json::Value sum = *set1;
+    std::set<Json::Value> set1_raw(sum.begin(), sum.end());
+    for (const auto& a : *set2) {
+        if (set1_raw.count(a) == 0) {
+            sum.append(a);
+        }
+    }
+    Json::Value ret(Json::objectValue);
+    ret[set1_type] = std::move(sum);
     return ret;
 }
 
@@ -905,8 +951,28 @@ future<json::json_return_type> executor::update_item(std::string content) {
                         attrs_collector.del(to_bytes(column_name), ts);
                     },
                     [&] (const parsed::update_expression::action::add& a) {
-                        // FIXME: implement ADD.
-                        throw api_error("ValidationException", "UpdateExpression: ADD not yet supported.");
+                        parsed::value base;
+                        parsed::value addition;
+                        base.set_path(action._path);
+                        addition.set_valref(a._valref);
+                        Json::Value v1 = calculate_value(base, update_info["ExpressionAttributeValues"], used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                        Json::Value v2 = calculate_value(addition, update_info["ExpressionAttributeValues"], used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                        Json::Value result;
+                        std::string v1_type = get_item_type_string(v1);
+                        if (v1_type == "N") {
+                            if (get_item_type_string(v2) != "N") {
+                                throw api_error("ValidationException", format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, v2));
+                            }
+                            result = number_add(v1, v2);
+                        } else if (v1_type == "SS" || v1_type == "NS" || v1_type == "BS") {
+                            if (get_item_type_string(v2) != v1_type) {
+                                throw api_error("ValidationException", format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, v2));
+                            }
+                            result = set_sum(v1, v2);
+                        } else {
+                            throw api_error("ValidationException", format("An operand in the update expression has an incorrect data type: {}", v1));
+                        }
+                        attrs_collector.put(to_bytes(column_name), serialize_item(result), ts);
                     },
                     [&] (const parsed::update_expression::action::del& a) {
                         // FIXME: implement DELETE.
