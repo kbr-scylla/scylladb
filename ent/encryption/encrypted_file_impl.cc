@@ -426,7 +426,11 @@ class indirect_encrypted_file_impl : public file_impl {
            return make_ready_future<>();
         }
         return _get().then([this](::shared_ptr<symmetric_key> k) {
-            _impl = make_encrypted_file(_f, std::move(k));
+            // #978 could be running the getting more than once.
+            // Only write _impl once though
+            if (!_impl) {
+                _impl = make_encrypted_file(_f, std::move(k));
+            }
         });
     }
 public:
