@@ -566,7 +566,7 @@ static Json::Value set_sum(const Json::Value& v1, const Json::Value& v2) {
         throw api_error("ValidationException", format("Mismatched set types: {} and {}", set1_type, set2_type));
     }
     if (!set1 || !set2) {
-        throw api_error("ValidationException", "UpdateExpression: set_sum() given a non-set");
+        throw api_error("ValidationException", "UpdateExpression: ADD operation for sets must be given sets as arguments");
     }
     Json::Value sum = *set1;
     std::set<Json::Value> set1_raw(sum.begin(), sum.end());
@@ -577,6 +577,29 @@ static Json::Value set_sum(const Json::Value& v1, const Json::Value& v2) {
     }
     Json::Value ret(Json::objectValue);
     ret[set1_type] = std::move(sum);
+    return ret;
+}
+
+// Take two JSON-encoded set values (e.g. {"SS": [...the actual list]}) and return the difference of s1 - s2,
+// again as a set value.
+static Json::Value set_diff(const Json::Value& v1, const Json::Value& v2) {
+    auto [set1_type, set1] = unwrap_set(v1);
+    auto [set2_type, set2] = unwrap_set(v2);
+    if (set1_type != set2_type) {
+        throw api_error("ValidationException", format("Mismatched set types: {} and {}", set1_type, set2_type));
+    }
+    if (!set1 || !set2) {
+        throw api_error("ValidationException", "UpdateExpression: DELETE operation can only be performed on a set");
+    }
+    std::set<Json::Value> set1_raw(set1->begin(), set1->end());
+    for (const auto& a : *set2) {
+        set1_raw.erase(a);
+    }
+    Json::Value ret(Json::objectValue);
+    Json::Value& result_set = ret[set1_type];
+    for (const auto& a : set1_raw) {
+        result_set.append(a);
+    }
     return ret;
 }
 
@@ -980,8 +1003,14 @@ future<json::json_return_type> executor::update_item(std::string content) {
                         attrs_collector.put(to_bytes(column_name), serialize_item(result), ts);
                     },
                     [&] (const parsed::update_expression::action::del& a) {
-                        // FIXME: implement DELETE.
-                        throw api_error("ValidationException", "UpdateExpression: DELETE not yet supported.");
+                        parsed::value base;
+                        parsed::value subset;
+                        base.set_path(action._path);
+                        subset.set_valref(a._valref);
+                        Json::Value v1 = calculate_value(base, update_info["ExpressionAttributeValues"], used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                        Json::Value v2 = calculate_value(subset, update_info["ExpressionAttributeValues"], used_attribute_names, used_attribute_values, update_info, schema, previous_item);
+                        Json::Value result  = set_diff(v1, v2);
+                        attrs_collector.put(to_bytes(column_name), serialize_item(result), ts);
                     }
                 }, action._action);
             }
