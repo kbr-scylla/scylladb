@@ -147,11 +147,13 @@ public:
 
     future<> connect();
     future<shared_ptr<symmetric_key>, id_type> get_or_create_key(const key_info&, const key_options& = {});
-    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&);
+    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const std::optional<key_info>& = {});
 
 private:
     future<key_and_id_type> create_key(const kmip_key_info&);
     future<shared_ptr<symmetric_key>> find_key(const id_type&);
+
+    static shared_ptr<symmetric_key> ensure_compatible_key(shared_ptr<symmetric_key>, const key_info&);
 
     template<typename T, int(*)(T *)>
     class kmip_handle;
@@ -642,16 +644,16 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
             kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id), cmd);
 
             utils::UUID uuid(new_id);
-            kmip_log.trace("{}: Created {}:{}", _name, info, uuid);
+            kmip_log.debug("{}: Created {}:{}", _name, info, uuid);
 
             KMIP_CMD_set_ctx(cmd, const_cast<char *>("activate"));
 
             return do_cmd(std::move(cmd), [new_id](KMIP_CMD* cmd) {
                 return KMIP_CMD_activate(cmd, new_id);
-            }).then([this, uuid](kmip_cmd cmd) {
+            }).then([this, uuid, info](kmip_cmd cmd) {
                 bytes id = uuid.serialize();
-                kmip_log.trace("{}: Activated {}", _name, uuid);
-                return get_key_by_id(id).then([id](auto k) {
+                kmip_log.debug("{}: Activated {}", _name, uuid);
+                return get_key_by_id(id, info.info).then([id](auto k) {
                     return key_and_id_type(k, id);
                 });
             });
@@ -777,14 +779,36 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
     });
 }
 
+shared_ptr<symmetric_key> kmip_host::impl::ensure_compatible_key(shared_ptr<symmetric_key> k, const key_info& info) {
+    // keys we get back are typically void
+    // of block mode/padding info (because this is meaningless
+    // from the standpoint of the kmip server).
+    // Check and re-init the actual key used based
+    // on what the user wants so we adhere to block mode etc.
+    if (!info.compatible(k->info())) {
+        throw std::invalid_argument(sprint("Incompatible key: %s", k->info()));
+    }
+    if (k->info() != info) {
+        k = ::make_shared<symmetric_key>(info, k->key());
+    }
+    return k;
+}
+
 future<shared_ptr<symmetric_key>, kmip_host::id_type> kmip_host::impl::get_or_create_key(const key_info& info, const key_options& opts) {
-    return _attr_cache.get(kmip_key_info{info, opts}).then([](key_and_id_type kinfo) {
-        return make_ready_future<shared_ptr<symmetric_key>, id_type>(std::get<0>(kinfo), std::get<1>(kinfo));
+    kmip_log.debug("{}: Lookup key {}:{}", _name, info, opts);
+    return _attr_cache.get(kmip_key_info{info, opts}).then([info](key_and_id_type kinfo) {
+        return make_ready_future<shared_ptr<symmetric_key>, id_type>(ensure_compatible_key(std::get<0>(kinfo), info), std::get<1>(kinfo));
     });
 }
 
-future<shared_ptr<symmetric_key>> kmip_host::impl::get_key_by_id(const id_type& id) {
-    return _id_cache.get(id);
+future<shared_ptr<symmetric_key>> kmip_host::impl::get_key_by_id(const id_type& id, const std::optional<key_info>& info) {
+    auto f = _id_cache.get(id);
+    if (info) {
+        f = f.then([info](shared_ptr<symmetric_key> k) {
+           return ensure_compatible_key(k, *info);
+        });
+    }
+    return f;
 }
 
 kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::unordered_map<sstring, sstring>& map)
@@ -834,26 +858,7 @@ future<shared_ptr<symmetric_key>, kmip_host::id_type> kmip_host::get_or_create_k
 }
 
 future<shared_ptr<symmetric_key>> kmip_host::get_key_by_id(const id_type& id, std::optional<key_info> info) {
-    auto f = _impl->get_key_by_id(id);
-
-    if (info) {
-        f = f.then([info](shared_ptr<symmetric_key> k) {
-            // keys we get back are typically void
-            // of block mode/padding info (because this is meaningless
-            // from the standpoint of the kmip server).
-            // Check and re-init the actual key used based
-            // on what the user wants so we adhere to block mode etc.
-            if (!info->compatible(k->info())) {
-                throw std::invalid_argument(sprint("Incompatible key: %s", k->info()));
-            }
-            if (k->info() != *info) {
-                k = ::make_shared<symmetric_key>(*info, k->key());
-            }
-            return k;
-        });
-    }
-
-    return f;
+    return _impl->get_key_by_id(id, info);
 }
 
 
