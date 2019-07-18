@@ -31,8 +31,7 @@ boost_tests = [
     'mutation_reader_test',
     'serialized_action_test',
     'cql_query_test',
-    # disabled until we resolve audit vs DROP INDEX conflict: 
-    # 'secondary_index_test',
+    'secondary_index_test',
     'json_cql_query_test',
     'filtering_test',
     'storage_proxy_test',
