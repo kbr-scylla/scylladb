@@ -615,7 +615,7 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
 
     if (!cfg.kmip_hosts().empty()) {
         // only pre-create on shard 0.
-        f = f.then([&] {
+        f = f.then([&cfg, ctxt] {
             return parallel_for_each(cfg.kmip_hosts(), [ctxt](auto& p) {
                 auto host = ctxt->get_kmip_host(p.first);
                 return host->connect();
