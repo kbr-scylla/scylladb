@@ -965,11 +965,13 @@ static void test_range_queries(populate_fn populate) {
 void test_all_data_is_read_back(populate_fn populate) {
     BOOST_TEST_MESSAGE(__PRETTY_FUNCTION__);
 
-    for_each_mutation([&populate] (const mutation& m) mutable {
+    const auto query_time = gc_clock::now();
+
+    for_each_mutation([&populate, query_time] (const mutation& m) mutable {
         auto ms = populate(m.schema(), {m});
         mutation copy(m);
-        copy.partition().compact_for_compaction(*copy.schema(), always_gc, gc_clock::now());
-        assert_that(ms.make_reader(m.schema())).produces_compacted(copy);
+        copy.partition().compact_for_compaction(*copy.schema(), always_gc, query_time);
+        assert_that(ms.make_reader(m.schema())).produces_compacted(copy, query_time);
     });
 }
 
@@ -1480,7 +1482,7 @@ static mutation_sets generate_mutation_sets() {
 
         clustering_key ck1 = clustering_key::from_deeply_exploded(*s1, {data_value(bytes("ck1_0")), data_value(bytes("ck1_1"))});
         clustering_key ck2 = clustering_key::from_deeply_exploded(*s1, {data_value(bytes("ck2_0")), data_value(bytes("ck2_1"))});
-        auto ttl = gc_clock::duration(1);
+        auto ttl = gc_clock::duration(1000);
 
         {
             auto tomb = new_tombstone();
