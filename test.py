@@ -19,6 +19,7 @@ import multiprocessing
 import xml.etree.ElementTree as ET
 import shutil
 import signal
+import shlex
 
 LDAP_SERVER_CONFIGURATION_FILE = os.path.join(os.path.dirname(__file__), 'tests', 'slapd.conf')
 
@@ -253,6 +254,8 @@ if __name__ == "__main__":
                         help="Number of jobs to use for running the tests")
     parser.add_argument('--xunit', action="store",
                         help="Name of a file to write results of non-boost tests to in xunit format")
+    parser.add_argument('--manual-execution', action='store_true', default=False,
+                        help='Let me manually run the test executable at the moment this script would run it')
     args = parser.parse_args()
 
     print_progress = print_status_verbose if args.verbose else print_progress_succint
@@ -300,6 +303,10 @@ if __name__ == "__main__":
     failed_tests = []
 
     n_total = len(test_to_run)
+    if args.manual_execution and n_total > 1:
+        print('--manual-execution only supports running a single test, but multiple selected: {}'.format(
+            [e[0] for e in test_to_run[:3]])) # Print the whole e[0] path, as matches may come from multiple dirs.
+        sys.exit(1)
     env = os.environ
     env['UBSAN_OPTIONS'] = 'print_stacktrace=1'
     env['BOOST_TEST_CATCH_SYSTEM_ERRORS'] = 'no'
@@ -390,11 +397,17 @@ if __name__ == "__main__":
             for arg in setup():
                 if type == 'ldap':
                     env['SEASTAR_LDAP_PORT'] = str(arg)
-
-                subprocess.check_output([path] + boost_args + exec_args,
-                                        stderr=subprocess.STDOUT,
-                                        timeout=args.timeout,
-                                        env=env, preexec_fn=os.setsid)
+                cmd = [path] + boost_args + exec_args
+                if not args.manual_execution:
+                    subprocess.check_output(
+                        cmd, stderr=subprocess.STDOUT, timeout=args.timeout, env=env, preexec_fn=os.setsid)
+                else:
+                    print('Please run the following shell command, then press <enter>:')
+                    shcmd = ' '.join([shlex.quote(e) for e in cmd])
+                    if type == 'ldap':
+                        shcmd = 'SEASTAR_LDAP_PORT={} {}'.format(arg, shcmd)
+                    print(shcmd)
+                    input('-- press <enter> to continue --')
                 success = True
         except subprocess.TimeoutExpired as e:
             def report_subcause(e):
