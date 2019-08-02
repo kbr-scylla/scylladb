@@ -17,6 +17,49 @@ import concurrent.futures
 import io
 import multiprocessing
 import xml.etree.ElementTree as ET
+import shutil
+import signal
+
+LDAP_SERVER_CONFIGURATION_FILE = os.path.join(os.path.dirname(__file__), 'tests', 'slapd.conf')
+
+DEFAULT_ENTRIES = [
+    """dn: dc=example,dc=com
+objectClass: dcObject
+objectClass: organization
+dc: example
+o: Example
+description: Example directory.
+""",
+    """dn: cn=root,dc=example,dc=com
+objectClass: organizationalRole
+cn: root
+description: Directory manager.
+""",
+    """dn: ou=People,dc=example,dc=com
+objectClass: organizationalUnit
+ou: People
+description: Our people.
+""",
+    """# Default superuser for Scylla
+dn: uid=cassandra,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: cassandra
+ou: People
+sn: cassandra
+userid: cassandra
+userPassword: cassandra
+""",
+    """dn: uid=jsmith,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: Joe Smith
+ou: People
+sn: Smith
+userid: jsmith
+userPassword: joeisgreat
+"""
+]
 
 boost_tests = [
     'bytes_ostream_test',
@@ -127,6 +170,10 @@ other_tests = [
     'memory_footprint',
 ]
 
+ldap_tests = [
+    'ldap_connection_test',
+]
+
 CONCOLORS = {'green': '\033[1;32m', 'red': '\033[1;31m', 'nocolor': '\033[0m'}
 
 def colorformat(msg, **kwargs):
@@ -227,6 +274,8 @@ if __name__ == "__main__":
             test_to_run.append((os.path.join(prefix, test), 'other', custom_seastar_args.get(test, seastar_args) + standard_args))
         for test in boost_tests:
             test_to_run.append((os.path.join(prefix, test), 'boost', custom_seastar_args.get(test, seastar_args) + standard_args))
+        for test in ldap_tests:
+            test_to_run.append((os.path.join(prefix, test), 'ldap', custom_seastar_args.get(test, seastar_args) + standard_args))
 
     for m in ['release', 'dev']:
         if m in modes_to_run:
@@ -255,7 +304,68 @@ if __name__ == "__main__":
     env['UBSAN_OPTIONS'] = 'print_stacktrace=1'
     env['BOOST_TEST_CATCH_SYSTEM_ERRORS'] = 'no'
 
-    def run_test(path, type, exec_args):
+    def noop_setup():
+        yield None
+    port = 5000
+
+    def ldap_setup(ldap_path):
+        global port
+
+        local_port = 0
+        local_port_ldap = port
+        local_port_sldap = port + 1
+        port = port + 2
+        slapd_pid = None
+        # Start creating the instance folder structure.
+        instance_path = os.path.join(os.path.abspath(ldap_path),str(local_port_ldap))
+        slapd_pid_file = os.path.join(instance_path,"slapd.pid")
+        if os.path.exists(instance_path):
+            # Kill the slapd process if it happen to be a residual one this really should not happen
+            # unless in the extreme case a previous test.py process crashing in the middle of an
+            # ldap test.
+            if os.path.exists(slapd_pid_file):
+                with open(slapd_pid_file, 'r') as pidfile:
+                    slapd_pid = int(pidfile.read())
+                    os.kill(slapd_pid,signal.SIGTERM)
+                    slapd_pid = None
+            shutil.rmtree(instance_path)
+        data_path = os.path.join(instance_path,'data')
+        os.makedirs(data_path)
+        # This will always fail because it lacks the permissions to read the default slapd data
+        # folder but it does create the instance folder so we don't want to fail here.
+        try:
+            with open(os.devnull, 'w') as devnull:
+                subprocess.check_output(['slaptest','-f',LDAP_SERVER_CONFIGURATION_FILE,'-F',instance_path],stderr=devnull)
+        except:
+            pass
+        # Change the data folder in the default config.
+        replace_expression = 's/olcDbDirectory:.*/olcDbDirectory: {}/g'.format(os.path.abspath(data_path).replace('/','\/'))
+        cmd = ['find',instance_path,'-type','f','-exec','sed','-i',replace_expression,'{}',";"]
+        subprocess.check_output(cmd)
+        # Change the pid file to be kept with the instance.
+        replace_expression = 's/olcPidFile:.*/olcPidFile: {}/g'.format(os.path.abspath(slapd_pid_file).replace('/','\/'))
+        cmd = ['find',instance_path,'-type','f','-exec','sed','-i',replace_expression,'{}',";"]
+        subprocess.check_output(cmd)
+        # Put the test data in.
+        cmd = ['slapadd','-F',os.path.abspath(instance_path)]
+        subprocess.run(cmd, capture_output=True, check=True, text=True, input='\n\n'.join(DEFAULT_ENTRIES))
+        # Set up the server.
+        SLAPD_URLS="ldap://:{local_port_ldap}/ ldaps://:{local_port_sldap}/".format(local_port_ldap=local_port_ldap,local_port_sldap=local_port_sldap)
+        subprocess.check_output(['slapd','-F',os.path.abspath(instance_path),'-h',SLAPD_URLS,'-n',"server-{}".format(local_port_ldap)])
+        # Record the process pid.
+        with open(slapd_pid_file, 'r') as pidfile:
+            slapd_pid = int(pidfile.read())
+        # Put some data in.
+        yield local_port_ldap
+
+        # Wrap up logic - this will be executed when this generator is enumerated.
+
+        # Kill the slapd process.
+        os.kill(slapd_pid,signal.SIGTERM)
+        # Remove test directory.
+        shutil.rmtree(instance_path)
+
+    def run_test(path, type, exec_args, setup):
         boost_args = []
         # avoid modifying in-place, it will change test_to_run
         exec_args = exec_args + '--collectd 0'.split()
@@ -266,7 +376,7 @@ if __name__ == "__main__":
                 mode = 'debug'
             xmlout = (args.jenkins + "." + mode + "." + os.path.basename(path.split()[0]) + ".boost.xml")
             boost_args += ['--report_level=no', '--logger=HRF,test_suite:XML,test_suite,' + xmlout]
-        if type == 'boost':
+        if type in ['boost', 'ldap']:
             boost_args += ['--']
 
         def report_error(exc, out, report_subcause):
@@ -277,11 +387,15 @@ if __name__ == "__main__":
                 print('=== stdout END ===', file=file)
         success = False
         try:
-            subprocess.check_output([path] + boost_args + exec_args,
-                                    stderr=subprocess.STDOUT,
-                                    timeout=args.timeout,
-                                    env=env, preexec_fn=os.setsid)
-            success = True
+            for arg in setup():
+                if type == 'ldap':
+                    env['SEASTAR_LDAP_PORT'] = str(arg)
+
+                subprocess.check_output([path] + boost_args + exec_args,
+                                        stderr=subprocess.STDOUT,
+                                        timeout=args.timeout,
+                                        env=env, preexec_fn=os.setsid)
+                success = True
         except subprocess.TimeoutExpired as e:
             def report_subcause(e):
                 print('  timed out', file=file)
@@ -298,12 +412,25 @@ if __name__ == "__main__":
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
     futures = []
+    # We take note of all slapd processes that ran prior to the tests in order not to clean them.
+    slapd_before = set([])
+    try:
+        slapd_before = set(map(int,subprocess.check_output(["pidof",'slapd']).split()))
+    except:
+        pass
+    instance_dirs_to_remove = set([])
     for n, test in enumerate(test_to_run):
         path = test[0]
+        test_path = os.path.split(path)[0];
+        ldap_path = os.path.join(test_path,'ldap_instances');
+        setup = noop_setup
         test_type = test[1]
+        if test_type == 'ldap':
+            instance_dirs_to_remove.add(ldap_path)
+            setup = lambda: ldap_setup(ldap_path)
         exec_args = test[2] if len(test) >= 3 else []
         for _ in range(args.repeat):
-            futures.append(executor.submit(run_test, path, test_type, exec_args))
+            futures.append(executor.submit(run_test, path, test_type, exec_args, setup))
 
     results = []
     cookie = len(futures)
@@ -314,6 +441,24 @@ if __name__ == "__main__":
         cookie = print_progress(test_path, test_args, success, cookie)
         if not success:
             failed_tests.append((test_path, test_args, out))
+    # After all test are done we need to clean the residual slapds if there are any.  The correct
+    # state here is not to have residual slapds since each test cleans after itself.  This is just
+    # another measurement taken in order not to pollute the environment we run in.
+    slapd_after = set([])
+    try:
+        slapd_after = set(map(int,subprocess.check_output(["pidof",'slapd']).split()))
+    except:
+        pass
+    residual_slapds = slapd_after.difference(slapd_before)
+    for pid in residual_slapds:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    # Remove all residual folders of slapd.
+    for instance_dir in  instance_dirs_to_remove:
+        shutil.rmtree(instance_dir)
 
     if not failed_tests:
         print('\nOK.')
