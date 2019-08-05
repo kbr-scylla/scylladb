@@ -354,6 +354,7 @@ public:
                 create_directories((cfg->view_hints_directory() + "/" + std::to_string(i)).c_str());
             }
 
+            set_abort_on_internal_error(true);
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto& ms = netw::get_messaging_service();

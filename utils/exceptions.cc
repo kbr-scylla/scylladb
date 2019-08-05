@@ -7,8 +7,13 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/print.hh>
+#include <seastar/util/log.hh>
+#include <seastar/util/backtrace.hh>
+
 #include <exception>
 #include <system_error>
+#include <atomic>
 #include "exceptions.hh"
 
 #include <iostream>
@@ -51,4 +56,19 @@ bool should_stop_on_system_error(const std::system_error& e) {
         }
     }
     return true;
+}
+
+std::atomic<bool> abort_on_internal_error{false};
+
+void set_abort_on_internal_error(bool do_abort) {
+    abort_on_internal_error.store(do_abort);
+}
+
+void on_internal_error(seastar::logger& logger, const seastar::sstring& msg) {
+    if (abort_on_internal_error.load()) {
+        logger.error("{}, at: {}", msg.c_str(), seastar::current_backtrace());
+        abort();
+    } else {
+        seastar::throw_with_backtrace<std::runtime_error>(msg.c_str());
+    }
 }
