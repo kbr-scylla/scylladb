@@ -318,6 +318,10 @@ int kmip_host::impl::connection::recv(void* data, unsigned int len, unsigned int
             if (_in_buffer->empty()) {
                 _in_buffer = std::nullopt;
             }
+            // #998 cryptsoft example returns error on EOF. 
+            if (n == 0) {
+                return KMIP_ERROR_IO;
+            }
             break;
         }
 
