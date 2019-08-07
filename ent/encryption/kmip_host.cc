@@ -37,6 +37,8 @@ using namespace std::chrono_literals;
 
 static logger kmip_log("kmip");
 static constexpr int kmip_port = 5696;
+// default for command execution/failover retry.
+static constexpr int default_num_cmd_retry = 3;
 
 std::ostream& operator<<(std::ostream& os, KMIP* kmip) {
     auto* s = KMIP_dump_str(kmip, KMIP_DUMP_FORMAT_DEFAULT);
@@ -171,11 +173,12 @@ private:
     }
 
     using con_ptr = ::shared_ptr<connection>;
+    using opt_int = std::optional<int>;
 
     template<typename Func>
     future<kmip_cmd> do_cmd(kmip_cmd, Func &&);
     template<typename Func>
-    future<int> do_cmd(KMIP_CMD*, con_ptr, Func &&);
+    future<int> do_cmd(KMIP_CMD*, con_ptr, Func&);
 
     future<con_ptr> get_connection(KMIP_CMD*);
     future<con_ptr> get_connection(const sstring&);
@@ -207,6 +210,7 @@ private:
     // current default host. If a host fails, incremented and
     // we try another in the host ip list.
     size_t _index = 0;
+    size_t _max_retry = default_num_cmd_retry;
 };
 
 class kmip_host::impl::connection {
@@ -273,6 +277,8 @@ future<> kmip_host::impl::connection::connect() {
         return seastar::net::dns::resolve_name(_host).then([this, cred](seastar::net::inet_address addr) {
             return seastar::tls::connect(cred, seastar::ipv4_addr{addr, kmip_port}).then([this](seastar::connected_socket s) {
                 kmip_log.debug("Successfully connected {} ({})", _host);
+                // #998 Set keepalive to try avoiding connection going stale inbetween commands. 
+                s.set_keepalive(true);
                 _input = s.input();
                 _output = s.output();
             });
@@ -464,12 +470,10 @@ void kmip_host::impl::release(KMIP_CMD* cmd, con_ptr cp) {
 }
 
 template<typename Func>
-future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func && f) {
-    using opt_int = std::optional<int>;
-
+future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func& f) {
     cp->attach(cmd);
 
-    return repeat_until_value([this, cmd, f = std::forward<Func>(f), cp] {
+    return repeat_until_value([this, cmd, &f, cp] {
         int res = f(cmd);
         switch (res) {
         case KMIP_ERROR_RETRY:
@@ -508,10 +512,27 @@ template<typename Func>
 future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func && f) {
     kmip_log.trace("{}: begin do_cmd", *this, cmd_in);
     KMIP_CMD* cmd = cmd_in;
-    return get_connection(cmd).then([this, cmd, f = std::move(f)](auto cp) mutable {
-        auto res = do_cmd(cmd, std::move(cp), std::move(f));
-        kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
-        return res;
+
+    // #998 Need to do retry loop, because we can have either timed out connection,
+    // lost it (connected server went down) or some other network error.
+    return do_with(std::move(f), [this, cmd](Func& f) {
+        return repeat_until_value([this, cmd, &f, retry = _max_retry]() mutable {
+            --retry;
+            return get_connection(cmd).then([this, cmd, &f, retry](auto cp) mutable {
+                auto res = do_cmd(cmd, std::move(cp), f);
+                kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
+                return res.then([this, retry](int res) mutable {
+                    if (res == KMIP_ERROR_IO) {
+                        kmip_log.debug("{}: request error {}", *this, kmip_errorc.message(res));
+                        if (retry) {
+                            kmip_log.debug("{}: retrying...", *this);
+                            return opt_int{};
+                        }
+                    }
+                    return opt_int(res);
+                });
+            });
+        });
     }).then([this, cmd = std::move(cmd_in)](int res) mutable {
         kmip_chk(res, cmd);
         kmip_log.trace("{}: result {}", *this, KMIP_CMD_get_response(cmd));
@@ -531,13 +552,14 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(const sstring& 
         return cp->connect().then([this, cp, host] {
             kmip_log.trace("{}: verifying {}", *this, host);
             kmip_cmd cmd;
-            auto f = do_cmd(cmd, cp, [](KMIP_CMD* cmd) {
+            static auto connection_query = [](KMIP_CMD* cmd) {
                 static const std::array<int, 2> query_options = {
                   KMIP_QUERY_FUNCTION_QUERY_OPERATIONS,
                   KMIP_QUERY_FUNCTION_QUERY_OBJECTS,
                 };
                 return KMIP_CMD_query(cmd, const_cast<int *>(query_options.data()), unsigned(query_options.size()));
-            });
+            };
+            auto f = do_cmd(cmd, cp, connection_query);
             return f.then([this, cp, host, cmd = std::move(cmd)](auto) {
                 kmip_log.trace("{}: connected {}", *this, host);
                 return cp;
