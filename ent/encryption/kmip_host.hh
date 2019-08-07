@@ -43,6 +43,7 @@ public:
 
         std::optional<std::chrono::milliseconds> key_cache_expiry;
         std::optional<size_t> max_pooled_connections_per_host;
+        std::optional<size_t> max_command_retries;
     };
     struct key_options {
         sstring template_name;

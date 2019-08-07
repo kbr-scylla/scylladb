@@ -140,7 +140,9 @@ public:
                                                     default_expiry),
                                     default_refresh, kmip_log,
                                     std::bind(&impl::find_key, this,
-                                                    std::placeholders::_1))
+                                                    std::placeholders::_1)),
+                                    _max_retry(std::max(size_t(1), options.max_command_retries.value_or(default_num_cmd_retry)))
+
     {
         if (_options.hosts.size() > max_hosts) {
             throw std::invalid_argument("Too many hosts");
@@ -864,6 +866,10 @@ kmip_host::kmip_host(encryption_context& ctxt, const sstring& name, const std::u
 
         opts.username = m("username").value_or("");
         opts.password = ctxt.maybe_decrypt_config_value(m("password").value_or(""));
+
+        if (m("max_command_retries")) {
+            opts.max_command_retries = std::stoul(*m("max_command_retries"));
+        }
 
         return opts;
     }())

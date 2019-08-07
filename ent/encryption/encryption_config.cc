@@ -71,6 +71,8 @@ support read replication, or other strategies for availability.
 
 Hosts are tried in the order they appear here. Add them in the same sequence they'll fail over in.
 
+KMIP requests will fail over/retry 'max_command_retries' times (default 3)
+
 )foo")
 		  
 // END entry definitions

@@ -895,6 +895,8 @@ murmur3_partitioner_ignore_msb_bits: 12
 # support read replication, or other strategies for availability.
 #
 # Hosts are tried in the order they appear here. Add them in the same sequence they'll fail over in.
+# 
+# KMIP requests will fail over/retry 'max_command_retries' times (default 3)
 #
 # kmip_hosts:
 #   <name>:
@@ -905,6 +907,7 @@ murmur3_partitioner_ignore_msb_bits: 12
 #       priority_string: <kmip tls priority string> (optional)
 #       username: <login> (optional>
 #       password: <password> (optional)
+#       max_command_retries: <int> (optional; default 3)
 #   <name>:
 #       ...
 #
