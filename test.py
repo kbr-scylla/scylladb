@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 import shutil
 import signal
 import shlex
+from random import randint
 
 LDAP_SERVER_CONFIGURATION_FILE = os.path.join(os.path.dirname(__file__), 'tests', 'slapd.conf')
 
@@ -256,6 +257,8 @@ if __name__ == "__main__":
                         help="Name of a file to write results of non-boost tests to in xunit format")
     parser.add_argument('--manual-execution', action='store_true', default=False,
                         help='Let me manually run the test executable at the moment this script would run it')
+    parser.add_argument('--byte-limit', action="store", default=None, type=int,
+                        help="Specific byte limit for failure injection (random by default)")
     args = parser.parse_args()
 
     print_progress = print_status_verbose if args.verbose else print_progress_succint
@@ -312,7 +315,7 @@ if __name__ == "__main__":
     env['BOOST_TEST_CATCH_SYSTEM_ERRORS'] = 'no'
 
     def noop_setup():
-        yield None
+        yield None, None
     port = 5000
 
     def ldap_setup(ldap_path):
@@ -321,8 +324,10 @@ if __name__ == "__main__":
         local_port = 0
         local_port_ldap = port
         local_port_sldap = port + 1
-        port = port + 2
+        local_port_failure_injection = port + 2
+        port = port + 3
         slapd_pid = None
+        byte_limit = args.byte_limit if args.byte_limit else randint(0, 2000)
         # Start creating the instance folder structure.
         instance_path = os.path.join(os.path.abspath(ldap_path),str(local_port_ldap))
         slapd_pid_file = os.path.join(instance_path,"slapd.pid")
@@ -345,6 +350,14 @@ if __name__ == "__main__":
                 subprocess.check_output(['slaptest','-f',LDAP_SERVER_CONFIGURATION_FILE,'-F',instance_path],stderr=devnull)
         except:
             pass
+        # Set up failure injection.
+        proxy_name = 'p{}'.format(local_port_ldap)
+        subprocess.check_output(['toxiproxy-cli', 'c', proxy_name, '--listen',
+                                 'localhost:{}'.format(local_port_failure_injection),
+                                 '--upstream', 'localhost:{}'.format(local_port_ldap)])
+        # Sever the connection after byte_limit bytes have passed through:
+        subprocess.check_output(['toxiproxy-cli', 't', 'a', proxy_name, '-t', 'limit_data', '-n', 'limiter',
+                                 '-a', 'bytes={}'.format(byte_limit)])
         # Change the data folder in the default config.
         replace_expression = 's/olcDbDirectory:.*/olcDbDirectory: {}/g'.format(os.path.abspath(data_path).replace('/','\/'))
         cmd = ['find',instance_path,'-type','f','-exec','sed','-i',replace_expression,'{}',";"]
@@ -363,7 +376,7 @@ if __name__ == "__main__":
         with open(slapd_pid_file, 'r') as pidfile:
             slapd_pid = int(pidfile.read())
         # Put some data in.
-        yield local_port_ldap
+        yield local_port_ldap, byte_limit
 
         # Wrap up logic - this will be executed when this generator is enumerated.
 
@@ -371,6 +384,8 @@ if __name__ == "__main__":
         os.kill(slapd_pid,signal.SIGTERM)
         # Remove test directory.
         shutil.rmtree(instance_path)
+        # Clean up failure injection.
+        subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
 
     def run_test(path, type, exec_args, setup):
         boost_args = []
@@ -386,17 +401,21 @@ if __name__ == "__main__":
         if type in ['boost', 'ldap']:
             boost_args += ['--']
 
-        def report_error(exc, out, report_subcause):
+        def report_error(exc, out, report_subcause, failure_injection_desc):
             report_subcause(exc)
             if out:
                 print('=== stdout START ===', file=file)
                 print(out, file=file)
                 print('=== stdout END ===', file=file)
+            if failure_injection_desc:
+                print('failure injection: {}'.format(failure_injection_desc), file=file)
         success = False
+        failure_injection_desc = None
         try:
-            for arg in setup():
+            for (port, byte_limit) in setup():
                 if type == 'ldap':
-                    env['SEASTAR_LDAP_PORT'] = str(arg)
+                    env['SEASTAR_LDAP_PORT'] = str(port)
+                    failure_injection_desc = '--byte-limit={}'.format(byte_limit)
                 cmd = [path] + boost_args + exec_args
                 if not args.manual_execution:
                     subprocess.check_output(
@@ -405,24 +424,28 @@ if __name__ == "__main__":
                     print('Please run the following shell command, then press <enter>:')
                     shcmd = ' '.join([shlex.quote(e) for e in cmd])
                     if type == 'ldap':
-                        shcmd = 'SEASTAR_LDAP_PORT={} {}'.format(arg, shcmd)
+                        shcmd = 'SEASTAR_LDAP_PORT={} {}'.format(port, shcmd)
                     print(shcmd)
                     input('-- press <enter> to continue --')
                 success = True
+        # TODO: if an exception is thrown, the setup() enumeration terminates early, so some cleanup
+        # inside it is skipped.  Should be handled below.
         except subprocess.TimeoutExpired as e:
             def report_subcause(e):
                 print('  timed out', file=file)
-            report_error(e, e.output.decode(encoding='UTF-8'), report_subcause=report_subcause)
+            report_error(e, e.output.decode(encoding='UTF-8'), report_subcause, failure_injection_desc)
         except subprocess.CalledProcessError as e:
             def report_subcause(e):
                 print('  with error code {code}\n'.format(code=e.returncode), file=file)
-            report_error(e, e.output.decode(encoding='UTF-8'), report_subcause=report_subcause)
+            report_error(e, e.output.decode(encoding='UTF-8'), report_subcause, failure_injection_desc)
         except Exception as e:
             def report_subcause(e):
                 print('  with error {e}\n'.format(e=e), file=file)
-            report_error(e, e, report_subcause=report_subcause)
+            report_error(e, e, report_subcause, failure_injection_desc)
         return (path, boost_args + exec_args, type, success, file.getvalue())
 
+    with open(os.devnull, 'w') as devnull:
+        tp_server = subprocess.Popen('toxiproxy-server', stderr=devnull)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs)
     futures = []
     # We take note of all slapd processes that ran prior to the tests in order not to clean them.
@@ -472,6 +495,8 @@ if __name__ == "__main__":
     # Remove all residual folders of slapd.
     for instance_dir in  instance_dirs_to_remove:
         shutil.rmtree(instance_dir)
+
+    tp_server.terminate()
 
     if not failed_tests:
         print('\nOK.')
