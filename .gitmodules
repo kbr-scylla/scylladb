@@ -15,3 +15,6 @@
 [submodule "libdeflate"]
 	path = libdeflate
 	url = ../libdeflate
+[submodule "zstd"]
+	path = zstd
+	url = ../zstd
