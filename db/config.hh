@@ -276,8 +276,6 @@ public:
     named_value<sstring> audit_keyspaces;
     named_value<size_t> audit_syslog_write_buffer_size;
 
-    named_value<uint16_t> alternator_port;
-
     seastar::logging_settings logging_settings(const boost::program_options::variables_map&) const;
 
     boost::program_options::options_description_easy_init&
