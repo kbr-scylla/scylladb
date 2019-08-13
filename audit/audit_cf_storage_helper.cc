@@ -44,7 +44,7 @@ audit_cf_storage_helper::audit_cf_storage_helper()
                        "username,"
                        "error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        KEYSPACE_NAME, TABLE_NAME))
-    , _dummy_query_state(service::client_state(service::client_state::internal_tag{}))
+    , _dummy_query_state(service::client_state(service::client_state::internal_tag{}), empty_service_permit())
 {
 }
 

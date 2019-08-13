@@ -194,7 +194,8 @@ protected:
                 bool local,
                 const query_options& options,
                 db::timeout_clock::time_point now,
-                tracing::trace_state_ptr trace_state);
+                tracing::trace_state_ptr trace_state,
+                service_permit permit);
 private:
     future<::shared_ptr<cql_transport::messages::result_message>>
     do_execute(service::storage_proxy& proxy, service::query_state& qs, const query_options& options);
@@ -337,7 +338,7 @@ public:
      * @return vector of the mutations
      * @throws invalid_request_exception on invalid requests
      */
-    future<std::vector<mutation>> get_mutations(service::storage_proxy& proxy, const query_options& options, db::timeout_clock::time_point timeout, bool local, int64_t now, tracing::trace_state_ptr trace_state);
+    future<std::vector<mutation>> get_mutations(service::storage_proxy& proxy, const query_options& options, db::timeout_clock::time_point timeout, bool local, int64_t now, tracing::trace_state_ptr trace_state, service_permit permit);
 
 public:
     future<std::unique_ptr<update_parameters>> make_update_parameters(
@@ -348,7 +349,8 @@ public:
                 db::timeout_clock::time_point timeout,
                 bool local,
                 int64_t now,
-                tracing::trace_state_ptr trace_state);
+                tracing::trace_state_ptr trace_state,
+                service_permit permit);
 
 protected:
     /**

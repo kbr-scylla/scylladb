@@ -59,7 +59,7 @@ class query_processor::internal_state {
     service::query_state _qs;
 public:
     internal_state(qos::service_level_controller &sl_controller) :
-        _qs(service::client_state{service::client_state::internal_tag()}, sl_controller) {
+        _qs(service::client_state{service::client_state::internal_tag()}, empty_service_permit(), sl_controller) {
     }
     operator service::query_state&() {
         return _qs;

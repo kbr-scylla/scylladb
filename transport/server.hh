@@ -26,6 +26,7 @@
 #include <seastar/net/tls.hh>
 #include <seastar/core/metrics_registration.hh>
 #include "utils/fragmented_temporary_buffer.hh"
+#include "service_permit.hh"
 #include "service/qos/service_level_controller.hh"
 
 namespace scollectd {
@@ -79,19 +80,12 @@ struct [[gnu::packed]] cql_binary_frame_v3 {
     }
 };
 
-enum class cql_load_balance {
-    none,
-    round_robin,
-};
-
-cql_load_balance parse_load_balance(sstring value);
-
 struct cql_query_state {
     service::query_state query_state;
     std::unique_ptr<cql3::query_options> options;
 
-    cql_query_state(service::client_state& client_state, qos::service_level_controller& sl_controller)
-        : query_state(client_state, sl_controller)
+    cql_query_state(service::client_state& client_state, service_permit permit, qos::service_level_controller& sl_controller)
+        : query_state(client_state, std::move(permit), sl_controller)
     { }
 };
 
@@ -121,11 +115,10 @@ private:
     uint64_t _requests_served = 0;
     uint64_t _requests_serving = 0;
     uint64_t _requests_blocked_memory = 0;
-    cql_load_balance _lb;
     auth::service& _auth_service;
     qos::service_level_controller& _sl_controller;
 public:
-    cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, cql_load_balance lb, auth::service&,
+    cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, auth::service&,
             cql_server_config config, qos::service_level_controller& sl_controller);
     future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
     future<> do_accepts(int which, bool keepalive, socket_address server_addr);
@@ -175,7 +168,8 @@ private:
                 uint8_t,
                 uint16_t,
                 service::client_state,
-                tracing_request_type>;
+                tracing_request_type,
+                service_permit>;
         static thread_local execution_stage_type _process_request_stage;
     public:
         connection(cql_server& server, socket_address server_addr, connected_socket&& fd, socket_address addr);
@@ -186,7 +180,7 @@ private:
     private:
         const ::timeout_config& timeout_config() { return _server.timeout_config(); }
         friend class process_request_executor;
-        future<processing_result> process_request_one(fragmented_temporary_buffer::istream buf, uint8_t op, uint16_t stream, service::client_state client_state, tracing_request_type tracing_request);
+        future<processing_result> process_request_one(fragmented_temporary_buffer::istream buf, uint8_t op, uint16_t stream, service::client_state client_state, tracing_request_type tracing_request, service_permit permit);
         unsigned frame_size() const;
         unsigned pick_request_cpu();
         void update_client_state(processing_result& r);
@@ -196,10 +190,10 @@ private:
         future<response_type> process_startup(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_auth_response(uint16_t stream, request_reader in, service::client_state client_state);
         future<response_type> process_options(uint16_t stream, request_reader in, service::client_state client_state);
-        future<response_type> process_query(uint16_t stream, request_reader in, service::client_state client_state);
+        future<response_type> process_query(uint16_t stream, request_reader in, service::client_state client_state, service_permit permit);
         future<response_type> process_prepare(uint16_t stream, request_reader in, service::client_state client_state);
-        future<response_type> process_execute(uint16_t stream, request_reader in, service::client_state client_state);
-        future<response_type> process_batch(uint16_t stream, request_reader in, service::client_state client_state);
+        future<response_type> process_execute(uint16_t stream, request_reader in, service::client_state client_state, service_permit permit);
+        future<response_type> process_batch(uint16_t stream, request_reader in, service::client_state client_state, service_permit permit);
         future<response_type> process_register(uint16_t stream, request_reader in, service::client_state client_state);
         future<> process_until_tenant_switch();
 
@@ -221,7 +215,7 @@ private:
         std::unique_ptr<cql_server::response> make_auth_success(int16_t, bytes, const tracing::trace_state_ptr& tr_state);
         std::unique_ptr<cql_server::response> make_auth_challenge(int16_t, bytes, const tracing::trace_state_ptr& tr_state);
 
-        void write_response(foreign_ptr<std::unique_ptr<cql_server::response>>&& response, cql_compression compression = cql_compression::none);
+        void write_response(foreign_ptr<std::unique_ptr<cql_server::response>>&& response, service_permit permit = empty_service_permit(), cql_compression compression = cql_compression::none);
 
         void init_cql_serialization_format();
 
