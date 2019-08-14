@@ -507,7 +507,7 @@ future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func& f) {
                 return make_ready_future<opt_int>(res);
             });
         }
-    });
+    }).finally([cp] {});
 }
 
 template<typename Func>
@@ -520,7 +520,7 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
     return do_with(std::move(f), [this, cmd](Func& f) {
         return repeat_until_value([this, cmd, &f, retry = _max_retry]() mutable {
             --retry;
-            return get_connection(cmd).then([this, cmd, &f, retry](auto cp) mutable {
+            return get_connection(cmd).then([this, cmd, &f, retry](con_ptr cp) mutable {
                 auto res = do_cmd(cmd, std::move(cp), f);
                 kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
                 return res.then([this, retry](int res) mutable {
