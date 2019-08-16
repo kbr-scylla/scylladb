@@ -376,12 +376,7 @@ void kmip_host::impl::connection::attach(KMIP_CMD* cmd) {
     if (cmd == nullptr) {
         return;
     }
-
-    auto p = KMIP_CMD_get_userdata(cmd);
-    if (p != nullptr) {
-        return;
-    }
-
+    
     if (!_options.username.empty()) {
         kmip_chk(
                         KMIP_CMD_set_credential_username(cmd,
