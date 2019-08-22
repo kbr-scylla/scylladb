@@ -32,6 +32,7 @@
 #include "types/list.hh"
 #include "types/set.hh"
 #include "db/config.hh"
+#include "cql3/cql_config.hh"
 #include "sstables/compaction_manager.hh"
 #include "service/qos/qos_common.hh"
 #include "exception_utils.hh"
@@ -352,6 +353,56 @@ SEASTAR_TEST_CASE(test_in_clause_validation) {
         test_bind(sstring(1, '\255'), true);
         test_bind("proper utf8 string", false);
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_in_clause_cartesian_product_limits) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE tab1 (pk1 int, pk2 int, PRIMARY KEY ((pk1, pk2)))").get();
+
+        // 100 partitions, should pass
+        e.execute_cql("SELECT * FROM tab1 WHERE pk1 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)"
+                "                           AND pk2 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)").get();
+        // 110 partitions, should fail
+        BOOST_REQUIRE_THROW(
+                e.execute_cql("SELECT * FROM tab1 WHERE pk1 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)"
+                        "                          AND pk2 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)").get(),
+                        std::runtime_error);
+
+        e.execute_cql("CREATE TABLE tab2 (pk1 int, ck1 int, ck2 int, PRIMARY KEY (pk1, ck1, ck2))").get();
+
+        // 100 clustering rows, should pass
+        e.execute_cql("SELECT * FROM tab2 WHERE pk1 = 1"
+                "                          AND ck1 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)"
+                "                          AND ck2 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)").get();
+        // 110 clustering rows, should fail
+        BOOST_REQUIRE_THROW(
+                e.execute_cql("SELECT * FROM tab2 WHERE pk1 = 1"
+                        "                           AND ck1 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)"
+                        "                           AND ck2 IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)").get(),
+                        std::runtime_error);
+        auto make_tuple = [] (unsigned count) -> sstring {
+            std::ostringstream os;
+            os << "(0";
+            for (unsigned i = 1; i < count; ++i) {
+                os << "," << i;
+            }
+            os << ")";
+            return os.str();
+        };
+        e.execute_cql("CREATE TABLE tab3 (pk1 int, ck1 int, PRIMARY KEY (pk1, ck1))").get();
+        // tuple with 100 keys, should pass
+        e.execute_cql(fmt::format("SELECT * FROM tab3 WHERE pk1 IN {}", make_tuple(100))).get();
+        e.execute_cql(fmt::format("SELECT * FROM tab3 WHERE pk1 = 1 AND ck1 IN {}", make_tuple(100))).get();
+        // tuple with 101 keys, should fail
+        BOOST_REQUIRE_THROW(
+                e.execute_cql(fmt::format("SELECT * FROM tab3 WHERE pk1 IN {}", make_tuple(101))).get(),
+                std::runtime_error
+                );
+        BOOST_REQUIRE_THROW(
+                e.execute_cql(fmt::format("SELECT * FROM tab3 WHERE pk1 = 3 AND ck1 IN {}", make_tuple(101))).get(),
+                std::runtime_error
+                );
+    }).get();
 }
 
 SEASTAR_TEST_CASE(test_tuple_elements_validation) {
@@ -1652,6 +1703,11 @@ SEASTAR_TEST_CASE(test_duration_restrictions) {
                         env,
                         "create table my_table (tuple_key tuple<int, duration, int> PRIMARY KEY);",
                         "duration type is not supported for PRIMARY KEY part tuple_key");
+            }).then([&] {
+                return validate_request_failure(
+                        env,
+                        "create table my_table (a int, b duration, PRIMARY KEY ((a), b)) WITH CLUSTERING ORDER BY (b DESC);",
+                        "duration type is not supported for PRIMARY KEY part b");
             }).then([&] {
                 return env.execute_cql("create table my_table0 (key int PRIMARY KEY, name text, span duration);")
                         .discard_result().then([&] {
@@ -3015,7 +3071,7 @@ SEASTAR_TEST_CASE(test_insert_large_collection_values) {
             BOOST_REQUIRE_THROW(e.execute_cql(format("INSERT INTO tbl (pk, m) VALUES ('Golding', {{'{}': 'value'}});", long_value)).get(), std::exception);
 
             auto make_query_options = [] (cql_protocol_version_type version) {
-                    return std::make_unique<cql3::query_options>(db::consistency_level::ONE, infinite_timeout_config, std::nullopt,
+                    return std::make_unique<cql3::query_options>(cql3::default_cql_config, db::consistency_level::ONE, infinite_timeout_config, std::nullopt,
                             std::vector<cql3::raw_value_view>(), false,
                             cql3::query_options::specific_options::DEFAULT, cql_serialization_format{version});
             };
@@ -3795,6 +3851,20 @@ void require_rows(cql_test_env& e,
     }
 }
 
+/// Asserts that e.execute_prepared(id, values) contains expected rows, in any order.
+void require_rows(cql_test_env& e,
+                  cql3::prepared_cache_key_type id,
+                  const std::vector<cql3::raw_value>& values,
+                  const std::vector<std::vector<bytes_opt>>& expected,
+                  const source_location& loc = source_location::current()) {
+    try {
+        assert_that(e.execute_prepared(id, values).get0()).is_rows().with_rows_ignore_order(expected);
+    } catch (const std::exception& e) {
+        BOOST_FAIL(format("execute_prepared failed: {}\n{}:{}: originally from here",
+                          e.what(), loc.file_name(), loc.line()));
+    }
+}
+
 auto I(int32_t x) { return int32_type->decompose(x); }
 
 auto L(int64_t x) { return long_type->decompose(x); }
@@ -4003,15 +4073,10 @@ SEASTAR_TEST_CASE(test_like_operator_bind_marker) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         cquery_nofail(e, "create table t (s text primary key, )");
         cquery_nofail(e, "insert into t (s) values ('abc')");
-        try {
-            auto result = e.execute_prepared(
-                    e.prepare("select s from t where s like ? allow filtering").get0(),
-                    {cql3::raw_value::make_value(T("_b_"))}).get0();
-            assert_that(result).is_rows().with_rows_ignore_order({{T("abc")}});
-        }
-        catch (const std::exception& e) {
-            BOOST_FAIL(e.what());
-        }
+        auto stmt = e.prepare("select s from t where s like ? allow filtering").get0();
+        require_rows(e, stmt, {cql3::raw_value::make_value(T("_b_"))}, {{T("abc")}});
+        require_rows(e, stmt, {cql3::raw_value::make_value(T("%g"))}, {});
+        require_rows(e, stmt, {cql3::raw_value::make_value(T("%c"))}, {{T("abc")}});
     });
 }
 
@@ -4041,31 +4106,39 @@ SEASTAR_TEST_CASE(test_like_operator_varchar) {
     });
 }
 
-SEASTAR_TEST_CASE(test_alter_type_on_compact_storage_with_no_regular_columns_does_not_crash) {
-    return do_with_cql_env_thread([] (cql_test_env& e) {
-        cquery_nofail(e, "CREATE TYPE my_udf (first text);");
-        cquery_nofail(e, "create table z (pk int, ck frozen<my_udf>, primary key(pk, ck)) with compact storage;");
-        cquery_nofail(e, "alter type my_udf add test_int int;");
-    });
-}
+namespace {
 
-SEASTAR_TEST_CASE(test_like_operator_on_nonstring) {
-    return do_with_cql_env_thread([] (cql_test_env& e) {
-        cquery_nofail(e, "create table t (k int primary key, s text)");
+/// Asserts that a column of type \p type cannot be LHS of the LIKE operator.
+auto assert_like_doesnt_accept(const char* type) {
+    return do_with_cql_env_thread([type] (cql_test_env& e) {
+        cquery_nofail(e, format("create table t (k {}, p int primary key)", type).c_str());
         BOOST_REQUIRE_EXCEPTION(
                 e.execute_cql("select * from t where k like 123 allow filtering").get(),
                 exceptions::invalid_request_exception,
                 exception_predicate::message_contains("only on string types"));
-#if 0 // TODO: Enable when query::result_set::consume() is fixed.
-        BOOST_REQUIRE_EXCEPTION(
-                e.execute_prepared(
-                        e.prepare("select s from t where s like ? allow filtering").get0(),
-                        {cql3::raw_value::make_value(I(1))}).get(),
-                exceptions::invalid_request_exception,
-                exception_predicate::message_contains("only on string types"));
-#endif
     });
 }
+
+} // anonymous namespace
+
+SEASTAR_TEST_CASE(test_like_operator_fails_on_bigint)    { return assert_like_doesnt_accept("bigint");    }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_blob)      { return assert_like_doesnt_accept("blob");      }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_boolean)   { return assert_like_doesnt_accept("boolean");   }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_counter)   { return assert_like_doesnt_accept("counter");   }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_decimal)   { return assert_like_doesnt_accept("decimal");   }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_double)    { return assert_like_doesnt_accept("double");    }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_duration)  { return assert_like_doesnt_accept("duration");  }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_float)     { return assert_like_doesnt_accept("float");     }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_inet)      { return assert_like_doesnt_accept("inet");      }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_int)       { return assert_like_doesnt_accept("int");       }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_smallint)  { return assert_like_doesnt_accept("smallint");  }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_timestamp) { return assert_like_doesnt_accept("timestamp"); }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_tinyint)   { return assert_like_doesnt_accept("tinyint");   }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_uuid)      { return assert_like_doesnt_accept("uuid");      }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_varint)    { return assert_like_doesnt_accept("varint");    }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_timeuuid)  { return assert_like_doesnt_accept("timeuuid");  }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_date)      { return assert_like_doesnt_accept("date");      }
+SEASTAR_TEST_CASE(test_like_operator_fails_on_time)      { return assert_like_doesnt_accept("time");      }
 
 SEASTAR_TEST_CASE(test_like_operator_on_token) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
@@ -4074,5 +4147,13 @@ SEASTAR_TEST_CASE(test_like_operator_on_token) {
                 e.execute_cql("select * from t where token(s) like 'abc' allow filtering").get(),
                 exceptions::invalid_request_exception,
                 exception_predicate::message_contains("token function"));
+    });
+}
+
+SEASTAR_TEST_CASE(test_alter_type_on_compact_storage_with_no_regular_columns_does_not_crash) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "CREATE TYPE my_udf (first text);");
+        cquery_nofail(e, "create table z (pk int, ck frozen<my_udf>, primary key(pk, ck)) with compact storage;");
+        cquery_nofail(e, "alter type my_udf add test_int int;");
     });
 }

@@ -135,14 +135,15 @@ event::event_type parse_event_type(const sstring& value)
 }
 
 cql_server::cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, auth::service& auth_service,
-        cql_server_config config, qos::service_level_controller& sl_controller)
+        const cql3::cql_config& cql_config, cql_server_config config, qos::service_level_controller& sl_controller)
     : _proxy(proxy)
     , _query_processor(qp)
     , _config(config)
     , _max_request_size(config.max_request_size)
-    , _memory_available(_max_request_size)
+    , _memory_available(config.get_service_memory_limiter_semaphore())
     , _notifier(std::make_unique<event_notifier>())
     , _auth_service(auth_service)
+    , _cql_config(cql_config)
     , _sl_controller(sl_controller)
 {
     namespace sm = seastar::metrics;
@@ -755,7 +756,7 @@ future<response_type> cql_server::connection::process_query(uint16_t stream, req
     auto query = in.read_long_string_view();
     auto q_state = std::make_unique<cql_query_state>(client_state, std::move(permit), _server._sl_controller);
     auto& query_state = q_state->query_state;
-    q_state->options = in.read_options(_version, _cql_serialization_format, this->timeout_config());
+    q_state->options = in.read_options(_version, _cql_serialization_format, this->timeout_config(), _server._cql_config);
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
 
@@ -833,10 +834,10 @@ future<response_type> cql_server::connection::process_execute(uint16_t stream, r
         std::vector<cql3::raw_value_view> values;
         in.read_value_view_list(_version, values);
         auto consistency = in.read_consistency();
-        q_state->options = std::make_unique<cql3::query_options>(consistency, timeout_config(), std::nullopt, values, false,
+        q_state->options = std::make_unique<cql3::query_options>(_server._cql_config, consistency, timeout_config(), std::nullopt, values, false,
                                                                  cql3::query_options::specific_options::DEFAULT, _cql_serialization_format);
     } else {
-        q_state->options = in.read_options(_version, _cql_serialization_format, this->timeout_config());
+        q_state->options = in.read_options(_version, _cql_serialization_format, this->timeout_config(), _server._cql_config);
     }
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
@@ -952,7 +953,7 @@ cql_server::connection::process_batch(uint16_t stream, request_reader in, servic
     auto q_state = std::make_unique<cql_query_state>(client_state, std::move(permit), _server._sl_controller);
     auto& query_state = q_state->query_state;
     // #563. CQL v2 encodes query_options in v1 format for batch requests.
-    q_state->options = std::make_unique<cql3::query_options>(cql3::query_options::make_batch_options(std::move(*in.read_options(_version < 3 ? 1 : _version, _cql_serialization_format, this->timeout_config())), std::move(values)));
+    q_state->options = std::make_unique<cql3::query_options>(cql3::query_options::make_batch_options(std::move(*in.read_options(_version < 3 ? 1 : _version, _cql_serialization_format, this->timeout_config(), _server._cql_config)), std::move(values)));
     auto& options = *q_state->options;
 
     tracing::set_consistency_level(client_state.get_trace_state(), options.get_consistency());
@@ -1567,16 +1568,16 @@ public:
         }
         if (type->is_collection()) {
             auto&& ctype = static_cast<const collection_type_impl*>(type.get());
-            if (&ctype->_kind == &collection_type_impl::kind::map) {
+            if (ctype->get_kind() == abstract_type::kind::map) {
                 r.write_short(uint16_t(type_id::MAP));
                 auto&& mtype = static_cast<const map_type_impl*>(ctype);
                 encode(r, mtype->get_keys_type());
                 encode(r, mtype->get_values_type());
-            } else if (&ctype->_kind == &collection_type_impl::kind::set) {
+            } else if (ctype->get_kind() == abstract_type::kind::set) {
                 r.write_short(uint16_t(type_id::SET));
                 auto&& stype = static_cast<const set_type_impl*>(ctype);
                 encode(r, stype->get_elements_type());
-            } else if (&ctype->_kind == &collection_type_impl::kind::list) {
+            } else if (ctype->get_kind() == abstract_type::kind::list) {
                 r.write_short(uint16_t(type_id::LIST));
                 auto&& ltype = static_cast<const list_type_impl*>(ctype);
                 encode(r, ltype->get_elements_type());

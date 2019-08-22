@@ -22,10 +22,12 @@
 #include <seastar/core/reactor.hh>
 #include "service/storage_service.hh"
 #include <seastar/core/distributed.hh>
+#include <seastar/core/abort_source.hh>
 #include "database.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "service/qos/service_level_controller.hh"
 #include "db/config.hh"
+#include "cql3/cql_config.hh"
 
 namespace db::view {
 class view_update_generator;
@@ -36,11 +38,16 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         distributed<database> db;
         database_config dbcfg;
         db::config cfg;
+        sharded<abort_source> abort_sources;
         sharded<auth::service> auth_service;
         sharded<db::system_distributed_keyspace> sys_dist_ks;
         sharded<db::view::view_update_generator> view_update_generator;
         utils::fb_utilities::set_broadcast_address(gms::inet_address("127.0.0.1"));
         sharded<gms::feature_service> feature_service;
+
+        abort_sources.start().get();
+        auto stop_abort_sources = defer([&] { abort_sources.stop().get(); });
+
         feature_service.start().get();
         sharded<qos::service_level_controller> sl_controller;
         sl_controller.start(qos::service_level_options{1000}).get();
@@ -57,7 +64,13 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         gms::get_gossiper().start(std::ref(feature_service), std::ref(cfg)).get();
         auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
 
-        service::get_storage_service().start(std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), std::ref(sl_controller), true).get();
+        service::storage_service_config sscfg;
+        sscfg.available_memory =  memory::stats().total_memory();
+        sharded<cql3::cql_config> cql_config;
+        cql_config.start();
+        auto stop_cql_config = defer([&] { cql_config.stop().get(); });
+
+        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(sl_controller), true).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         db.start(std::ref(cfg), dbcfg).get();

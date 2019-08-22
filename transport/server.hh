@@ -92,6 +92,7 @@ struct cql_query_state {
 struct cql_server_config {
     ::timeout_config timeout_config;
     size_t max_request_size;
+    std::function<semaphore& ()> get_service_memory_limiter_semaphore;
     bool allow_shard_aware_drivers = true;
 };
 
@@ -106,7 +107,7 @@ private:
     distributed<cql3::query_processor>& _query_processor;
     cql_server_config _config;
     size_t _max_request_size;
-    semaphore _memory_available;
+    semaphore& _memory_available;
     seastar::metrics::metric_groups _metrics;
     std::unique_ptr<event_notifier> _notifier;
 private:
@@ -116,10 +117,11 @@ private:
     uint64_t _requests_serving = 0;
     uint64_t _requests_blocked_memory = 0;
     auth::service& _auth_service;
+    const cql3::cql_config& _cql_config;
     qos::service_level_controller& _sl_controller;
 public:
     cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, auth::service&,
-            cql_server_config config, qos::service_level_controller& sl_controller);
+            const cql3::cql_config& cql_config, cql_server_config config, qos::service_level_controller& sl_controller);
     future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
     future<> do_accepts(int which, bool keepalive, socket_address server_addr);
     future<> stop();
