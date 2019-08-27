@@ -31,6 +31,8 @@ debian_base_packages=(
     thrift-compiler
     git
     pigz
+    slapd
+    ldap-utils
 )
 
 fedora_packages=(
@@ -72,6 +74,9 @@ fedora_packages=(
     util-linux
     ethtool
     hwloc
+    openldap-servers
+    openldap-devel
+    toxiproxy
 )
 
 centos_packages=(
@@ -85,6 +90,8 @@ centos_packages=(
     scylla-python34-pyparsing20
     systemd-devel
     pigz
+    openldap-servers
+    openldap-devel
 )
 
 if [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
