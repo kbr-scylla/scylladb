@@ -299,7 +299,8 @@ std::optional<sstring> service_level_controller::get_active_service_level() {
 }
 
 void service_level_controller::update_from_distributed_data(std::chrono::duration<float> interval) {
-    container().invoke_on(global_controller, [interval] (service_level_controller& global_sl) {
+    // FIXME: ignored future
+    (void)container().invoke_on(global_controller, [interval] (service_level_controller& global_sl) {
         if (global_sl._global_controller_db->distributed_data_update.available()) {
             sl_logger.info("update_from_distributed_data: starting configuration polling loop");
             global_sl._global_controller_db->distributed_data_update = repeat([interval, &global_sl] {
