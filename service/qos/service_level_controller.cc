@@ -405,7 +405,7 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
            if ((service_level_it->second.is_static) && (!is_static)) {
                service_level_it->second.is_static = false;
            }
-           container().invoke_on_all(&service_level_controller::notify_service_level_updated, name, slo);
+           return container().invoke_on_all(&service_level_controller::notify_service_level_updated, name, slo);
         } else {
             // this means we set static layer when the the service level
             // is running of the non static configuration. so we have nothing
