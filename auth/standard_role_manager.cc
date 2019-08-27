@@ -174,7 +174,7 @@ future<> standard_role_manager::create_metadata_tables_if_missing() const {
 
     if (_qp.db().get_config().create_role_attributes_table) {
         role_attributes_table_created = role_attributes_table_created.then([this] {
-            create_metadata_table_if_missing(
+            return create_metadata_table_if_missing(
                     meta::role_attributes_table::name,
                     _qp,
                     meta::role_attributes_table::creation_query(),
