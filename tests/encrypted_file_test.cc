@@ -15,6 +15,7 @@
 #include <seastar/core/seastar.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/util/defer.hh>
 
 #include <seastar/testing/test_case.hh>
 
@@ -52,6 +53,7 @@ static future<> test_random_data_disk(size_t n) {
         auto name = "test_rand_" + std::to_string(n);
         auto t = make_file(name, open_flags::rw|open_flags::create).get();
         auto f = std::get<0>(t);
+        auto close_file = defer([&] { f.close().get(); });
         auto k = std::get<1>(t);
         auto a = f.memory_dma_alignment();
         auto buf = generate_random(n, a);
