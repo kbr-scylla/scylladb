@@ -156,8 +156,11 @@ void init_ms_fd_gossiper(sharded<qos::service_level_controller>& sl_controller
         throw bad_configuration_error();
     }
     gossiper.local().set_seeds(seeds);
-    gossiper.invoke_on_all([cluster_name](gms::gossiper& g) {
+    // Do it in the background.
+    (void)gossiper.invoke_on_all([cluster_name](gms::gossiper& g) {
         g.set_cluster_name(cluster_name);
+    }).handle_exception([] (std::exception_ptr e) {
+        startlog.error("Unexpected exception while setting cluster name: {}", e);
     });
 }
 

@@ -539,7 +539,8 @@ public:
      */
     future<sseg_ptr> finish_and_get_new(db::timeout_clock::time_point timeout) {
         _closed = true;
-        sync();
+        //FIXME: discarded future.
+        (void)sync();
         return _segment_manager->active_segment(timeout);
     }
     void reset_sync_time() {
@@ -838,7 +839,8 @@ public:
                     return new_seg->allocate(id, std::move(writer), std::move(permit), timeout);
                 });
             } else {
-                cycle().discard_result().handle_exception([] (auto ex) {
+                //FIXME: discarded future
+                (void)cycle().discard_result().handle_exception([] (auto ex) {
                     clogger.error("Failed to flush commits to disk: {}", ex);
                 });
             }
@@ -890,7 +892,8 @@ public:
             // then no other request will be allowed in to force the cycle()ing of this buffer. We
             // have to do it ourselves.
             if ((buffer_position() >= (db::commitlog::segment::default_size))) {
-                cycle().discard_result().handle_exception([] (auto ex) {
+                //FIXME: discarded future.
+                (void)cycle().discard_result().handle_exception([] (auto ex) {
                     clogger.error("Failed to flush commits to disk: {}", ex);
                 });
             }
@@ -1436,7 +1439,7 @@ void db::commitlog::segment_manager::discard_unused_segments() {
     // segments on deletion queue could be non-empty, and we don't want
     // those accidentally left around for replay.
     if (!_shutdown) {
-        with_gate(_gate, [this] {
+        (void)with_gate(_gate, [this] {
             return do_pending_deletes();
         });
     }
@@ -1587,7 +1590,7 @@ future<> db::commitlog::segment_manager::clear() {
  */
 void db::commitlog::segment_manager::sync() {
     for (auto s : _segments) {
-        s->sync(); // we do not care about waiting...
+        (void)s->sync(); // we do not care about waiting...
     }
 }
 
@@ -1595,9 +1598,10 @@ void db::commitlog::segment_manager::on_timer() {
     // Gate, because we are starting potentially blocking ops
     // without waiting for them, so segement_manager could be shut down
     // while they are running.
-    seastar::with_gate(_gate, [this] {
+    (void)seastar::with_gate(_gate, [this] {
         if (cfg.mode != sync_mode::BATCH) {
-            sync();
+            //FIXME: discarded future.
+            (void)sync();
         }
         // IFF a new segment was put in use since last we checked, and we're
         // above threshold, request flush.
@@ -2043,7 +2047,8 @@ db::commitlog::read_log_file(const sstring& filename, const sstring& pfx, seasta
         auto w = make_lw_shared<work>(std::move(f), d, read_io_prio_class, off);
         auto ret = w->s.listen(next);
 
-        w->s.started().then(std::bind(&work::read_file, w.get())).then([w] {
+        //FIXME: discarded future.
+        (void)w->s.started().then(std::bind(&work::read_file, w.get())).then([w] {
             if (!w->failed) {
                 w->s.close();
             }

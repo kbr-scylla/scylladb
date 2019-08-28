@@ -67,7 +67,8 @@ public:
                 {ep2, endpoint_state()},
             };
             gms::gossip_digest_ack ack(std::move(digests), std::move(eps));
-            ms.send_gossip_digest_ack(from, std::move(ack)).handle_exception([] (auto ep) {
+            // FIXME: discarded future.
+            (void)ms.send_gossip_digest_ack(from, std::move(ack)).handle_exception([] (auto ep) {
                 fmt::print("Fail to send ack : {}", ep);
             });
             return messaging_service::no_wait();
@@ -82,7 +83,8 @@ public:
                 {ep1, endpoint_state()},
             };
             gms::gossip_digest_ack2 ack2(std::move(eps));
-            ms.send_gossip_digest_ack2(from, std::move(ack2)).handle_exception([] (auto ep) {
+            // FIXME: discarded future.
+            (void)ms.send_gossip_digest_ack2(from, std::move(ack2)).handle_exception([] (auto ep) {
                 fmt::print("Fail to send ack2 : {}", ep);
             });
             digest_test_done.set_value();
@@ -172,11 +174,11 @@ int main(int ac, char ** av) {
         }
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
-        sl_controller.start(qos::service_level_options{1000}).then([listen, &sl_controller] {
+        return sl_controller.start(qos::service_level_options{1000}).then([listen, &sl_controller] {
             return netw::get_messaging_service().start(std::ref(sl_controller), listen);
         }).then([config, api_port, stay_alive] () {
             auto testers = new distributed<tester>;
-            testers->start().then([testers]{
+            return testers->start().then([testers]{
                 auto& server = netw::get_local_messaging_service();
                 auto port = server.port();
                 std::cout << "Messaging server listening on port " << port << " ...\n";
@@ -184,7 +186,7 @@ int main(int ac, char ** av) {
             }).then([testers, config, stay_alive] {
                 auto t = &testers->local();
                 if (!config.count("server")) {
-                    return;
+                    return make_ready_future<>();
                 }
                 auto ip = config["server"].as<std::string>();
                 auto cpuid = config["cpuid"].as<uint32_t>();
@@ -192,18 +194,18 @@ int main(int ac, char ** av) {
                 t->set_server_cpuid(cpuid);
                 fmt::print("=============TEST START===========\n");
                 fmt::print("Sending to server ....\n");
-                t->test_gossip_digest().then([testers, t] {
+                return t->test_gossip_digest().then([testers, t] {
                     return t->test_gossip_shutdown();
                 }).then([testers, t] {
                     return t->test_echo();
                 }).then([testers, t, stay_alive] {
                     if (stay_alive) {
-                        return;
+                        return make_ready_future<>();
                     }
                     fmt::print("=============TEST DONE===========\n");
-                    testers->stop().then([testers] {
+                    return testers->stop().then([testers] {
                         delete testers;
-                        netw::get_messaging_service().stop().then([]{
+                        return netw::get_messaging_service().stop().then([]{
                             engine().exit(0);
                         });
                     });

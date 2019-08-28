@@ -2848,13 +2848,15 @@ int sstable::compare_by_max_timestamp(const sstable& other) const {
 
 sstable::~sstable() {
     if (_index_file) {
-        _index_file.close().handle_exception([save = _index_file, op = background_jobs().start()] (auto ep) {
+        // Registered as background job.
+        (void)_index_file.close().handle_exception([save = _index_file, op = background_jobs().start()] (auto ep) {
             sstlog.warn("sstable close index_file failed: {}", ep);
             general_disk_error();
         });
     }
     if (_data_file) {
-        _data_file.close().handle_exception([save = _data_file, op = background_jobs().start()] (auto ep) {
+        // Registered as background job.
+        (void)_data_file.close().handle_exception([save = _data_file, op = background_jobs().start()] (auto ep) {
             sstlog.warn("sstable close data_file failed: {}", ep);
             general_disk_error();
         });
@@ -2871,7 +2873,7 @@ sstable::~sstable() {
             // FIXME:
             // - Longer term fix is to hand off deletion of sstables to a manager that can
             //   deal with sstable marked to be deleted after the corresponding object is destructed.
-            unlink().handle_exception(
+            (void)unlink().handle_exception(
                         [op = background_jobs().start()] (std::exception_ptr eptr) {
                             try {
                                 std::rethrow_exception(eptr);
@@ -3193,7 +3195,7 @@ delete_atomically(std::vector<shared_sstable> ssts) {
             dir_f.close().get();
             sstlog.debug("{} written successfully.", pending_delete_log);
         } catch (...) {
-            sstlog.warn("Error while writing {}: {}. Ignoring.", pending_delete_log), std::current_exception();
+            sstlog.warn("Error while writing {}: {}. Ignoring.", pending_delete_log, std::current_exception());
         }
 
         parallel_for_each(ssts, [] (shared_sstable sst) {

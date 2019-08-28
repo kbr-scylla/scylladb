@@ -93,7 +93,8 @@ future<> gossiping_property_file_snitch::start() {
 
 void gossiping_property_file_snitch::periodic_reader_callback() {
     _file_reader_runs = true;
-    property_file_was_modified().then([this] (bool was_modified) {
+    //FIXME: discarded future.
+    (void)property_file_was_modified().then([this] (bool was_modified) {
 
         if (was_modified) {
             return read_property_file();
