@@ -265,12 +265,12 @@ future<> kmip_host::impl::connection::connect() {
 
     if (!_options.certfile.empty()) {
         f = f.then([this, cred] {
-            cred->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
+            return cred->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
         });
     }
     if (!_options.truststore.empty()) {
         f = f.then([this, cred] {
-            cred->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
+            return cred->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
         });
     }
     return f.then([this, cred] {
