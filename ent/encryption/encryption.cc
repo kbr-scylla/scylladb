@@ -335,11 +335,15 @@ public:
                 return create(_ctxt, opts);
             }
             extension_ptr operator()(const bytes& v) const {
-                auto opts = ser::deserialize_from_buffer(v, boost::type<options>(), 0);
+                auto opts = parse_options(v);
                 return create(_ctxt, std::move(opts));
             }
         } v{ctxt};
         return std::visit(v, cfg);
+    }
+
+    static options parse_options(const bytes& v) {
+        return ser::deserialize_from_buffer(v, boost::type<options>(), 0);
     }
 
     future<::shared_ptr<symmetric_key>> key_for_read(opt_bytes id) const {
@@ -393,6 +397,66 @@ public:
         : _ctxt(std::move(ctxt))
     {}
 
+    static inline const sstring key_id_attribute = "scylla_key_id";
+    static inline const sstring encrypted_components_attribute = "encrypted_components";
+
+    static inline const sstables::disk_string<uint32_t> encryption_attribute_ds{
+        bytes{encryption_attribute.begin(), encryption_attribute.end()}
+    };
+    static inline const sstables::disk_string<uint32_t> key_id_attribute_ds{
+        bytes{key_id_attribute.begin(), key_id_attribute.end()}
+    };
+    static inline const sstables::disk_string<uint32_t> encrypted_components_attribute_ds{
+        bytes{encrypted_components_attribute.begin(), encrypted_components_attribute.end()}
+    };
+
+    attr_value_map get_attributes(const sstables::sstable& sst) const override {
+        auto& sc = sst.get_shared_components();
+        if (!sc.scylla_metadata) {
+            return {};
+        }
+        auto* exta  = sc.scylla_metadata->get_extension_attributes();
+        if (!exta) {
+            return {};
+        }
+
+        auto i = exta->map.find(encryption_attribute_ds);
+        if (i == exta->map.end()) {
+            return {};
+        }
+        auto opts = encryption_schema_extension::parse_options(i->second.value);
+
+        if (exta->map.count(key_id_attribute_ds)) {
+            auto id = exta->map.at(key_id_attribute_ds).value;
+            opts["key_id"] = utils::UUID_gen::get_UUID(id).to_sstring();
+        }
+
+        if (exta->map.count(encrypted_components_attribute_ds)) {
+            std::vector<sstables::component_type> ccs;
+            ccs.reserve(9);
+            auto mask = ser::deserialize_from_buffer(exta->map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
+            for (auto c : { sstables::component_type::Index,
+                            sstables::component_type::CompressionInfo,
+                            sstables::component_type::Data,
+                            sstables::component_type::Summary,
+                            sstables::component_type::Digest,
+                            sstables::component_type::CRC,
+                            sstables::component_type::Filter,
+                            sstables::component_type::Statistics,
+                            sstables::component_type::TemporaryStatistics,
+            }) {
+                if (mask & int(c)) {
+                    ccs.emplace_back(c);
+                }
+            }
+            opts["components"] = std::to_string(ccs);
+        } else {
+            opts["components"] = "Data";
+        }
+        attr_value_map res;
+        res["encryption_info"] = std::move(opts);
+        return res;
+    }
 
     future<file> wrap_file(sstables::sstable& sst, sstables::component_type type, file f, open_flags flags) override {
         switch (type) {
@@ -403,19 +467,6 @@ public:
         default:
             break;
         }
-
-        static const sstring key_id_attribute = "scylla_key_id";
-        static const sstring encrypted_components_attribute = "encrypted_components";
-
-        static const sstables::disk_string<uint32_t> encryption_attribute_ds{
-            bytes{encryption_attribute.begin(), encryption_attribute.end()}
-        };
-        static const sstables::disk_string<uint32_t> key_id_attribute_ds{
-            bytes{key_id_attribute.begin(), key_id_attribute.end()}
-        };
-        static const sstables::disk_string<uint32_t> encrypted_components_attribute_ds{
-            bytes{encrypted_components_attribute.begin(), encrypted_components_attribute.end()}
-        };
 
         if (flags == open_flags::ro) {
             // open existing. check read opts.
