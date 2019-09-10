@@ -156,6 +156,7 @@ public:
 private:
     future<key_and_id_type> create_key(const kmip_key_info&);
     future<shared_ptr<symmetric_key>> find_key(const id_type&);
+    future<std::vector<id_type>> find_matching_keys(const kmip_key_info&, std::optional<int> max = {});
 
     static shared_ptr<symmetric_key> ensure_compatible_key(shared_ptr<symmetric_key>, const key_info&);
 
@@ -164,6 +165,8 @@ private:
     class kmip_cmd;
     class kmip_data_list;
     class connection;
+
+    std::tuple<kmip_data_list, unsigned int> make_attributes(const kmip_key_info&) const;
 
     union userdata {
         void * ptr;
@@ -376,7 +379,7 @@ void kmip_host::impl::connection::attach(KMIP_CMD* cmd) {
     if (cmd == nullptr) {
         return;
     }
-    
+
     if (!_options.username.empty()) {
         kmip_chk(
                         KMIP_CMD_set_credential_username(cmd,
@@ -605,79 +608,94 @@ future<> kmip_host::impl::connect() {
     });
 }
 
+std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_attributes(const kmip_key_info& info) const {
+    kmip_data_list kdl_attrs;
+
+    if (!info.options.template_name.empty()) {
+        kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
+                        const_cast<char*>(KMIP_TAGSTR_TEMPLATE),
+                        const_cast<char*>(info.options.template_name.c_str()))
+                        );
+    }
+    if (!info.options.key_namespace.empty()) {
+        kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
+                        const_cast<char *>("x-namespace"),
+                        const_cast<char*>(info.options.key_namespace.c_str()))
+                        );
+    }
+
+    auto from_str = [](auto f, const sstring& s) {
+        int found = 0;
+        auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
+        if (!found) {
+            throw std::invalid_argument(s);
+        }
+        return res;
+    };
+
+    sstring type, mode, padd;
+    std::tie(type, mode, padd) = parse_key_spec(info.info.alg);
+
+    auto crypt_alg = from_str(&KMIP_string_to_CRYPTOGRAPHIC_ALGORITHM, type);
+
+    KMIP_CRYPTOGRAPHIC_PARAMETERS params;
+    kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_clear(&params));
+
+    KMIP_CRYPTOGRAPHIC_PARAMETERS_set_cryptographic_algorithm(&params, crypt_alg);
+    KMIP_CRYPTOGRAPHIC_PARAMETERS_set_block_cipher_mode(&params, from_str(&KMIP_string_to_BLOCK_CIPHER_MODE, mode));
+    if (!padd.empty()) {
+        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_padding_method(&params, from_str(&KMIP_string_to_PADDING_METHOD, padd));
+    }
+
+    kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_to_kdl(&params, kdl_attrs));
+
+    return std::make_tuple(std::move(kdl_attrs), crypt_alg);
+}
+
 future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_key_info& info) {
     if (engine().cpu_id() == 0) {
-        kmip_data_list kdl_attrs;
-
-        kmip_log.debug("{}: Creating key {}", _name, info);
-
-        if (!info.options.template_name.empty()) {
-            kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
-                            const_cast<char*>(KMIP_TAGSTR_TEMPLATE),
-                            const_cast<char*>(info.options.template_name.c_str()))
-                            );
-        }
-        if (!info.options.key_namespace.empty()) {
-            kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
-                            const_cast<char *>("x-namespace"),
-                            const_cast<char*>(info.options.key_namespace.c_str()))
-                            );
-        }
-
-        auto from_str = [](auto f, const sstring& s) {
-            int found = 0;
-            auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
-            if (!found) {
-                throw std::invalid_argument(s);
+        // #1039 First try looking for existing keys on server
+        return find_matching_keys(info, 1).then([this, info](std::vector<id_type> ids) {
+            if (!ids.empty()) {
+                // got it
+                return get_key_by_id(ids.front(), info.info).then([id = ids.front()](shared_ptr<symmetric_key> k) {
+                    return key_and_id_type(std::move(k), id);
+                });
             }
-            return res;
-        };
 
-        sstring type, mode, padd;
-        std::tie(type, mode, padd) = parse_key_spec(info.info.alg);
+            kmip_log.debug("{}: Creating key {}", _name, info);
 
-        auto crypt_alg = from_str(&KMIP_string_to_CRYPTOGRAPHIC_ALGORITHM, type);
+            auto [kdl_attrs, crypt_alg] = make_attributes(info);
 
-        KMIP_CRYPTOGRAPHIC_PARAMETERS params;
-        kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_clear(&params));
+            // TODO: this is inefficient. We can probably put this in a single batch.
+            kmip_cmd cmd;
+            KMIP_CMD_set_ctx(cmd, const_cast<char *>("Create key"));
 
-        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_cryptographic_algorithm(&params, crypt_alg);
-        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_block_cipher_mode(&params, from_str(&KMIP_string_to_BLOCK_CIPHER_MODE, mode));
-        if (!padd.empty()) {
-            KMIP_CRYPTOGRAPHIC_PARAMETERS_set_padding_method(&params, from_str(&KMIP_string_to_PADDING_METHOD, padd));
-        }
+            return do_cmd(std::move(cmd), [info, kdl_attrs = std::move(kdl_attrs), crypt_alg](KMIP_CMD* cmd) {
+                return KMIP_CMD_create_smpl(cmd, KMIP_OBJECT_TYPE_SYMMETRIC_KEY,
+                    crypt_alg,
+                    KMIP_CRYPTOGRAPHIC_USAGE_ENCRYPT|KMIP_CRYPTOGRAPHIC_USAGE_DECRYPT,
+                    int(info.info.len),
+                    KMIP_DATA_LIST_attrs(kdl_attrs), KMIP_DATA_LIST_n_attrs(kdl_attrs)
+                );
+            }).then([this, info](kmip_cmd cmd) {
+                /* now get the details (the value of the key) */
+                char* new_id;
+                kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id), cmd);
 
-        kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_to_kdl(&params, kdl_attrs));
+                utils::UUID uuid(new_id);
+                kmip_log.debug("{}: Created {}:{}", _name, info, uuid);
 
+                KMIP_CMD_set_ctx(cmd, const_cast<char *>("activate"));
 
-        // TODO: this is inefficient. We can probably put this in a single batch.
-        kmip_cmd cmd;
-        KMIP_CMD_set_ctx(cmd, const_cast<char *>("Create key"));
-
-        return do_cmd(std::move(cmd), [info, kdl_attrs = std::move(kdl_attrs), crypt_alg](KMIP_CMD* cmd) {
-            return KMIP_CMD_create_smpl(cmd, KMIP_OBJECT_TYPE_SYMMETRIC_KEY,
-                crypt_alg,
-                KMIP_CRYPTOGRAPHIC_USAGE_ENCRYPT|KMIP_CRYPTOGRAPHIC_USAGE_DECRYPT,
-                int(info.info.len),
-                KMIP_DATA_LIST_attrs(kdl_attrs), KMIP_DATA_LIST_n_attrs(kdl_attrs)
-            );
-        }).then([this, info](kmip_cmd cmd) {
-            /* now get the details (the value of the key) */
-            char* new_id;
-            kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id), cmd);
-
-            utils::UUID uuid(new_id);
-            kmip_log.debug("{}: Created {}:{}", _name, info, uuid);
-
-            KMIP_CMD_set_ctx(cmd, const_cast<char *>("activate"));
-
-            return do_cmd(std::move(cmd), [new_id](KMIP_CMD* cmd) {
-                return KMIP_CMD_activate(cmd, new_id);
-            }).then([this, uuid, info](kmip_cmd cmd) {
-                bytes id = uuid.serialize();
-                kmip_log.debug("{}: Activated {}", _name, uuid);
-                return get_key_by_id(id, info.info).then([id](auto k) {
-                    return key_and_id_type(k, id);
+                return do_cmd(std::move(cmd), [new_id](KMIP_CMD* cmd) {
+                    return KMIP_CMD_activate(cmd, new_id);
+                }).then([this, uuid, info](kmip_cmd cmd) {
+                    bytes id = uuid.serialize();
+                    kmip_log.debug("{}: Activated {}", _name, uuid);
+                    return get_key_by_id(id, info.info).then([id](auto k) {
+                        return key_and_id_type(k, id);
+                    });
                 });
             });
         });
@@ -689,6 +707,45 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
         });
     }).then([](key_info info, bytes b, id_type id) {
        return make_ready_future<key_and_id_type>(key_and_id_type(make_shared<symmetric_key>(info, b), id));
+    });
+}
+
+future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(const kmip_key_info& info, std::optional<int> max) {
+    kmip_log.debug("{}: Finding matching key {}", _name, info);
+
+    auto [kdl_attrs, crypt_alg] = make_attributes(info);
+
+    KMIP_DATA_LIST_add_32(kdl_attrs, KMIP_TAG_STATE, KMIP_ITEM_TYPE_ENUMERATION, KMIP_STATE_ACTIVE);
+
+    kmip_cmd cmd;
+    KMIP_CMD_set_ctx(cmd, const_cast<char *>("Find matching key"));
+
+    std::unique_ptr<int> mp;
+    int* maxp = nullptr;
+    if (max) {
+        mp = std::make_unique<int>(*max);
+        maxp = mp.get();
+    }
+
+    return do_cmd(std::move(cmd), [info, kdl_attrs = std::move(kdl_attrs), crypt_alg, maxp](KMIP_CMD* cmd) {
+        return KMIP_CMD_locate(cmd, maxp, nullptr, KMIP_DATA_LIST_attrs(kdl_attrs), KMIP_DATA_LIST_n_attrs(kdl_attrs));
+    }).then([this, info, mp = std::move(mp)](kmip_cmd cmd) {
+        std::vector<id_type> result;
+
+        for (int i = 0; ; ++i) {
+            char* new_id;
+            auto err = KMIP_CMD_get_uuid(cmd, i, &new_id);
+            if (err == KMIP_ERROR_NOT_FOUND) {
+                break;
+            }
+            kmip_chk(err, cmd);            
+            utils::UUID uuid(new_id);
+            result.emplace_back(uuid.serialize());
+        }
+
+        kmip_log.debug("{}: Found {} matching keys {}", _name, result.size(), info);
+
+        return result;
     });
 }
 
