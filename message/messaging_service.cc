@@ -61,6 +61,7 @@
 #include "idl/cache_temperature.dist.hh"
 #include "idl/view.dist.hh"
 #include "idl/mutation.dist.hh"
+#include "idl/messaging_service.dist.hh"
 #include "serializer_impl.hh"
 #include "serialization_visitors.hh"
 #include "idl/consistency_level.dist.impl.hh"
@@ -81,6 +82,7 @@
 #include "idl/query.dist.impl.hh"
 #include "idl/cache_temperature.dist.impl.hh"
 #include "idl/mutation.dist.impl.hh"
+#include "idl/messaging_service.dist.impl.hh"
 #include <seastar/rpc/lz4_compressor.hh>
 #include <seastar/rpc/lz4_fragmented_compressor.hh>
 #include <seastar/rpc/multi_algo_compressor_factory.hh>
@@ -290,7 +292,6 @@ void messaging_service::start_listen() {
     if (_compress_what != compress_what::none) {
         so.compressor_factory = &compressor_factory;
     }
-    so.streaming_domain = rpc::streaming_domain_type(0x55AA);
     so.load_balancing_algorithm = server_socket::load_balancing_algorithm::port;
 
     // FIXME: we don't set so.tcp_nodelay, because we can't tell at this point whether the connection will come from a
@@ -303,19 +304,21 @@ void messaging_service::start_listen() {
         return cfg;
     };
     if (!_server[0]) {
-        auto listen = [&] (const gms::inet_address& a) {
+        auto listen = [&] (const gms::inet_address& a, rpc::streaming_domain_type sdomain) {
+            so.streaming_domain = sdomain;
             auto addr = socket_address{a, _port};
             return std::unique_ptr<rpc_protocol_server_wrapper>(new rpc_protocol_server_wrapper(*_rpc,
                     so, addr, limits));
         };
-        _server[0] = listen(_listen_address);
+        _server[0] = listen(_listen_address, rpc::streaming_domain_type(0x55AA));
         if (listen_to_bc) {
-            _server[1] = listen(utils::fb_utilities::get_broadcast_address());
+            _server[1] = listen(utils::fb_utilities::get_broadcast_address(), rpc::streaming_domain_type(0x66BB));
         }
     }
 
     if (!_server_tls[0]) {
-        auto listen = [&] (const gms::inet_address& a) {
+        auto listen = [&] (const gms::inet_address& a, rpc::streaming_domain_type sdomain) {
+            so.streaming_domain = sdomain;
             return std::unique_ptr<rpc_protocol_server_wrapper>(
                     [this, &so, &a, limits] () -> std::unique_ptr<rpc_protocol_server_wrapper>{
                 if (_encrypt_what == encrypt_what::none) {
@@ -329,9 +332,9 @@ void messaging_service::start_listen() {
                         so, seastar::tls::listen(_credentials, addr, lo), limits);
             }());
         };
-        _server_tls[0] = listen(_listen_address);
+        _server_tls[0] = listen(_listen_address, rpc::streaming_domain_type(0x77CC));
         if (listen_to_bc) {
-            _server_tls[1] = listen(utils::fb_utilities::get_broadcast_address());
+            _server_tls[1] = listen(utils::fb_utilities::get_broadcast_address(), rpc::streaming_domain_type(0x88DD));
         }
     }
     // Do this on just cpu 0, to avoid duplicate logs.
@@ -975,24 +978,28 @@ future<> messaging_service::send_gossip_digest_ack2(msg_addr id, gossip_digest_a
     return send_message_oneway(this, messaging_verb::GOSSIP_DIGEST_ACK2, std::move(id), std::move(msg));
 }
 
-void messaging_service::register_definitions_update(std::function<rpc::no_wait_type (const rpc::client_info& cinfo, std::vector<frozen_mutation> fm)>&& func) {
+void messaging_service::register_definitions_update(std::function<rpc::no_wait_type (const rpc::client_info& cinfo, std::vector<frozen_mutation> fm,
+            rpc::optional<std::vector<canonical_mutation>> cm)>&& func) {
     register_handler(this, netw::messaging_verb::DEFINITIONS_UPDATE, std::move(func));
 }
 void messaging_service::unregister_definitions_update() {
     _rpc->unregister_handler(netw::messaging_verb::DEFINITIONS_UPDATE);
 }
-future<> messaging_service::send_definitions_update(msg_addr id, std::vector<frozen_mutation> fm) {
-    return send_message_oneway(this, messaging_verb::DEFINITIONS_UPDATE, std::move(id), std::move(fm));
+future<> messaging_service::send_definitions_update(msg_addr id, std::vector<frozen_mutation> fm, std::vector<canonical_mutation> cm) {
+    return send_message_oneway(this, messaging_verb::DEFINITIONS_UPDATE, std::move(id), std::move(fm), std::move(cm));
 }
 
-void messaging_service::register_migration_request(std::function<future<std::vector<frozen_mutation>> (const rpc::client_info&)>&& func) {
+void messaging_service::register_migration_request(std::function<future<std::vector<frozen_mutation>, std::vector<canonical_mutation>>
+        (const rpc::client_info&, rpc::optional<schema_pull_options>)>&& func) {
     register_handler(this, netw::messaging_verb::MIGRATION_REQUEST, std::move(func));
 }
 void messaging_service::unregister_migration_request() {
     _rpc->unregister_handler(netw::messaging_verb::MIGRATION_REQUEST);
 }
-future<std::vector<frozen_mutation>> messaging_service::send_migration_request(msg_addr id) {
-    return send_message<std::vector<frozen_mutation>>(this, messaging_verb::MIGRATION_REQUEST, std::move(id));
+future<std::vector<frozen_mutation>, rpc::optional<std::vector<canonical_mutation>>> messaging_service::send_migration_request(msg_addr id,
+        schema_pull_options options) {
+    return send_message<future<std::vector<frozen_mutation>, rpc::optional<std::vector<canonical_mutation>>>>(this, messaging_verb::MIGRATION_REQUEST,
+            std::move(id), options);
 }
 
 void messaging_service::register_mutation(std::function<future<rpc::no_wait_type> (const rpc::client_info&, rpc::opt_time_point, frozen_mutation fm, std::vector<inet_address> forward,

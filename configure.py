@@ -490,6 +490,7 @@ scylla_core = (['database.cc',
                 'sstables/partition.cc',
                 'sstables/compaction.cc',
                 'sstables/compaction_strategy.cc',
+                'sstables/leveled_compaction_strategy.cc',
                 'sstables/compaction_manager.cc',
                 'sstables/integrity_checked_file_impl.cc',
                 'sstables/prepended_input_stream.cc',
@@ -809,6 +810,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/consistency_level.idl.hh',
         'idl/cache_temperature.idl.hh',
         'idl/view.idl.hh',
+        'idl/messaging_service.idl.hh',
         ]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])

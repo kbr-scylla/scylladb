@@ -1057,9 +1057,26 @@ void sstable::write_simple(const T& component, const io_priority_class& pc) {
     options.buffer_size = sstable_buffer_size;
     options.io_priority_class = pc;
     auto w = file_writer(std::move(f), std::move(options));
-    write(_version, w, component);
-    w.flush();
-    w.close();
+    std::exception_ptr eptr;
+    try {
+        write(_version, w, component);
+        w.flush();
+    } catch (...) {
+        eptr = std::current_exception();
+    }
+    try {
+        w.close();
+    } catch (...) {
+        std::exception_ptr close_eptr = std::current_exception();
+        sstlog.warn("failed to close file_writer: {}", close_eptr);
+        // If write succeeded but close failed, we rethrow close's exception.
+        if (!eptr) {
+            eptr = close_eptr;
+        }
+    }
+    if (eptr) {
+        std::rethrow_exception(eptr);
+    }
 }
 
 template future<> sstable::read_simple<component_type::Filter>(sstables::filter& f, const io_priority_class& pc);
@@ -2413,7 +2430,8 @@ future<> sstable::write_components(
     }
     return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), cfg, stats, &pc] () mutable {
         auto wr = get_writer(*schema, estimated_partitions, cfg, stats, pc);
-        mr.consume_in_thread(std::move(wr), db::no_timeout);
+        auto validator = mutation_fragment_stream_validator(*schema, get_config().enable_sstable_key_validation());
+        mr.consume_in_thread(std::move(wr), std::move(validator), db::no_timeout);
     });
 }
 

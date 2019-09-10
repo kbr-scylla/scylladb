@@ -141,7 +141,7 @@ future<> save_system_keyspace_schema();
 
 future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy, schema_features);
 
-future<std::vector<frozen_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy, schema_features);
+future<std::vector<canonical_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy, schema_features);
 std::vector<mutation> adjust_schema_for_schema_features(std::vector<mutation> schema, schema_features features);
 
 future<schema_result_value_type>

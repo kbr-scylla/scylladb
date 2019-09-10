@@ -58,8 +58,7 @@ const std::chrono::minutes prepared_statements_cache::entry_expiry = std::chrono
 class query_processor::internal_state {
     service::query_state _qs;
 public:
-    internal_state(qos::service_level_controller &sl_controller) :
-        _qs(service::client_state{service::client_state::internal_tag()}, empty_service_permit(), sl_controller) {
+    internal_state(qos::service_level_controller &sl_controller) : _qs(service::client_state::for_internal_calls(), empty_service_permit(), sl_controller) {
     }
     operator service::query_state&() {
         return _qs;
@@ -73,14 +72,7 @@ public:
     operator const service::client_state&() const {
         return _qs.get_client_state();
     }
-    api::timestamp_type next_timestamp() {
-        return _qs.get_client_state().get_timestamp();
-    }
 };
-
-api::timestamp_type query_processor::next_timestamp() {
-    return _internal_state->next_timestamp();
-}
 
 query_processor::query_processor(service::storage_proxy& proxy, database& db, query_processor::memory_config mcfg, sharded<qos::service_level_controller>& sl_controller)
         : _migration_subscriber{std::make_unique<migration_subscriber>(this)}
