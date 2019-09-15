@@ -275,6 +275,9 @@ public:
     named_value<uint32_t> max_partition_key_restrictions_per_query;
     named_value<uint32_t> max_clustering_key_restrictions_per_query;
 
+    named_value<uint16_t> alternator_port;
+    named_value<sstring> alternator_address;
+
     named_value<sstring> audit;
     named_value<sstring> audit_categories;
     named_value<sstring> audit_tables;

@@ -50,6 +50,8 @@ class intrusive_list:
             # Some boost versions have this instead
             self.root = rps['m_header']
         member_hook = get_template_arg_with_prefix(list_type, "boost::intrusive::member_hook")
+        if not member_hook:
+            member_hook = get_template_arg_with_prefix(list_type, "struct boost::intrusive::member_hook")
         if member_hook:
             self.link_offset = member_hook.template_argument(2).cast(self.size_t)
         else:
@@ -692,6 +694,13 @@ class seastar_lw_shared_ptr():
         else:
             type = gdb.lookup_type('seastar::shared_ptr_no_esft<%s>' % str(self.elem_type.unqualified())).pointer()
             return self.ref['_p'].cast(type)['_value'].address
+
+
+def all_tables(db):
+    """Returns pointers to table objects which exist on current shard"""
+
+    for (key, value) in list_unordered_map(db['_column_families']):
+        yield seastar_lw_shared_ptr(value).get()
 
 
 class lsa_region():
@@ -2280,16 +2289,8 @@ class scylla_cache(gdb.Command):
 
 def find_sstables():
     """A generator which yields pointers to all live sstable objects on current shard."""
-    visited = set()
-    # FIXME: Add support for other sstable sets. Also, we should change Scylla to make this easier
-    for sst_set in find_instances('sstables::bag_sstable_set'):
-        sstables = std_vector(sst_set['_sstables'])
-        for sst_ptr in sstables:
-            sst = seastar_lw_shared_ptr(sst_ptr).get()
-            if not int(sst) in visited:
-                visited.add(int(sst))
-                yield sst
-
+    for sst in intrusive_list(gdb.parse_and_eval('sstables::tracker._sstables')):
+        yield sst.address
 
 class scylla_sstables(gdb.Command):
     """Lists all sstable objects on currents shard together with useful information like on-disk and in-memory size."""
@@ -2305,6 +2306,8 @@ class scylla_sstables(gdb.Command):
         count = 0
 
         for sst in find_sstables():
+            if not sst['_open']:
+                continue
             count += 1
             size = 0
 
@@ -2340,14 +2343,33 @@ class scylla_sstables(gdb.Command):
             # FIXME: Include compression info
 
             data_file_size = sst['_data_file_size']
-            gdb.write('(sstables::sstable*) 0x%x: local=%d data_file=%d, in_memory=%d (bf=%d, summary=%d, sm=%d)\n'
-                      % (int(sst), local, data_file_size, size, bf_size, summary_size, sm_size))
+            schema = schema_ptr(sst['_schema'])
+            gdb.write('(sstables::sstable*) 0x%x: local=%d data_file=%d, in_memory=%d (bf=%d, summary=%d, sm=%d) %s\n'
+                      % (int(sst), local, data_file_size, size, bf_size, summary_size, sm_size, schema.table_name()))
 
             if local:
                 total_size += size
                 total_on_disk_size += data_file_size
 
         gdb.write('total (shard-local): count=%d, data_file=%d, in_memory=%d\n' % (count, total_on_disk_size, total_size))
+
+
+class scylla_memtables(gdb.Command):
+    """Lists basic information about all memtable objects on current shard."""
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla memtables', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        db = find_db()
+        region_ptr_type = gdb.lookup_type('logalloc::region').pointer()
+        for table in all_tables(db):
+            gdb.write('table %s:\n' % schema_ptr(table['_schema']).table_name())
+            memtable_list = seastar_lw_shared_ptr(table['_memtables']).get()
+            for mt_ptr in std_vector(memtable_list['_memtables']):
+                mt = seastar_lw_shared_ptr(mt_ptr).get()
+                reg = lsa_region(mt.cast(region_ptr_type))
+                gdb.write('  (memtable*) 0x%x: total=%d, used=%d, free=%d, flushed=%d\n' % (mt, reg.total(), reg.used(), reg.free(), mt['_flushed_memory']))
 
 
 scylla()
@@ -2379,3 +2401,4 @@ scylla_netw()
 scylla_gms()
 scylla_cache()
 scylla_sstables()
+scylla_memtables()
