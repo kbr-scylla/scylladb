@@ -634,6 +634,8 @@ shared_ptr<messaging_service::rpc_protocol_client_wrapper> messaging_service::ge
         opts.compressor_factory = &compressor_factory;
     }
     opts.tcp_nodelay = must_tcp_nodelay;
+    opts.reuseaddr = true;
+
     // isolate connections meant for statements
     if (idx > 3) {
         std::optional<sstring> service_level = _sl_controller.get_active_service_level();
