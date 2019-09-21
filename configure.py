@@ -238,6 +238,10 @@ modes = {
     }
 }
 
+ldap_tests = [
+    'tests/ldap_connection_test',
+]
+
 scylla_tests = [
     'tests/mutation_test',
     'tests/mvcc_test',
@@ -364,7 +368,7 @@ scylla_tests = [
     'tests/truncation_migration_test',
     'tests/symmetric_key_test',
     'tests/like_matcher_test',
-]
+] + ldap_tests
 
 perf_tests = [
     'tests/perf/perf_mutation_readers',
@@ -738,6 +742,7 @@ scylla_core = (['database.cc',
                 'ent/encryption/encrypted_file_impl.cc',
                 'ent/encryption/kmip_host.cc',
                 'ent/encryption/kmip_key_provider.cc',
+                'ent/ldap/ldap_connection.cc',
                 'in-memory-file-impl.cc',
                 'mirror-file-impl.cc',
                 'multishard_mutation_query.cc',
@@ -1187,7 +1192,7 @@ def configure_zstd(build_dir, mode):
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
-                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
+                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
 xxhash_dir = 'xxHash'

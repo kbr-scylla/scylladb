@@ -1,0 +1,330 @@
+/*
+ * Copyright (C) 2019 ScyllaDB
+ */
+
+/*
+ * This file is part of Scylla.
+ *
+ * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+ */
+
+#define LDAP_DEPRECATED 1
+
+#include "ldap_connection.hh"
+
+#include <cerrno>
+#include <cstring>
+#include <fmt/format.h>
+#include <stdexcept>
+#include <string>
+
+#include <seastar/core/seastar.hh>
+#include <seastar/util/log.hh>
+
+#include "seastarx.hh"
+
+extern "C" {
+// Declared in `ldap_pvt.h`, but this header is not usually installed by distributions even though
+// it's considered public by upstream.
+int ldap_init_fd(int, int, const char *, LDAP**);
+}
+
+namespace {
+
+logger mylog{"ldap_connection"}; // `log` is taken by math.
+
+constexpr int failure_code{-1}, success_code{0}; // LDAP return codes.
+
+/// Helper function for Sockbuf_IO work.
+ldap_connection* connection(Sockbuf_IO_Desc* sid) {
+    return reinterpret_cast<ldap_connection*>(sid->sbiod_pvt);
+}
+
+/// Sockbuf_IO setup function for ldap_connection.
+int ssbi_setup(Sockbuf_IO_Desc* sid, void* arg) {
+    sid->sbiod_pvt = arg; // arg is ldap_connection, already set up.
+    return success_code;
+}
+
+/// Sockbuf_IO remove function for ldap_connection.
+int ssbi_remove(Sockbuf_IO_Desc* sid) {
+    return success_code; // ldap_connection will be destructed by its owner.
+}
+
+void throw_if_failed(int status, const char* op, const ldap_connection& conn, int success = LDAP_SUCCESS) {
+    if (status != success) {
+        throw std::runtime_error(fmt::format("{} returned {}: {}", op, status, conn.get_error()));
+    }
+}
+
+} // anonymous namespace
+
+void ldap_connection::ldap_deleter::operator()(LDAP* ld) {
+    mylog.trace("ldap_deleter: invoking unbind");
+    int status = ldap_unbind(ld);
+    if (status != LDAP_SUCCESS) {
+        mylog.error("ldap_unbind failed with status {}", status);
+    }
+    mylog.trace("ldap_deleter done");
+}
+
+ldap_connection::ldap_connection(seastar::connected_socket&& socket) :
+        _fd(file_desc::eventfd(0, EFD_NONBLOCK)) // Never ready for read, always ready for write.
+    , _socket(std::move(socket))
+    , _input_stream(std::move(_socket.input()))
+    , _output_stream(std::move(_socket.output()))
+    , _status(status::up)
+    , _read_consumer(now())
+    , _read_in_progress(false)
+    , _outstanding_write(now()) {
+    // Proactively initiate Seastar read, before ldap_connection::read() is first called.
+    read_ahead();
+
+    // Libldap determines if we're ready for an sbi_write by polling _fd.  We're always ready to
+    // accept an sbi_write because we chain writes as continuations.  Therefore, _fd always polls
+    // ready to write.
+    //
+    // Libldap determines if we're ready for an sbi_read by first calling sbi_ctrl(DATA_READY); only
+    // if that returns false does libldap then poll _fd.  We are ready to accept an sbi_read when a
+    // prior Seastar read completed successfully and delivered some data into our _read_buffer.
+    // Only sbi_ctrl() knows that, which is why _fd always polls NOT READY to read.
+    //
+    // NB: libldap never actually reads or writes directly to _fd.  It reads and writes through the
+    // custom Sockbuf_IO we provide it.
+    static constexpr int LDAP_PROTO_EXT = 4; // From ldap_pvt.h, which isn't always available.
+    mylog.trace("constructor invoking ldap_init");
+    LDAP* init_result;
+    throw_if_failed(ldap_init_fd(_fd.get(), LDAP_PROTO_EXT, nullptr, &init_result), "ldap_init_fd", *this);
+    _ldap.reset(init_result);
+    static constexpr int opt_v3 = LDAP_VERSION3;
+    throw_if_failed(
+            ldap_set_option(_ldap.get(), LDAP_OPT_PROTOCOL_VERSION, &opt_v3), // Encouraged by ldap_set_option manpage.
+            "ldap_set_option protocol version",
+            *this,
+            LDAP_OPT_SUCCESS);
+    throw_if_failed(
+            ldap_set_option(_ldap.get(), LDAP_OPT_RESTART, LDAP_OPT_ON), // Retry on EINTR, rather than return error.
+            "ldap_set_option restart",
+            *this,
+            LDAP_OPT_SUCCESS);
+
+    Sockbuf* sb;
+    throw_if_failed(ldap_get_option(_ldap.get(), LDAP_OPT_SOCKBUF, &sb), "ldap_get_option", *this, LDAP_OPT_SUCCESS);
+    mylog.trace("constructor adding Sockbuf_IO");
+    throw_if_failed(
+            ber_sockbuf_add_io(sb, const_cast<Sockbuf_IO*>(&seastar_sbio), LBER_SBIOD_LEVEL_PROVIDER, this),
+            "ber_sockbuf_add_io",
+            *this);
+    mylog.trace("constructor done");
+}
+
+future<> ldap_connection::close() {
+    _ldap.reset(); // Sends one last message to the server before reclaiming memory.
+    return when_all(
+            _read_consumer.finally([this] { return _input_stream.close(); })
+            .handle_exception([this] (std::exception_ptr ep) {
+                mylog.error("Seastar input stream closing failed: {}", ep);
+            }),
+            _outstanding_write.finally([this] { return _output_stream.close(); })
+            .handle_exception([this] (std::exception_ptr ep) {
+                mylog.error("Seastar output stream closing failed: {}", ep);
+            })
+    ).discard_result().then([this] {
+        shutdown();
+        return make_ready_future<>();
+    });
+}
+
+sstring ldap_connection::get_error() const {
+    int result_code;
+    int status = ldap_get_option(get_ldap(), LDAP_OPT_RESULT_CODE, reinterpret_cast<void*>(&result_code));
+    if (status != LDAP_OPT_SUCCESS) {
+        mylog.error("ldap_get_option returned {}", status);
+        return "error description unavailable";
+    }
+    return ldap_err2string(result_code);
+}
+
+int ldap_connection::sbi_ctrl(Sockbuf_IO_Desc* sid, int opt, void* arg) noexcept {
+    mylog.debug("sbi_ctrl({}/{}, {}, {})", sid, sid->sbiod_pvt, opt, arg);
+    auto conn = connection(sid);
+    switch (opt) {
+    case LBER_SB_OPT_DATA_READY:
+        return !conn->_read_buffer.empty()
+               || conn->_status != status::up; // Let sbi_read proceed and report status; otherwise, LDAP loops forever.
+    case LBER_SB_OPT_GET_FD:
+        if (conn->_status == status::down) {
+            errno = ENOTCONN;
+            return -1;
+        }
+        *reinterpret_cast<ber_socket_t*>(arg) = conn->_fd.get();
+        return 1;
+    }
+    return 0;
+}
+
+ber_slen_t ldap_connection::sbi_read(Sockbuf_IO_Desc* sid, void* buffer, ber_len_t size) noexcept {
+    mylog.trace("sbi_read {}/{}", sid, sid->sbiod_pvt);
+    try {
+        return connection(sid)->read(reinterpret_cast<char*>(buffer), size);
+    } catch (...) {
+        mylog.error("Unexpected error while reading: {}", std::current_exception());
+        return failure_code;
+    }
+}
+
+ber_slen_t ldap_connection::sbi_write(Sockbuf_IO_Desc* sid, void* buffer, ber_len_t size) noexcept {
+    mylog.trace("sbi_write {}/{}", sid, sid->sbiod_pvt);
+    try {
+        return connection(sid)->write(reinterpret_cast<const char*>(buffer), size);
+    } catch (...) {
+        mylog.error("Unexpected error while writing: {}", std::current_exception());
+        return failure_code;
+    }
+}
+
+int ldap_connection::sbi_close(Sockbuf_IO_Desc* sid) noexcept {
+    mylog.debug("sbi_close {}/{}", sid, sid->sbiod_pvt);
+    // Leave actual closing to the owner of *this.  Note sbi_close() will be invoked during
+    // ldap_unbind(), which also calls sbi_write() to convey one last message to the server.  We
+    // remain open here, to try to communicate that message.
+    return success_code;
+}
+
+const Sockbuf_IO ldap_connection::seastar_sbio{
+    // Strictly speaking, designated initializers like this are not in the standard, but they're
+    // supported by both major compilers we use.
+    .sbi_setup = &ssbi_setup,
+    .sbi_remove = &ssbi_remove,
+    .sbi_ctrl = &ldap_connection::sbi_ctrl,
+    .sbi_read = &ldap_connection::sbi_read,
+    .sbi_write = &ldap_connection::sbi_write,
+    .sbi_close = &ldap_connection::sbi_close
+};
+
+void ldap_connection::read_ahead() {
+    if (_read_in_progress) { // Differs from _read_consumer.available(), because handle_exception adds a continuation.
+        mylog.warn("read_ahead called while a prior Seastar read is already in progress");
+        return;
+    }
+    if (_input_stream.eof()) {
+        mylog.error("read_ahead encountered EOF");
+        _status = status::eof;
+        return;
+    }
+    mylog.trace("read_ahead");
+    _read_in_progress = true;
+    mylog.trace("read_ahead invoking socket read");
+    _read_consumer = _input_stream.read().then([this] (temporary_buffer<char> b) {
+        if (b.empty()) {
+            mylog.error("read_ahead received empty buffer; assuming EOF");
+            _status = status::eof;
+            return;
+        }
+        mylog.trace("read_ahead received data");
+        if (!_read_buffer.empty()) { // Shouldn't happen; read_ahead's purpose is to replenish empty _read_buffer.
+            mylog.error("read_ahead dropping {} unconsumed bytes", _read_buffer.size());
+        }
+        _read_buffer = std::move(b);
+        _read_in_progress = false;
+    }).handle_exception([this] (std::exception_ptr ep) {
+        mylog.error("Seastar read failed: {}", ep);
+        _status = status::err;
+    });
+    mylog.trace("read_ahead done");
+}
+
+ber_slen_t ldap_connection::write(char const* b, ber_len_t size) {
+    mylog.trace("write({})", size);
+    switch (_status) {
+    case status::err:
+        mylog.trace("write({}) reporting error", size);
+        errno = ECONNRESET;
+        return -1;
+    case status::down:
+        mylog.trace("write({}) invoked after shutdown", size);
+        errno = ENOTCONN;
+        return -1;
+    case status::up:
+    case status::eof:
+        ; // Proceed.
+    }
+    _outstanding_write = _outstanding_write.then([this, buf = temporary_buffer(b, size)] () mutable {
+        if (_status != status::up) {
+            return make_ready_future<>();
+        }
+        mylog.trace("write invoking socket write");
+        return _output_stream.write(std::move(buf)).then([this] {
+            // Sockbuf_IO doesn't seem to have the notion of flushing the stream, so we flush after
+            // every write.
+            mylog.trace("write invoking flush");
+            return _output_stream.flush();
+        }).handle_exception([this] (std::exception_ptr ep) {
+            mylog.error("Seastar write failed: {}", ep);
+            _status = status::err;
+        });
+    });
+    mylog.trace("write({}) done", size);
+    return size;
+}
+
+ber_slen_t ldap_connection::read(char* b, ber_len_t size) {
+    mylog.trace("read({})", size);
+    switch (_status) {
+    case status::eof:
+        mylog.trace("read({}) reporting eof", size);
+        return 0;
+    case status::err:
+        mylog.trace("read({}) reporting error", size);
+        errno = ECONNRESET;
+        return -1;
+    case status::down:
+        mylog.trace("read({}) invoked after shutdown", size);
+        errno = ENOTCONN;
+        return -1;
+    case status::up:
+        ; // Proceed.
+    }
+    if (_read_buffer.empty()) { // Can happen because libldap doesn't always wait for data to be ready.
+        mylog.trace("read({}) found empty read buffer", size);
+        // Don't invoke read_ahead() here; it was already invoked as soon as _read_buffer was
+        // drained.  In fact, its Seastar read might have actually completed, and the buffer is
+        // about to be filled by a waiting continuation.  We DON'T want another read_ahead() before
+        // that data is consumed.
+        errno = EWOULDBLOCK;
+        return 0;
+    }
+    const auto byte_count = std::min(_read_buffer.size(), size);
+    std::copy_n(_read_buffer.begin(), byte_count, b);
+    _read_buffer.trim_front(byte_count);
+    if (_read_buffer.empty()) {
+        mylog.trace("read({}) replenishing buffer", size);
+        read_ahead();
+    }
+    mylog.trace("read({}) returning {}", size, byte_count);
+    return byte_count;
+}
+
+void ldap_connection::shutdown()  {
+    mylog.trace("shutdown");
+    _status = status::down;
+    mylog.trace("shutdown: shutdown input");
+    _socket.shutdown_input();
+    mylog.trace("shutdown: shutdown output");
+    _socket.shutdown_output();
+    mylog.trace("shutdown done");
+}
+
+void with_ldap_connection(seastar::connected_socket&& socket, std::function<void(ldap_connection&)> f) {
+    mylog.trace("with_ldap_connection");
+    ldap_connection c(std::move(socket));
+    mylog.trace("with_ldap_connection: invoking f");
+    f(c);
+    mylog.trace("with_ldap_connection: winding down");
+    c.close().get();
+    mylog.trace("with_ldap_connection done");
+}
+
+void with_ldap_connection(const seastar::socket_address& a, std::function<void(ldap_connection&)> f) {
+    with_ldap_connection(connect(a).get0(), f);
+}
