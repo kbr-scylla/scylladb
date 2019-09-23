@@ -629,7 +629,7 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
     }
     if (!info.options.key_namespace.empty()) {
         kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
-                        const_cast<char *>("x-namespace"),
+                        const_cast<char *>("x-key-namespace"),
                         const_cast<char*>(info.options.key_namespace.c_str()))
                         );
     }
