@@ -283,6 +283,7 @@ future<> kmip_host::impl::connection::connect() {
             return seastar::tls::connect(cred, seastar::ipv4_addr{addr, kmip_port}).then([this](seastar::connected_socket s) {
                 kmip_log.debug("Successfully connected {} ({})", _host);
                 // #998 Set keepalive to try avoiding connection going stale inbetween commands. 
+                s.set_keepalive_parameters(net::tcp_keepalive_params{60s, 60s, 10});
                 s.set_keepalive(true);
                 _input = s.input();
                 _output = s.output();
