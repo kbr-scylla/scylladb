@@ -166,7 +166,7 @@ private:
     class kmip_data_list;
     class connection;
 
-    std::tuple<kmip_data_list, unsigned int> make_attributes(const kmip_key_info&) const;
+    std::tuple<kmip_data_list, unsigned int> make_attributes(const kmip_key_info&, bool include_template = true) const;
 
     union userdata {
         void * ptr;
@@ -608,12 +608,21 @@ future<> kmip_host::impl::connect() {
     });
 }
 
-std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_attributes(const kmip_key_info& info) const {
+static unsigned from_str(unsigned (*f)(char*, int, int*), const sstring& s) {
+    int found = 0;
+    auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
+    if (!found) {
+        throw std::invalid_argument(s);
+    }
+    return res;
+}
+
+std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_attributes(const kmip_key_info& info, bool include_template) const {
     kmip_data_list kdl_attrs;
 
     if (!info.options.template_name.empty()) {
-        kmip_chk(KMIP_DATA_LIST_add_attr_str(kdl_attrs,
-                        const_cast<char*>(KMIP_TAGSTR_TEMPLATE),
+        kmip_chk(KMIP_DATA_LIST_add_attr_str_by_tag(kdl_attrs,
+                        KMIP_TAG_TEMPLATE,
                         const_cast<char*>(info.options.template_name.c_str()))
                         );
     }
@@ -623,15 +632,6 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
                         const_cast<char*>(info.options.key_namespace.c_str()))
                         );
     }
-
-    auto from_str = [](auto f, const sstring& s) {
-        int found = 0;
-        auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
-        if (!found) {
-            throw std::invalid_argument(s);
-        }
-        return res;
-    };
 
     sstring type, mode, padd;
     std::tie(type, mode, padd) = parse_key_spec(info.info.alg);
@@ -713,9 +713,31 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
 future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(const kmip_key_info& info, std::optional<int> max) {
     kmip_log.debug("{}: Finding matching key {}", _name, info);
 
-    auto [kdl_attrs, crypt_alg] = make_attributes(info);
+    auto [kdl_attrs, crypt_alg] = make_attributes(info, false);
 
-    KMIP_DATA_LIST_add_32(kdl_attrs, KMIP_TAG_STATE, KMIP_ITEM_TYPE_ENUMERATION, KMIP_STATE_ACTIVE);
+    // #1079. Query mask apparently ignores things like cryptographic 
+    // attribute set of options, instead we must specify the query 
+    // as a list of attributes. 
+    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
+                    KMIP_TAG_OBJECT_TYPE,
+                    KMIP_OBJECT_TYPE_SYMMETRIC_KEY)
+                    );
+    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
+                    KMIP_TAG_CRYPTOGRAPHIC_ALGORITHM,
+                    int(crypt_alg))
+                    );
+    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
+                    KMIP_TAG_CRYPTOGRAPHIC_LENGTH,
+                    int(info.info.len))
+                    );
+    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
+                    KMIP_TAG_STATE,
+                    KMIP_STATE_ACTIVE)
+                    );
+    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
+                    KMIP_TAG_CRYPTOGRAPHIC_USAGE_MASK,
+                    KMIP_CRYPTOGRAPHIC_USAGE_ENCRYPT|KMIP_CRYPTOGRAPHIC_USAGE_DECRYPT)
+                    );
 
     kmip_cmd cmd;
     KMIP_CMD_set_ctx(cmd, const_cast<char *>("Find matching key"));
@@ -727,7 +749,7 @@ future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(cons
         maxp = mp.get();
     }
 
-    return do_cmd(std::move(cmd), [info, kdl_attrs = std::move(kdl_attrs), crypt_alg, maxp](KMIP_CMD* cmd) {
+    return do_cmd(std::move(cmd), [kdl_attrs = std::move(kdl_attrs), maxp](KMIP_CMD* cmd) {
         return KMIP_CMD_locate(cmd, maxp, nullptr, KMIP_DATA_LIST_attrs(kdl_attrs), KMIP_DATA_LIST_n_attrs(kdl_attrs));
     }).then([this, info, mp = std::move(mp)](kmip_cmd cmd) {
         std::vector<id_type> result;
