@@ -63,6 +63,14 @@
 #include "mutation_query.hh"
 #include "service_permit.hh"
 
+
+namespace seastar::rpc {
+
+template <typename... T>
+class tuple;
+
+}
+
 namespace locator {
 
 class token_metadata;
@@ -139,6 +147,7 @@ private:
         ~unique_response_handler();
         response_id_type release();
     };
+    using response_handlers_map = std::unordered_map<response_id_type, ::shared_ptr<abstract_write_response_handler>>;
 
 public:
     static const sstring COORDINATOR_STATS_CATEGORY;
@@ -192,7 +201,7 @@ private:
     smp_service_group _write_smp_service_group;
     smp_service_group _write_ack_smp_service_group;
     response_id_type _next_response_id;
-    std::unordered_map<response_id_type, ::shared_ptr<abstract_write_response_handler>> _response_handlers;
+    response_handlers_map _response_handlers;
     // This buffer hold ids of throttled writes in case resource consumption goes
     // below the threshold and we want to unthrottle some of them. Without this throttled
     // request with dead or slow replica may wait for up to timeout ms before replying
@@ -235,6 +244,7 @@ private:
             coordinator_query_options optional_params);
     response_id_type register_response_handler(shared_ptr<abstract_write_response_handler>&& h);
     void remove_response_handler(response_id_type id);
+    void remove_response_handler_entry(response_handlers_map::iterator entry);
     void got_response(response_id_type id, gms::inet_address from, std::optional<db::view::update_backlog> backlog);
     void got_failure_response(response_id_type id, gms::inet_address from, size_t count, std::optional<db::view::update_backlog> backlog);
     future<> response_wait(response_id_type id, clock_type::time_point timeout);
@@ -263,12 +273,12 @@ private:
             const std::vector<gms::inet_address>& preferred_endpoints,
             bool& is_bounced_read,
             service_permit permit);
-    future<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature> query_result_local(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
+    future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> query_result_local(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
                                                                            query::result_options opts,
                                                                            tracing::trace_state_ptr trace_state,
                                                                            clock_type::time_point timeout,
                                                                            uint64_t max_size = query::result_memory_limiter::maximum_result_size);
-    future<query::result_digest, api::timestamp_type, cache_temperature> query_result_local_digest(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
+    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> query_result_local_digest(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
                                                                                                    tracing::trace_state_ptr trace_state,
                                                                                                    clock_type::time_point timeout,
                                                                                                    query::digest_algorithm da,
@@ -308,7 +318,7 @@ private:
     void handle_read_error(std::exception_ptr eptr, bool range);
     template<typename Range>
     future<> mutate_internal(Range mutations, db::consistency_level cl, bool counter_write, tracing::trace_state_ptr tr_state, service_permit permit, std::optional<clock_type::time_point> timeout_opt = { });
-    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature> query_nonsingular_mutations_locally(
+    future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_nonsingular_mutations_locally(
             schema_ptr s, lw_shared_ptr<query::read_command> cmd, const dht::partition_range_vector&& pr, tracing::trace_state_ptr trace_state,
             uint64_t max_size, clock_type::time_point timeout);
 
@@ -437,20 +447,20 @@ public:
         db::consistency_level cl,
         coordinator_query_options optional_params);
 
-    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature> query_mutations_locally(
+    future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_mutations_locally(
         schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range&,
         clock_type::time_point timeout,
         tracing::trace_state_ptr trace_state = nullptr,
         uint64_t max_size = query::result_memory_limiter::maximum_result_size);
 
 
-    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature> query_mutations_locally(
+    future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_mutations_locally(
         schema_ptr, lw_shared_ptr<query::read_command> cmd, const ::compat::one_or_two_partition_ranges&,
         clock_type::time_point timeout,
         tracing::trace_state_ptr trace_state = nullptr,
         uint64_t max_size = query::result_memory_limiter::maximum_result_size);
 
-    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature> query_mutations_locally(
+    future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> query_mutations_locally(
             schema_ptr s, lw_shared_ptr<query::read_command> cmd, const dht::partition_range_vector& pr,
             clock_type::time_point timeout,
             tracing::trace_state_ptr trace_state = nullptr,

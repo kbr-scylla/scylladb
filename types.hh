@@ -1072,7 +1072,6 @@ to_bytes(const utils::UUID& uuid) {
 }
 
 // This follows java.util.Comparator
-// FIXME: Choose a better place than database.hh
 template <typename T>
 struct comparator {
     comparator() = default;
