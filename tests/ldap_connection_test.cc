@@ -18,6 +18,7 @@
 #include <string>
 
 #include <ent/ldap/ldap_connection.hh>
+#include "exception_utils.hh"
 
 #include "seastarx.hh"
 
@@ -45,71 +46,27 @@ const std::set<std::string> results_expected_from_search_base_dn{
     "uid=jsmith,ou=People,dc=example,dc=com"
 };
 
-/// Functor to invoke ldap_msgfree.
-struct msg_deleter {
-    void operator()(LDAPMessage* p) {
-        ldap_msgfree(p);
-    }
-};
-
-using msg_ptr = std::unique_ptr<LDAPMessage, msg_deleter>;
-
-/// Thrown when ldap_result returns an unexpected error value.
-struct result_exception : public std::runtime_error {
-    result_exception(const char* what) : std::runtime_error(what) {}
-};
-
-/// Gets an LDAP result indicated by msgid.  Captures \p conn, which must survive until the returned future resolves.
-future<msg_ptr> result(const ldap_connection& conn, int msgid) {
-    mylog.trace("result: msgid={}", msgid);
-    // Busy-wait on the result.  This is just for testing that ordinary ldap_* functions work as
-    // expected with custom Seastar LDAP.  In production, a different waiting loop is used.
-    return repeat_until_value([&conn, msgid] {
-        LDAPMessage *result;
-        timeval zero_duration{}; // Must allow Seastar to run other fibers to complete networking operations.
-        mylog.trace("Invoking ldap_result for msgid={}", msgid);
-        const auto result_type = ldap_result(conn.get_ldap(), msgid, /*all=*/0, &zero_duration, &result);
-        mylog.debug("ldap_result for msgid={} returned {}", msgid, result_type);
-        if (result_type < 0) {
-            mylog.error("ldap_result error: {}", conn.get_error());
-            throw result_exception("negative ldap_result");
-        }
-        return make_ready_future<compat::optional<msg_ptr>>(
-                result_type ? compat::make_optional(msg_ptr(result)) : compat::nullopt);
-    });
+/// Ignores exceptions from LDAP operations.  Useful for failure-injection tests, which must
+/// tolerate aborted communication.
+ldap_msg_ptr ignore(std::exception_ptr) {
+    return ldap_msg_ptr();
 }
 
-/// Attempts to get msgid's LDAP result, but ignores errors.  Useful for failure-injection tests,
-/// which must tolerate communication failure.
-void try_get_result(const ldap_connection& conn, int msgid) {
-    try {
-        result(conn, msgid).handle_exception([] (std::exception_ptr) { return msg_ptr(); }).get();
-    } catch (result_exception&) {
-        // Swallow.
+/// Extracts entries from an ldap_search result.
+std::set<std::string> entries(LDAP* ld, LDAPMessage* res) {
+    BOOST_REQUIRE_EQUAL(LDAP_RES_SEARCH_ENTRY, ldap_msgtype(res));
+    std::set<std::string> entry_set;
+    for (auto e = ldap_first_entry(ld, res); e; e = ldap_next_entry(ld, e)) {
+        char* dn = ldap_get_dn(ld, e);
+        entry_set.insert(dn);
+        ldap_memfree(dn);
     }
+    return entry_set;
 }
 
-/// Extracts n entries resulting from a prior ldap_search operation msgid.
-std::set<std::string> entries(size_t n, const ldap_connection& conn, int msgid) {
-    std::set<std::string> retval;
-    auto ld = conn.get_ldap();
-    for (size_t i = 0; i < n; ++i) {
-        const auto res = result(conn, msgid).get0();
-        BOOST_REQUIRE_MESSAGE(ldap_msgtype(res.get()) == LDAP_RES_SEARCH_ENTRY, i);
-        for (auto e = ldap_first_entry(ld, res.get()); e; e = ldap_next_entry(ld, e)) {
-            char* dn = ldap_get_dn(ld, e);
-            retval.insert(dn);
-            ldap_memfree(dn);
-        }
-    }
-    return retval;
-}
-
-int search(const ldap_connection& conn, const char* term, int* msgid) {
-    // Can't use synchronous LDAP operations, since they stall the Seastar reactor.
-    return ldap_search_ext(
-            conn.get_ldap(),
-            term,
+future<ldap_msg_ptr> search(ldap_connection& conn, const char* term) {
+    return conn.search(
+            const_cast<char*>(term),
             LDAP_SCOPE_SUBTREE,
             /*filter=*/nullptr,
             /*attrs=*/nullptr,
@@ -117,14 +74,11 @@ int search(const ldap_connection& conn, const char* term, int* msgid) {
             /*serverctrls=*/nullptr,
             /*clientctrls=*/nullptr,
             /*timeout=*/nullptr,
-            /*sizelimit=*/0,
-            msgid);
+            /*sizelimit=*/0);
 }
 
-int bind(ldap_connection& conn)
-{
-    // Can't use synchronous LDAP operations, since they stall the Seastar reactor.
-    return ldap_simple_bind(conn.get_ldap(), manager_dn, manager_password);
+future<ldap_msg_ptr> bind(ldap_connection& conn) {
+    return conn.simple_bind(manager_dn, manager_password);
 }
 
 } // anonymous namespace
@@ -147,12 +101,8 @@ SEASTAR_THREAD_TEST_CASE(bind_with_custom_sockbuf_io) {
     mylog.trace("bind_with_custom_sockbuf_io");
     with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
         mylog.trace("bind_with_custom_sockbuf_io invoking bind");
-        const auto id = bind(c);
-        mylog.trace("bind_with_custom_sockbuf_io bind returned {}", id);
-        BOOST_REQUIRE_NE(id, -1);
-        // Await the bind result:
-        auto r = result(c, id).get0();
-        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(r.get()));
+        const auto res = bind(c).get0();
+        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(res.get()));
     });
     mylog.trace("bind_with_custom_sockbuf_io done");
 }
@@ -160,12 +110,11 @@ SEASTAR_THREAD_TEST_CASE(bind_with_custom_sockbuf_io) {
 SEASTAR_THREAD_TEST_CASE(search_with_custom_sockbuf_io) {
     mylog.trace("search_with_custom_sockbuf_io");
     with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
-        int msgid;
-        mylog.trace("search_with_custom_sockbuf_io: invoking ldap search");
-        BOOST_REQUIRE_EQUAL(LDAP_SUCCESS, search(c, base_dn, &msgid));
-        mylog.trace("search_with_custom_sockbuf_io: ldap search returned msgid {}", msgid);
+        mylog.trace("search_with_custom_sockbuf_io: invoking search");
+        const auto res = search(c, base_dn).get0();
+        mylog.trace("search_with_custom_sockbuf_io: got result");
+        const auto actual = entries(c.get_ldap(), res.get());
         const std::set<std::string>& expected = results_expected_from_search_base_dn;
-        const auto actual = entries(expected.size(), c, msgid);
         BOOST_REQUIRE_EQUAL_COLLECTIONS(actual.cbegin(), actual.cend(), expected.cbegin(), expected.cend());
     });
     mylog.trace("search_with_custom_sockbuf_io done");
@@ -174,32 +123,36 @@ SEASTAR_THREAD_TEST_CASE(search_with_custom_sockbuf_io) {
 SEASTAR_THREAD_TEST_CASE(multiple_outstanding_operations) {
     mylog.trace("multiple_outstanding_operations");
     with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
-        const auto id_bind = bind(c);
-        mylog.trace("bind_with_custom_sockbuf_io bind returned {}", id_bind);
-        BOOST_REQUIRE_NE(id_bind, -1);
+        mylog.trace("multiple_outstanding_operations: bind");
+        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(bind(c).get0().get()));
 
-        int id_search_base;
-        mylog.trace("multiple_outstanding_operations: invoking search base");
-        BOOST_REQUIRE_EQUAL(LDAP_SUCCESS, search(c, base_dn, &id_search_base));
-        mylog.trace("multiple_outstanding_operations: search base returned msgid {}", id_search_base);
+        std::vector<future<ldap_msg_ptr>> results_base;
+        for (size_t i = 0; i < 10; ++i) {
+            mylog.trace("multiple_outstanding_operations: invoking search base");
+            results_base.push_back(search(c, base_dn));
+        }
 
-        int id_search_jsmith;
-        mylog.trace("multiple_outstanding_operations: invoking search jsmith");
-        BOOST_REQUIRE_EQUAL(LDAP_SUCCESS, search(c, "uid=jsmith,ou=People,dc=example,dc=com", &id_search_jsmith));
-        mylog.trace("multiple_outstanding_operations: search jsmith returned msgid {}", id_search_jsmith);
+        std::vector<future<ldap_msg_ptr>> results_jsmith;
+        for (size_t i = 0; i < 10; ++i) {
+            mylog.trace("multiple_outstanding_operations: invoking search jsmith");
+            results_jsmith.push_back(search(c, "uid=jsmith,ou=People,dc=example,dc=com"));
+        }
 
-        const auto actual_for_base = entries(results_expected_from_search_base_dn.size(), c, id_search_base);
-        BOOST_REQUIRE_EQUAL_COLLECTIONS(
-                actual_for_base.cbegin(), actual_for_base.cend(),
-                results_expected_from_search_base_dn.cbegin(), results_expected_from_search_base_dn.cend());
+        using boost::test_tools::per_element;
+        mylog.trace("multiple_outstanding_operations: check base results");
+        for (size_t i = 0; i < results_base.size(); ++i) {
+            const auto actual_base = entries(c.get_ldap(), results_base[i].get0().get());
+            BOOST_TEST_INFO("result #" << i);
+            BOOST_TEST(actual_base == results_expected_from_search_base_dn, per_element());
+        }
 
-        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(result(c, id_bind).get0().get()));
-
-        const std::set<std::string> expected_for_jsmith{"uid=jsmith,ou=People,dc=example,dc=com"};
-        const auto actual_for_jsmith = entries(expected_for_jsmith.size(), c, id_search_jsmith);
-        BOOST_REQUIRE_EQUAL_COLLECTIONS(
-                actual_for_jsmith.cbegin(), actual_for_jsmith.cend(),
-                expected_for_jsmith.cbegin(), expected_for_jsmith.cend());
+        mylog.trace("multiple_outstanding_operations: check jsmith result");
+        const std::set<std::string> expected_jsmith{"uid=jsmith,ou=People,dc=example,dc=com"};
+        for (size_t i = 0; i < results_jsmith.size(); ++i) {
+            const auto actual_jsmith = entries(c.get_ldap(), results_jsmith[i].get0().get());
+            BOOST_TEST_INFO("result #" << i);
+            BOOST_TEST(actual_jsmith == expected_jsmith, per_element());
+        }
     });
     mylog.trace("multiple_outstanding_operations done");
 }
@@ -208,30 +161,20 @@ SEASTAR_THREAD_TEST_CASE(early_shutdown) {
     mylog.trace("early_shutdown: noop");
     with_ldap_connection(local_ldap_address, [] (ldap_connection&) {});
     mylog.trace("early_shutdown: bind");
-    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { bind(c); });
+    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { (void) bind(c); });
     mylog.trace("early_shutdown: search");
-    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
-        int dummy_id;
-        search(c, base_dn, &dummy_id);
-    });
+    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { (void) search(c, base_dn); });
 }
 
 SEASTAR_THREAD_TEST_CASE(bind_after_fail) {
     mylog.trace("bind_after_fail: wonky connection");
     with_ldap_connection(local_fail_inject_address, [] (ldap_connection& wonky_conn) {
-        const auto id = bind(wonky_conn);
-        if (id != -1) {
-            try_get_result(wonky_conn, id);
-        }
+        bind(wonky_conn).handle_exception(&ignore).get();
     });
     mylog.trace("bind_after_fail: solid connection");
     with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
-        const auto id = bind(c);
-        BOOST_REQUIRE_NE(id, -1);
-        mylog.trace("bind_after_fail: bind returned {}", id);
-        // Await the bind result:
-        auto r = result(c, id).get0();
-        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(r.get()));
+        const auto res = bind(c).get0();
+        BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(res.get()));
     });
     mylog.trace("bind_after_fail done");
 }
@@ -239,19 +182,16 @@ SEASTAR_THREAD_TEST_CASE(bind_after_fail) {
 SEASTAR_THREAD_TEST_CASE(search_after_fail) {
     mylog.trace("search_after_fail: wonky connection");
     with_ldap_connection(local_fail_inject_address, [] (ldap_connection& wonky_conn) {
-        int id;
-        if(LDAP_SUCCESS == search(wonky_conn, base_dn, &id)) {
-            try_get_result(wonky_conn, id);
-        }
+        search(wonky_conn, base_dn).handle_exception(&ignore).get();
     });
     mylog.trace("search_after_fail: solid connection");
     with_ldap_connection(local_ldap_address, [] (ldap_connection& c) {
-        int msgid;
-        BOOST_REQUIRE_EQUAL(LDAP_SUCCESS, search(c, base_dn, &msgid));
-        mylog.trace("search_after_fail: search returned msgid {}", msgid);
-        const std::set<std::string>& expected = results_expected_from_search_base_dn;
-        const auto actual = entries(expected.size(), c, msgid);
-        BOOST_REQUIRE_EQUAL_COLLECTIONS(actual.cbegin(), actual.cend(), expected.cbegin(), expected.cend());
+        const auto res = search(c, base_dn).get0();
+        mylog.trace("search_after_fail: got search result");
+        const auto actual = entries(c.get_ldap(), res.get());
+        BOOST_REQUIRE_EQUAL_COLLECTIONS(
+                actual.cbegin(), actual.cend(),
+                results_expected_from_search_base_dn.cbegin(), results_expected_from_search_base_dn.cend());
     });
     mylog.trace("search_after_fail done");
 }
@@ -259,37 +199,56 @@ SEASTAR_THREAD_TEST_CASE(search_after_fail) {
 SEASTAR_THREAD_TEST_CASE(multiple_outstanding_operations_on_failing_connection) {
     mylog.trace("multiple_outstanding_operations_on_failing_connection");
     with_ldap_connection(local_fail_inject_address, [] (ldap_connection& c) {
-        const auto id_bind = bind(c);
-        mylog.trace("bind_with_custom_sockbuf_io bind returned {}", id_bind);
+        mylog.trace("multiple_outstanding_operations_on_failing_connection: invoking bind");
+        bind(c).handle_exception(&ignore).get();;
 
-        int id_search_base;
-        mylog.trace("multiple_outstanding_operations_on_failing_connection: invoking search base");
-        const auto status_base = search(c, base_dn, &id_search_base);
-        mylog.trace("multiple_outstanding_operations_on_failing_connection: search base returned status {}, msgid {}",
-                    status_base, id_search_base);
-
-        int id_search_jsmith;
-        mylog.trace("multiple_outstanding_operations_on_failing_connection: invoking search jsmith");
-        const auto status_jsmith = search(c, "uid=jsmith,ou=People,dc=example,dc=com", &id_search_jsmith);
-        mylog.trace("multiple_outstanding_operations_on_failing_connection: search jsmith returned status {}, msgid {}",
-                    status_jsmith, id_search_jsmith);
-
-        if (status_base == LDAP_SUCCESS) {
-            mylog.trace("multiple_outstanding_operations_on_failing_connection: taking base-search result");
-            for (size_t i = 0; i < results_expected_from_search_base_dn.size(); ++i) {
-                try_get_result(c, id_search_base);
-            }
+        std::vector<future<ldap_msg_ptr>> results_base;
+        for (size_t i = 0; i < 10; ++i) {
+            mylog.trace("multiple_outstanding_operations_on_failing_connection: invoking search base");
+            results_base.push_back(search(c, base_dn).handle_exception(&ignore));
         }
 
-        if (id_bind != -1) {
-            mylog.trace("multiple_outstanding_operations_on_failing_connection: taking bind result");
-            try_get_result(c, id_bind);
+        std::vector<future<ldap_msg_ptr>> results_jsmith;
+        for (size_t i = 0; i < 10; ++i) {
+            mylog.trace("multiple_outstanding_operations_on_failing_connection: invoking search jsmith");
+            results_jsmith.push_back(search(c, "uid=jsmith,ou=People,dc=example,dc=com").handle_exception(&ignore));
         }
 
-        if (status_jsmith == LDAP_SUCCESS) {
-            mylog.trace("multiple_outstanding_operations_on_failing_connection: taking jsmith-search result");
-            try_get_result(c, id_search_jsmith);
-        }
+        mylog.trace("multiple_outstanding_operations_on_failing_connection: getting base results");
+        when_all_succeed(results_base.begin(), results_base.end()).get();
+        mylog.trace("multiple_outstanding_operations_on_failing_connection: getting jsmith results");
+        when_all_succeed(results_jsmith.begin(), results_jsmith.end()).get();
     });
     mylog.trace("multiple_outstanding_operations_on_failing_connection done");
+}
+
+using exception_predicate::message_contains;
+
+SEASTAR_THREAD_TEST_CASE(bind_after_close) {
+    ldap_connection c(connect(local_ldap_address).get0());
+    c.close().get();
+    BOOST_REQUIRE_EXCEPTION(bind(c).get(), std::runtime_error, message_contains("ldap_connection"));
+}
+
+SEASTAR_THREAD_TEST_CASE(search_after_close) {
+    ldap_connection c(connect(local_ldap_address).get0());
+    c.close().get();
+    BOOST_REQUIRE_EXCEPTION(search(c, base_dn).get(), std::runtime_error, message_contains("ldap_connection"));
+}
+
+SEASTAR_THREAD_TEST_CASE(close_after_close) {
+    ldap_connection c(connect(local_ldap_address).get0());
+    c.close().get();
+    BOOST_REQUIRE_EXCEPTION(c.close().get(), std::runtime_error, message_contains("ldap_connection"));
+}
+
+SEASTAR_THREAD_TEST_CASE(severed_connection_yields_exceptional_future) {
+    with_ldap_connection(local_fail_inject_address, [] (ldap_connection& c) {
+        int up = 1;
+        while (up) {
+            search(c, base_dn)
+                    .handle_exception_type([&] (std::runtime_error&) { up = 0; return ldap_msg_ptr(); })
+                    .get();
+        }
+    });
 }

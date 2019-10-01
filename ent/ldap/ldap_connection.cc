@@ -119,6 +119,10 @@ ldap_connection::ldap_connection(seastar::connected_socket&& socket) :
 }
 
 future<> ldap_connection::close() {
+    if (_status == status::down) {
+        mylog.error("close called while connection is down");
+        return make_exception_future<>(std::runtime_error("double close() of ldap_connection"));
+    }
     _ldap.reset(); // Sends one last message to the server before reclaiming memory.
     return when_all(
             _read_consumer.finally([this] { return _input_stream.close(); })
@@ -133,6 +137,72 @@ future<> ldap_connection::close() {
         shutdown();
         return make_ready_future<>();
     });
+}
+
+future<ldap_msg_ptr> ldap_connection::await_result(int msgid) {
+    mylog.trace("await_result({})", msgid);
+    try {
+        return _msgid_to_promise[msgid].get_future();
+    } catch (...) {
+        auto ex = std::current_exception();
+        mylog.error("await_result({}) error: {}", msgid, ex);
+        // Tell LDAP to abandon this msgid, since we failed to register it.
+        ldap_abandon_ext(get_ldap(), msgid, /*sctrls=*/nullptr, /*cctrls=*/nullptr);
+        return make_exception_future<ldap_msg_ptr>(ex);
+    }
+}
+
+future<ldap_msg_ptr> ldap_connection::await_result(int status, int msgid) {
+    mylog.trace("await_result({}, {})", status, msgid);
+    if (status == LDAP_SUCCESS) {
+        return await_result(msgid);
+    } else {
+        const char* err = ldap_err2string(status);
+        mylog.trace("await_result({}, {}) reporting error {}", status, msgid, err);
+        return make_exception_future<ldap_msg_ptr>(
+                std::runtime_error(fmt::format("ldap operation error: {}", err)));
+    }
+}
+
+future<ldap_msg_ptr> ldap_connection::simple_bind(const char *who, const char *passwd) {
+    mylog.trace("simple_bind({})", who);
+    if (_status != status::up) {
+        mylog.error("simple_bind({}) punting, connection down", who);
+        return make_exception_future<ldap_msg_ptr>(
+                std::runtime_error("bind operation attempted on a closed ldap_connection"));
+    }
+    const int msgid = ldap_simple_bind(get_ldap(), who, passwd);
+    if (msgid == -1) {
+        const auto err = get_error();
+        mylog.error("ldap simple bind error: {}", err);
+        return make_exception_future<ldap_msg_ptr>(
+                std::runtime_error(fmt::format("ldap simple bind error: {}", err)));
+    } else {
+        mylog.trace("simple_bind: msgid {}", msgid);
+        return await_result(msgid);
+    }
+}
+
+future<ldap_msg_ptr> ldap_connection::search(
+        char *base,
+        int scope,
+        char *filter,
+        char *attrs[],
+        int attrsonly,
+        LDAPControl **serverctrls,
+        LDAPControl **clientctrls,
+        struct timeval *timeout,
+        int sizelimit) {
+    mylog.trace("search");
+    int msgid;
+    if (_status != status::up) {
+        mylog.error("search punting, connection down");
+        return make_exception_future<ldap_msg_ptr>(
+                std::runtime_error("search operation attempted on a closed ldap_connection"));
+    }
+    const int status = ldap_search_ext(
+            get_ldap(), base, scope, filter, attrs, attrsonly, serverctrls, clientctrls, timeout, sizelimit, &msgid);
+    return await_result(status, msgid);
 }
 
 sstring ldap_connection::get_error() const {
@@ -209,7 +279,7 @@ void ldap_connection::read_ahead() {
     }
     if (_input_stream.eof()) {
         mylog.error("read_ahead encountered EOF");
-        _status = status::eof;
+        set_status(status::eof);
         return;
     }
     mylog.trace("read_ahead");
@@ -218,18 +288,19 @@ void ldap_connection::read_ahead() {
     _read_consumer = _input_stream.read().then([this] (temporary_buffer<char> b) {
         if (b.empty()) {
             mylog.error("read_ahead received empty buffer; assuming EOF");
-            _status = status::eof;
+            set_status(status::eof);
             return;
         }
-        mylog.trace("read_ahead received data");
+        mylog.trace("read_ahead received data of size {}", b.size());
         if (!_read_buffer.empty()) { // Shouldn't happen; read_ahead's purpose is to replenish empty _read_buffer.
             mylog.error("read_ahead dropping {} unconsumed bytes", _read_buffer.size());
         }
         _read_buffer = std::move(b);
         _read_in_progress = false;
+        poll_results();
     }).handle_exception([this] (std::exception_ptr ep) {
         mylog.error("Seastar read failed: {}", ep);
-        _status = status::err;
+        set_status(status::err);
     });
     mylog.trace("read_ahead done");
 }
@@ -261,7 +332,7 @@ ber_slen_t ldap_connection::write(char const* b, ber_len_t size) {
             return _output_stream.flush();
         }).handle_exception([this] (std::exception_ptr ep) {
             mylog.error("Seastar write failed: {}", ep);
-            _status = status::err;
+            set_status(status::err);
         });
     });
     mylog.trace("write({}) done", size);
@@ -307,12 +378,54 @@ ber_slen_t ldap_connection::read(char* b, ber_len_t size) {
 
 void ldap_connection::shutdown()  {
     mylog.trace("shutdown");
-    _status = status::down;
+    set_status(status::down);
     mylog.trace("shutdown: shutdown input");
     _socket.shutdown_input();
     mylog.trace("shutdown: shutdown output");
     _socket.shutdown_output();
     mylog.trace("shutdown done");
+}
+
+void ldap_connection::poll_results() {
+    mylog.trace("poll_results");
+    if (!_ldap) { // Could happen during close(), which unbinds.
+        mylog.debug("poll_results: _ldap is null, punting");
+        return;
+    }
+    LDAPMessage *result;
+    while (!_read_buffer.empty()) {
+        static timeval zero_duration{};
+        mylog.trace("poll_results: {} in buffer, invoking ldap_result", _read_buffer.size());
+        const int status = ldap_result(get_ldap(), LDAP_RES_ANY, /*all=*/1, &zero_duration, &result);
+        if (status > 0) {
+            ldap_msg_ptr result_ptr(result);
+            const int id = ldap_msgid(result);
+            mylog.trace("poll_results: ldap_result returned status {}, id {}", status, id);
+            const auto found = _msgid_to_promise.find(id);
+            if (found == _msgid_to_promise.end()) {
+                mylog.error("poll_results: got valid result for unregistered id {}, dropping it", id);
+                ldap_msgfree(result);
+            } else {
+                found->second.set_value(std::move(result_ptr));
+                _msgid_to_promise.erase(found);
+            }
+        } else if (status < 0) {
+            mylog.error("poll_results: ldap_result returned status {}", status);
+            set_status(status::down);
+        }
+    }
+    mylog.trace("poll_results done");
+}
+
+void ldap_connection::set_status(ldap_connection::status s) {
+    _status = s;
+    if (s != status::up) {
+        mylog.trace("set_status: signal result-waiting futures");
+        for (auto& e : _msgid_to_promise) {
+            e.second.set_exception(std::runtime_error("ldap_connection status set to error"));
+        }
+        _msgid_to_promise.clear();
+    }
 }
 
 void with_ldap_connection(seastar::connected_socket&& socket, std::function<void(ldap_connection&)> f) {
