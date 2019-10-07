@@ -326,6 +326,8 @@ class encryption_schema_extension : public schema_extension {
     shared_ptr<key_provider> _provider;
     std::map<sstring, sstring> _options;
     std::optional<size_t> _key_block_size;
+
+    friend std::ostream& operator<<(std::ostream&, const encryption_schema_extension&);
 public:
     encryption_schema_extension(key_info, shared_ptr<key_provider>, std::map<sstring, sstring>);
 
@@ -387,6 +389,10 @@ public:
         return *_key_block_size;
     }
 };
+
+std::ostream& operator<<(std::ostream& os, const encryption_schema_extension& ext) {
+    return os << ext._options << ", alg=" << ext._info << ", provider=" << *ext._provider;
+}
 
 encryption_schema_extension::encryption_schema_extension(key_info info, shared_ptr<key_provider> provider, std::map<sstring, sstring> options)
     : _info(std::move(info))
@@ -505,6 +511,9 @@ public:
                         if (exta->map.count(key_id_attribute_ds)) {
                             id = exta->map.at(key_id_attribute_ds).value;
                         }
+
+                        logg.debug("Open encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
+
                         if (esx->should_delay_read(id)) {
                             return make_ready_future<file>(make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
                                 return esx->key_for_read(id);
@@ -537,6 +546,8 @@ public:
                 }
 
                 auto esx = static_pointer_cast<encryption_schema_extension>(e->second);
+
+                logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
                 return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](::shared_ptr<symmetric_key> k, opt_bytes id) {
                     if (!ext.map.count(encryption_attribute_ds)) {
@@ -586,7 +597,7 @@ public:
         auto cfg_file = config_name(filename);
 
         if (flags == open_flags::ro) {
-            return read_text_file_fully(cfg_file).then([f, this](temporary_buffer<char> buf) {
+            return read_text_file_fully(cfg_file).then([f, this, filename](temporary_buffer<char> buf) {
                 std::istringstream ss(std::string(buf.begin(), buf.end()));
                 options opts;
                 std::string line;
@@ -602,12 +613,19 @@ public:
                 if (opts.count(id_key)) {
                     id = base64_decode(opts[id_key]);
                 }
-                return _ctxt->get_provider(opts)->key(get_key_info(opts), id).then([f](shared_ptr<symmetric_key> k, opt_bytes) {
+
+                auto provider = _ctxt->get_provider(opts);
+
+                logg.debug("Open commitlog segment {} using {} (id: {})", filename, *provider, id);
+
+                return provider->key(get_key_info(opts), id).then([f](shared_ptr<symmetric_key> k, opt_bytes) {
                     return make_ready_future<file>(make_encrypted_file(f, k));
                 });
             });
         } else {
-            return _ctxt->get_provider(_opts)->key(get_key_info(_opts)).then([f, this, cfg_file](shared_ptr<symmetric_key> k, opt_bytes id) {
+            auto provider = _ctxt->get_provider(_opts);
+
+            return provider->key(get_key_info(_opts)).then([f, this, cfg_file, filename, &provider = *provider](shared_ptr<symmetric_key> k, opt_bytes id) {
                 std::ostringstream ss;
                 for (auto&p : _opts) {
                     ss << p.first << "=" << p.second << std::endl;
@@ -615,6 +633,9 @@ public:
                 if (id) {
                     ss << id_key << "=" << base64_encode(*id) << std::endl;
                 }
+
+                logg.debug("Creating commitlog segment {} using {} (id: {})", filename, provider, id);
+
                 return write_text_file_fully(cfg_file, ss.str()).then([f, this, k] {
                     return make_ready_future<file>(make_encrypted_file(f, k));
                 });
@@ -652,6 +673,8 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
             // explicitly set the key file path
             opts[SECRET_KEY_FILE] = (bfs::path(cfg.system_key_directory()) / bfs::path("system") / bfs::path(sie("key_name").value_or("system_table_keytab"))).string();
         }
+
+        logg.info("Adding system info encryption using {}", opts);
 
         exts.add_commitlog_file_extension(encryption_attribute, std::make_unique<encryption_commitlog_file_extension>(ctxt, opts));
 
