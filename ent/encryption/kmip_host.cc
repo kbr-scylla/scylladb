@@ -17,6 +17,7 @@
 #include <seastar/net/api.hh>
 #include <seastar/net/tls.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/sleep.hh>
 
 // workaround cryptsoft sdk issue:
 #define strcasestr  kmip_strcasestr
@@ -38,7 +39,9 @@ using namespace std::chrono_literals;
 static logger kmip_log("kmip");
 static constexpr uint16_t kmip_port = 5696u;
 // default for command execution/failover retry.
-static constexpr int default_num_cmd_retry = 3;
+static constexpr int default_num_cmd_retry = 5;
+static constexpr int min_num_cmd_retry = 2;
+static constexpr auto base_backoff_time = 100ms;
 
 std::ostream& operator<<(std::ostream& os, KMIP* kmip) {
     auto* s = KMIP_dump_str(kmip, KMIP_DUMP_FORMAT_DEFAULT);
@@ -141,7 +144,7 @@ public:
                                     default_refresh, kmip_log,
                                     std::bind(&impl::find_key, this,
                                                     std::placeholders::_1)),
-                                    _max_retry(std::max(size_t(1), options.max_command_retries.value_or(default_num_cmd_retry)))
+                                    _max_retry(std::max(size_t(min_num_cmd_retry), options.max_command_retries.value_or(default_num_cmd_retry)))
     {
         if (_options.hosts.size() > max_hosts) {
             throw std::invalid_argument("Too many hosts");
@@ -186,6 +189,8 @@ private:
 
     future<con_ptr> get_connection(KMIP_CMD*);
     future<con_ptr> get_connection(const sstring&);
+    future<> clear_connections(const sstring& host);
+
     void release(KMIP_CMD*, con_ptr);
 
     size_t max_pooled_connections_per_host() const {
@@ -523,18 +528,49 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
     return do_with(std::move(f), [this, cmd](Func& f) {
         return repeat_until_value([this, cmd, &f, retry = _max_retry]() mutable {
             --retry;
-            return get_connection(cmd).then([this, cmd, &f, retry](con_ptr cp) mutable {
+            return get_connection(cmd).handle_exception([this, cmd, retry](std::exception_ptr ep) {
+                if (retry) {
+                    // failed to connect. do more serious backing off.
+                    // we only retry this once, since get_connection
+                    // will either give back cached connections, 
+                    // or explicitly try all avail hosts. 
+                    // In the first case, we will do the lower retry
+                    // loop if something is stale/borked, the latter is 
+                    // more or less dead. 
+                    auto sleeptime = base_backoff_time * (_max_retry - retry);
+                    kmip_log.debug("{}: Connection failed. backoff {}", *this, std::chrono::duration_cast<std::chrono::milliseconds>(sleeptime).count());
+                    return seastar::sleep(sleeptime).then([this, cmd] {
+                        kmip_log.debug("{}: retrying...", *this);
+                        return get_connection(cmd);
+                    });
+                }
+                return make_exception_future<con_ptr>(std::move(ep));
+            }).then([this, cmd, &f, retry](con_ptr cp) mutable {
+                auto host = cp->host();
                 auto res = do_cmd(cmd, std::move(cp), f);
                 kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
-                return res.then([this, retry](int res) mutable {
+                return res.then([this, retry, cmd, host = std::move(host)](int res) {
                     if (res == KMIP_ERROR_IO) {
                         kmip_log.debug("{}: request error {}", *this, kmip_errorc.message(res));
                         if (retry) {
-                            kmip_log.debug("{}: retrying...", *this);
-                            return opt_int{};
+                            // do some backing off unless this is the first retry, which 
+                            // might be a stale connection. Clear out all caches for the 
+                            // current host first, then retry. 
+                            auto f = clear_connections(host);
+                            if (retry != (_max_retry - 1)) {             
+                                f = f.then([this] {
+                                    auto sleeptime = base_backoff_time;
+                                    kmip_log.debug("{}: backoff {}ms", *this, std::chrono::duration_cast<std::chrono::milliseconds>(sleeptime).count());
+                                    return seastar::sleep(sleeptime);
+                                });
+                            }
+                            return f.then([this] {
+                                kmip_log.debug("{}: retrying...", *this);
+                                return opt_int{};
+                            });
                         }
                     }
-                    return opt_int(res);
+                    return make_ready_future<opt_int>(res);
                 });
             });
         });
@@ -551,30 +587,33 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(const sstring& 
     // and re-run command with a new connection. Maybe always verify connection, even if
     // it is old?
     auto& q = _host_connections[host];
-    if (q.empty()) {
-        auto cp = ::make_shared<connection>(host, _options);
-        kmip_log.trace("{}: connecting to {}", *this, host);
-        return cp->connect().then([this, cp, host] {
-            kmip_log.trace("{}: verifying {}", *this, host);
-            kmip_cmd cmd;
-            static auto connection_query = [](KMIP_CMD* cmd) {
-                static const std::array<int, 2> query_options = {
-                  KMIP_QUERY_FUNCTION_QUERY_OPERATIONS,
-                  KMIP_QUERY_FUNCTION_QUERY_OBJECTS,
-                };
-                return KMIP_CMD_query(cmd, const_cast<int *>(query_options.data()), unsigned(query_options.size()));
-            };
-            auto f = do_cmd(cmd, cp, connection_query);
-            return f.then([this, cp, host, cmd = std::move(cmd)](auto) {
-                kmip_log.trace("{}: connected {}", *this, host);
-                return cp;
-            });
-        });
+    
+    if (!q.empty()) {
+        auto cp = q.front();
+        q.pop_front();
+        return make_ready_future<::shared_ptr<connection>>(cp);
     }
 
-    auto cp = q.front();
-    q.pop_front();
-    return make_ready_future<::shared_ptr<connection>>(cp);
+    auto cp = ::make_shared<connection>(host, _options);
+    kmip_log.trace("{}: connecting to {}", *this, host);
+    return cp->connect().then([this, cp, host] {
+        kmip_log.trace("{}: verifying {}", *this, host);
+        kmip_cmd cmd;
+        static auto connection_query = [](KMIP_CMD* cmd) {
+            static const std::array<int, 2> query_options = {
+            KMIP_QUERY_FUNCTION_QUERY_OPERATIONS,
+            KMIP_QUERY_FUNCTION_QUERY_OBJECTS,
+            };
+            return KMIP_CMD_query(cmd, const_cast<int *>(query_options.data()), unsigned(query_options.size()));
+        };
+        // when/if this succeeds, it will push the connection onto the available stack
+        auto f = do_cmd(cmd, cp, connection_query);
+        return f.then([this, host, cmd = std::move(cmd)](int res) {
+            kmip_chk(res, cmd);
+            kmip_log.trace("{}: connected {}", *this, host);
+            return get_connection(host);
+        });
+    });
 }
 
 
@@ -582,7 +621,6 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(KMIP_CMD* cmd) 
     userdata u{ KMIP_CMD_get_userdata(cmd) };
     if (u.host != nullptr) {
         return get_connection(u.host).then([this, cmd](con_ptr cp) {
-            cp->attach(cmd);
             return cp;
         });
     }
@@ -596,11 +634,23 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(KMIP_CMD* cmd) 
         }
         auto& host = _options.hosts[_index % _options.hosts.size()];
         return get_connection(host).then([this, cmd](con_ptr cp) {
-            cp->attach(cmd);
             return con_opt(std::move(cp));
-        }).handle_exception([this](auto) {
+        }).handle_exception([this, host](auto) {
             ++_index;
-            return con_opt();
+            // if we fail one host, clear out any 
+            // caches for it just in case. 
+            return clear_connections(host).then([] {
+                return con_opt();
+            });
+        });
+    });
+}
+
+future<> kmip_host::impl::clear_connections(const sstring& host) {
+    auto q = std::exchange(_host_connections[host], {});
+    return parallel_for_each(q.begin(), q.end(), [](con_ptr c) {
+        return c->close().handle_exception([c](auto ep) {
+            // ignore exceptions
         });
     });
 }
