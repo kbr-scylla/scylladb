@@ -54,6 +54,8 @@
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
 
+static seastar::logger logg{"encryption"};
+
 namespace encryption {
 
 static const std::set<sstring> keywords = { KEY_PROVIDER,
@@ -364,9 +366,14 @@ public:
     bytes serialize() const override {
         return ser::serialize_to_buffer<bytes>(_options, 0);
     }
-    future<> validate(const schema&) const override {
-        return _provider->validate().then([this] {
-            return key_for_write().discard_result();
+    future<> validate(const schema& s) const override {
+        return _provider->validate().then([this, &s] {
+            return key_for_write().discard_result().then([this, &s] {
+                logg.info("Added encryption extension to {}.{}", s.ks_name(), s.cf_name());
+                logg.info("   Options: {}", _options);
+                logg.info("   Key Algorithm: {}", _info);
+                logg.info("   Provider: {}", *_provider);
+            });
         });
     }
 
