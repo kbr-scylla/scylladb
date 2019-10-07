@@ -22,9 +22,10 @@ namespace encryption {
 
 class kmip_key_provider : public key_provider {
 public:
-    kmip_key_provider(::shared_ptr<kmip_host> kmip_host, kmip_host::key_options kopts)
+    kmip_key_provider(::shared_ptr<kmip_host> kmip_host, kmip_host::key_options kopts, sstring name)
         : _kmip_host(std::move(kmip_host))
         , _kopts(std::move(kopts))
+        , _name(std::move(name))
     {}
     future<key_ptr, opt_bytes> key(const key_info& info, opt_bytes id) override {
         if (id) {
@@ -36,9 +37,20 @@ public:
             return make_ready_future<key_ptr, opt_bytes>(k, id);
         });
     }
+    void print(std::ostream& os) const override {
+        os << _name;
+        if (!_kopts.key_namespace.empty()) {
+            os << ", namespace=" << _kopts.key_namespace;
+        }
+        if (!_kopts.template_name.empty()) {
+            os << ", template=" << _kopts.template_name;
+        }
+    }
+
 private:
     ::shared_ptr<kmip_host> _kmip_host;
     kmip_host::key_options _kopts;
+    sstring _name;
 };
 
 
@@ -57,7 +69,7 @@ shared_ptr<key_provider> kmip_key_provider_factory::get_provider(encryption_cont
     auto provider = ctxt.get_cached_provider(cache_key);
 
     if (!provider) {
-        provider = ::make_shared<kmip_key_provider>(ctxt.get_kmip_host(*host), std::move(kopts));
+        provider = ::make_shared<kmip_key_provider>(ctxt.get_kmip_host(*host), std::move(kopts), *host);
         ctxt.cache_provider(cache_key, provider);
     }
 

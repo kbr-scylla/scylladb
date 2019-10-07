@@ -79,6 +79,10 @@ public:
     const sstring& path() const {
         return _path;
     }
+    void print(std::ostream& os) const override {
+        os << "key=" << _path;
+    }
+
 private:
     future<key_ptr> load_or_create(const key_info&);
     future<key_ptr> load_or_create_local(const key_info&);

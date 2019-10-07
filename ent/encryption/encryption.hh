@@ -114,7 +114,12 @@ public:
     virtual bool should_delay_read(const opt_bytes&) const {
         return false;
     }
+private:
+    friend std::ostream& operator<<(std::ostream&, const key_provider&);
+    virtual void print(std::ostream&) const = 0;
 };
+
+std::ostream& operator<<(std::ostream&, const key_provider&);
 
 class key_provider_factory {
 public:

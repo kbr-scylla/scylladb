@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <regex>
 #include <algorithm>
+#include <ios>
 
 #include <string.h>
 
@@ -178,6 +179,11 @@ key_info get_key_info(const options& map) {
     }
     // todo: static constexpr auto KMIP_KEY_PROVIDER_FACTORY = "KmipKeyProviderFactory";
     return key_info{ std::move(cipher_name), unsigned(key_strength) };
+}
+
+std::ostream& operator<<(std::ostream& os, const key_provider& p) {
+    p.print(os);
+    return os;
 }
 
 sstring encryption_context::maybe_decrypt_config_value(const sstring& s) const {

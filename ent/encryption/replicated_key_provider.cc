@@ -95,6 +95,10 @@ public:
         return !qp.local_is_initialized() || _ctxt.get_database().local().get_compaction_manager().stopped();
     }
 
+    void print(std::ostream& os) const override {
+        os << "system_key=" << _system_key->name() << ", local=" << *_local_provider;
+    }
+
 private:
     void store_key(const key_id&, const UUID&, key_ptr);
     opt_bytes decode_id(const opt_bytes&) const;
