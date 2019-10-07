@@ -900,7 +900,7 @@ murmur3_partitioner_ignore_msb_bits: 12
 #
 # kmip_hosts:
 #   <name>:
-#       hosts: <address1> [, <address2>...]
+#       hosts: <address1[:port]> [, <address2[:port]>...]
 #       certificate: <identifying certificate> (optional)
 #       keyfile: <identifying key> (optional)
 #       truststore: <truststore for SSL connection> (optional)

@@ -63,7 +63,7 @@ See the scylla documentation for available key providers and their properties.
 
 The unique name of kmip host/cluster that can be referenced in table schema.
 
-host.yourdomain.com={ hosts=[<host1>, <host2>...], keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
+host.yourdomain.com={ hosts=<host1[:port]>[, <host2[:port]>...], keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
 
 The KMIP connection management only supports failover, so all requests will go through a 
 single KMIP server. There is no load balancing, as no KMIP servers (at the time of this writing)

@@ -36,7 +36,7 @@
 using namespace std::chrono_literals;
 
 static logger kmip_log("kmip");
-static constexpr int kmip_port = 5696;
+static constexpr uint16_t kmip_port = 5696u;
 // default for command execution/failover retry.
 static constexpr int default_num_cmd_retry = 3;
 
@@ -142,7 +142,6 @@ public:
                                     std::bind(&impl::find_key, this,
                                                     std::placeholders::_1)),
                                     _max_retry(std::max(size_t(1), options.max_command_retries.value_or(default_num_cmd_retry)))
-
     {
         if (_options.hosts.size() > max_hosts) {
             throw std::invalid_argument("Too many hosts");
@@ -279,9 +278,14 @@ future<> kmip_host::impl::connection::connect() {
     return f.then([this, cred] {
         // TODO, find if we should do hostname verification
         // TODO: connect all failovers already?
-        return seastar::net::dns::resolve_name(_host).then([this, cred](seastar::net::inet_address addr) {
-            return seastar::tls::connect(cred, seastar::ipv4_addr{addr, kmip_port}).then([this](seastar::connected_socket s) {
-                kmip_log.debug("Successfully connected {} ({})", _host);
+
+        auto i = _host.find_last_of(':');
+        auto name = _host.substr(0, i);
+        auto port = i != sstring::npos ? std::stoul(_host.substr(i + 1)) : kmip_port;
+
+        return seastar::net::dns::resolve_name(name).then([this, cred, port](seastar::net::inet_address addr) {
+            return seastar::tls::connect(cred, seastar::ipv4_addr{addr, uint16_t(port)}).then([this](seastar::connected_socket s) {
+                kmip_log.debug("Successfully connected {}", _host);
                 // #998 Set keepalive to try avoiding connection going stale inbetween commands. 
                 s.set_keepalive_parameters(net::tcp_keepalive_params{60s, 60s, 10});
                 s.set_keepalive(true);
