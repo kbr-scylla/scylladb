@@ -369,7 +369,8 @@ if __name__ == "__main__":
         subprocess.check_output(cmd)
         # Put the test data in.
         cmd = ['slapadd','-F',os.path.abspath(instance_path)]
-        subprocess.run(cmd, capture_output=True, check=True, text=True, input='\n\n'.join(DEFAULT_ENTRIES))
+        subprocess.check_output(
+            cmd, input='\n\n'.join(DEFAULT_ENTRIES).encode('ascii'), stderr=subprocess.STDOUT)
         # Set up the server.
         SLAPD_URLS="ldap://:{local_port_ldap}/ ldaps://:{local_port_sldap}/".format(local_port_ldap=local_port_ldap,local_port_sldap=local_port_sldap)
         subprocess.check_output(['slapd','-F',os.path.abspath(instance_path),'-h',SLAPD_URLS,'-n',"server-{}".format(local_port_ldap)])
