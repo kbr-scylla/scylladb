@@ -96,8 +96,8 @@ parse(const sstring& json_string, const std::vector<column_definition>& expected
 
 namespace statements {
 
-update_statement::update_statement(audit::audit_info_ptr&& audit_info, statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, uint64_t* cql_stats_counter_ptr)
-    : modification_statement{type, bound_terms, std::move(s), std::move(attrs), cql_stats_counter_ptr}
+update_statement::update_statement(audit::audit_info_ptr&& audit_info, statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats)
+    : modification_statement{type, bound_terms, std::move(s), std::move(attrs), stats}
 {
     set_audit_info(std::move(audit_info));
 }
@@ -277,7 +277,7 @@ insert_statement::insert_statement(            ::shared_ptr<cf_name> name,
 insert_statement::prepare_internal(database& db, schema_ptr schema,
     ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs, cql_stats& stats)
 {
-    auto stmt = ::make_shared<cql3::statements::update_statement>(audit_info(), statement_type::INSERT, bound_names->size(), schema, std::move(attrs), &stats.inserts);
+    auto stmt = ::make_shared<cql3::statements::update_statement>(audit_info(), statement_type::INSERT, bound_names->size(), schema, std::move(attrs), stats);
 
     // Created from an INSERT
     if (stmt->is_counter()) {
@@ -340,7 +340,7 @@ insert_json_statement::prepare_internal(database& db, schema_ptr schema,
     auto json_column_placeholder = ::make_shared<column_identifier>("", true);
     auto prepared_json_value = _json_value->prepare(db, "", ::make_shared<column_specification>("", "", json_column_placeholder, utf8_type));
     prepared_json_value->collect_marker_specification(bound_names);
-    return ::make_shared<cql3::statements::insert_prepared_json_statement>(audit_info(), bound_names->size(), schema, std::move(attrs), &stats.inserts, std::move(prepared_json_value), _default_unset);
+    return ::make_shared<cql3::statements::insert_prepared_json_statement>(audit_info(), bound_names->size(), schema, std::move(attrs), stats, std::move(prepared_json_value), _default_unset);
 }
 
 update_statement::update_statement(            ::shared_ptr<cf_name> name,
@@ -357,7 +357,7 @@ update_statement::update_statement(            ::shared_ptr<cf_name> name,
 update_statement::prepare_internal(database& db, schema_ptr schema,
     ::shared_ptr<variable_specifications> bound_names, std::unique_ptr<attributes> attrs, cql_stats& stats)
 {
-    auto stmt = ::make_shared<cql3::statements::update_statement>(audit_info(), statement_type::UPDATE, bound_names->size(), schema, std::move(attrs), &stats.updates);
+    auto stmt = ::make_shared<cql3::statements::update_statement>(audit_info(), statement_type::UPDATE, bound_names->size(), schema, std::move(attrs), stats);
 
     for (auto&& entry : _updates) {
         auto id = entry.first->prepare_column_identifier(schema);

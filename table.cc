@@ -136,9 +136,12 @@ contains_rows(const sstables::sstable& sst, const schema_ptr& schema, const ck_f
 // of a range for each clustering component.
 static std::vector<sstables::shared_sstable>
 filter_sstable_for_reader(std::vector<sstables::shared_sstable>&& sstables, column_family& cf, const schema_ptr& schema,
-        const sstables::key& key, const query::partition_slice& slice) {
-    auto sstable_has_not_key = [&] (const sstables::shared_sstable& sst) {
-        return !sst->filter_has_key(key);
+        const dht::partition_range& pr, const sstables::key& key, const query::partition_slice& slice) {
+    const dht::ring_position& pr_key = pr.start()->value();
+    auto sstable_has_not_key = [&, cmp = dht::ring_position_comparator(*schema)] (const sstables::shared_sstable& sst) {
+        return cmp(pr_key, sst->get_first_decorated_key()) < 0 ||
+               cmp(pr_key, sst->get_last_decorated_key()) > 0 ||
+               !sst->filter_has_key(key);
     };
     sstables.erase(boost::remove_if(sstables, sstable_has_not_key), sstables.end());
 
@@ -286,7 +289,7 @@ create_single_key_sstable_reader(column_family* cf,
 {
     auto key = sstables::key::from_partition_key(*schema, *pr.start()->value().key());
     auto readers = boost::copy_range<std::vector<flat_mutation_reader>>(
-        filter_sstable_for_reader(sstables->select(pr), *cf, schema, key, slice)
+        filter_sstable_for_reader(sstables->select(pr), *cf, schema, pr, key, slice)
         | boost::adaptors::transformed([&] (const sstables::shared_sstable& sstable) {
             tracing::trace(trace_state, "Reading key {} from sstable {}", pr, seastar::value_of([&sstable] { return sstable->get_filename(); }));
             return sstable->read_row_flat(schema, pr.start()->value(), slice, pc, resource_tracker, fwd);
@@ -674,6 +677,14 @@ void table::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, co
     }
 }
 
+inline void table::add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable) {
+    // Don't add sstables that belong to more than one shard to the table's backlog tracker
+    // given that such sstables are supposed to be tracked only by resharding's own tracker.
+    if (!sstable->is_shared()) {
+        tracker.add_sstable(sstable);
+    }
+}
+
 void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable) {
     // allow in-progress reads to continue using old list
     auto new_sstables = make_lw_shared(*_sstables);
@@ -683,7 +694,7 @@ void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsi
     if (sstable->requires_view_building()) {
         _sstables_staging.emplace(sstable->generation(), sstable);
     } else {
-        _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
+        add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sstable);
     }
 }
 
@@ -1402,7 +1413,7 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
 
     auto new_sstables = new_cs.make_sstable_set(_schema);
     for (auto&& s : *_sstables->all()) {
-        new_cs.get_backlog_tracker().add_sstable(s);
+        add_sstable_to_backlog_tracker(new_cs.get_backlog_tracker(), s);
         new_sstables.insert(s);
     }
 

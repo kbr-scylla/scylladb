@@ -523,6 +523,7 @@ private:
     // Doesn't trigger compaction.
     // Strong exception guarantees.
     void add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable);
+    static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     // returns an empty pointer if sstable doesn't belong to current shard.
     future<sstables::shared_sstable> open_sstable(sstables::foreign_sstable_open_info info, sstring dir,
         int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
@@ -1269,6 +1270,7 @@ private:
     std::unordered_map<std::pair<sstring, sstring>, utils::UUID, utils::tuple_hash> _ks_cf_to_uuid;
     std::unique_ptr<db::commitlog> _commitlog;
     utils::UUID _version;
+    uint32_t _schema_change_count = 0;
     // compaction_manager object is referenced by all column families of a database.
     std::unique_ptr<compaction_manager> _compaction_manager;
     seastar::metrics::metric_groups _metrics;

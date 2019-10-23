@@ -26,6 +26,24 @@
 
 constexpr int32_t schema::NAME_LENGTH;
 
+void column_mask::union_with(const column_mask& with) {
+
+    // boost::dynamic_bitset doesn't support logical
+    // or of bitsets of different sizes, work this around.
+    if (_mask.size() > with._mask.size()) {
+        if (with._mask.size()) {
+            column_mask::bitset tmp = with._mask;
+            tmp.resize(_mask.size());
+            _mask |= tmp;
+        }
+        return;
+    }
+    if (_mask.size() < with._mask.size()) {
+        _mask.resize(with._mask.size());
+    }
+    _mask |= with._mask;
+}
+
 sstring to_sstring(column_kind k) {
     switch (k) {
     case column_kind::partition_key:  return "PARTITION_KEY";
@@ -80,6 +98,11 @@ std::ostream& operator<<(std::ostream& out, const column_mapping& cm) {
         << "], regular=[" << ::join(", ", boost::irange<column_id>(0, n_regular) |
             boost::adaptors::transformed([&] (column_id i) { return pr_entry(i, cm.regular_column_at(i)); }))
         << "]}";
+}
+
+std::ostream& operator<<(std::ostream& os, ordinal_column_id id)
+{
+    return os << static_cast<column_count_type>(id);
 }
 
 ::shared_ptr<cql3::column_specification>
@@ -283,6 +306,7 @@ schema::schema(const raw_schema& raw, std::optional<raw_view_info> raw_view_info
     for (auto& def : _raw._columns) {
         def.column_specification = make_column_specification(def);
         assert(!def.id || def.id == id - column_offset(def.kind));
+        def.ordinal_id = static_cast<ordinal_column_id>(id);
         def.id = id - column_offset(def.kind);
 
         auto dropped_at_it = _raw._dropped_columns.find(def.name_as_text());
@@ -424,6 +448,7 @@ bool operator==(const schema& x, const schema& y)
         && x._raw._compaction_strategy == y._raw._compaction_strategy
         && x._raw._compaction_strategy_options == y._raw._compaction_strategy_options
         && x._raw._compaction_enabled == y._raw._compaction_enabled
+        && x._raw._cdc_options == y._raw._cdc_options
         && x._raw._caching_options == y._raw._caching_options
         && x._raw._dropped_columns == y._raw._dropped_columns
         && x._raw._collections == y._raw._collections
@@ -530,6 +555,11 @@ schema::column_at(column_kind kind, column_id id) const {
     return _raw._columns.at(column_offset(kind) + id);
 }
 
+const column_definition&
+schema::column_at(ordinal_column_id ordinal_id) const {
+    return _raw._columns.at(static_cast<column_count_type>(ordinal_id));
+}
+
 std::ostream& operator<<(std::ostream& os, const schema& s) {
     os << "org.apache.cassandra.config.CFMetaData@" << &s << "[";
     os << "cfId=" << s._raw._id;
@@ -574,6 +604,7 @@ std::ostream& operator<<(std::ostream& os, const schema& s) {
     os << ",bloomFilterFpChance=" << s._raw._bloom_filter_fp_chance;
     os << ",memtableFlushPeriod=" << s._raw._memtable_flush_period;
     os << ",caching=" << s._raw._caching_options.to_sstring();
+    os << ",cdc=" << s._raw._cdc_options.to_sstring();
     os << ",defaultTimeToLive=" << s._raw._default_time_to_live.count();
     os << ",minIndexInterval=" << s._raw._min_index_interval;
     os << ",maxIndexInterval=" << s._raw._max_index_interval;
@@ -682,6 +713,7 @@ schema_builder::schema_builder(const schema::raw_schema& raw)
     // recomputed in build().
     for (auto& def : _raw._columns | boost::adaptors::filtered([] (auto& def) { return !def.is_primary_key(); })) {
             def.id = 0;
+            def.ordinal_id = static_cast<ordinal_column_id>(0);
     }
 }
 

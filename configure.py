@@ -271,6 +271,7 @@ scylla_tests = [
     'tests/row_cache_stress_test',
     'tests/memory_footprint',
     'tests/perf/perf_sstable',
+    'tests/cdc_test',
     'tests/cql_query_test',
     'tests/secondary_index_test',
     'tests/json_cql_query_test',
@@ -504,6 +505,7 @@ scylla_core = (['database.cc',
                 'transport/event_notifier.cc',
                 'transport/server.cc',
                 'transport/messages/result_message.cc',
+                'cdc/cdc.cc',
                 'cql3/abstract_marker.cc',
                 'cql3/attributes.cc',
                 'cql3/cf_name.cc',
@@ -801,6 +803,7 @@ alternator = [
        Antlr3Grammar('alternator/expressions.g'),
        'alternator/conditions.cc',
        'alternator/rjson.cc',
+       'alternator/auth.cc',
 ]
 
 idls = ['idl/gossip_digest.idl.hh',

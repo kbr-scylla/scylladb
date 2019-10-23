@@ -62,6 +62,7 @@
 #include "cache_temperature.hh"
 #include "mutation_query.hh"
 #include "service_permit.hh"
+#include "service/client_state.hh"
 
 
 namespace seastar::rpc {
@@ -91,6 +92,11 @@ class mutation_holder;
 class view_update_write_response_handler;
 
 using replicas_per_token_range = std::unordered_map<dht::token_range, std::vector<utils::UUID>>;
+
+struct query_partition_key_range_concurrent_result {
+    std::vector<foreign_ptr<lw_shared_ptr<query::result>>> result;
+    replicas_per_token_range replicas;
+};
 
 struct view_update_backlog_timestamped {
     db::view::update_backlog backlog;
@@ -161,17 +167,20 @@ public:
 
     public:
         service_permit permit;
+        client_state& cstate;
         tracing::trace_state_ptr trace_state = nullptr;
         replicas_per_token_range preferred_replicas;
         std::optional<db::read_repair_decision> read_repair_decision;
 
         coordinator_query_options(clock_type::time_point timeout,
                 service_permit permit_,
+                client_state& client_state_,
                 tracing::trace_state_ptr trace_state = nullptr,
                 replicas_per_token_range preferred_replicas = { },
                 std::optional<db::read_repair_decision> read_repair_decision = { })
             : _timeout(timeout)
             , permit(std::move(permit_))
+            , cstate(client_state_)
             , trace_state(std::move(trace_state))
             , preferred_replicas(std::move(preferred_replicas))
             , read_repair_decision(read_repair_decision) {
@@ -289,7 +298,7 @@ private:
             coordinator_query_options optional_params);
     float estimate_result_rows_per_range(lw_shared_ptr<query::read_command> cmd, keyspace& ks);
     static std::vector<gms::inet_address> intersection(const std::vector<gms::inet_address>& l1, const std::vector<gms::inet_address>& l2);
-    future<std::vector<foreign_ptr<lw_shared_ptr<query::result>>>, replicas_per_token_range> query_partition_key_range_concurrent(clock_type::time_point timeout,
+    future<query_partition_key_range_concurrent_result> query_partition_key_range_concurrent(clock_type::time_point timeout,
             std::vector<foreign_ptr<lw_shared_ptr<query::result>>>&& results,
             lw_shared_ptr<query::read_command> cmd,
             db::consistency_level cl,

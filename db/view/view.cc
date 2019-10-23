@@ -75,7 +75,7 @@ cql3::statements::select_statement& view_info::select_statement() const {
         // FIXME(sarna): legacy code, should be removed after "computed_columns" feature is guaranteed
         // to be available on every node. Then, we won't need to check if this view is backing a secondary index.
         const column_definition* legacy_token_column = nullptr;
-        if (service::get_local_storage_service().db().local().find_column_family(base_id()).get_index_manager().is_index(_schema)) {
+        if (service::get_local_storage_service().db().local().find_column_family(base_id()).get_index_manager().is_global_index(_schema)) {
            if (!_schema.clustering_key_columns().empty()) {
                legacy_token_column = &_schema.clustering_key_columns().front();
            }
@@ -444,7 +444,7 @@ void create_virtual_column(schema_builder& builder, const bytes& name, const dat
         // A map has keys and values. We don't need these values,
         // and can use empty values instead.
         auto mtype = dynamic_pointer_cast<const map_type_impl>(type);
-        builder.with_column(name, map_type_impl::get_instance(mtype->get_values_type(), empty_type, true), column_kind::regular_column, column_view_virtual::yes);
+        builder.with_column(name, map_type_impl::get_instance(mtype->get_keys_type(), empty_type, true), column_kind::regular_column, column_view_virtual::yes);
     } else if (ctype->is_set()) {
         // A set's cell has nothing beyond the keys, so the
         // virtual version of a set is, unfortunately, a complete

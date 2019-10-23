@@ -147,6 +147,10 @@ public:
         _sst->_data_file_write_time = wtime;
     }
 
+    void set_run_identifier(utils::UUID identifier) {
+        _sst->_run_identifier = identifier;
+    }
+
     future<> store() {
         _sst->_recognized_components.erase(component_type::Index);
         _sst->_recognized_components.erase(component_type::Data);
@@ -184,10 +188,6 @@ public:
         _sst->set_first_and_last_keys();
         _sst->_components->statistics.contents[metadata_type::Compaction] = std::make_unique<compaction_metadata>();
         _sst->_run_identifier = utils::make_random_uuid();
-    }
-
-    void set_run_identifier(utils::UUID identifier) {
-        _sst->_run_identifier = identifier;
     }
 
     void rewrite_toc_without_scylla_component() {

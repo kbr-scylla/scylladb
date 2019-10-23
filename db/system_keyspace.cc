@@ -1443,7 +1443,7 @@ future<db_clock::time_point> get_truncated_at(utils::UUID cf_id) {
     });
 }
 
-set_type_impl::native_type prepare_tokens(std::unordered_set<dht::token>& tokens) {
+static set_type_impl::native_type prepare_tokens(const std::unordered_set<dht::token>& tokens) {
     set_type_impl::native_type tset;
     for (auto& t: tokens) {
         tset.push_back(dht::global_partitioner().to_sstring(t));
@@ -1461,10 +1461,7 @@ std::unordered_set<dht::token> decode_tokens(set_type_impl::native_type& tokens)
     return tset;
 }
 
-/**
- * Record tokens being used by another node
- */
-future<> update_tokens(gms::inet_address ep, std::unordered_set<dht::token> tokens)
+future<> update_tokens(gms::inet_address ep, const std::unordered_set<dht::token>& tokens)
 {
     if (ep == utils::fb_utilities::get_broadcast_address()) {
         return remove_endpoint(ep);
@@ -1477,21 +1474,6 @@ future<> update_tokens(gms::inet_address ep, std::unordered_set<dht::token> toke
     });
 }
 
-future<std::unordered_set<dht::token>> update_local_tokens(
-    const std::unordered_set<dht::token> add_tokens,
-    const std::unordered_set<dht::token> rm_tokens) {
-    return get_saved_tokens().then([add_tokens = std::move(add_tokens), rm_tokens = std::move(rm_tokens)] (auto tokens) {
-        for (auto& x : rm_tokens) {
-            tokens.erase(x);
-        }
-        for (auto& x : add_tokens) {
-            tokens.insert(x);
-        }
-        return update_tokens(tokens).then([tokens] {
-            return tokens;
-        });
-    });
-}
 
 future<std::unordered_map<gms::inet_address, std::unordered_set<dht::token>>> load_tokens() {
     sstring req = format("SELECT peer, tokens FROM system.{}", PEERS);
@@ -1637,10 +1619,7 @@ future<> remove_endpoint(gms::inet_address ep) {
     });
 }
 
-    /**
-     * This method is used to update the System Keyspace with the new tokens for this node
-    */
-future<> update_tokens(std::unordered_set<dht::token> tokens) {
+future<> update_tokens(const std::unordered_set<dht::token>& tokens) {
     if (tokens.empty()) {
         throw std::invalid_argument("remove_endpoint should be used instead");
     }
@@ -1883,7 +1862,7 @@ query(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const 
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(),
         std::move(slice), std::numeric_limits<uint32_t>::max());
     return proxy.local().query(schema, cmd, {query::full_partition_range}, db::consistency_level::ONE,
-            {db::no_timeout, empty_service_permit(), nullptr}).then([schema, cmd] (auto&& qr) {
+            {db::no_timeout, empty_service_permit(), service::client_state::for_internal_calls(), nullptr}).then([schema, cmd] (auto&& qr) {
         return make_lw_shared(query::result_set::from_raw_result(schema, cmd->slice, *qr.query_result));
     });
 }
@@ -1899,7 +1878,7 @@ query(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const 
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), query::max_rows);
 
     return proxy.local().query(schema, cmd, {dht::partition_range::make_singular(key)}, db::consistency_level::ONE,
-            {db::no_timeout, empty_service_permit(), nullptr}).then([schema, cmd] (auto&& qr) {
+            {db::no_timeout, empty_service_permit(), service::client_state::for_internal_calls(), nullptr}).then([schema, cmd] (auto&& qr) {
         return make_lw_shared(query::result_set::from_raw_result(schema, cmd->slice, *qr.query_result));
     });
 }

@@ -113,7 +113,20 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         std::optional<utils::observer<sstable&>> observer;
         sstables::sstable_run_based_compaction_strategy_for_tests cs;
 
-        auto do_replace = [&] (auto old_sstables, auto new_sstables, auto& expected_sst, auto& closed_sstables_tracker) {
+        auto do_replace = [&] (const std::vector<shared_sstable>& old_sstables, const std::vector<shared_sstable>& new_sstables) {
+            for (auto& old_sst : old_sstables) {
+                BOOST_REQUIRE(sstables.count(old_sst));
+                sstables.erase(old_sst);
+            }
+            for (auto& new_sst : new_sstables) {
+                BOOST_REQUIRE(!sstables.count(new_sst));
+                sstables.insert(new_sst);
+            }
+            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
+            cf->get_compaction_manager().propagate_replacement(&*cf, old_sstables, new_sstables);
+        };
+
+        auto do_incremental_replace = [&] (auto old_sstables, auto new_sstables, auto& expected_sst, auto& closed_sstables_tracker) {
             // that's because each sstable will contain only 1 mutation.
             BOOST_REQUIRE(old_sstables.size() == 1);
             BOOST_REQUIRE(new_sstables.size() == 1);
@@ -123,12 +136,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             // check that previously released sstable was already closed
             BOOST_REQUIRE(*closed_sstables_tracker == old_sstables.front()->generation());
 
-            BOOST_REQUIRE(sstables.count(old_sstables.front()));
-            BOOST_REQUIRE(!sstables.count(new_sstables.front()));
-            sstables.erase(old_sstables.front());
-            sstables.insert(new_sstables.front());
-            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
-            cf->get_compaction_manager().propagate_replacement(&*cf, old_sstables, new_sstables);
+            do_replace(old_sstables, new_sstables);
+
             observer = old_sstables.front()->add_on_closed_handler([&] (sstable& sst) {
                 BOOST_TEST_MESSAGE(sprint("Closing sstable of generation %d", sst.generation()));
                 closed_sstables_tracker++;
@@ -145,6 +154,10 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             if (desc.sstables.empty()) {
                 return {};
             }
+            std::unordered_set<utils::UUID> run_ids;
+            bool incremental_enabled = std::any_of(desc.sstables.begin(), desc.sstables.end(), [&run_ids] (shared_sstable& sst) {
+                return !run_ids.insert(sst->run_identifier()).second;
+            });
 
             BOOST_REQUIRE(desc.sstables.size() == expected_input);
             auto sstable_run = boost::copy_range<std::set<int64_t>>(desc.sstables
@@ -153,7 +166,12 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             auto closed_sstables_tracker = sstable_run.begin();
             auto replacer = [&] (auto old_sstables, auto new_sstables) {
                 BOOST_REQUIRE(expected_sst != sstable_run.end());
-                do_replace(std::move(old_sstables), std::move(new_sstables), expected_sst, closed_sstables_tracker);
+                if (incremental_enabled) {
+                    do_incremental_replace(std::move(old_sstables), std::move(new_sstables), expected_sst, closed_sstables_tracker);
+                } else {
+                    do_replace(std::move(old_sstables), std::move(new_sstables));
+                    expected_sst = sstable_run.end();
+                }
             };
 
             auto result = compact(std::move(desc.sstables), replacer);
