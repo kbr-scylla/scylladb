@@ -189,7 +189,11 @@ incremental_compaction_strategy::get_resharding_jobs(column_family& cf, std::vec
     shard_id reshard_at_current = 0;
 
     clogger.debug("Trying to get resharding jobs for {}.{}...", cf.schema()->ks_name(), cf.schema()->cf_name());
-    for (auto& run : cf.get_sstable_set().select(candidates)) {
+    std::unordered_map<utils::UUID, sstable_run> runs;
+    for (auto& candidate : candidates) {
+        runs[candidate->run_identifier()].insert(candidate);
+    }
+    for (auto& run : runs | boost::adaptors::map_values) {
         std::vector<shared_sstable> all_fragments;
         std::move(run.all().begin(), run.all().end(), std::back_inserter(all_fragments));
         jobs.push_back(resharding_descriptor{std::move(all_fragments), _fragment_size, reshard_at_current++ % smp::count, 0});
