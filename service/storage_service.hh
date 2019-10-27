@@ -343,6 +343,7 @@ private:
     gms::feature _digest_insensitive_to_expiry;
     gms::feature _computed_columns;
     gms::feature _cdc_feature;
+    gms::feature _nonfrozen_udts;
     gms::feature _in_memory_tables;
 
     sstables::sstable_version_types _sstables_format = sstables::sstable_version_types::ka;
@@ -2372,6 +2373,10 @@ public:
 
     bool cluster_supports_computed_columns() const {
         return bool(_computed_columns);
+    }
+
+    bool cluster_supports_nonfrozen_udts() const {
+        return bool(_nonfrozen_udts);
     }
 
     const gms::feature& cluster_supports_in_memory_tables() const {
