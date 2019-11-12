@@ -47,13 +47,10 @@ GCC6_CONCEPT(
     }
 
     template<typename T>
-    concept bool PartitionFilter = requires(T filter, const dht::decorated_key& dk) {
+    concept bool FlattenedConsumerFilter = requires(T filter, const dht::decorated_key& dk, const mutation_fragment& mf) {
         { filter(dk) } -> bool;
-    };
-
-    template<typename T>
-    concept bool MutationFragmentFilter = requires(T filter, const mutation_fragment& mf) {
         { filter(mf) } -> bool;
+        { filter.on_end_of_stream() } -> void;
     };
 )
 
@@ -171,7 +168,7 @@ public:
 
         template<typename Consumer, typename Filter>
         GCC6_CONCEPT(
-            requires FlatMutationReaderConsumer<Consumer>() && PartitionFilter<Filter> && MutationFragmentFilter<Filter>
+            requires FlatMutationReaderConsumer<Consumer>() && FlattenedConsumerFilter<Filter>
         )
         // A variant of consume_pausable() that expects to be run in
         // a seastar::thread.
@@ -184,6 +181,7 @@ public:
                 }
                 if (is_buffer_empty()) {
                     if (is_end_of_stream()) {
+                        filter.on_end_of_stream();
                         return;
                     }
                     fill_buffer(timeout).get();
@@ -271,7 +269,7 @@ public:
 
         template<typename Consumer, typename Filter>
         GCC6_CONCEPT(
-            requires FlattenedConsumer<Consumer>() && PartitionFilter<Filter> && MutationFragmentFilter<Filter>
+            requires FlattenedConsumer<Consumer>() && FlattenedConsumerFilter<Filter>
         )
         // A variant of consumee() that expects to be run in a seastar::thread.
         // Partitions for which filter(decorated_key) returns false are skipped
@@ -384,6 +382,8 @@ public:
         bool operator()(const mutation_fragment& mf) const {
             return _mutation_fragment_filter(mf);
         }
+
+        void on_end_of_stream() const { }
     };
 
     struct no_filter {
@@ -394,11 +394,13 @@ public:
         bool operator()(const mutation_fragment& mf) const {
             return true;
         }
+
+        void on_end_of_stream() const { }
     };
 
     template<typename Consumer, typename Filter>
     GCC6_CONCEPT(
-        requires FlattenedConsumer<Consumer>() && PartitionFilter<Filter> && MutationFragmentFilter<Filter>
+        requires FlattenedConsumer<Consumer>() && FlattenedConsumerFilter<Filter>
     )
     auto consume_in_thread(Consumer consumer, Filter filter, db::timeout_clock::time_point timeout) {
         return _impl->consume_in_thread(std::move(consumer), std::move(filter), timeout);
@@ -741,10 +743,11 @@ class mutation_fragment_stream_validator {
     position_in_partition _prev_pos;
     partition_region _prev_region;
     bool _compare_keys;
+    dht::decorated_key _prev_partition_key;
 public:
     mutation_fragment_stream_validator(const schema& s, bool compare_keys = false);
-    ~mutation_fragment_stream_validator();
 
     bool operator()(const dht::decorated_key& dk);
     bool operator()(const mutation_fragment& mv);
+    void on_end_of_stream() const;
 };

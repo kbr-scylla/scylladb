@@ -32,6 +32,7 @@ debian_base_packages=(
     thrift-compiler
     git
     pigz
+    libunistring-dev
     slapd
     ldap-utils
 )

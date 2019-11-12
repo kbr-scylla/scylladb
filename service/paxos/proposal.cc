@@ -1,4 +1,5 @@
 /*
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -7,21 +8,21 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
  */
-
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2019 ScyllaDB
  *
  * Modified by ScyllaDB
  */
-
 /*
  * This file is part of Scylla.
  *
@@ -39,22 +40,15 @@
  * along with Scylla.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#include "proposal.hh"
 
-#include "consistency_level_type.hh"
+namespace service {
 
-class schema;
+namespace paxos {
 
-namespace db {
-
-void validate_for_read(consistency_level cl);
-
-void validate_for_write(consistency_level cl);
-
-bool is_serial_consistency(consistency_level cl);
-
-void validate_for_cas(consistency_level cl);
-
-void validate_counter_for_write(const schema& s, consistency_level cl);
-
+std::ostream& operator<<(std::ostream& os, const proposal& proposal) {
+    return os << "proposal(" << proposal.ballot << ")";
 }
+
+} // end of namespace "paxos"
+} // endf of namespace "service"
