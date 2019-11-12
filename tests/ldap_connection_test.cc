@@ -19,7 +19,7 @@
 
 #include <ent/ldap/ldap_connection.hh>
 #include "exception_utils.hh"
-
+#include "ldap_common.hh"
 #include "seastarx.hh"
 
 extern "C" {
@@ -30,20 +30,18 @@ namespace {
 
 logger mylog{"ldap_connection_test"}; // `log` is taken by math.
 
-constexpr auto base_dn = "dc=example,dc=com";
-constexpr auto manager_dn = "cn=root,dc=example,dc=com";
-constexpr auto manager_password = "secret";
-const auto ldap_envport = std::getenv("SEASTAR_LDAP_PORT");
-const std::string ldap_port(ldap_envport ? ldap_envport : "389");
-const socket_address local_ldap_address(ipv4_addr("127.0.0.1", std::stoi(ldap_port)));
-const socket_address local_fail_inject_address(ipv4_addr("127.0.0.1", std::stoi(ldap_port) + 2));
 const int globally_set_search_dn_before_any_test_runs = ldap_set_option(nullptr, LDAP_OPT_DEFBASE, base_dn);
+
 const std::set<std::string> results_expected_from_search_base_dn{
     "dc=example,dc=com",
     "cn=root,dc=example,dc=com",
     "ou=People,dc=example,dc=com",
     "uid=cassandra,ou=People,dc=example,dc=com",
-    "uid=jsmith,ou=People,dc=example,dc=com"
+    "uid=jsmith,ou=People,dc=example,dc=com",
+    "uid=jdoe,ou=People,dc=example,dc=com",
+    "cn=role1,dc=example,dc=com",
+    "cn=role2,dc=example,dc=com",
+    "cn=role3,dc=example,dc=com",
 };
 
 /// Ignores exceptions from LDAP operations.  Useful for failure-injection tests, which must

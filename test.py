@@ -60,7 +60,32 @@ ou: People
 sn: Smith
 userid: jsmith
 userPassword: joeisgreat
-"""
+""",
+    """dn: uid=jdoe,ou=People,dc=example,dc=com
+objectClass: organizationalPerson
+objectClass: uidObject
+cn: John Doe
+ou: People
+sn: Doe
+userid: jdoe
+userPassword: pa55w0rd
+""",
+    """dn: cn=role1,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role1
+uniqueMember: uid=jsmith,ou=People,dc=example,dc=com
+uniqueMember: uid=cassandra,ou=People,dc=example,dc=com
+""",
+    """dn: cn=role2,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role2
+uniqueMember: uid=cassandra,ou=People,dc=example,dc=com
+""",
+    """dn: cn=role3,dc=example,dc=com
+objectClass: groupOfUniqueNames
+cn: role3
+uniqueMember: uid=jdoe,ou=People,dc=example,dc=com
+""",
 ]
 
 boost_tests = [
@@ -140,7 +165,6 @@ boost_tests = [
     'castas_fcts_test',
     'big_decimal_test',
     'aggregate_fcts_test',
-    'role_manager_test',
     'caching_options_test',
     'auth_resource_test',
     'cql_auth_query_test',
@@ -177,6 +201,7 @@ other_tests = [
 
 ldap_tests = [
     'ldap_connection_test',
+    'role_manager_test',
 ]
 
 CONCOLORS = {'green': '\033[1;32m', 'red': '\033[1;31m', 'nocolor': '\033[0m'}
