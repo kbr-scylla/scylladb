@@ -41,7 +41,7 @@ auto make_manager(cql_test_env& env) {
 }
 
 SEASTAR_TEST_CASE(create_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_manager(env);
         m->start().get0();
 
@@ -72,7 +72,7 @@ SEASTAR_TEST_CASE(create_role) {
 }
 
 SEASTAR_TEST_CASE(drop_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_manager(env);
         m->start().get0();
 
@@ -122,7 +122,7 @@ SEASTAR_TEST_CASE(drop_role) {
 }
 
 SEASTAR_TEST_CASE(grant_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_manager(env);
         m->start().get0();
 
@@ -164,7 +164,7 @@ SEASTAR_TEST_CASE(grant_role) {
 }
 
 SEASTAR_TEST_CASE(revoke_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_manager(env);
         m->start().get0();
 
@@ -203,7 +203,7 @@ SEASTAR_TEST_CASE(revoke_role) {
 }
 
 SEASTAR_TEST_CASE(alter_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_manager(env);
         m->start().get0();
 
@@ -256,7 +256,7 @@ void create_ldap_roles(auth::role_manager& rmgr) {
 using auth::role_set;
 
 SEASTAR_TEST_CASE(ldap_single_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -265,7 +265,7 @@ SEASTAR_TEST_CASE(ldap_single_role) {
 }
 
 SEASTAR_TEST_CASE(ldap_two_roles) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -275,7 +275,7 @@ SEASTAR_TEST_CASE(ldap_two_roles) {
 }
 
 SEASTAR_TEST_CASE(ldap_no_roles) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -284,7 +284,7 @@ SEASTAR_TEST_CASE(ldap_no_roles) {
 }
 
 SEASTAR_TEST_CASE(ldap_wrong_role) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -293,7 +293,7 @@ SEASTAR_TEST_CASE(ldap_wrong_role) {
 }
 
 SEASTAR_TEST_CASE(ldap_wrong_url) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env, "wrong:/UR?L");
         m->start().get0();
         create_ldap_roles(*m);
@@ -302,7 +302,7 @@ SEASTAR_TEST_CASE(ldap_wrong_url) {
 }
 
 SEASTAR_TEST_CASE(ldap_wrong_server_name) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env, "ldap://server.that.will.never.exist.scylladb.com");
         m->start().get0();
         create_ldap_roles(*m);
@@ -311,7 +311,7 @@ SEASTAR_TEST_CASE(ldap_wrong_server_name) {
 }
 
 SEASTAR_TEST_CASE(ldap_wrong_port) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env, "ldap://localhost:2");
         m->start().get0();
         create_ldap_roles(*m);
@@ -320,7 +320,7 @@ SEASTAR_TEST_CASE(ldap_wrong_port) {
 }
 
 SEASTAR_TEST_CASE(ldap_qualified_name) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         const sstring name(make_ldap_manager(env)->qualified_java_name());
         static const sstring suffix = "LDAPRoleManager";
         BOOST_REQUIRE_EQUAL(name.find(suffix), name.size() - suffix.size());
@@ -328,7 +328,7 @@ SEASTAR_TEST_CASE(ldap_qualified_name) {
 }
 
 SEASTAR_TEST_CASE(ldap_delegates_drop) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -339,7 +339,7 @@ SEASTAR_TEST_CASE(ldap_delegates_drop) {
 }
 
 SEASTAR_TEST_CASE(ldap_delegates_query_all) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
@@ -351,7 +351,7 @@ SEASTAR_TEST_CASE(ldap_delegates_query_all) {
 }
 
 SEASTAR_TEST_CASE(ldap_delegates_config) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         m->create("super", auth::role_config{/*is_superuser=*/true, /*can_login=*/false}).get();
@@ -366,7 +366,7 @@ SEASTAR_TEST_CASE(ldap_delegates_config) {
 }
 
 SEASTAR_TEST_CASE(ldap_delegates_attributes) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         m->create("r", auth::role_config{}).get();
@@ -383,7 +383,7 @@ using exceptions::invalid_request_exception;
 using exception_predicate::message_contains;
 
 SEASTAR_TEST_CASE(ldap_forbids_grant) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         BOOST_REQUIRE_EXCEPTION(m->grant("a", "b").get(), invalid_request_exception,
@@ -392,7 +392,7 @@ SEASTAR_TEST_CASE(ldap_forbids_grant) {
 }
 
 SEASTAR_TEST_CASE(ldap_forbids_revoke) {
-    return do_with_cql_env_thread([](auto&& env) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         BOOST_REQUIRE_EXCEPTION(m->revoke("a", "b").get(), invalid_request_exception,
