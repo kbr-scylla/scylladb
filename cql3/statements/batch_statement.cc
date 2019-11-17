@@ -331,7 +331,6 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::exe
 
     auto cl_for_commit = options.get_consistency();
     auto cl_for_paxos = options.check_serial_consistency();
-    db::validate_for_cas(cl_for_paxos);
     seastar::shared_ptr<cas_request> request;
     schema_ptr schema;
 
@@ -379,6 +378,9 @@ void batch_statement::build_cas_result_set_metadata() {
         return;
     }
     const auto& schema = *_statements.front().statement->s;
+
+    _columns_of_cas_result_set.resize(schema.all_columns_count());
+
     // Add the mandatory [applied] column to result set metadata
     std::vector<shared_ptr<column_specification>> columns;
 

@@ -65,6 +65,8 @@ modification_statement::modification_statement(statement_type type_, uint32_t bo
     : cql_statement_opt_metadata(modification_statement_timeout(*schema_))
     , type{type_}
     , _bound_terms{bound_terms}
+    , _columns_to_read(schema_->all_columns_count())
+    , _columns_of_cas_result_set(schema_->all_columns_count())
     , s{schema_}
     , attrs{std::move(attrs_)}
     , _column_operations{}
@@ -83,7 +85,7 @@ bool modification_statement::uses_function(const sstring& ks_name, const sstring
             return true;
         }
     }
-    for (auto&& condition : _column_conditions) {
+    for (auto&& condition : _regular_conditions) {
         if (condition && condition->uses_function(ks_name, function_name)) {
             return true;
         }
@@ -153,15 +155,22 @@ future<> modification_statement::check_access(const service::client_state& state
 
 future<std::vector<mutation>>
 modification_statement::get_mutations(service::storage_proxy& proxy, const query_options& options, db::timeout_clock::time_point timeout, bool local, int64_t now, service::query_state& qs) {
+    auto cl = options.get_consistency();
     auto json_cache = maybe_prepare_json_cache(options);
     auto keys = build_partition_keys(options, json_cache);
     auto ranges = create_clustering_ranges(options, json_cache);
     auto f = make_ready_future<update_parameters::prefetch_data>(s);
 
+    if (is_counter()) {
+        db::validate_counter_for_write(*s, cl);
+    } else {
+        db::validate_for_write(cl);
+    }
+
     if (requires_read()) {
-        lw_shared_ptr<query::read_command> cmd = read_command(ranges, options.get_consistency());
+        lw_shared_ptr<query::read_command> cmd = read_command(ranges, cl);
         // FIXME: ignoring "local"
-        f = proxy.query(s, cmd, dht::partition_range_vector(keys), options.get_consistency(),
+        f = proxy.query(s, cmd, dht::partition_range_vector(keys), cl,
                 {timeout, qs.get_permit(), qs.get_client_state(), qs.get_trace_state()}).then(
 
                 [this, cmd] (auto cqr) {
@@ -214,7 +223,7 @@ bool modification_statement::applies_to(const update_parameters::prefetch_data::
         return cond->applies_to(value, options);
     };
     return (std::all_of(_static_conditions.begin(), _static_conditions.end(), condition_applies) &&
-            std::all_of(_column_conditions.begin(), _column_conditions.end(), condition_applies));
+            std::all_of(_regular_conditions.begin(), _regular_conditions.end(), condition_applies));
 }
 
 std::vector<mutation> modification_statement::apply_updates(
@@ -299,12 +308,6 @@ modification_statement::do_execute(service::storage_proxy& proxy, service::query
 future<>
 modification_statement::execute_without_condition(service::storage_proxy& proxy, service::query_state& qs, const query_options& options) {
     auto cl = options.get_consistency();
-    if (is_counter()) {
-        db::validate_counter_for_write(*s, cl);
-    } else {
-        db::validate_for_write(cl);
-    }
-
     auto timeout = db::timeout_clock::now() + options.get_timeout_config().*get_timeout_config_selector();
     return get_mutations(proxy, options, timeout, false, options.get_timestamp(qs), qs).then([this, cl, timeout, &proxy, &qs] (auto mutations) {
         if (mutations.empty()) {
@@ -335,10 +338,6 @@ modification_statement::execute_with_condition(service::storage_proxy& proxy, se
 
     auto cl_for_commit = options.get_consistency();
     auto cl_for_paxos = options.check_serial_consistency();
-
-    db::validate_for_write(cl_for_commit);
-    db::validate_for_cas(cl_for_paxos);
-
     db::timeout_clock::time_point now = db::timeout_clock::now();
     const timeout_config& cfg = options.get_timeout_config();
 
@@ -369,7 +368,7 @@ modification_statement::execute_with_condition(service::storage_proxy& proxy, se
 
 seastar::shared_ptr<cql_transport::messages::result_message>
 modification_statement::build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
-        const column_mask& columns,
+        const column_set& columns,
         bool is_applied,
         const update_parameters::prefetch_data& rows) {
 
@@ -382,7 +381,7 @@ modification_statement::build_cas_result_set(seastar::shared_ptr<cql3::metadata>
         std::vector<bytes_opt> row;
         row.reserve(metadata->value_count());
         row.emplace_back(boolean_type->decompose(is_applied));
-        for (ordinal_column_id id = columns.find_first(); id != column_mask::npos; id = columns.find_next(id)) {
+        for (ordinal_column_id id = columns.find_first(); id != column_set::npos; id = columns.find_next(id)) {
             const auto it = cell_map.cells.find(id);
             if (it == cell_map.cells.end()) {
                 row.emplace_back(bytes_opt{});
@@ -436,7 +435,7 @@ void modification_statement::build_cas_result_set_metadata() {
             _columns_of_cas_result_set.set(def.ordinal_id);
         }
     } else {
-        for (const auto& cond : _column_conditions) {
+        for (const auto& cond : _regular_conditions) {
             _columns_of_cas_result_set.set(cond->column.ordinal_id);
         }
         for (const auto& cond : _static_conditions) {
@@ -461,7 +460,7 @@ void modification_statement::build_cas_result_set_metadata() {
 void
 modification_statement::process_where_clause(database& db, std::vector<relation_ptr> where_clause, ::shared_ptr<variable_specifications> names) {
     _restrictions = ::make_shared<restrictions::statement_restrictions>(
-            db, s, type, where_clause, std::move(names), applies_only_to_static_columns(), _sets_a_collection, false);
+            db, s, type, where_clause, std::move(names), applies_only_to_static_columns(), _selects_a_collection, false);
     /*
      * If there's no clustering columns restriction, we may assume that EXISTS
      * check only selects static columns and hence we can use any row from the
@@ -627,7 +626,7 @@ void modification_statement::add_operation(::shared_ptr<operation> op) {
         _sets_static_columns = true;
     } else {
         _sets_regular_columns = true;
-        _sets_a_collection |= op->column.type->is_collection();
+        _selects_a_collection |= op->column.type->is_collection();
     }
     if (op->requires_read()) {
         _requires_read = true;
@@ -657,8 +656,8 @@ void modification_statement::add_condition(::shared_ptr<column_condition> cond) 
         _static_conditions.emplace_back(std::move(cond));
     } else {
         _has_regular_column_conditions = true;
-        _sets_a_collection |= cond->column.type->is_collection();
-        _column_conditions.emplace_back(std::move(cond));
+        _selects_a_collection |= cond->column.type->is_collection();
+        _regular_conditions.emplace_back(std::move(cond));
     }
 }
 
@@ -711,7 +710,7 @@ void modification_statement::validate_where_clause_for_conditions() const {
         }
 
         // All primary key parts must be specified, unless this statement has only static column conditions
-        if (_column_conditions.empty() == false) {
+        if (_regular_conditions.empty() == false) {
             throw exceptions::invalid_request_exception(
                     "DELETE statements must restrict all PRIMARY KEY columns with equality relations"
                     " in order to use IF condition on non static columns");

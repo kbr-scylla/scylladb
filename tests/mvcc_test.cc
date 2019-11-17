@@ -31,6 +31,8 @@
 using namespace std::chrono_literals;
 
 
+static thread_local mutation_application_stats app_stats_for_tests;
+
 // Verifies that tombstones in "list" are monotonic, overlap with the requested range,
 // and have information equivalent with "expected" in that range.
 static
@@ -70,10 +72,11 @@ void check_tombstone_slice(const schema& s, std::vector<range_tombstone> list,
 SEASTAR_TEST_CASE(test_range_tombstone_slicing) {
     return seastar::async([] {
         logalloc::region r;
-        mutation_cleaner cleaner(r, no_cache_tracker);
+        mutation_cleaner cleaner(r, no_cache_tracker, app_stats_for_tests);
         simple_schema table;
         auto s = table.schema();
         with_allocator(r.allocator(), [&] {
+            mutation_application_stats app_stats;
             logalloc::reclaim_lock l(r);
 
             auto rt1 = table.make_range_tombstone(table.make_ckey_range(1, 2));
@@ -116,7 +119,7 @@ SEASTAR_TEST_CASE(test_range_tombstone_slicing) {
             m2.apply_delete(*s, rt5);
 
             auto&& v2 = e.add_version(*s, no_cache_tracker);
-            v2.partition().apply_weak(*s, m2, *s);
+            v2.partition().apply_weak(*s, m2, *s, app_stats);
             auto snap2 = e.read(r, cleaner, s, no_cache_tracker);
 
             check_range(*snap2, table.make_ckey_range(0, 0), {});
@@ -163,7 +166,7 @@ public:
     mvcc_container(schema_ptr s, no_tracker)
         : _schema(s)
         , _region_holder(std::make_optional<logalloc::region>())
-        , _cleaner_holder(std::make_optional<mutation_cleaner>(*_region_holder, nullptr))
+        , _cleaner_holder(std::make_optional<mutation_cleaner>(*_region_holder, nullptr, app_stats_for_tests))
         , _region(&*_region_holder)
         , _cleaner(&*_cleaner_holder)
     { }
@@ -256,7 +259,7 @@ public:
 void mvcc_partition::apply_to_evictable(partition_entry&& src, schema_ptr src_schema) {
     with_allocator(region().allocator(), [&] {
         logalloc::allocating_section as;
-        mutation_cleaner src_cleaner(region(), no_cache_tracker);
+        mutation_cleaner src_cleaner(region(), no_cache_tracker, app_stats_for_tests);
         auto c = as(region(), [&] {
             if (_s != src_schema) {
                 src.upgrade(src_schema, _s, src_cleaner, no_cache_tracker);
@@ -290,7 +293,8 @@ void mvcc_partition::apply(const mutation_partition& mp, schema_ptr mp_s) {
         } else {
             logalloc::allocating_section as;
             as(region(), [&] {
-                _e.apply(*_s, mp, *mp_s);
+                mutation_application_stats app_stats;
+                _e.apply(*_s, mp, *mp_s, app_stats);
             });
         }
     });
@@ -487,6 +491,7 @@ SEASTAR_TEST_CASE(test_apply_to_incomplete_respects_continuity) {
 
             // Without active reader
             auto test = [&] (bool with_active_reader) {
+                mutation_application_stats app_stats;
                 auto e = ms.make_evictable(m3.partition());
 
                 auto snap1 = e.read();
@@ -511,7 +516,7 @@ SEASTAR_TEST_CASE(test_apply_to_incomplete_respects_continuity) {
                 }
 
                 auto expected = mutation_partition(*s, before);
-                expected.apply_weak(*s, std::move(expected_to_apply_slice));
+                expected.apply_weak(*s, std::move(expected_to_apply_slice), app_stats);
 
                 e += to_apply;
                 assert_that(s, e.squashed())
@@ -582,7 +587,7 @@ SEASTAR_TEST_CASE(test_snapshot_cursor_is_consistent_with_merging_for_nonevictab
     // Tests that reading many versions using a cursor gives the logical mutation back.
     return seastar::async([] {
         logalloc::region r;
-        mutation_cleaner cleaner(r, no_cache_tracker);
+        mutation_cleaner cleaner(r, no_cache_tracker, app_stats_for_tests);
         with_allocator(r.allocator(), [&] {
             random_mutation_generator gen(random_mutation_generator::generate_counters::no);
             auto s = gen.schema();
@@ -596,12 +601,13 @@ SEASTAR_TEST_CASE(test_snapshot_cursor_is_consistent_with_merging_for_nonevictab
             m3.partition().make_fully_continuous();
 
             {
+                mutation_application_stats app_stats;
                 logalloc::reclaim_lock rl(r);
                 auto e = partition_entry(mutation_partition(*s, m3.partition()));
                 auto snap1 = e.read(r, cleaner, s, no_cache_tracker);
-                e.apply(*s, m2.partition(), *s);
+                e.apply(*s, m2.partition(), *s, app_stats);
                 auto snap2 = e.read(r, cleaner, s, no_cache_tracker);
-                e.apply(*s, m1.partition(), *s);
+                e.apply(*s, m1.partition(), *s, app_stats);
 
                 auto expected = e.squashed(*s);
                 auto snap = e.read(r, cleaner, s, no_cache_tracker);
@@ -849,14 +855,16 @@ SEASTAR_TEST_CASE(test_apply_is_atomic) {
 
                 alloc.fail_after(fail_offset++);
                 try {
-                    e.apply(*target.schema(), std::move(m2), *second.schema());
+                    mutation_application_stats app_stats;
+                    e.apply(*target.schema(), std::move(m2), *second.schema(), app_stats);
                     alloc.stop_failing();
                     break;
                 } catch (const std::bad_alloc&) {
+                    mutation_application_stats app_stats;
                     assert_that(mutation(target.schema(), target.decorated_key(), e.squashed(*target.schema())))
                         .is_equal_to(target)
                         .has_same_continuity(target);
-                    e.apply(*target.schema(), std::move(m2), *second.schema());
+                    e.apply(*target.schema(), std::move(m2), *second.schema(), app_stats);
                     assert_that(mutation(target.schema(), target.decorated_key(), e.squashed(*target.schema())))
                         .is_equal_to(expected)
                         .has_same_continuity(expected);
@@ -876,7 +884,7 @@ SEASTAR_TEST_CASE(test_apply_is_atomic) {
 SEASTAR_TEST_CASE(test_versions_are_merged_when_snapshots_go_away) {
     return seastar::async([] {
         logalloc::region r;
-        mutation_cleaner cleaner(r, nullptr);
+        mutation_cleaner cleaner(r, nullptr, app_stats_for_tests);
         with_allocator(r.allocator(), [&] {
             random_mutation_generator gen(random_mutation_generator::generate_counters::no);
             auto s = gen.schema();
@@ -894,8 +902,9 @@ SEASTAR_TEST_CASE(test_versions_are_merged_when_snapshots_go_away) {
                 auto snap1 = e.read(r, cleaner, s, nullptr);
 
                 {
+                    mutation_application_stats app_stats;
                     logalloc::reclaim_lock rl(r);
-                    e.apply(*s, m2.partition(), *s);
+                    e.apply(*s, m2.partition(), *s, app_stats);
                 }
 
                 auto snap2 = e.read(r, cleaner, s, nullptr);
@@ -914,8 +923,9 @@ SEASTAR_TEST_CASE(test_versions_are_merged_when_snapshots_go_away) {
                 auto snap1 = e.read(r, cleaner, s, nullptr);
 
                 {
+                    mutation_application_stats app_stats;
                     logalloc::reclaim_lock rl(r);
-                    e.apply(*s, m2.partition(), *s);
+                    e.apply(*s, m2.partition(), *s, app_stats);
                 }
 
                 auto snap2 = e.read(r, cleaner, s, nullptr);

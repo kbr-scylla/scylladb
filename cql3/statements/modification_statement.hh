@@ -79,14 +79,14 @@ private:
     // columns, to match Cassandra behaviour.
     // This bitset contains a mask of ordinal_id identifiers
     // of the required columns.
-    column_mask _columns_to_read;
+    column_set _columns_to_read;
     // A CAS statement returns a result set with the columns
     // used in condition expression. This is a mask of ordinal_id
     // identifiers of the required columns. Contains all columns
     // of a schema if we have IF EXISTS/IF NOT EXISTS. Does *not*
     // contain LIST columns prefetched to apply updates, unless
     // these columns are also used in conditions.
-    column_mask _columns_of_cas_result_set;
+    column_set _columns_of_cas_result_set;
 public:
     const schema_ptr s;
     const std::unique_ptr<attributes> attrs;
@@ -95,7 +95,7 @@ protected:
     std::vector<::shared_ptr<operation>> _column_operations;
 private:
     // Separating normal and static conditions makes things somewhat easier
-    std::vector<::shared_ptr<column_condition>> _column_conditions;
+    std::vector<::shared_ptr<column_condition>> _regular_conditions;
     std::vector<::shared_ptr<column_condition>> _static_conditions;
 
     // True if this statement has _if_exists or _if_not_exists or other
@@ -109,9 +109,14 @@ private:
     bool _if_not_exists = false;
     bool _if_exists = false;
 
+    // True if this statement has column operations that apply to static/regular
+    // columns, respectively.
     bool _sets_static_columns = false;
     bool _sets_regular_columns = false;
-    bool _sets_a_collection = false;
+    // True if this statement has column operations or conditions for a column
+    // that stores a collection.
+    bool _selects_a_collection = false;
+
     std::optional<bool> _is_raw_counter_shard_write;
 
     const std::function<const column_definition&(::shared_ptr<column_condition>)> get_column_for_condition =
@@ -190,7 +195,7 @@ public:
     // CAS.
     static seastar::shared_ptr<cql_transport::messages::result_message>
     build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
-            const column_mask& mask, bool is_applied,
+            const column_set& mask, bool is_applied,
             const update_parameters::prefetch_data& rows);
 public:
     virtual dht::partition_range_vector build_partition_keys(const query_options& options, const json_cache_opt& json_cache);
@@ -198,13 +203,13 @@ public:
 
 private:
     // Return true if this statement doesn't update or read any regular rows, only static rows.
-    // Note, it isn't enought to just check !_sets_regular_columns && _column_conditions.empty(),
+    // Note, it isn't enought to just check !_sets_regular_columns && _regular_conditions.empty(),
     // because a DELETE statement that deletes whole rows (DELETE FROM ...) technically doesn't
     // have any column operations and hence doesn't have _sets_regular_columns set. It doesn't
     // have _sets_static_columns set either so checking the latter flag too here guarantees that
     // this function works as expected in all cases.
     bool applies_only_to_static_columns() const {
-        return _sets_static_columns && !_sets_regular_columns && _column_conditions.empty();
+        return _sets_static_columns && !_sets_regular_columns && _regular_conditions.empty();
     }
 public:
     // True if any of update operations of this statement requires
@@ -212,11 +217,11 @@ public:
     bool requires_read() const { return _requires_read; }
 
     // Columns used in this statement conditions or operations.
-    const column_mask& columns_to_read() const { return _columns_to_read; }
+    const column_set& columns_to_read() const { return _columns_to_read; }
 
     // Columns of the statement result set (only CAS statement
     // returns a result set).
-    const column_mask& columns_of_cas_result_set() { return _columns_of_cas_result_set; }
+    const column_set& columns_of_cas_result_set() { return _columns_of_cas_result_set; }
 
     // Build a read_command instance to fetch the previous mutation from storage. The mutation is
     // fetched if we need to check LWT conditions or apply updates to non-frozen list elements.

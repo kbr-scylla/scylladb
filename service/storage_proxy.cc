@@ -434,7 +434,9 @@ public:
     }
     void on_released() {
         _expire_timer.cancel();
-        _mutation_holder->release_mutation();
+        if (_targets.size() == 0) {
+            _mutation_holder->release_mutation();
+        }
     }
     void timeout_cb() {
         if (_cl_achieved || _cl == db::consistency_level::ANY) {
@@ -2855,7 +2857,8 @@ public:
             });
             auto m = boost::accumulate(v, mutation(schema, it->par->mut().key(*schema)), [this, schema] (mutation& m, const version& ver) {
                 if (ver.par) {
-                    m.partition().apply(*schema, ver.par->mut().partition(), *schema);
+                    mutation_application_stats app_stats;
+                    m.partition().apply(*schema, ver.par->mut().partition(), *schema, app_stats);
                 }
                 return std::move(m);
             });
@@ -3976,7 +3979,9 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
 
     assert(partition_ranges.size() == 1);
     assert(query::is_single_partition(partition_ranges[0]));
-    assert(cl_for_paxos == db::consistency_level::LOCAL_SERIAL || cl_for_paxos == db::consistency_level::SERIAL);
+
+    db::validate_for_cas(cl_for_paxos);
+    db::validate_for_cas_commit(cl_for_commit, schema->ks_name());
 
     shared_ptr<paxos_response_handler> handler;
     try {
