@@ -696,10 +696,15 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Set to true if the cluster was initially installed from 3.1.0. If it was upgraded from an earlier version,"
         " or installed from a later version, leave this set to false. This adjusts the communication protocol to"
         " work around a bug in Scylla 3.1.0")
+    , enable_user_defined_functions(this, "enable_user_defined_functions", value_status::Used, false,  "Enable user defined functions")
+    , user_defined_function_time_limit_ms(this, "user_defined_function_time_limit_ms", value_status::Used, 10, "The time limit for each UDF invocation")
+    , user_defined_function_allocation_limit_bytes(this, "user_defined_function_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate")
+    , user_defined_function_contiguous_allocation_limit_bytes(this, "user_defined_function_contiguous_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate in one chunk")
     , alternator_port(this, "alternator_port", value_status::Used, 0, "Alternator API port")
     , alternator_https_port(this, "alternator_https_port", value_status::Used, 0, "Alternator API HTTPS port")
     , alternator_address(this, "alternator_address", value_status::Used, "0.0.0.0", "Alternator API listening address")
     , alternator_enforce_authorization(this, "alternator_enforce_authorization", value_status::Used, false, "Enforce checking the authorization header for every request in Alternator")
+    , abort_on_ebadf(this, "abort_on_ebadf", value_status::Used, true, "Abort the server on incorrect file descriptor access. Throws exception when disabled.")
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
         "\n"

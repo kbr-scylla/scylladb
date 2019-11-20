@@ -331,6 +331,7 @@ private:
     gms::feature _correct_non_compound_range_tombstones;
     gms::feature _write_failure_reply_feature;
     gms::feature _xxhash_feature;
+    gms::feature _udf_feature;
     gms::feature _roles_feature;
     gms::feature _la_sstable_feature;
     gms::feature _stream_with_rpc_stream_feature;
@@ -2329,6 +2330,10 @@ public:
 
     gms::feature& cluster_supports_xxhash_digest_algorithm() {
         return _xxhash_feature;
+    }
+
+    bool cluster_supports_user_defined_functions() const {
+        return bool(_udf_feature);
     }
 
     bool cluster_supports_roles() const {

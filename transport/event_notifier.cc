@@ -59,6 +59,7 @@ void cql_server::event_notifier::on_create_keyspace(const sstring& ks_name)
         if (!conn->_pending_requests_gate.is_closed()) {
             conn->write_response(conn->make_schema_change_event(event::schema_change{
                 event::schema_change::change_type::CREATED,
+                event::schema_change::target_type::KEYSPACE,
                 ks_name
             }));
         };
@@ -117,6 +118,7 @@ void cql_server::event_notifier::on_update_keyspace(const sstring& ks_name)
         if (!conn->_pending_requests_gate.is_closed()) {
             conn->write_response(conn->make_schema_change_event(event::schema_change{
                 event::schema_change::change_type::UPDATED,
+                event::schema_change::target_type::KEYSPACE,
                 ks_name
             }));
         };
@@ -175,6 +177,7 @@ void cql_server::event_notifier::on_drop_keyspace(const sstring& ks_name)
         if (!conn->_pending_requests_gate.is_closed()) {
             conn->write_response(conn->make_schema_change_event(event::schema_change{
                 event::schema_change::change_type::DROPPED,
+                event::schema_change::target_type::KEYSPACE,
                 ks_name
             }));
         };

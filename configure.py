@@ -274,6 +274,7 @@ scylla_tests = [
     'tests/cdc_test',
     'tests/cql_query_test',
     'tests/user_types_test',
+    'tests/user_function_test',
     'tests/secondary_index_test',
     'tests/json_cql_query_test',
     'tests/filtering_test',
@@ -519,6 +520,7 @@ scylla_core = (['database.cc',
                 'cql3/sets.cc',
                 'cql3/tuples.cc',
                 'cql3/maps.cc',
+                'cql3/functions/user_function.cc',
                 'cql3/functions/functions.cc',
                 'cql3/functions/castas_fcts.cc',
                 'cql3/statements/cf_prop_defs.cc',
@@ -528,13 +530,16 @@ scylla_core = (['database.cc',
                 'cql3/statements/create_table_statement.cc',
                 'cql3/statements/create_view_statement.cc',
                 'cql3/statements/create_type_statement.cc',
+                'cql3/statements/create_function_statement.cc',
                 'cql3/statements/drop_index_statement.cc',
                 'cql3/statements/drop_keyspace_statement.cc',
                 'cql3/statements/drop_table_statement.cc',
                 'cql3/statements/drop_view_statement.cc',
                 'cql3/statements/drop_type_statement.cc',
+                'cql3/statements/drop_function_statement.cc',
                 'cql3/statements/schema_altering_statement.cc',
                 'cql3/statements/ks_prop_defs.cc',
+                'cql3/statements/function_statement.cc',
                 'cql3/statements/modification_statement.cc',
                 'cql3/statements/cas_request.cc',
                 'cql3/statements/parsed_statement.cc',
@@ -762,6 +767,7 @@ scylla_core = (['database.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
+                'lua.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -1202,7 +1208,7 @@ def configure_zstd(build_dir, mode):
 
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
-libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
+libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-llua', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
@@ -1535,6 +1541,10 @@ with open(buildfile_tmp, 'w') as f:
             command = rm -rf build
             description = CLEAN
         build clean: clean
+        rule mode_list
+            command = echo {modes_list}
+            description = List configured modes
+        build mode_list: mode_list
         default {modes_list}
         ''').format(modes_list=' '.join(default_modes), **globals()))
     f.write(textwrap.dedent('''\

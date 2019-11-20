@@ -275,11 +275,16 @@ public:
     named_value<uint32_t> max_partition_key_restrictions_per_query;
     named_value<uint32_t> max_clustering_key_restrictions_per_query;
     named_value<bool> enable_3_1_0_compatibility_mode;
+    named_value<bool> enable_user_defined_functions;
+    named_value<unsigned> user_defined_function_time_limit_ms;
+    named_value<unsigned> user_defined_function_allocation_limit_bytes;
+    named_value<unsigned> user_defined_function_contiguous_allocation_limit_bytes;
 
     named_value<uint16_t> alternator_port;
     named_value<uint16_t> alternator_https_port;
     named_value<sstring> alternator_address;
     named_value<bool> alternator_enforce_authorization;
+    named_value<bool> abort_on_ebadf;
 
     named_value<sstring> audit;
     named_value<sstring> audit_categories;

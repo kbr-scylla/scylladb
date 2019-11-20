@@ -79,6 +79,7 @@ boost_tests = [
     'cdc_test',
     'cql_query_test',
     'user_types_test',
+    'user_function_test',
     'secondary_index_test',
     'json_cql_query_test',
     'filtering_test',
@@ -273,7 +274,13 @@ if __name__ == "__main__":
     }
 
     test_to_run = []
-    modes_to_run =  ['debug', 'release', 'dev'] if not args.modes else args.modes
+    modes_to_run =  args.modes
+    if not modes_to_run:
+        out = subprocess.Popen(['ninja', 'mode_list'], stdout=subprocess.PIPE).communicate()[0].decode()
+        # [1/1] List configured modes
+        # debug release dev
+        modes_to_run = out.split('\n')[1].split(' ')
+
     for mode in modes_to_run:
         prefix = os.path.join('build', mode, 'tests')
         standard_args = '--overprovisioned --unsafe-bypass-fsync 1 --blocked-reactor-notify-ms 2000000'.split()
@@ -390,7 +397,7 @@ if __name__ == "__main__":
         # Clean up failure injection.
         subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
 
-    def run_test(path, type, exec_args, setup):
+    def run_test(path, repeat, type, exec_args, setup):
         boost_args = []
         # avoid modifying in-place, it will change test_to_run
         exec_args = exec_args + '--collectd 0'.split()
@@ -399,7 +406,7 @@ if __name__ == "__main__":
             mode = 'release'
             if path.startswith(os.path.join('build', 'debug')):
                 mode = 'debug'
-            xmlout = (args.jenkins + "." + mode + "." + os.path.basename(path.split()[0]) + ".boost.xml")
+            xmlout = (args.jenkins + "." + mode + "." + os.path.basename(path.split()[0]) + "." + str(repeat) + ".boost.xml")
             boost_args += ['--report_level=no', '--logger=HRF,test_suite:XML,test_suite,' + xmlout]
         if type in ['boost', 'ldap']:
             boost_args += ['--']
@@ -468,8 +475,8 @@ if __name__ == "__main__":
             instance_dirs_to_remove.add(ldap_path)
             setup = lambda: ldap_setup(ldap_path)
         exec_args = test[2] if len(test) >= 3 else []
-        for _ in range(args.repeat):
-            futures.append(executor.submit(run_test, path, test_type, exec_args, setup))
+        for repeat in range(args.repeat):
+            futures.append(executor.submit(run_test, path, repeat, test_type, exec_args, setup))
 
     results = []
     cookie = len(futures)

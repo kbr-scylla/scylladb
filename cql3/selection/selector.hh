@@ -78,6 +78,8 @@ public:
      */
     virtual data_type get_type() = 0;
 
+    virtual bool requires_thread();
+
     /**
      * Checks if this <code>selector</code> is creating aggregates.
      *

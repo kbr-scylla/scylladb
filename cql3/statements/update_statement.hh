@@ -46,7 +46,6 @@ namespace statements {
 
 /**
  * An <code>UPDATE</code> statement parsed from a CQL query statement.
- *
  */
 class update_statement : public modification_statement {
 public:
@@ -54,7 +53,13 @@ public:
     private static final Constants.Value EMPTY = new Constants.Value(ByteBufferUtil.EMPTY_BYTE_BUFFER);
 #endif
 
-    update_statement(audit::audit_info_ptr&& audit_info, statement_type type, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats);
+    update_statement(
+            audit::audit_info_ptr&& audit_info,
+            statement_type type,
+            uint32_t bound_terms,
+            schema_ptr s,
+            std::unique_ptr<attributes> attrs,
+            cql_stats& stats);
 private:
     virtual bool require_full_clustering_key() const override;
 
@@ -73,8 +78,16 @@ class insert_prepared_json_statement : public update_statement {
     ::shared_ptr<term> _term;
     bool _default_unset;
 public:
-    insert_prepared_json_statement(audit::audit_info_ptr&& audit_info, uint32_t bound_terms, schema_ptr s, std::unique_ptr<attributes> attrs, cql_stats& stats, ::shared_ptr<term> t, bool default_unset)
-        : update_statement(std::move(audit_info), statement_type::INSERT, bound_terms, s, std::move(attrs), stats), _term(t), _default_unset(default_unset) {
+    insert_prepared_json_statement(
+            audit::audit_info_ptr&& audit_info,
+            uint32_t bound_terms,
+            schema_ptr s,
+            std::unique_ptr<attributes> attrs,
+            cql_stats& stats,
+            ::shared_ptr<term> t, bool default_unset)
+        : update_statement(std::move(audit_info), statement_type::INSERT, bound_terms, s, std::move(attrs), stats)
+        , _term(t)
+        , _default_unset(default_unset) {
         _restrictions = ::make_shared<restrictions::statement_restrictions>(s, false);
     }
 private:
