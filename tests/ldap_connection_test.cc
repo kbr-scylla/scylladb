@@ -127,32 +127,38 @@ SEASTAR_THREAD_TEST_CASE(multiple_outstanding_operations) {
         BOOST_REQUIRE_EQUAL(LDAP_RES_BIND, ldap_msgtype(bind(c).get0().get()));
 
         std::vector<future<ldap_msg_ptr>> results_base;
-        for (size_t i = 0; i < 10; ++i) {
-            mylog.trace("multiple_outstanding_operations: invoking search base");
+        for (size_t i = 0; i < 30; ++i) {
+            mylog.trace("multiple_outstanding_operations: invoking search base #{}", i);
             results_base.push_back(search(c, base_dn));
+            mylog.trace("multiple_outstanding_operations: search base #{} got future {}", i, &results_base.back());
         }
 
         std::vector<future<ldap_msg_ptr>> results_jsmith;
-        for (size_t i = 0; i < 10; ++i) {
-            mylog.trace("multiple_outstanding_operations: invoking search jsmith");
+        for (size_t i = 0; i < 30; ++i) {
+            mylog.trace("multiple_outstanding_operations: invoking search jsmith #{}", i);
             results_jsmith.push_back(search(c, "uid=jsmith,ou=People,dc=example,dc=com"));
+            mylog.trace("multiple_outstanding_operations: search jsmith #{} got future {}", i, &results_jsmith.back());
         }
 
         using boost::test_tools::per_element;
         mylog.trace("multiple_outstanding_operations: check base results");
-        for (size_t i = 0; i < results_base.size(); ++i) {
-            const auto actual_base = entries(c.get_ldap(), results_base[i].get0().get());
-            BOOST_TEST_INFO("result #" << i);
+        future<> base_result_fut = parallel_for_each(results_base, [&c] (future<ldap_msg_ptr>& res) {
+            const auto actual_base = entries(c.get_ldap(), res.get0().get());
+            BOOST_TEST_INFO("result for " << &res);
             BOOST_TEST(actual_base == results_expected_from_search_base_dn, per_element());
-        }
+            return make_ready_future();
+        });
 
         mylog.trace("multiple_outstanding_operations: check jsmith result");
-        const std::set<std::string> expected_jsmith{"uid=jsmith,ou=People,dc=example,dc=com"};
-        for (size_t i = 0; i < results_jsmith.size(); ++i) {
-            const auto actual_jsmith = entries(c.get_ldap(), results_jsmith[i].get0().get());
-            BOOST_TEST_INFO("result #" << i);
+        static const std::set<std::string> expected_jsmith{"uid=jsmith,ou=People,dc=example,dc=com"};
+        future<> jsmith_result_fut = parallel_for_each(results_jsmith, [&c] (future<ldap_msg_ptr>& res) {
+            const auto actual_jsmith = entries(c.get_ldap(), res.get0().get());
+            BOOST_TEST_INFO("result for " << &res);
             BOOST_TEST(actual_jsmith == expected_jsmith, per_element());
-        }
+            return make_ready_future();
+        });
+
+        when_all(std::move(base_result_fut), std::move(jsmith_result_fut)).get();
     });
     mylog.trace("multiple_outstanding_operations done");
 }

@@ -393,7 +393,7 @@ void ldap_connection::poll_results() {
         return;
     }
     LDAPMessage *result;
-    while (!_read_buffer.empty()) {
+    while (!_read_buffer.empty() && _status == status::up) {
         static timeval zero_duration{};
         mylog.trace("poll_results: {} in buffer, invoking ldap_result", _read_buffer.size());
         const int status = ldap_result(get_ldap(), LDAP_RES_ANY, /*all=*/1, &zero_duration, &result);
@@ -411,7 +411,7 @@ void ldap_connection::poll_results() {
             }
         } else if (status < 0) {
             mylog.error("poll_results: ldap_result returned status {}", status);
-            set_status(status::down);
+            set_status(status::err);
         }
     }
     mylog.trace("poll_results done");
