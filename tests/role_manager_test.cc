@@ -229,12 +229,11 @@ SEASTAR_TEST_CASE(alter_role) {
 
 namespace {
 
-constexpr auto jsmith = "uid=jsmith,ou=People,dc=example,dc=com";
-constexpr auto jdoe = "uid=jdoe,ou=People,dc=example,dc=com";
-constexpr auto cassandra = "uid=cassandra,ou=People,dc=example,dc=com";
+const auto default_query_template = fmt::format(
+        "ldap://localhost:{}/{}?cn?sub?(uniqueMember=uid={{USER}},ou=People,dc=example,dc=com)",
+        ldap_port, base_dn);
 
-auto make_ldap_manager(cql_test_env& env, sstring query_template = fmt::format(
-                               "ldap://localhost:{}/{}?cn?sub?(uniqueMember={{USER}})", ldap_port, base_dn)) {
+auto make_ldap_manager(cql_test_env& env, sstring query_template = default_query_template) {
     auto stop_role_manager = [] (auth::ldap_role_manager* m) {
         m->stop().get();
         std::default_delete<auth::ldap_role_manager>()(m);
@@ -245,8 +244,8 @@ auto make_ldap_manager(cql_test_env& env, sstring query_template = fmt::format(
             std::move(stop_role_manager));
 }
 
-void create_ldap_roles(auth::role_manager& rmgr) {
-    rmgr.create(jsmith, auth::role_config()).get();
+void create_ldap_roles(const auth::role_manager& rmgr) {
+    rmgr.create("jsmith", auth::role_config()).get();
     rmgr.create("role1", auth::role_config()).get();
     rmgr.create("role2", auth::role_config()).get();
 }
@@ -260,7 +259,7 @@ SEASTAR_TEST_CASE(ldap_single_role) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{"role1"}, m->query_granted(jsmith, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"role1"}, m->query_granted("jsmith", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -270,7 +269,7 @@ SEASTAR_TEST_CASE(ldap_two_roles) {
         m->start().get0();
         create_ldap_roles(*m);
         role_set expected{"role1","role2"};
-        BOOST_REQUIRE_EQUAL(expected, m->query_granted(cassandra, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(expected, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -288,7 +287,7 @@ SEASTAR_TEST_CASE(ldap_wrong_role) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted(jdoe, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("jdoe", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -297,7 +296,7 @@ SEASTAR_TEST_CASE(ldap_wrong_url) {
         auto m = make_ldap_manager(env, "wrong:/UR?L");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted(cassandra, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -306,7 +305,7 @@ SEASTAR_TEST_CASE(ldap_wrong_server_name) {
         auto m = make_ldap_manager(env, "ldap://server.that.will.never.exist.scylladb.com");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted(cassandra, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -315,7 +314,7 @@ SEASTAR_TEST_CASE(ldap_wrong_port) {
         auto m = make_ldap_manager(env, "ldap://localhost:2");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted(cassandra, auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -346,7 +345,7 @@ SEASTAR_TEST_CASE(ldap_delegates_query_all) {
         const auto roles = m->query_all().get0();
         BOOST_REQUIRE_EQUAL(1, roles.count("role1"));
         BOOST_REQUIRE_EQUAL(1, roles.count("role2"));
-        BOOST_REQUIRE_EQUAL(1, roles.count(jsmith));
+        BOOST_REQUIRE_EQUAL(1, roles.count("jsmith"));
     });
 }
 
