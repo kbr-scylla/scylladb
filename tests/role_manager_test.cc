@@ -403,3 +403,28 @@ SEASTAR_TEST_CASE(ldap_forbids_revoke) {
                                 message_contains("with LDAPRoleManager."));
     });
 }
+
+namespace {
+
+shared_ptr<db::config> make_ldap_config() {
+    auto p = make_shared<db::config>();
+    p->role_manager("com.scylladb.auth.LDAPRoleManager");
+    p->ldap_url_template(default_query_template);
+    p->ldap_attr_role("cn");
+    p->ldap_bind_dn(manager_dn);
+    p->ldap_bind_passwd(manager_password);
+    return p;
+}
+
+} // anonymous namespace
+
+SEASTAR_TEST_CASE(ldap_config) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
+        const auto& svc = env.local_auth_service();
+        BOOST_REQUIRE_EQUAL(role_set{"cassandra"}, svc.get_roles("cassandra").get0());
+        auth::create_role(svc, "role1", auth::role_config{}, auth::authentication_options{}).get();
+        const role_set expected{"cassandra", "role1"};
+        BOOST_REQUIRE_EQUAL(expected, svc.get_roles("cassandra").get0());
+    },
+        make_ldap_config());
+}

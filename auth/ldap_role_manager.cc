@@ -20,8 +20,11 @@
 #include <vector>
 
 #include "common.hh"
+#include "cql3/query_processor.hh"
+#include "database.hh"
 #include "exceptions/exceptions.hh"
 #include "seastarx.hh"
+#include "utils/class_registrator.hh"
 
 namespace {
 
@@ -67,9 +70,17 @@ std::vector<sstring> get_attr_values(LDAP* ld, LDAPMessage* res, const char* att
     return values;
 }
 
+const char* ldap_role_manager_full_name = "com.scylladb.auth.LDAPRoleManager";
+
 } // anonymous namespace
 
 namespace auth {
+
+static const class_registrator<
+    role_manager,
+    ldap_role_manager,
+    cql3::query_processor&,
+    ::service::migration_manager&> registration(ldap_role_manager_full_name);
 
 ldap_role_manager::ldap_role_manager(
         sstring_view query_template, sstring_view target_attr, sstring_view bind_name, sstring_view bind_password,
@@ -78,9 +89,18 @@ ldap_role_manager::ldap_role_manager(
       , _bind_password(bind_password), _retries(0) {
 }
 
+ldap_role_manager::ldap_role_manager(cql3::query_processor& qp, ::service::migration_manager& mm)
+    : ldap_role_manager(
+            qp.db().get_config().ldap_url_template(),
+            qp.db().get_config().ldap_attr_role(),
+            qp.db().get_config().ldap_bind_dn(),
+            qp.db().get_config().ldap_bind_passwd(),
+            qp,
+            mm) {
+}
+
 std::string_view ldap_role_manager::qualified_java_name() const noexcept {
-    static const sstring instance = meta::AUTH_PACKAGE_NAME + "LDAPRoleManager";
-    return instance;
+    return ldap_role_manager_full_name;
 }
 
 const resource_set& ldap_role_manager::protected_resources() const {
