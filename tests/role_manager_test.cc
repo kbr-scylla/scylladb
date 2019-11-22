@@ -259,7 +259,8 @@ SEASTAR_TEST_CASE(ldap_single_role) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{"role1"}, m->query_granted("jsmith", auth::recursive_role_query::no).get0());
+        const role_set expected{"jsmith", "role1"};
+        BOOST_REQUIRE_EQUAL(expected, m->query_granted("jsmith", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -268,7 +269,7 @@ SEASTAR_TEST_CASE(ldap_two_roles) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        role_set expected{"role1","role2"};
+        const role_set expected{"cassandra", "role1","role2"};
         BOOST_REQUIRE_EQUAL(expected, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
@@ -278,7 +279,8 @@ SEASTAR_TEST_CASE(ldap_no_roles) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("dontexist", auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"dontexist"},
+                            m->query_granted("dontexist", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -287,7 +289,7 @@ SEASTAR_TEST_CASE(ldap_wrong_role) {
         auto m = make_ldap_manager(env);
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("jdoe", auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"jdoe"}, m->query_granted("jdoe", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -296,7 +298,8 @@ SEASTAR_TEST_CASE(ldap_wrong_url) {
         auto m = make_ldap_manager(env, "wrong:/UR?L");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"cassandra"},
+                            m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -305,7 +308,8 @@ SEASTAR_TEST_CASE(ldap_wrong_server_name) {
         auto m = make_ldap_manager(env, "ldap://server.that.will.never.exist.scylladb.com");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"cassandra"},
+                            m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
@@ -314,7 +318,8 @@ SEASTAR_TEST_CASE(ldap_wrong_port) {
         auto m = make_ldap_manager(env, "ldap://localhost:2");
         m->start().get0();
         create_ldap_roles(*m);
-        BOOST_REQUIRE_EQUAL(role_set{}, m->query_granted("cassandra", auth::recursive_role_query::no).get0());
+        BOOST_REQUIRE_EQUAL(role_set{"cassandra"},
+                            m->query_granted("cassandra", auth::recursive_role_query::no).get0());
     });
 }
 
