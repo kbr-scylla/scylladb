@@ -44,6 +44,7 @@
 #include "cql3/functions/function.hh"
 #include "cql3/functions/scalar_function.hh"
 #include "cql3/cql3_type.hh"
+#include "cql3/type_json.hh"
 
 #include "bytes_ostream.hh"
 #include "types.hh"
@@ -92,7 +93,7 @@ public:
                 encoded_row.write("\\\"", 2);
             }
             encoded_row.write("\": ", 3);
-            sstring row_sstring = _selector_types[i]->to_json_string(parameters[i]);
+            sstring row_sstring = to_json_string(*_selector_types[i], parameters[i]);
             encoded_row.write(row_sstring.c_str(), row_sstring.size());
         }
         encoded_row.write("}", 1);
@@ -112,15 +113,15 @@ public:
         return utf8_type;
     }
 
-    virtual bool is_pure() override {
+    virtual bool is_pure() const override {
         return true;
     }
 
-    virtual bool is_native() override {
+    virtual bool is_native() const override {
         return true;
     }
 
-    virtual bool is_aggregate() override {
+    virtual bool is_aggregate() const override {
         // Aggregates of aggregates are currently not supported, but JSON handles them
         return false;
     }
@@ -139,15 +140,15 @@ public:
         os << ") -> " << utf8_type->as_cql3_type().to_string();
     }
 
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) override {
+    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
         return false;
     }
 
-    virtual bool has_reference_to(function& f) override {
+    virtual bool has_reference_to(function& f) const override {
         return false;
     }
 
-    virtual sstring column_name(const std::vector<sstring>& column_names) override {
+    virtual sstring column_name(const std::vector<sstring>& column_names) const override {
         return "[json]";
     }
 

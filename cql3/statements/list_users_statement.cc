@@ -34,16 +34,16 @@
 #include "auth/common.hh"
 #include "transport/messages/result_message.hh"
 
-void cql3::statements::list_users_statement::validate(service::storage_proxy& proxy, const service::client_state& state) {
+void cql3::statements::list_users_statement::validate(service::storage_proxy& proxy, const service::client_state& state) const {
 }
 
-future<> cql3::statements::list_users_statement::check_access(const service::client_state& state) {
+future<> cql3::statements::list_users_statement::check_access(const service::client_state& state) const {
     state.ensure_not_anonymous();
     return make_ready_future();
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>
-cql3::statements::list_users_statement::execute(service::storage_proxy& proxy, service::query_state& state, const query_options& options) {
+cql3::statements::list_users_statement::execute(service::storage_proxy& proxy, service::query_state& state, const query_options& options) const {
     static const sstring virtual_table_name("users");
 
     static const auto make_column_spec = [](const sstring& name, const ::shared_ptr<const abstract_type>& ty) {
@@ -89,17 +89,16 @@ cql3::statements::list_users_statement::execute(service::storage_proxy& proxy, s
 
     const auto& cs = state.get_client_state();
     const auto& as = *cs.get_auth_service();
-    const auto user = cs.user();
 
-    return auth::has_superuser(as, *user).then([&cs, &as, user](bool has_superuser) {
+    return auth::has_superuser(as, *cs.user()).then([&cs, &as](bool has_superuser) {
         if (has_superuser) {
             return as.underlying_role_manager().query_all().then([&as](std::unordered_set<sstring> roles) {
                 return make_results(as, std::move(roles));
             });
         }
 
-        return auth::get_roles(as, *user).then([&as](std::unordered_set<sstring> granted_roles) {
+        return auth::get_roles(as, *cs.user()).then([&as](std::unordered_set<sstring> granted_roles) {
             return make_results(as, std::move(granted_roles));
         });
-    }).finally([user] {});
+    });
 }

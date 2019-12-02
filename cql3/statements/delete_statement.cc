@@ -50,7 +50,7 @@ bool delete_statement::allow_clustering_key_slices() const {
     return true;
 }
 
-void delete_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) {
+void delete_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const {
     if (_column_operations.empty()) {
         if (s->clustering_key_size() == 0 || range.is_full()) {
             m.partition().apply(params.make_tombstone());
@@ -95,12 +95,12 @@ delete_statement::prepare_internal(database& db, schema_ptr schema, shared_ptr<v
     prepare_conditions(db, schema, bound_names, *stmt);
     stmt->process_where_clause(db, _where_clause, std::move(bound_names));
     if (!db.supports_infinite_bound_range_deletions()) {
-        if (!stmt->restrictions()->get_clustering_columns_restrictions()->has_bound(bound::START)
-                || !stmt->restrictions()->get_clustering_columns_restrictions()->has_bound(bound::END)) {
+        if (!stmt->restrictions().get_clustering_columns_restrictions()->has_bound(bound::START)
+                || !stmt->restrictions().get_clustering_columns_restrictions()->has_bound(bound::END)) {
             throw exceptions::invalid_request_exception("A range deletion operation needs to specify both bounds for clusters without sstable mc format support");
         }
     }
-    if (!schema->is_compound() && stmt->restrictions()->get_clustering_columns_restrictions()->is_slice()) {
+    if (!schema->is_compound() && stmt->restrictions().get_clustering_columns_restrictions()->is_slice()) {
         throw exceptions::invalid_request_exception("Range deletions on \"compact storage\" schemas are not supported");
     }
     return stmt;

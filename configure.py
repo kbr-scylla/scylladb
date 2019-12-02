@@ -126,8 +126,12 @@ def flag_supported(flag, compiler):
 
 def gold_supported(compiler):
     src_main = 'int main(int argc, char **argv) { return 0; }'
-    if try_compile_and_link(source=src_main, flags=['-fuse-ld=gold'], compiler=compiler):
-        return '-fuse-ld=gold'
+    link_flags = ['-fuse-ld=gold']
+    if try_compile_and_link(source=src_main, flags=link_flags, compiler=compiler):
+        threads_flag = '-Wl,--threads'
+        if try_compile_and_link(source=src_main, flags=link_flags + [threads_flag], compiler=compiler):
+            link_flags.append(threads_flag)
+        return ' '.join(link_flags)
     else:
         print('Note: gold not found; using default system linker')
         return ''
@@ -421,8 +425,6 @@ arg_parser.add_argument('--dpdk-target', action='store', dest='dpdk_target', def
                         help='Path to DPDK SDK target location (e.g. <DPDK SDK dir>/x86_64-native-linuxapp-gcc)')
 arg_parser.add_argument('--debuginfo', action='store', dest='debuginfo', type=int, default=1,
                         help='Enable(1)/disable(0)compiler debug information generation')
-arg_parser.add_argument('--compress-exec-debuginfo', action='store', dest='compress_exec_debuginfo', type=int, default=1,
-                        help='Enable(1)/disable(0) debug information compression in executables')
 arg_parser.add_argument('--static-stdc++', dest='staticcxx', action='store_true',
                         help='Link libgcc and libstdc++ statically')
 arg_parser.add_argument('--static-thrift', dest='staticthrift', action='store_true',
@@ -445,6 +447,8 @@ arg_parser.add_argument('--enable-alloc-failure-injector', dest='alloc_failure_i
                         help='enable allocation failure injection')
 arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', default=None,
                         help='path to antlr3 executable')
+arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', default='ragel',
+        help='path to ragel executable')
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -509,6 +513,7 @@ scylla_core = (['database.cc',
                 'transport/server.cc',
                 'transport/messages/result_message.cc',
                 'cdc/cdc.cc',
+                'cql3/type_json.cc',
                 'cql3/abstract_marker.cc',
                 'cql3/attributes.cc',
                 'cql3/cf_name.cc',
@@ -821,6 +826,27 @@ alternator = [
        'alternator/auth.cc',
 ]
 
+redis = [
+        'redis/service.cc',
+        'redis/server.cc',
+        'redis/query_processor.cc',
+        'redis/protocol_parser.rl',
+        'redis/keyspace_utils.cc',
+        'redis/options.cc',
+        'redis/stats.cc',
+        'redis/mutation_utils.cc',
+        'redis/query_utils.cc',
+        'redis/abstract_command.cc',
+        'redis/command_factory.cc',
+        'redis/commands/unknown.cc',
+        'redis/commands/ping.cc',
+        'redis/commands/set.cc',
+        'redis/commands/get.cc',
+        'redis/commands/del.cc',
+        'redis/commands/select.cc',
+        'redis/commands/echo.cc',
+        ]
+
 idls = ['idl/gossip_digest.idl.hh',
         'idl/uuid.idl.hh',
         'idl/range.idl.hh',
@@ -866,7 +892,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 ]
 
 deps = {
-    'scylla': idls + ['main.cc', 'release.cc'] + scylla_core + api + alternator,
+    'scylla': idls + ['main.cc', 'release.cc'] + scylla_core + api + alternator + redis,
 }
 
 pure_boost_tests = set([
@@ -1002,7 +1028,7 @@ modes['release']['cxx_ld_flags'] += ' ' + ' '.join(optimization_flags)
 
 gold_linker_flag = gold_supported(compiler=args.cxx)
 
-dbgflag = '-g' if args.debuginfo else ''
+dbgflag = '-g -gz' if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
 
 if args.so:
@@ -1020,6 +1046,10 @@ else:
 # a string element is a package name with no alternatives
 optional_packages = [['libsystemd', 'libsystemd-daemon']]
 pkgs = []
+
+# Lua can be provided by lua53 package on Debian-like
+# systems and by Lua on others.
+pkgs.append('lua53' if have_pkg('lua53') else 'lua')
 
 
 def setup_first_pkg_of_list(pkglist):
@@ -1110,12 +1140,6 @@ file = open('build/SCYLLA-RELEASE-FILE', 'r')
 scylla_release = file.read().strip()
 
 extra_cxxflags["release.cc"] = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\""
-
-# We never compress debug info in debug mode
-modes['debug']['cxxflags'] += ' -gz'
-# We compress it by default in release mode
-flag_dest = 'cxx_ld_flags' if args.compress_exec_debuginfo else 'cxxflags'
-modes['release'][flag_dest] += ' -gz'
 
 for m in ['debug', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
@@ -1209,7 +1233,7 @@ def configure_zstd(build_dir, mode):
 
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
-libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-llua', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
+libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
@@ -1285,6 +1309,11 @@ if args.antlr3_exec:
 else:
     antlr3_exec = "antlr3"
 
+if args.ragel_exec:
+    ragel_exec = args.ragel_exec
+else:
+    ragel_exec = "ragel"
+
 for mode in build_modes:
     configure_zstd(outdir, mode)
 
@@ -1319,6 +1348,11 @@ with open(buildfile_tmp, 'w') as f:
             command = {ninja} -C $subdir $target
             restat = 1
             description = NINJA $out
+        rule ragel
+            # sed away a bug in ragel 7 that emits some extraneous _nfa* variables
+            # (the $$ is collapsed to a single one by ninja)
+            command = {ragel_exec} -G2 -o $out $in && sed -i -e '1h;2,$$H;$$!d;g' -re 's/static const char _nfa[^;]*;//g' $out
+            description = RAGEL $out
         rule run
             command = $in > $out
             description = GEN $out
@@ -1383,6 +1417,7 @@ with open(buildfile_tmp, 'w') as f:
         swaggers = {}
         serializers = {}
         thrifts = set()
+        ragels = {}
         antlr3_grammars = set()
         seastar_dep = 'build/{}/seastar/libseastar.a'.format(mode)
         for binary in build_artifacts:
@@ -1440,6 +1475,9 @@ with open(buildfile_tmp, 'w') as f:
                 elif src.endswith('.json'):
                     hh = '$builddir/' + mode + '/gen/' + src + '.hh'
                     swaggers[hh] = src
+                elif src.endswith('.rl'):
+                    hh = '$builddir/' + mode + '/gen/' + src.replace('.rl', '.hh')
+                    ragels[hh] = src
                 elif src.endswith('.thrift'):
                     thrifts.add(src)
                 elif src.endswith('.g'):
@@ -1468,6 +1506,7 @@ with open(buildfile_tmp, 'w') as f:
             gen_headers += g.headers('$builddir/{}/gen'.format(mode))
         gen_headers += list(swaggers.keys())
         gen_headers += list(serializers.keys())
+        gen_headers += list(ragels.keys())
         gen_headers_dep = ' '.join(gen_headers)
 
         for obj in compiles:
@@ -1481,6 +1520,9 @@ with open(buildfile_tmp, 'w') as f:
         for hh in serializers:
             src = serializers[hh]
             f.write('build {}: serializer {} | idl-compiler.py\n'.format(hh, src))
+        for hh in ragels:
+            src = ragels[hh]
+            f.write('build {}: ragel {}\n'.format(hh, src))
         for thrift in thrifts:
             outs = ' '.join(thrift.generated('$builddir/{}/gen'.format(mode)))
             f.write('build {}: thrift.{} {}\n'.format(outs, mode, thrift.source))

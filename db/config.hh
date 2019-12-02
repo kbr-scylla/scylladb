@@ -71,6 +71,7 @@ public:
 
     // Throws exception if experimental feature is disabled.
     void check_experimental(const sstring& what) const;
+    void setup_directories();
 
     /**
      * Scans the environment variables for configuration files directory
@@ -101,6 +102,7 @@ public:
     named_value<sstring> listen_address;
     named_value<sstring> listen_interface;
     named_value<bool> listen_interface_prefer_ipv6;
+    named_value<sstring> work_directory;
     named_value<sstring> commitlog_directory;
     named_value<string_list> data_file_directories;
     named_value<sstring> hints_directory;
@@ -286,6 +288,14 @@ public:
     named_value<bool> alternator_enforce_authorization;
     named_value<bool> abort_on_ebadf;
 
+    named_value<uint16_t> redis_transport_port;
+    named_value<uint16_t> redis_transport_port_ssl;
+    named_value<bool> enable_redis_protocol;
+    named_value<sstring> redis_read_consistency_level;
+    named_value<sstring> redis_write_consistency_level;
+    named_value<uint16_t> redis_default_database_count;
+    named_value<string_map> redis_keyspace_options;
+
     named_value<sstring> audit;
     named_value<sstring> audit_categories;
     named_value<sstring> audit_tables;
@@ -321,6 +331,9 @@ private:
     log_legacy_value<seastar::log_level> default_log_level;
     log_legacy_value<std::unordered_map<sstring, seastar::log_level>> logger_log_level;
     log_legacy_value<bool> log_to_stdout, log_to_syslog;
+
+    void maybe_in_workdir(named_value<sstring>&, const char*);
+    void maybe_in_workdir(named_value<string_list>&, const char*);
 
     std::shared_ptr<db::extensions> _extensions;
 };

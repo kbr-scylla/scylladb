@@ -16,17 +16,17 @@ list_service_level_statement::list_service_level_statement(sstring service_level
     _service_level(service_level), _describe_all(describe_all) {
 }
 
-void list_service_level_statement::validate(service::storage_proxy &, const service::client_state &) {
+void list_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 
-future<> list_service_level_statement::check_access(const service::client_state &state) {
+future<> list_service_level_statement::check_access(const service::client_state &state) const {
     return state.ensure_has_permission(auth::permission::DESCRIBE, auth::root_service_level_resource());
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>
 list_service_level_statement::execute(service::storage_proxy &sp,
         service::query_state &state,
-        const query_options &) {
+        const query_options &) const {
 
     static auto make_column = [] (sstring name, const shared_ptr<const abstract_type> type) {
         return ::make_shared<column_specification>(

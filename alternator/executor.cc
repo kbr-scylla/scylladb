@@ -35,6 +35,7 @@
 #include "query-result-reader.hh"
 #include "cql3/selection/selection.hh"
 #include "cql3/result_set.hh"
+#include "cql3/type_json.hh"
 #include "bytes.hh"
 #include "cql3/update_parameters.hh"
 #include "server.hh"
@@ -240,6 +241,36 @@ static std::string get_string_attribute(const rjson::value& value, rjson::string
 
 }
 
+// Sets a KeySchema object inside the given JSON parent describing the key
+// attributes of the the given schema as being either HASH or RANGE keys.
+// Additionally, adds to a given map mappings between the key attribute
+// names and their type (as a DynamoDB type string).
+static void describe_key_schema(rjson::value& parent, const schema& schema, std::unordered_map<std::string,std::string>& attribute_types) {
+    rjson::value key_schema = rjson::empty_array();
+    for (const column_definition& cdef : schema.partition_key_columns()) {
+        rjson::value key = rjson::empty_object();
+        rjson::set(key, "AttributeName", rjson::from_string(cdef.name_as_text()));
+        rjson::set(key, "KeyType", "HASH");
+        rjson::push_back(key_schema, std::move(key));
+        attribute_types[cdef.name_as_text()] = type_to_string(cdef.type);
+
+    }
+    for (const column_definition& cdef : schema.clustering_key_columns()) {
+        rjson::value key = rjson::empty_object();
+        rjson::set(key, "AttributeName", rjson::from_string(cdef.name_as_text()));
+        rjson::set(key, "KeyType", "RANGE");
+        rjson::push_back(key_schema, std::move(key));
+        attribute_types[cdef.name_as_text()] = type_to_string(cdef.type);
+        // FIXME: this "break" can avoid listing some clustering key columns
+        // we added for GSIs just because they existed in the base table -
+        // but not in all cases. We still have issue #5320. See also
+        // reproducer in test_gsi_2_describe_table_schema.
+        break;
+    }
+    rjson::set(parent, "KeySchema", std::move(key_schema));
+
+}
+
 future<json::json_return_type> executor::describe_table(client_state& client_state, std::string content) {
     _stats.api_operations.describe_table++;
     rjson::value request = rjson::parse(content);
@@ -268,6 +299,11 @@ future<json::json_return_type> executor::describe_table(client_state& client_sta
     rjson::set(table_description, "BillingModeSummary", rjson::empty_object());
     rjson::set(table_description["BillingModeSummary"], "BillingMode", "PAY_PER_REQUEST");
     rjson::set(table_description["BillingModeSummary"], "LastUpdateToPayPerRequestDateTime", rjson::value(creation_date_seconds));
+
+    std::unordered_map<std::string,std::string> key_attribute_types;
+    // Add base table's KeySchema and collect types for AttributeDefinitions:
+    describe_key_schema(table_description, *schema, key_attribute_types);
+
     table& t = _proxy.get_db().local().find_column_family(schema);
     if (!t.views().empty()) {
         rjson::value gsi_array = rjson::empty_array();
@@ -282,6 +318,8 @@ future<json::json_return_type> executor::describe_table(client_state& client_sta
             }
             sstring index_name = cf_name.substr(delim_it + 1);
             rjson::set(view_entry, "IndexName", rjson::from_string(index_name));
+            // Add indexes's KeySchema and collect types for AttributeDefinitions:
+            describe_key_schema(view_entry, *vptr, key_attribute_types);
             // Local secondary indexes are marked by an extra '!' sign occurring before the ':' delimiter
             rjson::value& index_array = (delim_it > 1 && cf_name[delim_it-1] == '!') ? lsi_array : gsi_array;
             rjson::push_back(index_array, std::move(view_entry));
@@ -293,10 +331,19 @@ future<json::json_return_type> executor::describe_table(client_state& client_sta
             rjson::set(table_description, "GlobalSecondaryIndexes", std::move(gsi_array));
         }
     }
+    // Use map built by describe_key_schema() for base and indexes to produce
+    // AttributeDefinitions for all key columns:
+    rjson::value attribute_definitions = rjson::empty_array();
+    for (auto& type : key_attribute_types) {
+        rjson::value key = rjson::empty_object();
+        rjson::set(key, "AttributeName", rjson::from_string(type.first));
+        rjson::set(key, "AttributeType", rjson::from_string(type.second));
+        rjson::push_back(attribute_definitions, std::move(key));
+    }
+    rjson::set(table_description, "AttributeDefinitions", std::move(attribute_definitions));
 
-    // FIXME: more attributes! Check https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TableDescription.html#DDB-Type-TableDescription-TableStatus but also run a test to see what DyanmoDB really fills
-    // maybe for TableId or TableArn use  schema.id().to_sstring().c_str();
-    // Of course, the whole schema is missing!
+    // FIXME: still missing some response fields (issue #5026)
+
     rjson::value response = rjson::empty_object();
     rjson::set(response, "Table", std::move(table_description));
     elogger.trace("returning {}", response);
@@ -1810,7 +1857,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
     for (const column_definition& cdef : schema.partition_key_columns()) {
         rjson::set_with_string_name(last_evaluated_key, cdef.name_as_text(), rjson::empty_object());
         rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
-        rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(cdef.type->to_json_string(*exploded_pk_it)));
+        rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_pk_it)));
         ++exploded_pk_it;
     }
     auto ck = paging_state.get_clustering_key();
@@ -1820,7 +1867,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
         for (const column_definition& cdef : schema.clustering_key_columns()) {
             rjson::set_with_string_name(last_evaluated_key, cdef.name_as_text(), rjson::empty_object());
             rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
-            rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(cdef.type->to_json_string(*exploded_ck_it)));
+            rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_ck_it)));
             ++exploded_ck_it;
         }
     }

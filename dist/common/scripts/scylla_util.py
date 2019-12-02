@@ -156,7 +156,7 @@ class aws_instance:
         return self._type.split(".")[0]
 
     def is_supported_instance_class(self):
-        if self.instance_class() in ['i2', 'i3', 'i3en']:
+        if self.instance_class() in ['i2', 'i3', 'i3en', 'c5d', 'm5d', 'm5ad', 'r5d', 'z1d']:
             return True
         return False
 
@@ -355,6 +355,8 @@ def is_redhat_variant():
 def is_gentoo_variant():
     return ('gentoo' in os_release['ID'])
 
+def is_redhat_8():
+    return is_redhat_variant() and ('8' in os_release['VERSION_ID'])
 
 def is_ec2():
     if os.path.exists('/sys/hypervisor/uuid'):
@@ -451,6 +453,22 @@ def get_mode_cpuset(nic, mode):
         return '-1'
 
 
+def parse_scylla_dirs_with_default(conf='/etc/scylla/scylla.yaml'):
+    y = yaml.safe_load(open(conf))
+    if 'workdir' not in y or not y['workdir']:
+        y['workdir'] = datadir()
+    if 'data_file_directories' not in y or \
+            not y['data_file_directories'] or \
+            not len(y['data_file_directories']) or \
+            not " ".join(y['data_file_directories']).strip():
+        y['data_file_directories'] = [os.path.join(y['workdir'], 'data')]
+    for t in [ "commitlog", "hints", "view_hints", "saved_caches" ]:
+        key = "%s_directory" % t
+        if key not in y or not y[k]:
+            y[k] = os.path.join(y['workdir'], t)
+    return y
+
+
 def get_scylla_dirs():
     """
     Returns a list of scylla directories configured in /etc/scylla/scylla.yaml.
@@ -460,13 +478,15 @@ def get_scylla_dirs():
     y = yaml.safe_load(open(scylla_yaml_name))
 
     # Check that mandatory fields are set
+    if 'workdir' not in y or not y['workdir']:
+        y['workdir'] = datadir()
     if 'data_file_directories' not in y or \
             not y['data_file_directories'] or \
             not len(y['data_file_directories']) or \
             not " ".join(y['data_file_directories']).strip():
-        raise Exception("{}: at least one directory has to be set in 'data_file_directory'".format(scylla_yaml_name))
+        y['data_file_directories'] = [os.path.join(y['workdir'], 'data')]
     if 'commitlog_directory' not in y or not y['commitlog_directory']:
-        raise Exception("{}: 'commitlog_directory' has to be set".format(scylla_yaml_name))
+        y['commitlog_directory'] = os.path.join(y['workdir'], 'commitlog')
 
     dirs = []
     dirs.extend(y['data_file_directories'])

@@ -127,12 +127,12 @@ public:
      * from the function/
      */
     template <typename Ret>
-    futurize_t<Ret> with_user_service_level(shared_ptr<auth::authenticated_user> usr, noncopyable_function<Ret()> func) {
+    futurize_t<Ret> with_user_service_level(const std::optional<auth::authenticated_user>& usr, noncopyable_function<Ret()> func) {
         if (usr) {
             auth::service& ser = service::get_local_storage_service().get_local_auth_service();
             return auth::get_roles(ser, *usr).then([this] (auth::role_set roles) {
                 return find_service_level(roles);
-            }).then([usr, this, func = std::move(func)] (sstring service_level_name) mutable {
+            }).then([this, func = std::move(func)] (sstring service_level_name) mutable {
                 return with_service_level(service_level_name, std::move(func));
             });
         } else {

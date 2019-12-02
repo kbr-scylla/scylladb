@@ -11,6 +11,7 @@
 #pragma once
 
 #include <boost/multiprecision/cpp_int.hpp>
+#include <ostream>
 
 #include "bytes.hh"
 
@@ -48,3 +49,7 @@ public:
     friend bool operator>=(const big_decimal& x, const big_decimal& y) { return x.compare(y) >= 0; }
     friend bool operator>(const big_decimal& x, const big_decimal& y) { return x.compare(y) > 0; }
 };
+
+inline std::ostream& operator<<(std::ostream& s, const big_decimal& v) {
+    return s << v.to_string();
+}

@@ -31,7 +31,7 @@
 #include "authentication_statement.hh"
 #include "transport/messages/result_message.hh"
 
-uint32_t cql3::statements::authentication_statement::get_bound_terms() {
+uint32_t cql3::statements::authentication_statement::get_bound_terms() const {
     return 0;
 }
 
@@ -57,10 +57,10 @@ bool cql3::statements::authentication_statement::depends_on_column_family(
 
 void cql3::statements::authentication_statement::validate(
                 service::storage_proxy&,
-                const service::client_state& state) {
+                const service::client_state& state) const {
 }
 
-future<> cql3::statements::authentication_statement::check_access(const service::client_state& state) {
+future<> cql3::statements::authentication_statement::check_access(const service::client_state& state) const {
     return make_ready_future<>();
 }
 

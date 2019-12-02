@@ -82,7 +82,7 @@ private:
     private volatile AuthenticatedUser user;
     private volatile String keyspace;
 #endif
-    ::shared_ptr<auth::authenticated_user> _user;
+    std::optional<auth::authenticated_user> _user;
 
     auth_state _auth_state = auth_state::UNINITIALIZED;
 
@@ -130,7 +130,7 @@ public:
             , _remote_address(remote_address)
             , _auth_service(&auth_service) {
         if (!auth_service.underlying_authenticator().require_authentication()) {
-            _user = ::make_shared<auth::authenticated_user>();
+            _user = auth::authenticated_user();
         }
     }
 
@@ -261,7 +261,7 @@ public:
     /**
      * Sets active user. Does _not_ validate anything
      */
-    void set_login(::shared_ptr<auth::authenticated_user>);
+    void set_login(auth::authenticated_user);
 
     /// \brief A user can login if it's anonymous, or if it exists and the `LOGIN` option for the user is `true`.
     future<> check_user_can_login();
@@ -300,7 +300,7 @@ public:
     }
 #endif
 
-    ::shared_ptr<auth::authenticated_user> user() const {
+    const std::optional<auth::authenticated_user>& user() const {
         return _user;
     }
 

@@ -16,17 +16,17 @@ drop_service_level_statement::drop_service_level_statement(sstring service_level
     _service_level(service_level), _if_exists(if_exists) {
 }
 
-void drop_service_level_statement::validate(service::storage_proxy &, const service::client_state &) {
+void drop_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 
-future<> drop_service_level_statement::check_access(const service::client_state &state) {
+future<> drop_service_level_statement::check_access(const service::client_state &state) const {
     return state.ensure_has_permission(auth::permission::DROP, auth::root_service_level_resource());
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>
 drop_service_level_statement::execute(service::storage_proxy &sp,
         service::query_state &state,
-        const query_options &) {
+        const query_options &) const {
     return state.get_service_level_controller().drop_distributed_service_level(_service_level, _if_exists).then([] {
         using void_result_msg = cql_transport::messages::result_message::void_message;
         using result_msg = cql_transport::messages::result_message;

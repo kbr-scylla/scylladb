@@ -190,15 +190,17 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     )
     /* Default directories */
     /* If you have changed any of the default directories during installation, make sure you have root access and set these properties: */
-    , commitlog_directory(this, "commitlog_directory", value_status::Used, "/var/lib/scylla/commitlog",
+    , work_directory(this, "workdir,W", value_status::Used, "/var/lib/scylla",
+        "The directory in which Scylla will put all its subdirectories. The location of individual subdirs can be overriden by the respective *_directory options.")
+    , commitlog_directory(this, "commitlog_directory", value_status::Used, "",
         "The directory where the commit log is stored. For optimal write performance, it is recommended the commit log be on a separate disk partition (ideally, a separate physical device) from the data file directories.")
-    , data_file_directories(this, "data_file_directories", value_status::Used, { "/var/lib/scylla/data" },
+    , data_file_directories(this, "data_file_directories", value_status::Used, { },
         "The directory location where table data (SSTables) is stored")
-    , hints_directory(this, "hints_directory", value_status::Used, "/var/lib/scylla/hints",
+    , hints_directory(this, "hints_directory", value_status::Used, "",
         "The directory where hints files are stored if hinted handoff is enabled.")
-    , view_hints_directory(this, "view_hints_directory", value_status::Used, "/var/lib/scylla/view_hints",
+    , view_hints_directory(this, "view_hints_directory", value_status::Used, "",
         "The directory where materialized-view updates are stored while a view replica is unreachable.")
-    , saved_caches_directory(this, "saved_caches_directory", value_status::Unused, "/var/lib/scylla/saved_caches",
+    , saved_caches_directory(this, "saved_caches_directory", value_status::Unused, "",
         "The directory location where table key and row caches are stored.")
     /* Commonly used properties */
     /* Properties most frequently used when configuring Scylla. */
@@ -705,6 +707,21 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , alternator_address(this, "alternator_address", value_status::Used, "0.0.0.0", "Alternator API listening address")
     , alternator_enforce_authorization(this, "alternator_enforce_authorization", value_status::Used, false, "Enforce checking the authorization header for every request in Alternator")
     , abort_on_ebadf(this, "abort_on_ebadf", value_status::Used, true, "Abort the server on incorrect file descriptor access. Throws exception when disabled.")
+    , redis_transport_port(this, "redis_transport_port", value_status::Used, 6379, "Port on which the REDIS transport listens for clients.")
+    // FIXME: 9142 has been used by native_transport_port_ssl
+    , redis_transport_port_ssl(this, "redis_transport_port_ssl", value_status::Used, 9142, "Port on which the REDIS TLS native transport listens for clients.")
+    , enable_redis_protocol(this, "enable_redis_protocol", value_status::Used, false, "Enable redis protocol; Scylla will process redis protocol as a redis cluster if enable.")
+    , redis_read_consistency_level(this, "redis_read_consistency_level", value_status::Used, "ONE", "Consistency level for read operations for redis.")
+    , redis_write_consistency_level(this, "redis_write_consistency_level", value_status::Used, "ANY", "Consistency level for write operations for redis.")
+    , redis_default_database_count(this, "redis_default_database_count", value_status::Used, 16, "Default database count for the redis cluster.")
+    , redis_keyspace_options(this, "redis_keyspace_options", value_status::Used, {}, 
+            "Enable redis protocol, list of properties of replication of redis keyspace. The available options are:\n"
+            "\n"
+            "\tclass : (Default: SimpleStrategy ).\n"
+            "\treplication_factor: (Default: 1) If the class is SimpleStrategy, set the replication factor for the strategy.\n"
+            "\tdatacenter_i: (Default: 1) If the class is NetworkTopologyStrategy, set the replication factor per datacenter.\n"
+            "\n"
+            "The properties of replication for redis keyspace.")
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
         "\n"
@@ -728,6 +745,28 @@ db::config::config()
 
 db::config::~config()
 {}
+
+void db::config::setup_directories() {
+    maybe_in_workdir(commitlog_directory, "commitlog");
+    maybe_in_workdir(data_file_directories, "data");
+    maybe_in_workdir(hints_directory, "hints");
+    maybe_in_workdir(view_hints_directory, "view_hints");
+    maybe_in_workdir(saved_caches_directory, "saved_caches");
+}
+
+void db::config::maybe_in_workdir(named_value<sstring>& to, const char* sub) {
+    if (!to.is_set()) {
+        to(work_directory() + "/" + sub);
+    }
+}
+
+void db::config::maybe_in_workdir(named_value<string_list>& tos, const char* sub) {
+    if (!tos.is_set()) {
+        string_list n;
+        n.push_back(work_directory() + "/" + sub);
+        tos(n);
+    }
+}
 
 const sstring db::config::default_tls_priority("SECURE128:-VERS-TLS1.0");
 

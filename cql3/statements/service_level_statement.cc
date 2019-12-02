@@ -11,7 +11,7 @@ namespace cql3 {
 
 namespace statements {
 
-uint32_t service_level_statement::get_bound_terms() {
+uint32_t service_level_statement::get_bound_terms() const {
     return 0;
 }
 
@@ -37,10 +37,10 @@ bool service_level_statement::depends_on_column_family(
 
 void service_level_statement::validate(
         service::storage_proxy &,
-        const service::client_state &state) {
+        const service::client_state &state) const {
 }
 
-future<> service_level_statement::check_access(const service::client_state &state) {
+future<> service_level_statement::check_access(const service::client_state &state) const {
     return make_ready_future<>();
 }
 

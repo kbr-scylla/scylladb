@@ -147,15 +147,15 @@ public:
         return _cql_stats;
     }
 
-    statements::prepared_statement::checked_weak_ptr get_prepared(const auth::authenticated_user* user_ptr, const prepared_cache_key_type& key) {
-        if (user_ptr) {
-            auto it = _authorized_prepared_cache.find(*user_ptr, key);
+    statements::prepared_statement::checked_weak_ptr get_prepared(const std::optional<auth::authenticated_user>& user, const prepared_cache_key_type& key) {
+        if (user) {
+            auto it = _authorized_prepared_cache.find(*user, key);
             if (it != _authorized_prepared_cache.end()) {
                 try {
                     return it->get()->checked_weak_from_this();
                 } catch (seastar::checked_ptr_is_null_exception&) {
                     // If the prepared statement got invalidated - remove the corresponding authorized_prepared_statements_cache entry as well.
-                    _authorized_prepared_cache.remove(*user_ptr, key);
+                    _authorized_prepared_cache.remove(*user, key);
                 }
             }
         }
@@ -333,7 +333,7 @@ private:
             const std::initializer_list<data_value>&,
             db::consistency_level,
             const timeout_config& timeout_config,
-            int32_t page_size = -1);
+            int32_t page_size = -1) const;
 
     future<::shared_ptr<cql_transport::messages::result_message>>
     process_authorized_statement(const ::shared_ptr<cql_statement> statement, service::query_state& query_state, const query_options& options);

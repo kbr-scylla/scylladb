@@ -35,7 +35,7 @@
 #include "unimplemented.hh"
 
 #include "cql3/operation_impl.hh"
-#include "json.hh"
+#include "cql3/type_json.hh"
 #include "types/map.hh"
 #include "types/set.hh"
 #include "types/list.hh"
@@ -84,7 +84,7 @@ parse(const sstring& json_string, const std::vector<column_definition>& expected
             json_map.emplace(std::move(cql_name), bytes_opt{});
             prepared_map.erase(value_it);
         } else {
-            json_map.emplace(std::move(cql_name), def.type->from_json_object(value_it->second, sf));
+            json_map.emplace(std::move(cql_name), from_json_object(*def.type, value_it->second, sf));
             prepared_map.erase(value_it);
         }
     }
@@ -118,13 +118,13 @@ bool update_statement::allow_clustering_key_slices() const {
     return false;
 }
 
-void update_statement::execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) {
+void update_statement::execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) const {
     for (auto&& update : _column_operations) {
         update->execute(m, prefix, params);
     }
 }
 
-void update_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) {
+void update_statement::add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const {
     auto prefix = range.start() ? std::move(range.start()->value()) : clustering_key_prefix::make_empty();
     if (s->is_dense()) {
         if (prefix.is_empty(*s) || prefix.components().front().empty()) {
@@ -176,7 +176,7 @@ void update_statement::add_update_for_key(mutation& m, const query::clustering_r
 #endif
 }
 
-modification_statement::json_cache_opt insert_prepared_json_statement::maybe_prepare_json_cache(const query_options& options) {
+modification_statement::json_cache_opt insert_prepared_json_statement::maybe_prepare_json_cache(const query_options& options) const {
     sstring json_string = with_linearized(_term->bind_and_get(options).data().value(), [&] (bytes_view value) {
         return utf8_type->to_string(bytes(value));
     });
@@ -184,7 +184,9 @@ modification_statement::json_cache_opt insert_prepared_json_statement::maybe_pre
 }
 
 void
-insert_prepared_json_statement::execute_set_value(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const column_definition& column, const bytes_opt& value) {
+insert_prepared_json_statement::execute_set_value(mutation& m, const clustering_key_prefix& prefix,
+    const update_parameters& params, const column_definition& column, const bytes_opt& value) const {
+
     if (!value) {
         visit(*column.type, make_visitor(
         [&] (const list_type_impl&) {
@@ -237,7 +239,7 @@ insert_prepared_json_statement::execute_set_value(mutation& m, const clustering_
 }
 
 dht::partition_range_vector
-insert_prepared_json_statement::build_partition_keys(const query_options& options, const json_cache_opt& json_cache) {
+insert_prepared_json_statement::build_partition_keys(const query_options& options, const json_cache_opt& json_cache) const {
     dht::partition_range_vector ranges;
     std::vector<bytes_opt> exploded;
     for (const auto& def : s->partition_key_columns()) {
@@ -253,7 +255,7 @@ insert_prepared_json_statement::build_partition_keys(const query_options& option
     return ranges;
 }
 
-query::clustering_row_ranges insert_prepared_json_statement::create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) {
+query::clustering_row_ranges insert_prepared_json_statement::create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) const {
     query::clustering_row_ranges ranges;
     std::vector<bytes_opt> exploded;
     for (const auto& def : s->clustering_key_columns()) {
@@ -268,7 +270,7 @@ query::clustering_row_ranges insert_prepared_json_statement::create_clustering_r
     return ranges;
 }
 
-void insert_prepared_json_statement::execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) {
+void insert_prepared_json_statement::execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) const {
     for (const auto& def : s->regular_columns()) {
         if (def.type->is_counter()) {
             throw exceptions::invalid_request_exception(format("Cannot set the value of counter column {} in JSON", def.name_as_text()));

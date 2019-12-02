@@ -58,11 +58,11 @@ public:
     virtual void abort() override {
     }
 
-    virtual int get_total_number_of_files() override {
+    virtual int get_total_number_of_files() const override {
         return 1;
     }
 
-    virtual long get_total_size() override {
+    virtual long get_total_size() const override {
         return _total_size;
     }
 

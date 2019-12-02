@@ -233,7 +233,7 @@ lists::marker::bind(const query_options& options) {
     }
 }
 
-constexpr const db_clock::time_point lists::precision_time::REFERENCE_TIME;
+constexpr db_clock::time_point lists::precision_time::REFERENCE_TIME;
 thread_local lists::precision_time lists::precision_time::_last = {db_clock::time_point::max(), 0};
 
 lists::precision_time
@@ -269,7 +269,7 @@ lists::setter::execute(mutation& m, const clustering_key_prefix& prefix, const u
 }
 
 bool
-lists::setter_by_index::requires_read() {
+lists::setter_by_index::requires_read() const {
     return true;
 }
 
@@ -326,7 +326,7 @@ lists::setter_by_index::execute(mutation& m, const clustering_key_prefix& prefix
 }
 
 bool
-lists::setter_by_uuid::requires_read() {
+lists::setter_by_uuid::requires_read() const {
     return false;
 }
 
@@ -426,7 +426,7 @@ lists::prepender::execute(mutation& m, const clustering_key_prefix& prefix, cons
 }
 
 bool
-lists::discarder::requires_read() {
+lists::discarder::requires_read() const {
     return true;
 }
 
@@ -479,7 +479,7 @@ lists::discarder::execute(mutation& m, const clustering_key_prefix& prefix, cons
 }
 
 bool
-lists::discarder_by_index::requires_read() {
+lists::discarder_by_index::requires_read() const {
     return true;
 }
 

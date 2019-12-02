@@ -129,10 +129,9 @@ event::event_type parse_event_type(const sstring& value)
     }
 }
 
-cql_server::cql_server(distributed<service::storage_proxy>& proxy, distributed<cql3::query_processor>& qp, auth::service& auth_service,
+cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
         const cql3::cql_config& cql_config, cql_server_config config, qos::service_level_controller& sl_controller)
-    : _proxy(proxy)
-    , _query_processor(qp)
+    : _query_processor(qp)
     , _config(config)
     , _max_request_size(config.max_request_size)
     , _memory_available(config.get_service_memory_limiter_semaphore())
@@ -256,7 +255,7 @@ cql_server::connection::frame_size() const {
 }
 
 cql_binary_frame_v3
-cql_server::connection::parse_frame(temporary_buffer<char> buf) {
+cql_server::connection::parse_frame(temporary_buffer<char> buf) const {
     if (buf.size() != frame_size()) {
         throw cql_frame_error();
     }
@@ -377,16 +376,7 @@ future<std::unique_ptr<cql_server::response>>
                 break;
         }
 
-        const auto user = [&client_state]() -> std::optional<auth::authenticated_user> {
-            const auto user = client_state.user();
-            if (!user) {
-                return {};
-            }
-
-            return *user;
-        }();
-
-        tracing::set_username(client_state.get_trace_state(), user);
+        tracing::set_username(client_state.get_trace_state(), client_state.user());
 
         auto in = request_reader(std::move(fbuf), *linearization_buffer_ptr);
         switch (cqlop) {
@@ -698,7 +688,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
             bool failed = f.failed();
             return audit::inspect_login(sasl_challenge->get_username(), client_state.get_client_address().addr(), failed).then(
                     [this, stream, challenge = std::move(challenge), &client_state, sasl_challenge, ff = std::move(f)] () mutable {
-                client_state.set_login(make_shared<auth::authenticated_user>(std::move(ff.get0())));
+                client_state.set_login(std::move(ff.get0()));
                 _tenant_switch = true;
                 auto f = client_state.check_user_can_login();
                 return f.then([this, stream, &client_state, challenge = std::move(challenge)]() mutable {
@@ -781,7 +771,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_ex
 
     // First, try to lookup in the cache of already authorized statements. If the corresponding entry is not found there
     // look for the prepared statement and then authorize it.
-    auto prepared = _server._query_processor.local().get_prepared(client_state.user().get(), cache_key);
+    auto prepared = _server._query_processor.local().get_prepared(client_state.user(), cache_key);
     if (!prepared) {
         needs_authorization = true;
         prepared = _server._query_processor.local().get_prepared(cache_key);
@@ -877,7 +867,7 @@ cql_server::connection::process_batch(uint16_t stream, request_reader in, servic
 
             // First, try to lookup in the cache of already authorized statements. If the corresponding entry is not found there
             // look for the prepared statement and then authorize it.
-            ps = _server._query_processor.local().get_prepared(client_state.user().get(), cache_key);
+            ps = _server._query_processor.local().get_prepared(client_state.user(), cache_key);
             if (!ps) {
                 ps = _server._query_processor.local().get_prepared(cache_key);
                 if (!ps) {
@@ -948,7 +938,7 @@ cql_server::connection::process_register(uint16_t stream, request_reader in, ser
     return make_ready_future<std::unique_ptr<cql_server::response>>(make_ready(stream, client_state.get_trace_state()));
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_unavailable_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t required, int32_t alive, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_unavailable_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t required, int32_t alive, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -959,7 +949,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_unavailable_e
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_read_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_read_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -971,7 +961,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_read_timeout_
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_read_failure_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t numfailures, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_read_failure_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t numfailures, int32_t blockfor, bool data_present, const tracing::trace_state_ptr& tr_state) const
 {
     if (_version < 4) {
         return make_read_timeout_error(stream, err, std::move(msg), cl, received, blockfor, data_present, tr_state);
@@ -987,7 +977,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_read_failure_
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_write_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, db::write_type type, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_write_timeout_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t blockfor, db::write_type type, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -999,7 +989,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_writ
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_write_failure_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t numfailures, int32_t blockfor, db::write_type type, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_write_failure_error(int16_t stream, exceptions::exception_code err, sstring msg, db::consistency_level cl, int32_t received, int32_t numfailures, int32_t blockfor, db::write_type type, const tracing::trace_state_ptr& tr_state) const
 {
     if (_version < 4) {
         return make_mutation_write_timeout_error(stream, err, std::move(msg), cl, received, blockfor, type, tr_state);
@@ -1015,7 +1005,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_mutation_writ
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_already_exists_error(int16_t stream, exceptions::exception_code err, sstring msg, sstring ks_name, sstring cf_name, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_already_exists_error(int16_t stream, exceptions::exception_code err, sstring msg, sstring ks_name, sstring cf_name, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -1025,7 +1015,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_already_exist
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_unprepared_error(int16_t stream, exceptions::exception_code err, sstring msg, bytes id, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_unprepared_error(int16_t stream, exceptions::exception_code err, sstring msg, bytes id, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -1034,7 +1024,7 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_unprepared_er
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_error(int16_t stream, exceptions::exception_code err, sstring msg, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_error(int16_t stream, exceptions::exception_code err, sstring msg, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
     response->write_int(static_cast<int32_t>(err));
@@ -1042,38 +1032,38 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_error(int16_t
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_ready(int16_t stream, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_ready(int16_t stream, const tracing::trace_state_ptr& tr_state) const
 {
     return std::make_unique<cql_server::response>(stream, cql_binary_opcode::READY, tr_state);
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_autheticate(int16_t stream, const sstring& clz, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_autheticate(int16_t stream, const sstring& clz, const tracing::trace_state_ptr& tr_state) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::AUTHENTICATE, tr_state);
     response->write_string(clz);
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_auth_success(int16_t stream, bytes b, const tracing::trace_state_ptr& tr_state) {
+std::unique_ptr<cql_server::response> cql_server::connection::make_auth_success(int16_t stream, bytes b, const tracing::trace_state_ptr& tr_state) const {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::AUTH_SUCCESS, tr_state);
     response->write_bytes(std::move(b));
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_auth_challenge(int16_t stream, bytes b, const tracing::trace_state_ptr& tr_state) {
+std::unique_ptr<cql_server::response> cql_server::connection::make_auth_challenge(int16_t stream, bytes b, const tracing::trace_state_ptr& tr_state) const {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::AUTH_CHALLENGE, tr_state);
     response->write_bytes(std::move(b));
     return response;
 }
 
-std::unique_ptr<cql_server::response> cql_server::connection::make_supported(int16_t stream, const tracing::trace_state_ptr& tr_state)
+std::unique_ptr<cql_server::response> cql_server::connection::make_supported(int16_t stream, const tracing::trace_state_ptr& tr_state) const
 {
     std::multimap<sstring, sstring> opts;
     opts.insert({"CQL_VERSION", cql3::query_processor::CQL_VERSION});
     opts.insert({"COMPRESSION", "lz4"});
     opts.insert({"COMPRESSION", "snappy"});
     if (_server._config.allow_shard_aware_drivers) {
-        auto& part = dht::global_partitioner();
+        auto const& part = dht::global_partitioner();
         opts.insert({"SCYLLA_SHARD", format("{:d}", engine().cpu_id())});
         opts.insert({"SCYLLA_NR_SHARDS", format("{:d}", smp::count)});
         opts.insert({"SCYLLA_SHARDING_ALGORITHM", part.cpu_sharding_algorithm_name()});
@@ -1159,7 +1149,7 @@ public:
 };
 
 std::unique_ptr<cql_server::response>
-cql_server::connection::make_result(int16_t stream, shared_ptr<messages::result_message> msg, const tracing::trace_state_ptr& tr_state, bool skip_metadata)
+cql_server::connection::make_result(int16_t stream, shared_ptr<messages::result_message> msg, const tracing::trace_state_ptr& tr_state, bool skip_metadata) const
 {
     auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::RESULT, tr_state);
     if (__builtin_expect(!msg->warnings().empty() && _version > 3, false)) {
@@ -1172,7 +1162,7 @@ cql_server::connection::make_result(int16_t stream, shared_ptr<messages::result_
 }
 
 std::unique_ptr<cql_server::response>
-cql_server::connection::make_topology_change_event(const event::topology_change& event)
+cql_server::connection::make_topology_change_event(const event::topology_change& event) const
 {
     auto response = std::make_unique<cql_server::response>(-1, cql_binary_opcode::EVENT, tracing::trace_state_ptr());
     response->write_string("TOPOLOGY_CHANGE");
@@ -1182,7 +1172,7 @@ cql_server::connection::make_topology_change_event(const event::topology_change&
 }
 
 std::unique_ptr<cql_server::response>
-cql_server::connection::make_status_change_event(const event::status_change& event)
+cql_server::connection::make_status_change_event(const event::status_change& event) const
 {
     auto response = std::make_unique<cql_server::response>(-1, cql_binary_opcode::EVENT, tracing::trace_state_ptr());
     response->write_string("STATUS_CHANGE");
@@ -1192,7 +1182,7 @@ cql_server::connection::make_status_change_event(const event::status_change& eve
 }
 
 std::unique_ptr<cql_server::response>
-cql_server::connection::make_schema_change_event(const event::schema_change& event)
+cql_server::connection::make_schema_change_event(const event::schema_change& event) const
 {
     auto response = std::make_unique<cql_server::response>(-1, cql_binary_opcode::EVENT, tracing::trace_state_ptr());
     response->write_string("SCHEMA_CHANGE");

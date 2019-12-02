@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "castas_fcts.hh"
 #include "native_scalar_function.hh"
 #include "utils/UUID_gen.hh"
 #include <boost/uuid/uuid.hpp>
@@ -238,6 +239,12 @@ make_timeuuidtounixtimestamp_fct() {
     });
 }
 
+inline bytes time_point_to_long(const data_value& v) {
+    auto since_epoch = value_cast<db_clock::time_point>(v).time_since_epoch();
+    int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count();
+    return data_value(ms).serialize();
+}
+
 inline
 shared_ptr<function>
 make_timestamptounixtimestamp_fct() {
@@ -252,7 +259,7 @@ make_timestamptounixtimestamp_fct() {
         if (ts_obj.is_null()) {
             return {};
         }
-        return {long_type->decompose(ts_obj)};
+        return time_point_to_long(ts_obj);
     });
 }
 
@@ -271,7 +278,7 @@ make_datetounixtimestamp_fct() {
             return {};
         }
         auto from_simple_date = get_castas_fctn(timestamp_type, simple_date_type);
-        return {long_type->decompose(from_simple_date(simple_date_obj))};
+        return time_point_to_long(from_simple_date(simple_date_obj));
     });
 }
 

@@ -1597,6 +1597,15 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
             timeuuid_native_type{utils::UUID("00000000-0000-1000-0000-000000000002")}
         ).test_min_max_count();
 
+        aggregate_function_test(e, time_type,
+            time_native_type{std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch() - std::chrono::seconds(1)).count()},
+            time_native_type{std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch()).count()},
+            time_native_type{std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch() + std::chrono::seconds(1)).count()}
+        ).test_min_max_count();
+
         aggregate_function_test(e, uuid_type,
             utils::UUID("00000000-0000-1000-0000-000000000000"),
             utils::UUID("00000000-0000-1000-0000-000000000001"),
@@ -1604,6 +1613,15 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
         ).test_min_max_count();
 
         aggregate_function_test(e, boolean_type, false, true).test_min_max_count();
+
+        aggregate_function_test(e, inet_addr_type,
+            net::inet_address("0.0.0.0"),
+            net::inet_address("::"),
+            net::inet_address("::1"),
+            net::inet_address("0.0.0.1"),
+            net::inet_address("1::1"),
+            net::inet_address("1.0.0.1")
+        ).test_min_max_count();
     });
 }
 
@@ -2151,7 +2169,7 @@ SEASTAR_TEST_CASE(test_types) {
                     decimal_type->decompose(big_decimal { 2, boost::multiprecision::cpp_int(123) }),
                     byte_type->decompose(int8_t(3)),
                     short_type->decompose(int16_t(3)),
-                    simple_date_type->decompose(int32_t(0x80000001)),
+                    serialized(simple_date_native_type{0x80000001}),
                     time_type->decompose(int64_t(0x0000000000000001)),
                     duration_type->decompose(cql_duration("1y2mo3w4d5h6m7s8ms9us10ns"))
                 }
@@ -2205,7 +2223,7 @@ SEASTAR_TEST_CASE(test_types) {
                     decimal_type->decompose(big_decimal { 2, boost::multiprecision::cpp_int(123) }),
                     byte_type->decompose(int8_t(3)),
                     short_type->decompose(int16_t(3)),
-                    simple_date_type->decompose(int32_t(0x80000001)),
+                    serialized(simple_date_native_type{0x80000001}),
                     time_type->decompose(int64_t(0x0000000000000001)),
                     duration_type->decompose(cql_duration("10y9mo8w7d6h5m4s3ms2us1ns"))
                 }
@@ -3229,8 +3247,8 @@ SEASTAR_TEST_CASE(test_time_conversions) {
         auto msg = e.execute_cql("select todate(id), todate(ts), totimestamp(id), totimestamp(d), tounixtimestamp(id),"
                                  "tounixtimestamp(ts), tounixtimestamp(d), tounixtimestamp(totimestamp(todate(totimestamp(todate(id))))) from time_data;").get0();
         assert_that(msg).is_rows().with_rows({{
-            simple_date_type->decompose(int32_t(0x80004518)),
-            simple_date_type->decompose(int32_t(0x80004517)),
+            serialized(simple_date_native_type{0x80004518}),
+            serialized(simple_date_native_type{0x80004517}),
             timestamp_type->decompose(tp1),
             timestamp_type->decompose(tp2),
             long_type->decompose(int64_t(1528269142136)),

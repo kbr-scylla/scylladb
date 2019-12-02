@@ -17,6 +17,7 @@
 #include "cql3/lists.hh"
 #include "cql3/constants.hh"
 #include "cql3/user_types.hh"
+#include "cql3/type_json.hh"
 #include "database.hh"
 #include "types/map.hh"
 #include "types/set.hh"
@@ -142,6 +143,10 @@ functions::init() {
     declare(aggregate_fcts::make_max_function<timeuuid_native_type>());
     declare(aggregate_fcts::make_min_function<timeuuid_native_type>());
 
+    declare(aggregate_fcts::make_count_function<time_native_type>());
+    declare(aggregate_fcts::make_max_function<time_native_type>());
+    declare(aggregate_fcts::make_min_function<time_native_type>());
+
     declare(aggregate_fcts::make_count_function<utils::UUID>());
     declare(aggregate_fcts::make_max_function<utils::UUID>());
     declare(aggregate_fcts::make_min_function<utils::UUID>());
@@ -153,6 +158,10 @@ functions::init() {
     declare(aggregate_fcts::make_count_function<bool>());
     declare(aggregate_fcts::make_max_function<bool>());
     declare(aggregate_fcts::make_min_function<bool>());
+
+    declare(aggregate_fcts::make_count_function<net::inet_address>());
+    declare(aggregate_fcts::make_max_function<net::inet_address>());
+    declare(aggregate_fcts::make_min_function<net::inet_address>());
 
     // FIXME: more count/min/max
 
@@ -230,7 +239,7 @@ shared_ptr<function>
 make_to_json_function(data_type t) {
     return make_native_scalar_function<true>("tojson", utf8_type, {t},
             [t](cql_serialization_format sf, const std::vector<bytes_opt>& parameters) -> bytes_opt {
-        return utf8_type->decompose(t->to_json_string(parameters[0]));
+        return utf8_type->decompose(to_json_string(*t, parameters[0]));
     });
 }
 
@@ -242,7 +251,7 @@ make_from_json_function(database& db, const sstring& keyspace, data_type t) {
         Json::Value json_value = json::to_json_value(utf8_type->to_string(parameters[0].value()));
         bytes_opt parsed_json_value;
         if (!json_value.isNull()) {
-            parsed_json_value.emplace(t->from_json_object(json_value, sf));
+            parsed_json_value.emplace(from_json_object(*t, json_value, sf));
         }
         return parsed_json_value;
     });

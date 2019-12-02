@@ -77,6 +77,7 @@ fedora_packages=(
     util-linux
     ethtool
     hwloc
+    glibc-langpack-en
     openldap-servers
     openldap-devel
     toxiproxy

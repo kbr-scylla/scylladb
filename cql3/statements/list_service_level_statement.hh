@@ -19,10 +19,10 @@ class list_service_level_statement final : public service_level_statement {
     bool _describe_all;
 public:
     list_service_level_statement(sstring service_level, bool describe_all);
-    void validate(service::storage_proxy&, const service::client_state&) override;
-    virtual future<> check_access(const service::client_state&) override;
+    void validate(service::storage_proxy&, const service::client_state&) const override;
+    virtual future<> check_access(const service::client_state&) const override;
     virtual future<::shared_ptr<cql_transport::messages::result_message>>
-    execute(service::storage_proxy&, service::query_state&, const query_options&) override;
+    execute(service::storage_proxy&, service::query_state&, const query_options&) const override;
 };
 
 }

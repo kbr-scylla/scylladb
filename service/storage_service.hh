@@ -105,10 +105,10 @@ using bind_messaging_port = bool_class<bind_messaging_port_tag>;
 
 class feature_enabled_listener : public gms::feature::listener {
     storage_service& _s;
-    seastar::semaphore& _sem;
+    seastar::named_semaphore& _sem;
     sstables::sstable_version_types _format;
 public:
-    feature_enabled_listener(storage_service& s, seastar::semaphore& sem, sstables::sstable_version_types format)
+    feature_enabled_listener(storage_service& s, seastar::named_semaphore& sem, sstables::sstable_version_types format)
         : _s(s)
         , _sem(sem)
         , _format(format)
@@ -165,8 +165,8 @@ private:
     // ever arise.
     bool _loading_new_sstables = false;
     shared_ptr<load_broadcaster> _lb;
-    shared_ptr<distributed<cql_transport::cql_server>> _cql_server;
-    shared_ptr<distributed<thrift_server>> _thrift_server;
+    std::optional<distributed<cql_transport::cql_server>> _cql_server;
+    std::optional<distributed<thrift_server>> _thrift_server;
     sstring _operation_in_progress;
     bool _force_remove_completion = false;
     bool _ms_stopped = false;
@@ -219,7 +219,7 @@ public:
     }
 
 private:
-    bool is_auto_bootstrap();
+    bool is_auto_bootstrap() const;
     inet_address get_broadcast_address() const {
         return utils::fb_utilities::get_broadcast_address();
     }
@@ -242,7 +242,7 @@ public:
     }
 #endif
 public:
-    dht::token_range_vector get_local_ranges(const sstring& keyspace_name) {
+    dht::token_range_vector get_local_ranges(const sstring& keyspace_name) const {
         return get_ranges_for_endpoint(keyspace_name, get_broadcast_address());
     }
 #if 0
@@ -348,7 +348,7 @@ private:
     gms::feature _in_memory_tables;
 
     sstables::sstable_version_types _sstables_format = sstables::sstable_version_types::ka;
-    seastar::semaphore _feature_listeners_sem = {1};
+    seastar::named_semaphore _feature_listeners_sem = {1, named_semaphore_exception_factory{"feature listeners"}};
     feature_enabled_listener _la_feature_listener;
     feature_enabled_listener _mc_feature_listener;
 public:
@@ -507,14 +507,14 @@ public:
     }
 #endif
 private:
-    bool should_bootstrap();
+    bool should_bootstrap() const;
     void prepare_to_join(std::vector<inet_address> loaded_endpoints, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features, bind_messaging_port do_bind = bind_messaging_port::yes);
     void join_token_ring(int delay);
     void wait_for_feature_listeners_to_finish();
     void maybe_start_sys_dist_ks();
 public:
     future<> join_ring();
-    bool is_joined();
+    bool is_joined() const;
 
     future<> rebuild(sstring source_dc);
 
@@ -562,7 +562,7 @@ private:
     void bootstrap();
 
 public:
-    bool is_bootstrap_mode() {
+    bool is_bootstrap_mode() const {
         return _is_bootstrap_mode;
     }
 
@@ -861,7 +861,7 @@ private:
 
     void add_expire_time_if_found(inet_address endpoint, int64_t expire_time);
 
-    int64_t extract_expire_time(const std::vector<sstring>& pieces) {
+    int64_t extract_expire_time(const std::vector<sstring>& pieces) const {
         return std::stoll(pieces[2]);
     }
 
@@ -901,9 +901,9 @@ private:
     std::unordered_multimap<dht::token_range, inet_address> get_changed_ranges_for_leaving(sstring keyspace_name, inet_address endpoint);
 public:
     /** raw load value */
-    double get_load();
+    double get_load() const;
 
-    sstring get_load_string();
+    sstring get_load_string() const;
 
     future<std::map<sstring, double>> get_load_map();
 
@@ -2281,14 +2281,14 @@ private:
     void do_isolate_on_error(disk_error type);
     utils::UUID _local_host_id;
 public:
-    utils::UUID get_local_id() { return _local_host_id; }
+    utils::UUID get_local_id() const { return _local_host_id; }
 
     sstring get_config_supported_features();
     std::set<sstring> get_config_supported_features_set();
     sstring get_known_features();
     std::set<sstring> get_known_features_set();
 
-    gms::feature& cluster_supports_range_tombstones() {
+    const gms::feature& cluster_supports_range_tombstones() const {
         return _range_tombstones_feature;
     }
 

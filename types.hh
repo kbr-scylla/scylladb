@@ -43,10 +43,6 @@
 class tuple_type_impl;
 class big_decimal;
 
-namespace Json {
-class Value;
-}
-
 namespace cql3 {
 
 class cql3_type;
@@ -417,6 +413,11 @@ public:
     friend inline auto visit(const data_value& v, Func&& f);
 };
 
+template<typename T>
+inline bytes serialized(T v) {
+    return data_value(v).serialize();
+}
+
 class serialized_compare;
 class serialized_tri_compare;
 class user_type_impl;
@@ -461,33 +462,6 @@ private:
     kind _kind;
 public:
     kind get_kind() const { return _kind; }
-
-    enum class cql3_kind : int8_t {
-        ASCII, BIGINT, BLOB, BOOLEAN, COUNTER, DECIMAL, DOUBLE, EMPTY, FLOAT, INT, SMALLINT, TINYINT, INET, TEXT, TIMESTAMP, UUID, VARINT, TIMEUUID, DATE, TIME, DURATION
-    };
-    using cql3_kind_enum = super_enum<cql3_kind,
-        cql3_kind::ASCII,
-        cql3_kind::BIGINT,
-        cql3_kind::BLOB,
-        cql3_kind::BOOLEAN,
-        cql3_kind::COUNTER,
-        cql3_kind::DECIMAL,
-        cql3_kind::DOUBLE,
-        cql3_kind::EMPTY,
-        cql3_kind::FLOAT,
-        cql3_kind::INET,
-        cql3_kind::INT,
-        cql3_kind::SMALLINT,
-        cql3_kind::TINYINT,
-        cql3_kind::TEXT,
-        cql3_kind::TIMESTAMP,
-        cql3_kind::UUID,
-        cql3_kind::VARINT,
-        cql3_kind::TIMEUUID,
-        cql3_kind::DATE,
-        cql3_kind::TIME,
-        cql3_kind::DURATION>;
-    using cql3_kind_enum_set = enum_set<cql3_kind_enum>;
 
     abstract_type(kind k, sstring name, std::optional<uint32_t> value_length_if_fixed, data::type_info ti)
         : _name(name), _value_length_if_fixed(std::move(value_length_if_fixed)), _imr_state(ti), _kind(k) {}
@@ -563,14 +537,6 @@ public:
     }
     sstring to_string_impl(const data_value& v) const;
     bytes from_string(sstring_view text) const;
-    sstring to_json_string(bytes_view bv) const;
-    sstring to_json_string(const bytes& b) const {
-        return to_json_string(bytes_view(b));
-    }
-    sstring to_json_string(const bytes_opt& b) const {
-        return b ? to_json_string(*b) : "null";
-    }
-    bytes from_json_object(const Json::Value& value, cql_serialization_format sf) const;
     bool is_counter() const;
     bool is_string() const;
     bool is_collection() const;
@@ -588,11 +554,9 @@ public:
     bool is_native() const;
     cql3::cql3_type as_cql3_type() const;
     const sstring& cql3_type_name() const;
-    cql3_kind_enum_set::prepared get_cql3_kind() const;
     virtual shared_ptr<const abstract_type> freeze() const { return shared_from_this(); }
     friend class list_type_impl;
 private:
-    cql3_kind get_cql3_kind_impl() const;
     mutable sstring _cql3_type_name;
 protected:
     // native_value_* methods are virualized versions of native_type's
@@ -627,13 +591,7 @@ data_value::make_new(data_type type, T&& v) {
 
 template <typename T>
 const T& value_cast(const data_value& value) {
-    if (typeid(maybe_empty<T>) != value.type()->native_typeid()) {
-        throw std::bad_cast();
-    }
-    if (value.is_null()) {
-        throw std::runtime_error("value is null");
-    }
-    return *reinterpret_cast<maybe_empty<T>*>(value._value);
+    return value_cast<T>(const_cast<data_value&&>(value));
 }
 
 template <typename T>
@@ -1210,11 +1168,3 @@ struct appending_hash<data_type> {
         feed_hash(h, v->name());
     }
 };
-
-/*
- * Support for CAST(. AS .) functions.
- */
-
-using castas_fctn = std::function<data_value(data_value)>;
-
-castas_fctn get_castas_fctn(data_type to_type, data_type from_type);

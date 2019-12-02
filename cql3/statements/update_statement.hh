@@ -65,9 +65,9 @@ private:
 
     virtual bool allow_clustering_key_slices() const override;
 
-    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) override;
+    virtual void add_update_for_key(mutation& m, const query::clustering_range& range, const update_parameters& params, const json_cache_opt& json_cache) const override;
 
-    virtual void execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache);
+    virtual void execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) const;
 };
 
 /*
@@ -88,18 +88,19 @@ public:
         : update_statement(std::move(audit_info), statement_type::INSERT, bound_terms, s, std::move(attrs), stats)
         , _term(t)
         , _default_unset(default_unset) {
-        _restrictions = ::make_shared<restrictions::statement_restrictions>(s, false);
+        _restrictions = restrictions::statement_restrictions(s, false);
     }
 private:
-    virtual void execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) override;
+    virtual void execute_operations_for_key(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const json_cache_opt& json_cache) const override;
 
-    virtual dht::partition_range_vector build_partition_keys(const query_options& options, const json_cache_opt& json_cache) override;
+    virtual dht::partition_range_vector build_partition_keys(const query_options& options, const json_cache_opt& json_cache) const override;
 
-    virtual query::clustering_row_ranges create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) override;
+    virtual query::clustering_row_ranges create_clustering_ranges(const query_options& options, const json_cache_opt& json_cache) const override;
 
-    json_cache_opt maybe_prepare_json_cache(const query_options& options) override;
+    json_cache_opt maybe_prepare_json_cache(const query_options& options) const override;
 
-    void execute_set_value(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const column_definition& column, const bytes_opt& value);
+    void execute_set_value(mutation& m, const clustering_key_prefix& prefix, const update_parameters&
+        params, const column_definition& column, const bytes_opt& value) const;
 };
 
 }

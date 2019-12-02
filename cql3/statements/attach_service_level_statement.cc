@@ -17,17 +17,17 @@ attach_service_level_statement::attach_service_level_statement(sstring service_l
     _service_level(service_level), _role_name(role_name) {
 }
 
-void attach_service_level_statement::validate(service::storage_proxy &, const service::client_state &) {
+void attach_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 
-future<> attach_service_level_statement::check_access(const service::client_state &state) {
+future<> attach_service_level_statement::check_access(const service::client_state &state) const {
     return state.ensure_has_permission(auth::permission::AUTHORIZE, auth::root_service_level_resource());
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>
 attach_service_level_statement::execute(service::storage_proxy &sp,
         service::query_state &state,
-        const query_options &) {
+        const query_options &) const {
     return state.get_service_level_controller().get_distributed_service_level(_service_level).then([this] (qos::service_levels_info sli) {
         if (sli.empty()) {
             throw qos::nonexistant_service_level_exception(_service_level);

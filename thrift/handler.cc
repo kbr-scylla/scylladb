@@ -238,7 +238,7 @@ public:
                     if (f.failed()) {
                         std::rethrow_exception(f.get_exception());
                     }
-                    _query_state.get_client_state().set_login(::make_shared<auth::authenticated_user>(std::move(f.get0())));
+                    _query_state.get_client_state().set_login(std::move(f.get0()));
                 });
             });
         });
@@ -1028,7 +1028,7 @@ public:
             cql3::prepared_cache_key_type cache_key(itemId);
             bool needs_authorization = false;
 
-            auto prepared = _query_processor.local().get_prepared(_query_state.get_client_state().user().get(), cache_key);
+            auto prepared = _query_processor.local().get_prepared(_query_state.get_client_state().user(), cache_key);
             if (!prepared) {
                 needs_authorization = true;
 

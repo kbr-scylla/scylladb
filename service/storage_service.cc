@@ -290,7 +290,7 @@ storage_service::isolate_on_commit_error() {
     do_isolate_on_error(disk_error::commit);
 }
 
-bool storage_service::is_auto_bootstrap() {
+bool storage_service::is_auto_bootstrap() const {
     return _db.local().get_config().auto_bootstrap();
 }
 sstring storage_service::get_known_features() {
@@ -414,7 +414,7 @@ bool get_property_load_ring_state() {
     return get_local_storage_service().db().local().get_config().load_ring_state();
 }
 
-bool storage_service::should_bootstrap() {
+bool storage_service::should_bootstrap() const {
     return is_auto_bootstrap() && !db::system_keyspace::bootstrap_complete() && !_gossiper.get_seeds().count(get_broadcast_address());
 }
 
@@ -820,7 +820,7 @@ future<> storage_service::join_ring() {
     });
 }
 
-bool storage_service::is_joined() {
+bool storage_service::is_joined() const {
     // Every time we set _joined, we do it on all shards, so we can read its
     // value locally.
     return _joined;
@@ -2211,8 +2211,8 @@ future<> storage_service::start_rpc_server() {
             return make_ready_future<>();
         }
 
-        auto tserver = make_shared<distributed<thrift_server>>();
-        ss._thrift_server = tserver;
+        ss._thrift_server = distributed<thrift_server>();
+        auto tserver = &*ss._thrift_server;
 
         auto& cfg = ss._db.local().get_config();
         auto port = cfg.rpc_port();
@@ -2238,15 +2238,15 @@ future<> storage_service::start_rpc_server() {
 }
 
 future<> storage_service::do_stop_rpc_server() {
-    auto tserver = _thrift_server;
-    _thrift_server = {};
-    if (tserver) {
-        // Note: We must capture tserver so that it will not be freed before tserver->stop
-        return tserver->stop().then([tserver] {
-            slogger.info("Thrift server stopped");
-        });
-    }
-    return make_ready_future<>();
+    return do_with(std::move(_thrift_server), [this] (std::optional<distributed<thrift_server>>& tserver) {
+        _thrift_server = std::nullopt;
+        if (tserver) {
+            return tserver->stop().then([] {
+                slogger.info("Thrift server stopped");
+            });
+        }
+        return make_ready_future<>();
+    });
 }
 
 future<> storage_service::stop_rpc_server() {
@@ -2266,8 +2266,9 @@ future<> storage_service::start_native_transport() {
         if (ss._cql_server || isolated.load()) {
             return make_ready_future<>();
         }
-        auto cserver = make_shared<distributed<cql_transport::cql_server>>();
-        ss._cql_server = cserver;
+
+        ss._cql_server = distributed<cql_transport::cql_server>();
+        auto cserver = &*ss._cql_server;
 
         auto& cfg = ss._db.local().get_config();
         auto addr = cfg.rpc_address();
@@ -2281,7 +2282,7 @@ future<> storage_service::start_native_transport() {
         cql_server_config.get_service_memory_limiter_semaphore = [ss = std::ref(get_storage_service())] () -> semaphore& { return ss.get().local()._service_memory_limiter; };
         cql_server_config.allow_shard_aware_drivers = cfg.enable_shard_aware_drivers();
         return gms::inet_address::lookup(addr, family, preferred).then([&ss, cserver, addr, &cfg, keepalive, ceo = std::move(ceo), cql_server_config] (seastar::net::inet_address ip) {
-                return cserver->start(std::ref(service::get_storage_proxy()), std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), cql_server_config, std::ref(ss._sl_controller)).then([cserver, &cfg, addr, ip, ceo, keepalive]() {
+                return cserver->start(std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), cql_server_config, std::ref(ss._sl_controller)).then([cserver, &cfg, addr, ip, ceo, keepalive]() {
 
                 auto f = make_ready_future();
 
@@ -2339,18 +2340,18 @@ future<> storage_service::start_native_transport() {
 }
 
 future<> storage_service::do_stop_native_transport() {
-    auto cserver = _cql_server;
-    _cql_server = {};
-    if (cserver) {
-        // FIXME: cql_server::stop() doesn't kill existing connections and wait for them
-        // Note: We must capture cserver so that it will not be freed before cserver->stop
-        return set_cql_ready(false).then([cserver] {
-            return cserver->stop().then([cserver] {
-                slogger.info("CQL server stopped");
+    return do_with(std::move(_cql_server), [this] (std::optional<distributed<cql_transport::cql_server>>& cserver) {
+        _cql_server = std::nullopt;
+        if (cserver) {
+            // FIXME: cql_server::stop() doesn't kill existing connections and wait for them
+            return set_cql_ready(false).then([&cserver] {
+                return cserver->stop().then([] {
+                    slogger.info("CQL server stopped");
+                });
             });
-        });
-    }
-    return make_ready_future<>();
+        }
+        return make_ready_future<>();
+    });
 }
 
 future<> storage_service::stop_native_transport() {
@@ -2600,6 +2601,9 @@ future<> storage_service::drain() {
     CommitLog.instance.forceRecycleAllSegments();
 #endif
 
+            ss.set_mode(mode::DRAINING, "shutting down migration manager", false);
+            service::get_migration_manager().stop().get();
+
             ss.db().invoke_on_all([] (auto& db) {
                 return db.commitlog()->shutdown();
             }).get();
@@ -2610,7 +2614,7 @@ future<> storage_service::drain() {
     });
 }
 
-double storage_service::get_load() {
+double storage_service::get_load() const {
     double bytes = 0;
 #if 0
     for (String keyspaceName : Schema.instance.getKeyspaces())
@@ -2625,7 +2629,7 @@ double storage_service::get_load() {
     return bytes;
 }
 
-sstring storage_service::get_load_string() {
+sstring storage_service::get_load_string() const {
     return format("{:f}", get_load());
 }
 

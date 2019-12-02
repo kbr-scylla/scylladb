@@ -26,27 +26,27 @@ class priority_manager {
     qos::service_level_controller* _sl_controller;
 public:
     const ::io_priority_class&
-    commitlog_priority() {
+    commitlog_priority() const {
         return _commitlog_priority;
     }
 
     const ::io_priority_class&
-    memtable_flush_priority() {
+    memtable_flush_priority() const {
         return _mt_flush_priority;
     }
 
     const ::io_priority_class&
-    streaming_read_priority() {
+    streaming_read_priority() const {
         return _stream_read_priority;
     }
 
     const ::io_priority_class&
-    streaming_write_priority() {
+    streaming_write_priority() const {
         return _stream_write_priority;
     }
 
     const ::io_priority_class&
-    sstable_query_read_priority() {
+    sstable_query_read_priority() const {
         if (_sl_controller) {
             io_priority_class* pc = _sl_controller->get_current_priority_class();
             if (pc) {
@@ -57,7 +57,7 @@ public:
     }
 
     const ::io_priority_class&
-    compaction_priority() {
+    compaction_priority() const {
         return _compaction_priority;
     }
 

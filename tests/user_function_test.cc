@@ -44,11 +44,6 @@ static shared_ptr<cql_transport::event::schema_change> get_schema_change(
     return schema_change_msg->get_change();
 }
 
-template<typename T>
-static bytes serialized(T v) {
-    return data_value(v).serialize();
-}
-
 SEASTAR_TEST_CASE(test_user_function_disabled) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         auto fut = e.execute_cql("CREATE FUNCTION my_func(val int) CALLED ON NULL INPUT RETURNS int LANGUAGE Lua AS 'return 2';");
@@ -610,9 +605,10 @@ SEASTAR_TEST_CASE(test_user_function_timestamp_return) {
             {serialized(db_clock::time_point(db_clock::duration(int64_t(0x12de9b1e550))))}
         });
 
-        e.execute_cql("CREATE FUNCTION my_func6(val varint) CALLED ON NULL INPUT RETURNS timestamp LANGUAGE Lua AS 'return {year = 10000, month = 2, day = 3, hour = 4, min = 5, sec = 6 }';").get();
+        // Different boost versions support different year ranges, but no version supports year 10001.
+        e.execute_cql("CREATE FUNCTION my_func6(val varint) CALLED ON NULL INPUT RETURNS timestamp LANGUAGE Lua AS 'return {year = 10001, month = 2, day = 3, hour = 4, min = 5, sec = 6 }';").get();
         auto fut = e.execute_cql("SELECT my_func6(val) FROM my_table;");
-        BOOST_REQUIRE_EXCEPTION(fut.get(), boost::wrapexcept<boost::gregorian::bad_year>, message_equals("Year is out of valid range: 1400..9999"));
+        BOOST_REQUIRE_EXCEPTION(fut.get(), boost::gregorian::bad_year, message_contains("Year is out of valid range:"));
 
         e.execute_cql("CREATE FUNCTION my_func3(val varint) CALLED ON NULL INPUT RETURNS timestamp LANGUAGE Lua AS 'return \"abc\"';").get();
         fut = e.execute_cql("SELECT my_func3(val) FROM my_table;");
