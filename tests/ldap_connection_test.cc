@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <exception>
+#include <seastar/util/defer.hh>
 #include <set>
 #include <string>
 
@@ -85,10 +86,9 @@ future<ldap_msg_ptr> bind(ldap_connection& conn) {
 void with_ldap_connection(seastar::connected_socket&& socket, std::function<void(ldap_connection&)> f) {
     mylog.trace("with_ldap_connection");
     ldap_connection c(std::move(socket));
+    auto do_close = defer([&] { c.close().get(); });
     mylog.trace("with_ldap_connection: invoking f");
     f(c);
-    mylog.trace("with_ldap_connection: winding down");
-    c.close().get();
     mylog.trace("with_ldap_connection done");
 }
 
