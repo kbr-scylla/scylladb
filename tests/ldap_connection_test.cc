@@ -79,6 +79,25 @@ future<ldap_msg_ptr> bind(ldap_connection& conn) {
     return conn.simple_bind(manager_dn, manager_password);
 }
 
+
+/// Creates an ldap_connection, invokes a function on it, then waits for its closing.  Must be
+/// invoked from Seastar thread.
+void with_ldap_connection(seastar::connected_socket&& socket, std::function<void(ldap_connection&)> f) {
+    mylog.trace("with_ldap_connection");
+    ldap_connection c(std::move(socket));
+    mylog.trace("with_ldap_connection: invoking f");
+    f(c);
+    mylog.trace("with_ldap_connection: winding down");
+    c.close().get();
+    mylog.trace("with_ldap_connection done");
+}
+
+/// Connects to an address, then invokes with_ldap_connection on the resulting socket.  Must be
+/// invoked from Seastar thread.
+void with_ldap_connection(const seastar::socket_address& a, std::function<void(ldap_connection&)> f) {
+    with_ldap_connection(connect(a).get0(), f);
+}
+
 } // anonymous namespace
 
 // Tests default (non-custom) libber networking.  Failure here indicates a likely bug in test.py's

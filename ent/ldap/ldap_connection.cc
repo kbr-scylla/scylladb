@@ -427,17 +427,3 @@ void ldap_connection::set_status(ldap_connection::status s) {
         _msgid_to_promise.clear();
     }
 }
-
-void with_ldap_connection(seastar::connected_socket&& socket, std::function<void(ldap_connection&)> f) {
-    mylog.trace("with_ldap_connection");
-    ldap_connection c(std::move(socket));
-    mylog.trace("with_ldap_connection: invoking f");
-    f(c);
-    mylog.trace("with_ldap_connection: winding down");
-    c.close().get();
-    mylog.trace("with_ldap_connection done");
-}
-
-void with_ldap_connection(const seastar::socket_address& a, std::function<void(ldap_connection&)> f) {
-    with_ldap_connection(connect(a).get0(), f);
-}

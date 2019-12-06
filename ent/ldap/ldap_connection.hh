@@ -148,11 +148,3 @@ class ldap_connection {
     /// element, then clears _msgid_to_promise.
     void set_status(ldap_connection::status s);
 };
-
-/// Creates an ldap_connection, invokes a function on it, then waits for its closing.  Must be
-/// invoked from Seastar thread.
-void with_ldap_connection(seastar::connected_socket&&, std::function<void(ldap_connection&)>);
-
-/// Connects to an address, then invokes with_ldap_connection on the resulting socket.  Must be
-/// invoked from Seastar thread.
-void with_ldap_connection(const seastar::socket_address&, std::function<void(ldap_connection&)>);
