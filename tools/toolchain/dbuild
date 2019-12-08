@@ -111,8 +111,6 @@ is_podman="$(docker --version | grep -o podman)"
 
 docker_common_args=()
 
-z=":z"
-
 if [ -z "$is_podman" ]; then
     docker_common_args+=(
        -u "$(id -u):$(id -g)"
@@ -120,23 +118,23 @@ if [ -z "$is_podman" ]; then
        -v /etc/passwd:/etc/passwd:ro
        -v /etc/group:/etc/group:ro
        )
-else
-    # podman accesses filesystem as the calling user, so selinux relabeling
-    # is not needed; moreover it objects to relabeling /tmp
-    z=""
 fi
 
 if [ "$PWD" != "$toplevel" ]; then
-     docker_common_args+=(-v "$toplevel:$toplevel$z")
+     docker_common_args+=(-v "$toplevel:$toplevel:z")
 fi
 
+# podman cannot relabel system directories like /tmp, but it can
+# relable directories we own, so we map a temporary directory to /tmp
+
+tmpdir=$(mktemp -d)
+
 docker_common_args+=(
-       --security-opt label=disable \
        --network host \
        --cap-add SYS_PTRACE \
-       -v "$PWD:$PWD$z" \
-       -v /tmp:/tmp$z \
-       -v "$MAVEN_LOCAL_REPO:$MAVEN_LOCAL_REPO$z" \
+       -v "$PWD:$PWD:z" \
+       -v "$tmpdir:/tmp:z" \
+       -v "$MAVEN_LOCAL_REPO:$MAVEN_LOCAL_REPO:z" \
        -v /etc/localtime:/etc/localtime:ro \
        -w "$PWD" \
        -e HOME \
@@ -151,7 +149,10 @@ if [[ -n "$interactive" || -n "$is_podman" ]]; then
 
     # We also avoid detached mode with podman, which doesn't need it
     # (it does not proxy SIGTERM) and doesn't work well with it.
-    exec docker run --rm "${docker_common_args[@]}"
+    docker run --rm "${docker_common_args[@]}"
+    ret=$?
+    rm -rf "$tmpdir"
+    exit $?
 fi
 
 container=$(
@@ -165,6 +166,7 @@ kill_it() {
         docker rm -f "$container" > /dev/null
         container=
     fi
+    rm -rf "$tmpdir"
 }
 
 trap kill_it SIGTERM SIGINT SIGHUP EXIT

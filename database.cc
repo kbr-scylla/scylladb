@@ -188,15 +188,21 @@ database::database(const db::config& cfg, database_config dbcfg)
     }))
     , _read_concurrency_sem(max_count_concurrent_reads,
         max_memory_concurrent_reads(),
+        "_read_concurrency_sem",
         max_inactive_queue_length(),
         [this] {
             ++_stats->sstable_read_queue_overloaded;
-            return std::make_exception_ptr(std::runtime_error("sstable read queue overloaded"));
         })
     // No timeouts or queue length limits - a failure here can kill an entire repair.
     // Trust the caller to limit concurrency.
-    , _streaming_concurrency_sem(max_count_streaming_concurrent_reads, max_memory_streaming_concurrent_reads())
-    , _system_read_concurrency_sem(max_count_system_concurrent_reads, max_memory_system_concurrent_reads())
+    , _streaming_concurrency_sem(
+            max_count_streaming_concurrent_reads,
+            max_memory_streaming_concurrent_reads(),
+            "_streaming_concurrency_sem")
+    , _system_read_concurrency_sem(
+            max_count_system_concurrent_reads,
+            max_memory_system_concurrent_reads(),
+            "_system_read_concurrency_sem")
     , _data_query_stage("data_query", &column_family::query)
     , _mutation_query_stage()
     , _apply_stage("db_apply", &database::do_apply)
@@ -1982,7 +1988,8 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
         return make_multishard_combining_reader(make_shared<streaming_reader_lifecycle_policy>(db), partitioner, std::move(s), pr, ps, pc,
                 std::move(trace_state), fwd_mr);
     });
-    return make_flat_multi_range_reader(std::move(schema), std::move(ms), std::move(range_generator), schema->full_slice(),
+    auto&& full_slice = schema->full_slice();
+    return make_flat_multi_range_reader(std::move(schema), std::move(ms), std::move(range_generator), std::move(full_slice),
             service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);
 }
 

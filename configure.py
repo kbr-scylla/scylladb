@@ -375,6 +375,7 @@ scylla_tests = [
     'tests/truncation_migration_test',
     'tests/symmetric_key_test',
     'tests/like_matcher_test',
+    'tests/linearizing_input_stream_test',
 ] + ldap_tests
 
 perf_tests = [
@@ -926,6 +927,7 @@ pure_boost_tests = set([
     'tests/top_k_test',
     'tests/small_vector_test',
     'tests/like_matcher_test',
+    'tests/linearizing_input_stream_test',
 ])
 
 tests_not_using_seastar_test_framework = set([
@@ -984,6 +986,7 @@ deps['tests/utf8_test'] = ['utils/utf8.cc', 'tests/utf8_test.cc']
 deps['tests/small_vector_test'] = ['tests/small_vector_test.cc']
 deps['tests/multishard_mutation_query_test'] += ['tests/test_table.cc']
 deps['tests/vint_serialization_test'] = ['tests/vint_serialization_test.cc', 'vint-serialization.cc', 'bytes.cc']
+deps['tests/linearizing_input_stream_test'] = ['tests/linearizing_input_stream_test.cc']
 
 deps['tests/duration_test'] += ['tests/exception_utils.cc']
 
@@ -1030,6 +1033,10 @@ gold_linker_flag = gold_supported(compiler=args.cxx)
 
 dbgflag = '-g -gz' if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
+
+# Strip if debuginfo is disabled, otherwise we end up with partial
+# debug info from the libraries we static link with
+regular_link_rule = 'link' if args.debuginfo else 'link_stripped'
 
 if args.so:
     args.pie = '-shared'
@@ -1420,6 +1427,7 @@ with open(buildfile_tmp, 'w') as f:
         ragels = {}
         antlr3_grammars = set()
         seastar_dep = 'build/{}/seastar/libseastar.a'.format(mode)
+        seastar_testing_dep = 'build/{}/seastar/libseastar_testing.a'.format(mode)
         for binary in build_artifacts:
             if binary in other:
                 continue
@@ -1457,12 +1465,12 @@ with open(buildfile_tmp, 'w') as f:
                     # So we strip the tests by default; The user can very
                     # quickly re-link the test unstripped by adding a "_g"
                     # to the test name, e.g., "ninja build/release/testname_g"
-                    f.write('build $builddir/{}/{}: {}.{} {} | {}\n'.format(mode, binary, tests_link_rule, mode, str.join(' ', objs), seastar_dep))
+                    f.write('build $builddir/{}/{}: {}.{} {} | {} {}\n'.format(mode, binary, tests_link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
                     f.write('   libs = {}\n'.format(local_libs))
-                    f.write('build $builddir/{}/{}_g: link.{} {} | {}\n'.format(mode, binary, mode, str.join(' ', objs), seastar_dep))
+                    f.write('build $builddir/{}/{}_g: {}.{} {} | {} {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
                     f.write('   libs = {}\n'.format(local_libs))
                 else:
-                    f.write('build $builddir/{}/{}: link.{} {} | {}\n'.format(mode, binary, mode, str.join(' ', objs), seastar_dep))
+                    f.write('build $builddir/{}/{}: {}.{} {} | {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep))
                     if has_thrift:
                         f.write('   libs =  {} {} $seastar_libs_{} $libs\n'.format(thrift_libs, maybe_static(args.staticboost, '-lboost_system'), mode))
             for src in srcs:
@@ -1488,7 +1496,7 @@ with open(buildfile_tmp, 'w') as f:
         compiles['$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'] = 'utils/gz/gen_crc_combine_table.cc'
         f.write('build {}: run {}\n'.format('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc',
                                             '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
-        f.write('build {}: link.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
+        f.write('build {}: {}.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', regular_link_rule, mode,
                                                 '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
         f.write('   libs = $seastar_libs_{}\n'.format(mode))
         f.write(
@@ -1547,7 +1555,12 @@ with open(buildfile_tmp, 'w') as f:
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
-        f.write('  target = seastar seastar_testing\n'.format(**locals()))
+        f.write('  target = seastar\n'.format(**locals()))
+        f.write('build build/{mode}/seastar/libseastar_testing.a: ninja\n'
+                .format(**locals()))
+        f.write('  pool = submodule_pool\n')
+        f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
+        f.write('  target = seastar_testing\n'.format(**locals()))
         f.write('build build/{mode}/seastar/apps/iotune/iotune: ninja\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')

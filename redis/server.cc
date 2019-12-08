@@ -199,7 +199,7 @@ future<redis_server::result> redis_server::connection::process_request_internal(
 void redis_server::connection::write_reply(const redis_exception& e)
 {
     _ready_to_respond = _ready_to_respond.then([this, exception_message = e.what_message()] () mutable {
-        return redis_message::make_exception(exception_message).then([this] (auto&& result) {
+        return redis_message::exception(exception_message).then([this] (auto&& result) {
             auto m = result.message();
             return _write_buf.write(std::move(*m)).then([this] {
                 return _write_buf.flush();
@@ -220,6 +220,9 @@ void redis_server::connection::write_reply(redis_server::result result)
 future<> redis_server::connection::process_request() {
     _parser.init();
     return _read_buf.consume(_parser).then([this] {
+        if (_parser.eof()) {
+            return make_ready_future<>();
+        }
         ++_server._stats._requests_serving;
         _pending_requests_gate.enter();
         utils::latency_counter lc;

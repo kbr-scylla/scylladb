@@ -195,6 +195,7 @@ boost_tests = [
     'truncation_migration_test',
     'symmetric_key_test',
     'like_matcher_test',
+    'linearizing_input_stream_test',
 ]
 
 other_tests = [

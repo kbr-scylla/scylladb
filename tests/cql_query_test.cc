@@ -112,16 +112,15 @@ SEASTAR_THREAD_TEST_CASE(test_large_data) {
         e.execute_cql("delete from tbl where a = 44;").get();
 
         // In order to guarantee that system.large_rows has been updated, we have to
-        // * flush, so that a thumbstone for the above delete is created.
-        // * do a major compaction, so that the thumbstone is combined with the old entry.
-        // * stop the db, as only then do we wait for sstable deletions.
+        // * flush, so that a tombstone for the above delete is created.
+        // * do a major compaction, so that the tombstone is combined with the old entry,
+        //   and the old sstable is deleted.
         flush(e);
         e.db().invoke_on_all([] (database& dbi) {
             return parallel_for_each(dbi.get_column_families(), [&dbi] (auto& table) {
                 return dbi.get_compaction_manager().submit_major_compaction(&*table.second);
             });
         }).get();
-        stop_database(e.db()).get();
 
         assert_that(e.execute_cql("select partition_key from system.large_rows where table_name = 'tbl' allow filtering;").get0())
             .is_rows()
@@ -1461,7 +1460,12 @@ struct aggregate_function_test {
     std::vector<data_value> _sorted_values;
 
     sstring table_name() {
-        return "cf_" + _column_type->cql3_type_name();
+        sstring tbl_name = "cf_" + _column_type->cql3_type_name();
+        // Substitute troublesome characters from `cql3_type_name()':
+        std::for_each(tbl_name.begin(), tbl_name.end(), [] (char& c) {
+            if (c == '<' || c == '>' || c == ',' || c == ' ') { c = '_'; }
+        });
+        return tbl_name;
     }
     void call_function_and_expect(const char* fname, data_type type, data_value expected) {
         auto msg = _e.execute_cql(format("select {}(value) from {}", fname, table_name())).get0();
@@ -1621,6 +1625,34 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
             net::inet_address("0.0.0.1"),
             net::inet_address("1::1"),
             net::inet_address("1.0.0.1")
+        ).test_min_max_count();
+
+        auto list_type_int = list_type_impl::get_instance(int32_type, false);
+        aggregate_function_test(e, list_type_int,
+            make_list_value(list_type_int, {1, 2, 3}),
+            make_list_value(list_type_int, {1, 2, 4}),
+            make_list_value(list_type_int, {2, 2, 3})
+        ).test_min_max_count();
+
+        auto set_type_int = set_type_impl::get_instance(int32_type, false);
+        aggregate_function_test(e, set_type_int,
+            make_set_value(set_type_int, {1, 2, 3}),
+            make_set_value(set_type_int, {1, 2, 4}),
+            make_set_value(set_type_int, {2, 3, 4})
+        ).test_min_max_count();
+
+        auto tuple_type_int_text = tuple_type_impl::get_instance({int32_type, utf8_type});
+        aggregate_function_test(e, tuple_type_int_text,
+            make_tuple_value(tuple_type_int_text, {1, "aaa"}),
+            make_tuple_value(tuple_type_int_text, {1, "bbb"}),
+            make_tuple_value(tuple_type_int_text, {2, "aaa"})
+        ).test_min_max_count();
+
+        auto map_type_int_text = map_type_impl::get_instance(int32_type, utf8_type, false);
+        aggregate_function_test(e, map_type_int_text,
+            make_map_value(map_type_int_text, {std::make_pair(data_value(1), data_value("asdf"))}),
+            make_map_value(map_type_int_text, {std::make_pair(data_value(2), data_value("asdf"))}),
+            make_map_value(map_type_int_text, {std::make_pair(data_value(2), data_value("bsdf"))})
         ).test_min_max_count();
     });
 }
