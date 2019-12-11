@@ -20,8 +20,11 @@
 #include <vector>
 
 #include "common.hh"
+#include "cql3/query_processor.hh"
+#include "database.hh"
 #include "exceptions/exceptions.hh"
 #include "seastarx.hh"
+#include "utils/class_registrator.hh"
 
 namespace {
 
@@ -67,9 +70,17 @@ std::vector<sstring> get_attr_values(LDAP* ld, LDAPMessage* res, const char* att
     return values;
 }
 
+const char* ldap_role_manager_full_name = "com.scylladb.auth.LDAPRoleManager";
+
 } // anonymous namespace
 
 namespace auth {
+
+static const class_registrator<
+    role_manager,
+    ldap_role_manager,
+    cql3::query_processor&,
+    ::service::migration_manager&> registration(ldap_role_manager_full_name);
 
 ldap_role_manager::ldap_role_manager(
         sstring_view query_template, sstring_view target_attr, sstring_view bind_name, sstring_view bind_password,
@@ -78,9 +89,18 @@ ldap_role_manager::ldap_role_manager(
       , _bind_password(bind_password), _retries(0) {
 }
 
+ldap_role_manager::ldap_role_manager(cql3::query_processor& qp, ::service::migration_manager& mm)
+    : ldap_role_manager(
+            qp.db().get_config().ldap_url_template(),
+            qp.db().get_config().ldap_attr_role(),
+            qp.db().get_config().ldap_bind_dn(),
+            qp.db().get_config().ldap_bind_passwd(),
+            qp,
+            mm) {
+}
+
 std::string_view ldap_role_manager::qualified_java_name() const noexcept {
-    static const sstring instance = meta::AUTH_PACKAGE_NAME + "LDAPRoleManager";
-    return instance;
+    return ldap_role_manager_full_name;
 }
 
 const resource_set& ldap_role_manager::protected_resources() const {
@@ -184,16 +204,16 @@ future<> ldap_role_manager::revoke(std::string_view, std::string_view) const {
 future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name, recursive_role_query) const {
     try {
         if (!_conn) {
-            return make_ready_future<role_set>();
+            return make_ready_future<role_set>(role_set{sstring(grantee_name)});
         }
         auto desc = parse_url(get_url(grantee_name.data()));
         if (!desc) {
-            return make_ready_future<role_set>();
+            return make_ready_future<role_set>(role_set{sstring(grantee_name)});
         }
         return _conn->search(desc->lud_dn, desc->lud_scope, desc->lud_filter, desc->lud_attrs,
                              /*attrsonly=*/0, /*serverctrls=*/nullptr, /*clientctrls=*/nullptr,
                              /*timeout=*/nullptr, /*sizelimit=*/0)
-                .then([this] (ldap_msg_ptr res) {
+                .then([this, grantee_name = sstring(grantee_name)] (ldap_msg_ptr res) {
                     mylog.trace("query_granted: got search results");
                     const auto mtype = ldap_msgtype(res.get());
                     if (mtype != LDAP_RES_SEARCH_ENTRY && mtype != LDAP_RES_SEARCH_RESULT) {
@@ -202,7 +222,7 @@ future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name,
                     }
                     return do_with(
                             get_attr_values(_conn->get_ldap(), res.get(), _target_attr.c_str()),
-                            auth::role_set(),
+                            auth::role_set{grantee_name},
                             [this] (const std::vector<sstring>& values, auth::role_set& valid_roles) {
                                 // Each value is a role to be granted.
                                 return parallel_for_each(values, [this, &valid_roles] (const sstring& ldap_role) {

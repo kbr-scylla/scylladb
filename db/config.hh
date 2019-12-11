@@ -301,6 +301,11 @@ public:
     named_value<sstring> audit_keyspaces;
     named_value<size_t> audit_syslog_write_buffer_size;
 
+    named_value<sstring> ldap_url_template;
+    named_value<sstring> ldap_attr_role;
+    named_value<sstring> ldap_bind_dn;
+    named_value<sstring> ldap_bind_passwd;
+
     seastar::logging_settings logging_settings(const boost::program_options::variables_map&) const;
 
     boost::program_options::options_description_easy_init&

@@ -49,6 +49,10 @@ class ldap_role_manager : public role_manager {
             ::service::migration_manager& mm ///< Passed to standard_role_manager.
     );
 
+    /// Retrieves LDAP configuration entries from qp and invokes the other constructor.  Required by
+    /// class_registrator<role_manager>.
+    ldap_role_manager(cql3::query_processor& qp, ::service::migration_manager& mm);
+
     /// Thrown when query-template parsing fails.
     struct url_error : public std::runtime_error {
         using runtime_error::runtime_error;
