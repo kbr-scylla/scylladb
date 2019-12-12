@@ -73,14 +73,25 @@ if [ $LOCALRPM -eq 1 ]; then
         pkg_install git
     fi
 
-    if [ ! -f dist/ami/files/$PRODUCT.x86_64.rpm ] || [ ! -f dist/ami/files/$PRODUCT-kernel-conf.x86_64.rpm ] || [ ! -f dist/ami/files/$PRODUCT-conf.x86_64.rpm ] || [ ! -f dist/ami/files/$PRODUCT-server.x86_64.rpm ] || [ ! -f dist/ami/files/$PRODUCT-debuginfo.x86_64.rpm ]; then
+    rpm_names=($PRODUCT $PRODUCT-kernel-conf $PRODUCT-conf $PRODUCT-server $PRODUCT-debuginfo)
+    version_string=`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`
+    rpms_path=build/redhat/RPMS/x86_64
+    rpm_missing=""
+    for i in ${rpm_names[@]}; do
+        if [ ! -f dist/ami/files/$i.x86_64.rpm ]; then
+            if [ -f $rpms_path/$i-$version_string.*.x86_64.rpm ]; then
+                cp $rpms_path/$i-$version_string.*.x86_64.rpm dist/ami/files/$i.x86_64.rpm
+            else
+                rpm_missing=yes
+            fi
+        fi
+    done
+    if [ -n "$rpm_missing" ]; then
         reloc/build_reloc.sh
         reloc/build_rpm.sh --dist --target centos7
-        cp build/redhat/RPMS/x86_64/$PRODUCT-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/$PRODUCT.x86_64.rpm
-        cp build/redhat/RPMS/x86_64/$PRODUCT-kernel-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/$PRODUCT-kernel-conf.x86_64.rpm
-        cp build/redhat/RPMS/x86_64/$PRODUCT-conf-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/$PRODUCT-conf.x86_64.rpm
-        cp build/redhat/RPMS/x86_64/$PRODUCT-server-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/$PRODUCT-server.x86_64.rpm
-        cp build/redhat/RPMS/x86_64/$PRODUCT-debuginfo-`cat build/SCYLLA-VERSION-FILE`-`cat build/SCYLLA-RELEASE-FILE`.*.x86_64.rpm dist/ami/files/$PRODUCT-debuginfo.x86_64.rpm
+        for i in ${rpm_names[@]}; do
+            cp $rpms_path/$i-$version_string.*.x86_64.rpm dist/ami/files/$i.x86_64.rpm
+        done
     fi
     branch_arg=${BRANCH:-$(git rev-parse --abbrev-ref HEAD || echo -n)}
     if [ -n "$branch_arg" ]; then
@@ -173,6 +184,7 @@ else
     SCYLLA_PYTHON3_VERSION=$(rpm -q --qf %{VERSION}-%{RELEASE} build/ami_packages/$PRODUCT-python3-*.rpm || true)
 fi
 
+SCYLLA_AMI_DESCRIPTION="scylla-$SCYLLA_VERSION scylla-ami-$SCYLLA_AMI_VERSION scylla-jmx-$SCYLLA_JMX_VERSION scylla-tools-$SCYLLA_TOOLS_VERSION scylla-python3-$SCYLLA_PYTHON3_VERSION"
 cd dist/ami
 
 if [ ! -f variables.json ]; then
@@ -195,4 +207,4 @@ if [ ! -d packer ]; then
     cd -
 fi
 
-env PACKER_LOG=1 PACKER_LOG_PATH=../../build/ami.log packer/packer build -var-file=variables.json -var install_args="$INSTALL_ARGS" -var region="$REGION" -var source_ami="$AMI" -var ssh_username="$SSH_USERNAME" -var scylla_version="$SCYLLA_VERSION" -var scylla_ami_version="$SCYLLA_AMI_VERSION" -var scylla_jmx_version="$SCYLLA_JMX_VERSION" -var scylla_tools_version="$SCYLLA_TOOLS_VERSION" -var scylla_python3_version="$SCYLLA_PYTHON3_VERSION" scylla.json
+env PACKER_LOG=1 PACKER_LOG_PATH=../../build/ami.log packer/packer build -var-file=variables.json -var install_args="$INSTALL_ARGS" -var region="$REGION" -var source_ami="$AMI" -var ssh_username="$SSH_USERNAME" -var scylla_version="$SCYLLA_VERSION" -var scylla_ami_version="$SCYLLA_AMI_VERSION" -var scylla_jmx_version="$SCYLLA_JMX_VERSION" -var scylla_tools_version="$SCYLLA_TOOLS_VERSION" -var scylla_python3_version="$SCYLLA_PYTHON3_VERSION" -var scylla_ami_description="${SCYLLA_AMI_DESCRIPTION:0:255}" scylla.json

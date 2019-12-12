@@ -376,6 +376,7 @@ scylla_tests = [
     'tests/symmetric_key_test',
     'tests/like_matcher_test',
     'tests/linearizing_input_stream_test',
+    'tests/enum_option_test',
 ] + ldap_tests
 
 perf_tests = [
@@ -922,6 +923,7 @@ pure_boost_tests = set([
     'tests/small_vector_test',
     'tests/like_matcher_test',
     'tests/linearizing_input_stream_test',
+    'tests/enum_option_test',
 ])
 
 tests_not_using_seastar_test_framework = set([

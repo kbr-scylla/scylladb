@@ -29,6 +29,7 @@
 #include "rjson.hh"
 #include "serialization.hh"
 #include "base64.hh"
+#include <stdexcept>
 
 namespace alternator {
 
@@ -47,7 +48,9 @@ comparison_operator_type get_comparison_operator(const rjson::value& comparison_
             {"NOT_NULL", comparison_operator_type::NOT_NULL},
             {"BETWEEN", comparison_operator_type::BETWEEN},
             {"BEGINS_WITH", comparison_operator_type::BEGINS_WITH},
-    }; //TODO: CONTAINS
+            {"CONTAINS", comparison_operator_type::CONTAINS},
+            {"NOT_CONTAINS", comparison_operator_type::NOT_CONTAINS},
+    };
     if (!comparison_operator.IsString()) {
         throw api_error("ValidationException", format("Invalid comparison operator definition {}", rjson::print(comparison_operator)));
     }
@@ -143,9 +146,44 @@ static void verify_operand_count(const rjson::value* array, const size_check& ex
     }
 }
 
+struct rjson_engaged_ptr_comp {
+    bool operator()(const rjson::value* p1, const rjson::value* p2) const {
+        return rjson::single_value_comp()(*p1, *p2);
+    }
+};
+
+// It's not enough to compare underlying JSON objects when comparing sets,
+// as internally they're stored in an array, and the order of elements is
+// not important in set equality. See issue #5021
+static bool check_EQ_for_sets(const rjson::value& set1, const rjson::value& set2) {
+    if (set1.Size() != set2.Size()) {
+        return false;
+    }
+    std::set<const rjson::value*, rjson_engaged_ptr_comp> set1_raw;
+    for (auto it = set1.Begin(); it != set1.End(); ++it) {
+        set1_raw.insert(&*it);
+    }
+    for (const auto& a : set2.GetArray()) {
+        if (set1_raw.count(&a) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Check if two JSON-encoded values match with the EQ relation
 static bool check_EQ(const rjson::value* v1, const rjson::value& v2) {
-    return v1 && *v1 == v2;
+    if (!v1) {
+        return false;
+    }
+    if (v1->IsObject() && v1->MemberCount() == 1 && v2.IsObject() && v2.MemberCount() == 1) {
+        auto it1 = v1->MemberBegin();
+        auto it2 = v2.MemberBegin();
+        if ((it1->name == "SS" && it2->name == "SS") || (it1->name == "NS" && it2->name == "NS") || (it1->name == "BS" && it2->name == "BS")) {
+            return check_EQ_for_sets(it1->value, it2->value);
+        }
+    }
+    return *v1 == v2;
 }
 
 // Check if two JSON-encoded values match with the NE relation
@@ -177,6 +215,59 @@ static bool check_BEGINS_WITH(const rjson::value* v1, const rjson::value& v2) {
     std::string_view val1(it1->value.GetString(), it1->value.GetStringLength());
     std::string_view val2(it2->value.GetString(), it2->value.GetStringLength());
     return val1.substr(0, val2.size()) == val2;
+}
+
+static std::string_view to_string_view(const rjson::value& v) {
+    return std::string_view(v.GetString(), v.GetStringLength());
+}
+
+static bool is_set_of(const rjson::value& type1, const rjson::value& type2) {
+    return (type2 == "S" && type1 == "SS") || (type2 == "N" && type1 == "NS") || (type2 == "B" && type1 == "BS");
+}
+
+// Check if two JSON-encoded values match with the CONTAINS relation
+static bool check_CONTAINS(const rjson::value* v1, const rjson::value& v2) {
+    if (!v1) {
+        return false;
+    }
+    const auto& kv1 = *v1->MemberBegin();
+    const auto& kv2 = *v2.MemberBegin();
+    if (kv2.name != "S" && kv2.name != "N" &&  kv2.name != "B") {
+        throw api_error("ValidationException",
+                        format("CONTAINS operator requires a single AttributeValue of type String, Number, or Binary, "
+                               "got {} instead", kv2.name));
+    }
+    if (kv1.name == "S" && kv2.name == "S") {
+        return to_string_view(kv1.value).find(to_string_view(kv2.value)) != std::string_view::npos;
+    } else if (kv1.name == "B" && kv2.name == "B") {
+        return base64_decode(kv1.value).find(base64_decode(kv2.value)) != bytes::npos;
+    } else if (is_set_of(kv1.name, kv2.name)) {
+        for (auto i = kv1.value.Begin(); i != kv1.value.End(); ++i) {
+            if (*i == kv2.value) {
+                return true;
+            }
+        }
+    } else if (kv1.name == "L") {
+        for (auto i = kv1.value.Begin(); i != kv1.value.End(); ++i) {
+            if (!i->IsObject() || i->MemberCount() != 1) {
+                clogger.error("check_CONTAINS received a list whose element is malformed");
+                return false;
+            }
+            const auto& el = *i->MemberBegin();
+            if (el.name == kv2.name && el.value == kv2.value) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Check if two JSON-encoded values match with the NOT_CONTAINS relation
+static bool check_NOT_CONTAINS(const rjson::value* v1, const rjson::value& v2) {
+    if (!v1) {
+        return false;
+    }
+    return !check_CONTAINS(v1, v2);
 }
 
 // Check if a JSON-encoded value equals any element of an array, which must have at least one element.
@@ -393,10 +484,14 @@ static bool verify_expected_one(const rjson::value& condition, const rjson::valu
         case comparison_operator_type::BETWEEN:
             verify_operand_count(attribute_value_list, exact_size(2), *comparison_operator);
             return check_BETWEEN(got, (*attribute_value_list)[0], (*attribute_value_list)[1]);
-        default:
-            // FIXME: implement all the missing types, so there will be no default here.
-            throw api_error("ValidationException", format("ComparisonOperator {} is not yet supported", *comparison_operator));
+        case comparison_operator_type::CONTAINS:
+            verify_operand_count(attribute_value_list, exact_size(1), *comparison_operator);
+            return check_CONTAINS(got, (*attribute_value_list)[0]);
+        case comparison_operator_type::NOT_CONTAINS:
+            verify_operand_count(attribute_value_list, exact_size(1), *comparison_operator);
+            return check_NOT_CONTAINS(got, (*attribute_value_list)[0]);
         }
+        throw std::logic_error(format("Internal error: corrupted operator enum: {}", int(op)));
     }
 }
 

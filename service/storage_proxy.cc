@@ -502,10 +502,19 @@ public:
     std::chrono::microseconds calculate_delay(db::view::update_backlog backlog) {
         constexpr auto delay_limit_us = 1000000;
         auto adjust = [] (float x) { return x * x * x; };
-        auto budget = std::max(std::chrono::microseconds(0), std::chrono::microseconds(_expire_timer.get_timeout() - storage_proxy::clock_type::now()));
-        return std::min(
-                budget,
-                std::chrono::microseconds(uint32_t(adjust(backlog.relative_size()) * delay_limit_us)));
+        auto budget = std::max(storage_proxy::clock_type::duration(0),
+            _expire_timer.get_timeout() - storage_proxy::clock_type::now());
+        std::chrono::microseconds ret(uint32_t(adjust(backlog.relative_size()) * delay_limit_us));
+        // "budget" has millisecond resolution and can potentially be long
+        // in the future so converting it to microseconds may overflow.
+        // So to compare buget and ret we need to convert both to the lower
+        // resolution.
+        if (std::chrono::duration_cast<storage_proxy::clock_type::duration>(ret) < budget) {
+            return ret;
+        } else {
+            // budget is small (< ret) so can be converted to microseconds
+            return budget;
+        }
     }
     // Calculates how much to delay completing the request. The delay adds to the request's inherent latency.
     template<typename Func>
@@ -737,7 +746,9 @@ static future<std::optional<paxos_response_handler::ballot_and_data>> sleep_and_
  */
 future<paxos_response_handler::ballot_and_data>
 paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& contentions, bool is_write) {
-    _proxy->get_db().local().get_config().check_experimental("Paxos");
+    if (!_proxy->get_db().local().get_config().check_experimental(db::experimental_features_t::LWT)) {
+        throw std::runtime_error("Paxos is currently disabled. Start Scylla with --experimental-features=lwt to enable.");
+    }
     return do_with(api::timestamp_type(0), shared_from_this(), [this, &cs, &contentions, is_write]
             (api::timestamp_type& min_timestamp_micros_to_use, shared_ptr<paxos_response_handler>& prh) {
         return repeat_until_value([this, &contentions, &cs, &min_timestamp_micros_to_use, is_write] {
@@ -4655,18 +4666,20 @@ void storage_proxy::init_messaging_service() {
     });
 }
 
-void storage_proxy::uninit_messaging_service() {
+future<> storage_proxy::uninit_messaging_service() {
     auto& ms = netw::get_local_messaging_service();
-    ms.unregister_mutation();
-    ms.unregister_mutation_done();
-    ms.unregister_mutation_failed();
-    ms.unregister_read_data();
-    ms.unregister_read_mutation_data();
-    ms.unregister_read_digest();
-    ms.unregister_truncate();
-    ms.unregister_paxos_prepare();
-    ms.unregister_paxos_accept();
-    ms.unregister_paxos_learn();
+    return when_all_succeed(
+        ms.unregister_mutation(),
+        ms.unregister_mutation_done(),
+        ms.unregister_mutation_failed(),
+        ms.unregister_read_data(),
+        ms.unregister_read_mutation_data(),
+        ms.unregister_read_digest(),
+        ms.unregister_truncate(),
+        ms.unregister_paxos_prepare(),
+        ms.unregister_paxos_accept(),
+        ms.unregister_paxos_learn()
+    );
 }
 
 future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>>
@@ -4760,8 +4773,7 @@ future<> storage_proxy::drain_on_shutdown() {
 future<>
 storage_proxy::stop() {
     // FIXME: hints manager should be stopped here but it seems like this function is never called
-    uninit_messaging_service();
-    return make_ready_future<>();
+    return uninit_messaging_service();
 }
 
 }

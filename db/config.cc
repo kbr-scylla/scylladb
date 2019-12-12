@@ -11,6 +11,7 @@
 
 #include <unordered_map>
 #include <regex>
+#include <sstream>
 
 #include <boost/any.hpp>
 #include <boost/program_options.hpp>
@@ -100,6 +101,10 @@ config_type config_type_for<int32_t> = config_type("integer", value_to_json<int3
 template <>
 config_type config_type_for<db::seed_provider_type> = config_type("seed provider", seed_provider_to_json);
 
+template <>
+const config_type config_type_for<std::vector<enum_option<db::experimental_features_t>>> = config_type(
+        "experimental features", value_to_json<std::vector<sstring>>);
+
 }
 
 namespace YAML {
@@ -140,6 +145,23 @@ struct convert<db::config::seed_provider_type> {
                     }
                 }
             }
+        }
+        return true;
+    }
+};
+
+template <>
+class convert<enum_option<db::experimental_features_t>> {
+public:
+    static bool decode(const Node& node, enum_option<db::experimental_features_t>& rhs) {
+        std::string name;
+        if (!convert<std::string>::decode(node, name)) {
+            return false;
+        }
+        try {
+            std::istringstream(name) >> rhs;
+        } catch (boost::program_options::invalid_option_value&) {
+            return false;
         }
         return true;
     }
@@ -608,7 +630,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , permissions_cache_max_entries(this, "permissions_cache_max_entries", value_status::Used, 1000,
         "Maximum cached permission entries. Must have a non-zero value if permissions caching is enabled (see a permissions_validity_in_ms description).")
     , server_encryption_options(this, "server_encryption_options", value_status::Used, {/*none*/},
-        "Enable or disable inter-node encryption. You must also generate keys and provide the appropriate key and trust store locations and passwords. No custom encryption options are currently enabled. The available options are:\n"
+        "Enable or disable inter-node encryption. You must also generate keys and provide the appropriate key and trust store locations and passwords. The available options are:\n"
         "\n"
         "internode_encryption : (Default: none ) Enable or disable encryption of inter-node communication using the TLS_RSA_WITH_AES_128_CBC_SHA cipher suite for authentication, key exchange, and encryption of data transfers. The available inter-node options are:\n"
         "\tall : Encrypt all inter-node communications.\n"
@@ -625,7 +647,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\trequire_client_auth : (Default: false ) Enables or disables certificate authentication.\n"
         "Related information: Node-to-node encryption")
     , client_encryption_options(this, "client_encryption_options", value_status::Used, {/*none*/},
-        "Enable or disable client-to-node encryption. You must also generate keys and provide the appropriate key and certificate. No custom encryption options are currently enabled. The available options are:\n"
+        "Enable or disable client-to-node encryption. You must also generate keys and provide the appropriate key and certificate. The available options are:\n"
         "\n"
         "\tenabled : (Default: false ) To enable, set to true.\n"
         "\tcertificate: (Default: conf/scylla.crt) The location of a PEM-encoded x509 certificate used to identify and encrypt the client/server communication.\n"
@@ -663,7 +685,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , shutdown_announce_in_ms(this, "shutdown_announce_in_ms", value_status::Used, 2 * 1000, "Time a node waits after sending gossip shutdown message in milliseconds. Same as -Dcassandra.shutdown_announce_in_ms in cassandra.")
     , developer_mode(this, "developer_mode", value_status::Used, false, "Relax environment checks. Setting to true can reduce performance and reliability significantly.")
     , skip_wait_for_gossip_to_settle(this, "skip_wait_for_gossip_to_settle", value_status::Used, -1, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.")
-    , experimental(this, "experimental", value_status::Used, false, "Set to true to unlock experimental features.")
+    , experimental(this, "experimental", value_status::Used, false, "Set to true to unlock all experimental features.")
+    , experimental_features(this, "experimental_features", value_status::Used, {}, "Unlock experimental features provided as the option arguments (possible values: 'lwt', 'cdc', 'udf'). Can be repeated.")
     , lsa_reclamation_step(this, "lsa_reclamation_step", value_status::Used, 1, "Minimum number of segments to reclaim in a single step")
     , prometheus_port(this, "prometheus_port", value_status::Used, 9180, "Prometheus port, set to zero to disable")
     , prometheus_address(this, "prometheus_address", value_status::Used, "0.0.0.0", "Prometheus listening address")
@@ -698,7 +721,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Set to true if the cluster was initially installed from 3.1.0. If it was upgraded from an earlier version,"
         " or installed from a later version, leave this set to false. This adjusts the communication protocol to"
         " work around a bug in Scylla 3.1.0")
-    , enable_user_defined_functions(this, "enable_user_defined_functions", value_status::Used, false,  "Enable user defined functions")
+    , enable_user_defined_functions(this, "enable_user_defined_functions", value_status::Used, false,  "Enable user defined functions. You must also set experimental-features=udf")
     , user_defined_function_time_limit_ms(this, "user_defined_function_time_limit_ms", value_status::Used, 10, "The time limit for each UDF invocation")
     , user_defined_function_allocation_limit_bytes(this, "user_defined_function_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate")
     , user_defined_function_contiguous_allocation_limit_bytes(this, "user_defined_function_contiguous_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate in one chunk")
@@ -832,10 +855,12 @@ db::fs::path db::config::get_conf_sub(db::fs::path sub) {
     return get_conf_dir() / sub;
 }
 
-void db::config::check_experimental(const sstring& what) const {
-    if (!experimental()) {
-        throw std::runtime_error(format("{} is currently disabled. Start Scylla with --experimental=on to enable.", what));
+bool db::config::check_experimental(experimental_features_t::feature f) const {
+    if (experimental()) {
+        return true;
     }
+    const auto& optval = experimental_features();
+    return find(begin(optval), end(optval), enum_option<experimental_features_t>{f}) != end(optval);
 }
 
 namespace bpo = boost::program_options;
@@ -878,6 +903,12 @@ logging::settings db::config::logging_settings(const bpo::variables_map& map) co
 
 const db::extensions& db::config::extensions() const {
     return *_extensions;
+}
+
+std::unordered_map<sstring, db::experimental_features_t::feature> db::experimental_features_t::map() {
+    // We decided against using the construct-on-first-use idiom here:
+    // https://github.com/scylladb/scylla/pull/5369#discussion_r353614807
+    return {{"lwt", LWT}, {"udf", UDF}, {"cdc", CDC}};
 }
 
 template struct utils::config_file::named_value<seastar::log_level>;

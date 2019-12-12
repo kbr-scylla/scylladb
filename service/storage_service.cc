@@ -106,7 +106,7 @@ static const sstring DIGEST_INSENSITIVE_TO_EXPIRY = "DIGEST_INSENSITIVE_TO_EXPIR
 static const sstring COMPUTED_COLUMNS_FEATURE = "COMPUTED_COLUMNS";
 static const sstring CDC_FEATURE = "CDC";
 static const sstring NONFROZEN_UDTS_FEATURE = "NONFROZEN_UDTS";
-static const sstring HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE = "HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE";
+static const sstring HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE = "HINTED_HANDOFF_SEPARATE_CONNECTION";
 static const sstring IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 
 static const sstring SSTABLE_FORMAT_PARAM_NAME = "sstable_format";
@@ -348,17 +348,19 @@ std::set<sstring> storage_service::get_config_supported_features_set() {
     // This should only be true in tests (see cql_test_env.cc:storage_service_for_tests)
     auto& db = service::get_local_storage_service().db();
     if (db.local_is_initialized()) {
-        auto& config = service::get_local_storage_service().db().local().get_config();
+        auto& config = db.local().get_config();
         if (config.enable_sstables_mc_format()) {
             features.insert(MC_SSTABLE_FEATURE);
         }
         if (config.enable_user_defined_functions()) {
-            db.local().get_config().check_experimental("UDF");
+            if (!config.check_experimental(db::experimental_features_t::UDF)) {
+                throw std::runtime_error(
+                        "You must use both enable_user_defined_functions and experimental_features:udf "
+                        "to enable user-defined functions");
+            }
             features.insert(UDF_FEATURE);
         }
-
-        if (config.experimental()) {
-            // push additional experimental features
+        if (config.check_experimental(db::experimental_features_t::CDC)) {
             features.insert(CDC_FEATURE);
         }
     }
@@ -1688,7 +1690,7 @@ future<> storage_service::gossip_snitch_info() {
 
 future<> storage_service::stop() {
     return with_semaphore(_feature_listeners_sem, 1, [this] {
-        uninit_messaging_service();
+        return uninit_messaging_service();
     }).then([this] {
         return _service_memory_limiter.wait(_service_memory_total); // make sure nobody uses the semaphore
     });
@@ -3238,9 +3240,9 @@ void storage_service::init_messaging_service() {
     });
 }
 
-void storage_service::uninit_messaging_service() {
+future<> storage_service::uninit_messaging_service() {
     auto& ms = netw::get_local_messaging_service();
-    ms.unregister_replication_finished();
+    return ms.unregister_replication_finished();
 }
 
 void storage_service::do_isolate_on_error(disk_error type)

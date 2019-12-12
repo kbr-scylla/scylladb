@@ -143,7 +143,7 @@ public:
             const query::partition_slice& slice, api::timestamp_type ts) = 0;
 };
 
-class storage_proxy : public seastar::async_sharded_service<storage_proxy>, public service::endpoint_lifecycle_subscriber /*implements StorageProxyMBean*/ {
+class storage_proxy : public seastar::async_sharded_service<storage_proxy>, public service::endpoint_lifecycle_subscriber {
 public:
     using clock_type = lowres_clock;
     struct config {
@@ -269,7 +269,7 @@ private:
     std::unique_ptr<view_update_handlers_list> _view_update_handlers_list;
 
 private:
-    void uninit_messaging_service();
+    future<> uninit_messaging_service();
     future<coordinator_query_result> query_singular(lw_shared_ptr<query::read_command> cmd,
             dht::partition_range_vector&& partition_ranges,
             db::consistency_level cl,
