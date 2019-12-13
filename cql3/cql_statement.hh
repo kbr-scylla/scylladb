@@ -100,6 +100,8 @@ public:
 
     audit::audit_info* get_audit_info() { return _audit_info.get(); }
     void set_audit_info(audit::audit_info_ptr&& info) { _audit_info = std::move(info); }
+
+    virtual void sanitize_audit_info() {}
 };
 
 class cql_statement_no_metadata : public cql_statement {

@@ -40,6 +40,7 @@
  */
 
 #include <algorithm>
+#include <regex>
 
 #include "auth/authentication_options.hh"
 #include "auth/common.hh"
@@ -57,6 +58,8 @@
 #include "service/storage_service.hh"
 #include "transport/messages/result_message.hh"
 #include "unimplemented.hh"
+
+#include <boost/algorithm/string.hpp>
 
 namespace cql3 {
 
@@ -153,6 +156,59 @@ create_role_statement::execute(service::storage_proxy&,
     });
 }
 
+/// Prepends '\' to special characters in ECMAScript regex syntax.
+static sstring escape_for_regex(const sstring& text) {
+    static const std::regex escape_re(R"([.^$|()\[\]{}*+?\\])", std::regex_constants::ECMAScript);
+    return std::regex_replace(text.c_str(), escape_re, R"(\$&)");
+}
+
+/// Removes single-quoted plaintext passwords.
+static void sanitize_audit_info_password(audit::audit_info* ai, const sstring& raw_password) {
+    sstring password;
+    // Empty passwords are stored as single char(-1) (&nbsp), NOT as empty strings.
+    if ((raw_password.size() == 1 && raw_password[0] != -1) || raw_password.size() > 1) {
+        // Password needs escaping to be searchable literally:
+        password = escape_for_regex(raw_password);
+    }
+    const std::regex re(R"(((WITH|AND)\s*PASSWORD\s*=?\s*)')" + std::string(password) + "'",
+            std::regex_constants::ECMAScript | std::regex_constants::icase);
+    const auto replace_result = std::regex_replace(ai->query().c_str(), re, "$1'***'");
+    ai->set_query_string(static_cast<std::string_view>(replace_result));
+}
+
+/// A heuristic to mask the values of `OPTIONS' map when key is like "PASSWORD".
+static void sanitize_audit_info_options(audit::audit_info* ai, const std::map<sstring,sstring>& options) {
+    for (const auto& [k, v] : options) {
+        const auto key_trimmed = boost::trim_copy(k);
+        if (!boost::iequals(key_trimmed, "PASSWORD")) { // Case-insensitive comp.
+            continue;
+        }
+        sstring password;
+        // Empty passwords may be stored as single char(-1) (&nbsp), NOT as empty strings.
+        if ((v.size() == 1 && v[0] != -1) || v.size() > 1) {
+            // Password needs escaping to be searchable literally:
+            password = escape_for_regex(v);
+        }
+        // Now find the pattern of map element, like: "' PassWord ' : '1234vcxz!@#$'",
+        //   capture "' PassWord ' : " and match "'1234vcxz!@#$'"
+        const std::regex re(R"(('\s*)" + std::string(key_trimmed) + R"(\s*'\s*:\s*)')"
+                + std::string(password) + "'", std::regex_constants::ECMAScript);
+        const auto replace_result = std::regex_replace(ai->query().c_str(), re, "$1'***'");
+        ai->set_query_string(static_cast<std::string_view>(replace_result));
+    }
+}
+
+void create_role_statement::sanitize_audit_info() {
+    if (audit::audit_info* ai = get_audit_info(); ai != nullptr) {
+        if (_options.password) {
+            sanitize_audit_info_password(ai, *_options.password);
+        }
+        if (_options.options) {
+            sanitize_audit_info_options(ai, *_options.options);
+        }
+    }
+}
+
 //
 // `alter_role_statement`
 //
@@ -227,6 +283,17 @@ alter_role_statement::execute(service::storage_proxy&, service::query_state& sta
             return make_exception_future<result_message_ptr>(exceptions::invalid_request_exception(e.what()));
         });
     });
+}
+
+void alter_role_statement::sanitize_audit_info() {
+    if (audit::audit_info* ai = get_audit_info(); ai != nullptr) {
+        if (_options.password) {
+            sanitize_audit_info_password(ai, *_options.password);
+        }
+        if (_options.options) {
+            sanitize_audit_info_options(ai, *_options.options);
+        }
+    }
 }
 
 //

@@ -598,6 +598,7 @@ query_processor::get_statement(const sstring_view& query, const service::client_
     auto audit_info = res->statement->get_audit_info();
     if (audit_info) {
         audit_info->set_query_string(query);
+        res->statement->sanitize_audit_info();
     }
     return res;
 }

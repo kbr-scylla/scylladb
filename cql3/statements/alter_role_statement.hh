@@ -57,6 +57,8 @@ public:
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>>
     execute(service::storage_proxy&, service::query_state&, const query_options&) const override;
+    
+    virtual void sanitize_audit_info() override;
 };
 
 }
