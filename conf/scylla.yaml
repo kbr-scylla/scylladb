@@ -479,13 +479,16 @@ commitlog_total_space_in_mb: -1
 
 #
 # audit setting
-# by default, Scylla does not audit anything.
+# by default, Scylla Enterprise audit DCL,DDL,AUTH and ADMIN event.
+# More on audit categories here: https://docs.scylladb.com/operating-scylla/security/auditing/
+#
 # It is possible to enable auditing to the following places:
-#   - audit.audit_log column family by setting the flag to "table"
-# audit: "none"
+#   - audit.audit_log table, by setting the flag to "table"
+#   - standard log, by setting the flag to "syslog"
+audit: "syslog"
 #
 # List of statement categories that should be audited.
-# audit_categories: "DCL,DDL,AUTH"
+audit_categories: "DCL,DDL,AUTH,ADMIN"
 #
 # List of tables that should be audited.
 # audit_tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
