@@ -1407,6 +1407,7 @@ SEASTAR_TEST_CASE(test_functions) {
                         res.push_back(rw[0]);
                     }
                 }
+                virtual void visit(const result_message::bounce_to_shard& rows) override { throw "bad"; }
             };
             validator v;
             msg->accept(v);
