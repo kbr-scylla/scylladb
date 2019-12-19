@@ -114,11 +114,6 @@ long_tests = set([
     'unit/row_cache_stress_test'
 ])
 
-ldap_tests = [
-    'ldap_connection_test',
-    'role_manager_test',
-]
-
 CONCOLORS = {'green': '\033[1;32m', 'red': '\033[1;31m', 'nocolor': '\033[0m'}
 
 def colorformat(msg, **kwargs):
