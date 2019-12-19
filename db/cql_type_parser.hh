@@ -40,7 +40,6 @@ class user_types_metadata;
 namespace db {
 namespace cql_type_parser {
 
-data_type parse(const sstring& keyspace, const sstring& type, lw_shared_ptr<user_types_metadata>);
 data_type parse(const sstring& keyspace, const sstring& type);
 
 class raw_builder {

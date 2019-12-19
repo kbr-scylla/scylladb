@@ -32,9 +32,6 @@ public:
         return _warnings;
     }
 
-    virtual std::optional<unsigned> move_to_shard() const {
-        return std::nullopt;
-    }
     //
     // Message types:
     //
@@ -43,7 +40,6 @@ public:
     class prepared;
     class schema_change;
     class rows;
-    class bounce_to_shard;
 };
 
 std::ostream& operator<<(std::ostream& os, const result_message& msg);
