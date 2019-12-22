@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include "build_id.hh"
 #include "supervisor.hh"
 #include "database.hh"
 #include <seastar/core/app-template.hh>
@@ -346,8 +347,10 @@ std::string format_parsed_options(const std::vector<bpo::option>& opts) {
     );
 }
 
+static constexpr char startup_msg[] = "Scylla version {} with build-id {} starting ...\n";
+
 void print_starting_message(int ac, char** av, const bpo::parsed_options& opts) {
-    fmt::print("Scylla version {} starting ...\n", scylla_version());
+    fmt::print(startup_msg, scylla_version(), get_build_id());
     if (ac) {
         fmt::print("command used: \"{}", av[0]);
         for (int i = 1; i < ac; ++i) {
@@ -500,7 +503,7 @@ int main(int ac, char** av) {
             logalloc::prime_segment_pool(get_available_memory(), memory::min_free_memory()).get();
             logging::apply_settings(cfg->logging_settings(opts));
 
-            startlog.info("Scylla version {} starting.", scylla_version());
+            startlog.info(startup_msg, scylla_version(), get_build_id());
 
             verify_rlimit(cfg->developer_mode());
             verify_adequate_memory_per_shard(cfg->developer_mode());
