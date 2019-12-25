@@ -267,7 +267,6 @@ public:
     explicit in_memory_config_type(utils::config_file& cfg) : _name("in_memory_storage_size_mb"), _desc("in memory storage size for sstables in MB (0 to disable)"), _size(&cfg, _name, utils::config_file::value_status::Used, 0, _desc)
  {}
     void append_options(db::config& cfg, boost::program_options::options_description_easy_init& init) override {
-        _size.add_command_line_option(init, "in-memory-storage-size-mb", _desc);
     }
     virtual future<> initialize(const boost::program_options::variables_map& map, const db::config& cfg, db::extensions& exts) {
         class in_memory_file_ext : public sstables::file_io_extension {
