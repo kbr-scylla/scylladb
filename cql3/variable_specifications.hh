@@ -51,7 +51,7 @@ public:
      * Returns an empty instance of <code>VariableSpecifications</code>.
      * @return an empty instance of <code>VariableSpecifications</code>
      */
-    static ::shared_ptr<variable_specifications> empty();
+    static lw_shared_ptr<variable_specifications> empty();
 
     size_t size() const;
 
