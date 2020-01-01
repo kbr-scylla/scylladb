@@ -83,7 +83,7 @@ public:
     {}
 
 
-    future<key_ptr, opt_bytes> key(const key_info&, opt_bytes = {}) override;
+    future<std::tuple<key_ptr, opt_bytes>> key(const key_info&, opt_bytes = {}) override;
     future<> validate() const override;
     future<> maybe_initialize_tables();
 
@@ -103,7 +103,7 @@ private:
     void store_key(const key_id&, const UUID&, key_ptr);
     opt_bytes decode_id(const opt_bytes&) const;
 
-    future<UUID, key_ptr> get_key(const key_info&, opt_bytes = {});
+    future<std::tuple<UUID, key_ptr>> get_key(const key_info&, opt_bytes = {});
 
     future<key_ptr> load_or_create(const key_info&);
     future<key_ptr> load_or_create_local(const key_info&);
@@ -172,7 +172,7 @@ opt_bytes replicated_key_provider::decode_id(const opt_bytes& b) const {
     return std::nullopt;
 }
 
-future<key_ptr, opt_bytes> replicated_key_provider::key(const key_info& info, opt_bytes input) {
+future<std::tuple<key_ptr, opt_bytes>> replicated_key_provider::key(const key_info& info, opt_bytes input) {
     opt_bytes id;
 
     if (input) { //reading header?
@@ -188,7 +188,8 @@ future<key_ptr, opt_bytes> replicated_key_provider::key(const key_info& info, op
 
     auto gen_id = !input;
 
-    return get_key(info, std::move(id)).then([gen_id](UUID uuid, key_ptr k) {
+    return get_key(info, std::move(id)).then([gen_id](std::tuple<UUID, key_ptr> uuid_k) {
+        auto&& [uuid, k] = uuid_k;
         opt_bytes id;
         if (gen_id) { // write case. need to give key id back
             bytes b{bytes::initialized_later(), header_size};
@@ -199,7 +200,7 @@ future<key_ptr, opt_bytes> replicated_key_provider::key(const key_info& info, op
             std::copy(md.begin(), md.end(), i);
             id = std::move(b);
         }
-        return make_ready_future<key_ptr, opt_bytes>(k, std::move(id));
+        return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(k, std::move(id)));
     }).handle_exception([this, info, input = std::move(input)](std::exception_ptr ep) {
         log.warn("Exception looking up key {}: {}", info, ep);
         if (_local_provider) {
@@ -213,15 +214,15 @@ future<key_ptr, opt_bytes> replicated_key_provider::key(const key_info& info, op
             log.warn("Falling back to local key {}", info);
             return _local_provider->key(info, input);
         }
-        return make_exception_future<key_ptr, opt_bytes>(ep);
+        return make_exception_future<std::tuple<key_ptr, opt_bytes>>(ep);
     });
 }
 
-future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt_bytes opt_id) {
+future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_info& info, opt_bytes opt_id) {
     key_id id(info, std::move(opt_id));
     auto i = _keys.find(id);
     if (i != _keys.end()) {
-        return make_ready_future<UUID, key_ptr>(i->second.first, i->second.second);
+        return make_ready_future<std::tuple<UUID, key_ptr>>(std::tuple(i->second.first, i->second.second));
     }
 
     if (!_initialized) {
@@ -258,7 +259,7 @@ future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt
         // if we find nothing, and we actually queried a specific key (by uuid), we've failed.
         if (res->empty() && id.id) {
             log.debug("Could not find key {}", id.id);
-            return make_exception_future<UUID, key_ptr>(std::runtime_error(sprint("Unable to find key for cipher=%s strength=%s id=%s", cipher, id.info.len, uuid)));
+            return make_exception_future<std::tuple<UUID, key_ptr>>(std::runtime_error(sprint("Unable to find key for cipher=%s strength=%s id=%s", cipher, id.info.len, uuid)));
         }
         // otoh, if we don't need a specific key, we can just create a new one (writing a sstable)
         if (res->empty()) {
@@ -276,7 +277,7 @@ future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt
                     return force_blocking_flush();
                 });
             }).then([k, uuid]() {
-                return make_ready_future<UUID, key_ptr>(uuid, k);
+                return make_ready_future<std::tuple<UUID, key_ptr>>(std::tuple(uuid, k));
             });
         }
         // found it
@@ -287,7 +288,7 @@ future<UUID, key_ptr> replicated_key_provider::get_key(const key_info& info, opt
         return _system_key->decrypt(kb).then([this, uuid, id = std::move(id)](bytes b) {
             auto k = make_shared<symmetric_key>(id.info, b);
             store_key(id, uuid, k);
-            return make_ready_future<UUID, key_ptr>(uuid, k);
+            return make_ready_future<std::tuple<UUID, key_ptr>>(std::tuple(uuid, k));
         });
     });
 }

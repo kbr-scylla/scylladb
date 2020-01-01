@@ -357,11 +357,11 @@ public:
     }
 
     future<::shared_ptr<symmetric_key>> key_for_read(opt_bytes id) const {
-        return _provider->key(_info, std::move(id)).then([](auto k, auto id) {
-            return std::move(k);
+        return _provider->key(_info, std::move(id)).then([](std::tuple<key_ptr, opt_bytes> k_id) {
+            return std::get<0>(std::move(k_id));
         });
     }
-    future<::shared_ptr<symmetric_key>, opt_bytes> key_for_write(opt_bytes id = {}) const {
+    future<std::tuple<::shared_ptr<symmetric_key>, opt_bytes>> key_for_write(opt_bytes id = {}) const {
         return _provider->key(_info, std::move(id));
     }
 
@@ -549,7 +549,8 @@ public:
 
                 logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
-                return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](::shared_ptr<symmetric_key> k, opt_bytes id) {
+                return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](std::tuple<::shared_ptr<symmetric_key>, opt_bytes> k_id) {
+                    auto&& [k, id] = k_id;
                     if (!ext.map.count(encryption_attribute_ds)) {
                         ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
                     }
@@ -618,14 +619,15 @@ public:
 
                 logg.debug("Open commitlog segment {} using {} (id: {})", filename, *provider, id);
 
-                return provider->key(get_key_info(opts), id).then([f](shared_ptr<symmetric_key> k, opt_bytes) {
-                    return make_ready_future<file>(make_encrypted_file(f, k));
+                return provider->key(get_key_info(opts), id).then([f](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k) {
+                    return make_ready_future<file>(make_encrypted_file(f, std::get<0>(k)));
                 });
             });
         } else {
             auto provider = _ctxt->get_provider(_opts);
 
-            return provider->key(get_key_info(_opts)).then([f, this, cfg_file, filename, &provider = *provider](shared_ptr<symmetric_key> k, opt_bytes id) {
+            return provider->key(get_key_info(_opts)).then([f, this, cfg_file, filename, &provider = *provider](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k_id) {
+                auto&& [k, id] = k_id;
                 std::ostringstream ss;
                 for (auto&p : _opts) {
                     ss << p.first << "=" << p.second << std::endl;

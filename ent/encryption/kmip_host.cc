@@ -152,7 +152,7 @@ public:
     }
 
     future<> connect();
-    future<shared_ptr<symmetric_key>, id_type> get_or_create_key(const key_info&, const key_options& = {});
+    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const key_options& = {});
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const std::optional<key_info>& = {});
 
 private:
@@ -757,10 +757,12 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
     }
 
     return smp::submit_to(0, [this, info] {
-        return _ctxt.get_kmip_host(_name)->get_or_create_key(info.info, info.options).then([](shared_ptr<symmetric_key> k, id_type id) {
-            return make_ready_future<key_info, bytes, id_type>(k->info(), k->key(), id);
+        return _ctxt.get_kmip_host(_name)->get_or_create_key(info.info, info.options).then([](std::tuple<shared_ptr<symmetric_key>, id_type> k_id) {
+            auto&& [k, id] = k_id;
+            return make_ready_future<std::tuple<key_info, bytes, id_type>>(std::tuple(k->info(), k->key(), id));
         });
-    }).then([](key_info info, bytes b, id_type id) {
+    }).then([](std::tuple<key_info, bytes, id_type> info_b_id) {
+       auto&& [info, b, id] = info_b_id;
        return make_ready_future<key_and_id_type>(key_and_id_type(make_shared<symmetric_key>(info, b), id));
     });
 }
@@ -929,9 +931,10 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
 
     return smp::submit_to(0, [this, id] {
         return _ctxt.get_kmip_host(_name)->get_key_by_id(id).then([](shared_ptr<symmetric_key> k) {
-            return make_ready_future<key_info, bytes>(k->info(), k->key());
+            return make_ready_future<std::tuple<key_info, bytes>>(std::tuple(k->info(), k->key()));
         });
-    }).then([](key_info info, bytes b) {
+    }).then([](std::tuple<key_info, bytes> info_b) {
+        auto&& [info, b] = info_b;
         return make_shared<symmetric_key>(info, b);
     });
 }
@@ -951,10 +954,10 @@ shared_ptr<symmetric_key> kmip_host::impl::ensure_compatible_key(shared_ptr<symm
     return k;
 }
 
-future<shared_ptr<symmetric_key>, kmip_host::id_type> kmip_host::impl::get_or_create_key(const key_info& info, const key_options& opts) {
+future<std::tuple<shared_ptr<symmetric_key>, kmip_host::id_type>> kmip_host::impl::get_or_create_key(const key_info& info, const key_options& opts) {
     kmip_log.debug("{}: Lookup key {}:{}", _name, info, opts);
     return _attr_cache.get(kmip_key_info{info, opts}).then([info](key_and_id_type kinfo) {
-        return make_ready_future<shared_ptr<symmetric_key>, id_type>(ensure_compatible_key(std::get<0>(kinfo), info), std::get<1>(kinfo));
+        return make_ready_future<std::tuple<shared_ptr<symmetric_key>, id_type>>(std::tuple(ensure_compatible_key(std::get<0>(kinfo), info), std::get<1>(kinfo)));
     });
 }
 
@@ -1014,7 +1017,7 @@ future<> kmip_host::connect() {
     return _impl->connect();
 }
 
-future<shared_ptr<symmetric_key>, kmip_host::id_type> kmip_host::get_or_create_key(const key_info& info, const key_options& opts) {
+future<std::tuple<shared_ptr<symmetric_key>, kmip_host::id_type>> kmip_host::get_or_create_key(const key_info& info, const key_options& opts) {
     return _impl->get_or_create_key(info, opts);
 }
 

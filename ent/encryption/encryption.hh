@@ -107,7 +107,7 @@ class key_provider {
 public:
     virtual ~key_provider()
     {}
-    virtual future<key_ptr, opt_bytes> key(const key_info&, opt_bytes = {}) = 0;
+    virtual future<std::tuple<key_ptr, opt_bytes>> key(const key_info&, opt_bytes = {}) = 0;
     virtual future<> validate() const {
         return make_ready_future<>();
     }

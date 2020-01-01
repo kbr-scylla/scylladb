@@ -47,14 +47,14 @@ public:
         , _sem(1)
         , _must_exist(must_exist)
     {}
-    future<key_ptr, opt_bytes> key(const key_info& info, opt_bytes = {}) override {
+    future<std::tuple<key_ptr, opt_bytes>> key(const key_info& info, opt_bytes = {}) override {
         // TODO: assert options -> my key
         auto i = _keys.find(info);
         if (i != _keys.end()) {
-            return make_ready_future<key_ptr, opt_bytes>(i->second, std::nullopt);
+            return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(i->second, std::nullopt));
         }
         return load_or_create(info).then([](key_ptr k) {
-            return make_ready_future<key_ptr, opt_bytes>(k, std::nullopt);
+            return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(k, std::nullopt));
         });
     }
     future<> validate() const override {
@@ -269,8 +269,8 @@ local_system_key::~local_system_key()
 {}
 
 future<shared_ptr<symmetric_key>> local_system_key::get_key() {
-    return _provider->key(system_key_info).then([](auto k, auto&&) {
-       return make_ready_future<shared_ptr<symmetric_key>>(std::move(k));
+    return _provider->key(system_key_info).then([](std::tuple<key_ptr, opt_bytes> k_id) {
+       return make_ready_future<shared_ptr<symmetric_key>>(std::get<0>(std::move(k_id)));
     });
 }
 

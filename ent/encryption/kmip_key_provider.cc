@@ -27,14 +27,14 @@ public:
         , _kopts(std::move(kopts))
         , _name(std::move(name))
     {}
-    future<key_ptr, opt_bytes> key(const key_info& info, opt_bytes id) override {
+    future<std::tuple<key_ptr, opt_bytes>> key(const key_info& info, opt_bytes id) override {
         if (id) {
             return _kmip_host->get_key_by_id(*id, info).then([id](key_ptr k) {
-                return make_ready_future<key_ptr, opt_bytes>(k, id);
+                return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(k, id));
             });
         }
-        return _kmip_host->get_or_create_key(info, _kopts).then([](key_ptr k, bytes id) {
-            return make_ready_future<key_ptr, opt_bytes>(k, id);
+        return _kmip_host->get_or_create_key(info, _kopts).then([](std::tuple<key_ptr, opt_bytes> k_id) {
+            return make_ready_future<std::tuple<key_ptr, opt_bytes>>(k_id);
         });
     }
     void print(std::ostream& os) const override {
