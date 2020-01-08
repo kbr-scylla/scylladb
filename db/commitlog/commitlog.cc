@@ -292,15 +292,16 @@ public:
     future<> init();
     future<sseg_ptr> new_segment();
     future<sseg_ptr> active_segment(db::timeout_clock::time_point timeout);
-    future<sseg_ptr> allocate_segment(bool active);
-    future<sseg_ptr> allocate_segment_ex(const descriptor&, sstring filename, open_flags, bool active);
+    future<sseg_ptr> allocate_segment();
+    future<sseg_ptr> allocate_segment_ex(const descriptor&, sstring filename, open_flags);
 
     sstring filename(const descriptor& d) const {
         return cfg.commit_log_location + "/" + d.filename();
     }
 
     future<> clear();
-    future<> sync_all_segments(bool shutdown = false);
+    future<> sync_all_segments();
+    future<> shutdown_all_segments();
     future<> shutdown();
 
     void create_counters(const sstring& metrics_category_name);
@@ -447,7 +448,6 @@ class db::commitlog::segment : public enable_shared_from_this<segment>, public c
     fragmented_temporary_buffer::ostream _buffer_ostream;
     std::unordered_map<cf_id_type, uint64_t> _cf_dirty;
     time_point _sync_time;
-    seastar::gate _gate;
     uint64_t _write_waiters = 0;
     utils::flush_queue<replay_position, std::less<replay_position>, clock_type> _pending_ops;
 
@@ -492,13 +492,13 @@ public:
     // TODO : tune initial / default size
     static constexpr size_t default_size = align_up<size_t>(128 * 1024, alignment);
 
-    segment(::shared_ptr<segment_manager> m, const descriptor& d, file && f, bool active)
+    segment(::shared_ptr<segment_manager> m, const descriptor& d, file && f)
             : _segment_manager(std::move(m)), _desc(std::move(d)), _file(std::move(f)),
         _file_name(_segment_manager->cfg.commit_log_location + "/" + _desc.filename()), _sync_time(
                     clock_type::now()), _pending_ops(true) // want exception propagation
     {
         ++_segment_manager->totals.segments_created;
-        clogger.debug("Created new {} segment {}", active ? "active" : "reserve", *this);
+        clogger.debug("Created new segment {}", *this);
     }
     ~segment() {
         if (!_closed_file) {
@@ -549,52 +549,45 @@ public:
      * Finalize this segment and get a new one
      */
     future<sseg_ptr> finish_and_get_new(db::timeout_clock::time_point timeout) {
-        _closed = true;
         //FIXME: discarded future.
-        (void)sync();
+        (void)close();
         return _segment_manager->active_segment(timeout);
     }
     void reset_sync_time() {
         _sync_time = clock_type::now();
     }
-    // See class comment for info
-    future<sseg_ptr> sync(bool shutdown = false) {
+    future<sseg_ptr> shutdown() {
         /**
-         * If we are shutting down, we first
-         * close the allocation gate, thus no new
+         * When we are shutting down, we first
+         * close the segment, thus no new
          * data can be appended. Then we just issue a
          * flush, which will wait for any queued ops
          * to complete as well. Then we close the ops
          * queue, just to be sure.
          */
-        if (shutdown) {
-            auto me = shared_from_this();
-            return _gate.close().then([me] {
-                me->_closed = true;
-                return me->sync().finally([me] {
-                    // When we get here, nothing should add ops,
-                    // and we should have waited out all pending.
-                    return me->_pending_ops.close().finally([me] {
-                        return me->_file.truncate(me->_flush_pos).then([me] {
-                            return me->_file.close().finally([me] { me->_closed_file = true; });
-                        });
-                    });
+        auto me = shared_from_this();
+        return close().finally([me] {
+            // When we get here, nothing should add ops,
+            // and we should have waited out all pending.
+            return me->_pending_ops.close().finally([me] {
+                return me->_file.truncate(me->_flush_pos).then([me] {
+                    return me->_file.close().finally([me] { me->_closed_file = true; });
                 });
             });
-        }
-
+        });
+    }
+    // See class comment for info
+    future<sseg_ptr> sync() {
         // Note: this is not a marker for when sync was finished.
         // It is when it was initiated
         reset_sync_time();
-        return _closed ? cycle(true).then([](sseg_ptr s) { return s->flush(); }) : cycle(true);
+        return cycle(true);
     }
     // See class comment for info
-    future<sseg_ptr> flush(uint64_t pos = 0) {
+    future<sseg_ptr> flush() {
         auto me = shared_from_this();
         assert(me.use_count() > 1);
-        if (pos == 0) {
-            pos = _file_pos;
-        }
+        uint64_t pos = _file_pos;
 
         clogger.trace("Syncing {} {} -> {}", *this, _flush_pos, pos);
 
@@ -603,24 +596,26 @@ public:
         replay_position rp(_desc.id, position_type(pos));
 
         // Run like this to ensure flush ordering, and making flushes "waitable"
-        auto f = _pending_ops.run_with_ordered_post_op(rp, [] { return make_ready_future<>(); }, [this, pos, me, rp] {
+        return _pending_ops.run_with_ordered_post_op(rp, [] { return make_ready_future<>(); }, [this, pos, me, rp] {
             assert(_pending_ops.has_operation(rp));
             return do_flush(pos);
         });
-
-        if (_closed && !std::exchange(_terminated, true)) {
-            f = f.then([this](sseg_ptr s) {
-                clogger.trace("{} is closed but not terminated.", *this);
-                if (_buffer.empty()) {
-                    new_buffer(0);
-                }
-                return cycle(true, true);
-            });
-        }
-
-        return f;
     }
-
+    future<sseg_ptr> terminate() {
+        assert(_closed);
+        if (!std::exchange(_terminated, true)) {
+            clogger.trace("{} is closed but not terminated.", *this);
+            if (_buffer.empty()) {
+                new_buffer(0);
+            }
+            return cycle(true, true);
+        }
+        return make_ready_future<sseg_ptr>(shared_from_this());
+    }
+    future<sseg_ptr> close() {
+        _closed = true;
+        return sync().then([] (sseg_ptr s) { return s->flush(); }).then([] (sseg_ptr s) { return s->terminate(); });
+    }
     future<sseg_ptr> do_flush(uint64_t pos) {
         auto me = shared_from_this();
         return begin_flush().then([this, pos]() {
@@ -846,7 +841,7 @@ public:
                 // If we run batch mode and find ourselves not fit in a non-empty
                 // buffer, we must force a cycle and wait for it (to keep flush order)
                 // This will most likely cause parallel writes, and consecutive flushes.
-                return with_timeout(timeout, cycle(true)).then([this, id, writer = std::move(writer), permit = std::move(permit), timeout] (auto new_seg) mutable {
+                return with_timeout(timeout, sync()).then([this, id, writer = std::move(writer), permit = std::move(permit), timeout] (auto new_seg) mutable {
                     return new_seg->allocate(id, std::move(writer), std::move(permit), timeout);
                 });
             } else {
@@ -863,7 +858,10 @@ public:
             buf_memory += buffer_position();
         }
 
-        _gate.enter(); // this might throw. I guess we accept this?
+        if (_closed) {
+            return make_exception_future<rp_handle>(std::runtime_error("commitlog: Cannot add data to a closed segment"));
+        }
+
         buf_memory -= permit.release();
         _segment_manager->account_memory_usage(buf_memory);
 
@@ -891,8 +889,6 @@ public:
 
         ++_segment_manager->totals.allocation_count;
         ++_num_allocs;
-
-        _gate.leave();
 
         if (_segment_manager->cfg.mode == sync_mode::BATCH) {
             return batch_cycle(timeout).then([h = std::move(h)](auto s) mutable {
@@ -986,7 +982,7 @@ db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, sha
         totals.requests_blocked_memory++;
     }
     return fut.then([this, id, writer = std::move(writer), timeout] (auto permit) mutable {
-        return this->active_segment(timeout).then([this, timeout, id, writer = std::move(writer), permit = std::move(permit)] (auto s) mutable {
+        return active_segment(timeout).then([this, timeout, id, writer = std::move(writer), permit = std::move(permit)] (auto s) mutable {
             return s->allocate(id, std::move(writer), std::move(permit), timeout);
         });
     });
@@ -1049,7 +1045,7 @@ future<> db::commitlog::segment_manager::replenish_reserve() {
                 return make_ready_future<>();
             }
             return with_gate(_gate, [this] {
-                return this->allocate_segment(false).then([this](sseg_ptr s) {
+                return allocate_segment().then([this](sseg_ptr s) {
                     auto ret = _reserve_segments.push(std::move(s));
                     if (!ret) {
                         clogger.error("Segment reserve is full! Ignoring and trying to continue, but shouldn't happen");
@@ -1139,8 +1135,8 @@ future<> db::commitlog::segment_manager::init() {
         clogger.trace("Delaying timer loop {} ms", delay);
         // We need to wait until we have scanned all other segments to actually start serving new
         // segments. We are ready now
-        this->_reserve_replenisher = replenish_reserve();
-        this->arm(delay);
+        _reserve_replenisher = replenish_reserve();
+        arm(delay);
     });
 }
 
@@ -1269,7 +1265,7 @@ static auto close_on_failure(future<file> file_fut, Func func) {
     });
 }
 
-future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment_ex(const descriptor& d, sstring filename, open_flags flags, bool active) {
+future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment_ex(const descriptor& d, sstring filename, open_flags flags) {
     file_open_options opt;
     opt.extent_allocation_size_hint = max_size;
     auto fut = do_io_check(commit_error_handler, [=] {
@@ -1286,7 +1282,7 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
         return fut;
     });
 
-    return close_on_failure(std::move(fut), [this, d, active, filename, flags] (file f) {
+    return close_on_failure(std::move(fut), [this, d, filename, flags] (file f) {
         f = make_checked_file(commit_error_handler, f);
         // xfs doesn't like files extended betond eof, so enlarge the file
         auto fut = make_ready_future<>();
@@ -1326,8 +1322,8 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
         } else {
             fut = f.truncate(max_size);
         }
-        return fut.then([this, d, active, f, filename] () mutable {
-            auto s = make_shared<segment>(this->shared_from_this(), d, std::move(f), active);
+        return fut.then([this, d, f, filename] () mutable {
+            auto s = make_shared<segment>(shared_from_this(), d, std::move(f));
             return make_ready_future<sseg_ptr>(s);
         });
     });
@@ -1341,7 +1337,7 @@ future<> db::commitlog::segment_manager::rename_file(sstring from, sstring to) c
     });
 }
 
-future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment(bool active) {
+future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment() {
     descriptor d(next_id(), cfg.fname_prefix);
     auto dst = filename(d);
     auto flags = open_flags::wo;
@@ -1358,11 +1354,11 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
         // out-of-order files. (Sort does not help).
         clogger.debug("Using recycled segment file {} -> {}", src, dst);
         return rename_file(std::move(src), dst).then([=] {
-            return allocate_segment_ex(d, dst, flags, false);
+            return allocate_segment_ex(d, dst, flags);
         });
     }
 
-    return allocate_segment_ex(d, dst, flags|open_flags::create, active);
+    return allocate_segment_ex(d, dst, flags|open_flags::create);
 }
 
 future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::new_segment() {
@@ -1503,11 +1499,20 @@ future<> db::commitlog::segment_manager::clear_reserve_segments() {
     });
 }
 
-future<> db::commitlog::segment_manager::sync_all_segments(bool shutdown) {
-    clogger.debug("Issuing sync for all segments ({})", shutdown ? "shutdown" : "active");
-    return parallel_for_each(_segments, [this, shutdown](sseg_ptr s) {
-        return s->sync(shutdown).then([](sseg_ptr s) {
+future<> db::commitlog::segment_manager::sync_all_segments() {
+    clogger.debug("Issuing sync for all segments");
+    return parallel_for_each(_segments, [] (sseg_ptr s) {
+        return s->sync().then([](sseg_ptr s) {
             clogger.debug("Synced segment {}", *s);
+        });
+    });
+}
+
+future<> db::commitlog::segment_manager::shutdown_all_segments() {
+    clogger.debug("Issuing shutdown for all segments");
+    return parallel_for_each(_segments, [] (sseg_ptr s) {
+        return s->shutdown().then([](sseg_ptr s) {
+            clogger.debug("Shutdown segment {}", *s);
         });
     });
 }
@@ -1519,13 +1524,13 @@ future<> db::commitlog::segment_manager::shutdown() {
         // Wait for all pending requests to finish. Need to sync first because segments that are
         // alive may be holding semaphore permits.
         auto block_new_requests = get_units(_request_controller, max_request_controller_units());
-        return sync_all_segments(false).then([this, block_new_requests = std::move(block_new_requests)] () mutable {
+        return sync_all_segments().then([this, block_new_requests = std::move(block_new_requests)] () mutable {
             return std::move(block_new_requests).then([this] (auto permits) {
                 _timer.cancel(); // no more timer calls
                 _shutdown = true; // no re-arm, no create new segments.
                 // Now first wait for periodic task to finish, then sync and close all
                 // segments, flushing out any remaining data.
-                return _gate.close().then(std::bind(&segment_manager::sync_all_segments, this, true)).finally([permits = std::move(permits)] { });
+                return _gate.close().then(std::bind(&segment_manager::shutdown_all_segments, this)).finally([permits = std::move(permits)] { });
             });
         }).finally([this] {
             discard_unused_segments();
@@ -2045,7 +2050,7 @@ db::commitlog::read_log_file(const sstring& filename, const sstring& pfx, seasta
                     }
 
                     return s.produce({std::move(buf), rp}).handle_exception([this](auto ep) {
-                        return this->fail();
+                        return fail();
                     });
                 });
             });

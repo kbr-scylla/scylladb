@@ -85,6 +85,7 @@ void migration_manager::init_messaging_service()
     if (engine().cpu_id() == 0) {
         _feature_listeners.push_back(ss.cluster_supports_view_virtual_columns().when_enabled(update_schema));
         _feature_listeners.push_back(ss.cluster_supports_digest_insensitive_to_expiry().when_enabled(update_schema));
+        _feature_listeners.push_back(ss.cluster_supports_cdc().when_enabled(update_schema));
         _feature_listeners.push_back(ss.cluster_supports_in_memory_tables().when_enabled(update_schema));
         _feature_listeners.push_back(ss.cluster_supports_xxhash_digest_algorithm().when_enabled(update_schema));
         _feature_listeners.push_back(ss.cluster_supports_range_tombstones().when_enabled(update_schema));
@@ -309,7 +310,8 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
     try {
         for (const auto& cm : canonical_mutations) {
             auto& tbl = db.find_column_family(cm.column_family_id());
-            mutations.emplace_back(cm.to_mutation(tbl.schema()));
+            mutations.emplace_back(cm.to_mutation(
+                    tbl.schema()));
         }
     } catch (no_such_column_family& e) {
         mlogger.error("Error while applying schema mutations from {}: {}", src, e);

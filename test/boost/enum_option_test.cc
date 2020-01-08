@@ -38,7 +38,7 @@ namespace po = boost::program_options;
 namespace {
 
 struct days {
-    enum enumeration { Mo, Tu, We, Th, Fr, Sa, Su };
+    enum enumeration : uint8_t { Mo, Tu, We, Th, Fr, Sa, Su };
     static std::unordered_map<std::string, enumeration> map() {
         return {{"Mon", Mo}, {"Tue", Tu}, {"Wed", We}, {"Thu", Th}, {"Fri", Fr}, {"Sat", Sa}, {"Sun", Su}};
     }
@@ -97,7 +97,7 @@ BOOST_AUTO_TEST_CASE(test_formatting_unknown) {
 namespace {
 
 struct names {
-    enum enumeration { John, Jane, Jim };
+    enum enumeration : uint8_t { John, Jane, Jim };
     static std::map<std::string, enumeration> map() {
         return {{"John", John}, {"Jane", Jane}, {"James", Jim}};
     }
@@ -155,7 +155,7 @@ BOOST_AUTO_TEST_CASE(test_multiple_format) {
 namespace {
 
 struct numbers {
-    enum enumeration { ONE, TWO };
+    enum enumeration : uint8_t { ONE, TWO };
     static std::unordered_map<int, enumeration> map() {
         return {{1, ONE}, {2, TWO}};
     }

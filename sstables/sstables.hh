@@ -431,6 +431,8 @@ public:
         return _large_data_handler;
     }
 
+    void assert_large_data_handler_is_running();
+
     /**
      * Note. This is using the Origin definition of
      * max_data_age, which is load time. This could maybe
@@ -555,6 +557,8 @@ private:
 
     template <component_type Type, typename T>
     void write_simple(const T& comp, const io_priority_class& pc);
+    void do_write_simple(component_type type, const io_priority_class& pc,
+            noncopyable_function<void (version_types version, file_writer& writer)> write_component);
 
     void write_crc(const checksum& c);
     void write_digest(uint32_t full_checksum);

@@ -156,7 +156,6 @@ private:
     sharded<auth::service>& _auth_service;
     sharded<cql3::cql_config>& _cql_config;
     sharded<qos::service_level_controller>& _sl_controller;
-    int _update_jobs{0};
     // Note that this is obviously only valid for the current shard. Users of
     // this facility should elect a shard to be the coordinator based on any
     // given objective criteria
@@ -265,9 +264,9 @@ private:
     std::optional<inet_address> _removing_node;
 
     /* Are we starting this node in bootstrap mode? */
-    bool _is_bootstrap_mode;
+    bool _is_bootstrap_mode = false;
 
-    bool _initialized;
+    bool _initialized = false;
 
     bool _joined = false;
 
@@ -2356,8 +2355,8 @@ public:
         return bool(_mc_sstable_feature);
     }
 
-    bool cluster_supports_cdc() const {
-        return bool(_cdc_feature);
+    const gms::feature& cluster_supports_cdc() const {
+        return _cdc_feature;
     }
 
     bool cluster_supports_row_level_repair() const {

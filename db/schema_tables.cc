@@ -293,24 +293,31 @@ schema_ptr tables() {
 
 // Holds Scylla-specific table metadata.
 schema_ptr scylla_tables(schema_features features) {
-    static auto make = [] (bool has_in_memory) -> schema_ptr {
+    static auto make = [] (bool has_cdc_options, bool has_in_memory) -> schema_ptr {
         auto id = generate_legacy_id(NAME, SCYLLA_TABLES);
-        auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id));
-        sb
+        auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id))
             .with_column("keyspace_name", utf8_type, column_kind::partition_key)
             .with_column("table_name", utf8_type, column_kind::clustering_key)
             .with_column("version", uuid_type)
-            .with_column("cdc", map_type_impl::get_instance(utf8_type, utf8_type, false))
-            .set_gc_grace_seconds(schema_gc_grace)
-            .with_version(generate_schema_version(id))
-            ;
+            .set_gc_grace_seconds(schema_gc_grace);
+
         if (has_in_memory) {
             sb.with_column("in_memory", boolean_type);
         }
+
+        if (has_cdc_options) {
+            sb.with_column("cdc", map_type_impl::get_instance(utf8_type, utf8_type, false));
+            sb.with_version(generate_schema_version(id, 1));
+        } else {
+            sb.with_version(generate_schema_version(id));
+        }
         return sb.build();
     };
-    static thread_local schema_ptr schemas[2] = { make(false), make(true) };
-    return schemas[features.contains(schema_feature::IN_MEMORY_TABLES)];
+    static thread_local schema_ptr schemas[2][2] = {
+            { make(false, false), make(false, true) },
+            { make(true, false), make(true, true) },
+    };
+    return schemas[features.contains(schema_feature::CDC_OPTIONS)][features.contains(schema_feature::IN_MEMORY_TABLES)];
 }
 
 // The "columns" table lists the definitions of all columns in all tables
@@ -615,7 +622,7 @@ schema_ptr aggregates() {
 static
 mutation
 redact_columns_for_missing_features(mutation m, schema_features features) {
-    if (features.contains(schema_feature::IN_MEMORY_TABLES)) {
+    if (features.contains(schema_feature::CDC_OPTIONS) && features.contains(schema_feature::IN_MEMORY_TABLES)) {
         return std::move(m);
     }
     if (m.schema()->cf_name() != SCYLLA_TABLES) {
@@ -696,7 +703,6 @@ future<std::vector<canonical_mutation>> convert_schema_to_mutations(distributed<
     return map_reduce(all_table_names(features), map, std::vector<canonical_mutation>{}, reduce);
 }
 
-
 std::vector<mutation>
 adjust_schema_for_schema_features(std::vector<mutation> schema, schema_features features) {
     for (auto& m : schema) {
@@ -704,7 +710,6 @@ adjust_schema_for_schema_features(std::vector<mutation> schema, schema_features 
     }
     return std::move(schema);
 }
-
 
 future<schema_result>
 read_schema_for_keyspaces(distributed<service::storage_proxy>& proxy, const sstring& schema_table_name, const std::set<sstring>& keyspace_names)
@@ -1018,11 +1023,10 @@ struct schema_diff {
     }
 };
 
-template<typename CreateSchema>
 static schema_diff diff_table_or_view(distributed<service::storage_proxy>& proxy,
     std::map<utils::UUID, schema_mutations>&& before,
     std::map<utils::UUID, schema_mutations>&& after,
-    CreateSchema&& create_schema)
+    noncopyable_function<schema_ptr (schema_mutations sm)> create_schema)
 {
     schema_diff d;
     auto diff = difference(before, after);
@@ -1055,10 +1059,10 @@ static void merge_tables_and_views(distributed<service::storage_proxy>& proxy,
     std::map<utils::UUID, schema_mutations>&& views_before,
     std::map<utils::UUID, schema_mutations>&& views_after)
 {
-    auto tables_diff = diff_table_or_view(proxy, std::move(tables_before), std::move(tables_after), [&] (auto&& sm) {
+    auto tables_diff = diff_table_or_view(proxy, std::move(tables_before), std::move(tables_after), [&] (schema_mutations sm) {
         return create_table_from_mutations(proxy, std::move(sm));
     });
-    auto views_diff = diff_table_or_view(proxy, std::move(views_before), std::move(views_after), [&] (auto&& sm) {
+    auto views_diff = diff_table_or_view(proxy, std::move(views_before), std::move(views_after), [&] (schema_mutations sm) {
         return create_view_from_mutations(proxy, std::move(sm));
     });
 
@@ -1774,9 +1778,20 @@ mutation make_scylla_tables_mutation(schema_ptr table, api::timestamp_type times
     auto ckey = clustering_key::from_singular(*s, table->cf_name());
     mutation m(scylla_tables(), pkey);
     m.set_clustered_cell(ckey, "version", utils::UUID(table->version()), timestamp);
-    store_map(m, ckey, "cdc", timestamp, table->cdc_options().to_map());
+    auto cdc_options = table->cdc_options().to_map();
+    if (!cdc_options.empty()) {
+        store_map(m, ckey, "cdc", timestamp, cdc_options);
+    } else {
+        // Avoid storing anything for cdc disabled, so we don't end up with
+        // different digests on different nodes due to the other node redacting
+        // the cdc column when the cdc cluster feature is disabled.
+        //
+        // Tombstones are not considered for schema digest, so this is okay (and
+        // needed in order for disabling of cdc to have effect).
+        auto& cdc_cdef = *scylla_tables()->get_column_definition("cdc");
+        m.set_clustered_cell(ckey, cdc_cdef, atomic_cell::make_dead(timestamp, gc_clock::now()));
+    }
     m.set_clustered_cell(ckey, "in_memory", table->is_in_memory(), timestamp);
-
     return m;
 }
 
@@ -2053,7 +2068,7 @@ static future<schema_mutations> read_table_mutations(distributed<service::storag
 
 future<schema_ptr> create_table_from_name(distributed<service::storage_proxy>& proxy, const sstring& keyspace, const sstring& table)
 {
-    return do_with(qualified_name(keyspace, table), [&proxy] (auto&& qn) {
+    return do_with(qualified_name(keyspace, table), [&proxy] (qualified_name& qn) {
         return read_table_mutations(proxy, qn, tables()).then([qn, &proxy] (schema_mutations sm) {
             if (!sm.live()) {
                throw std::runtime_error(format("{}:{} not found in the schema definitions keyspace.", qn.keyspace_name, qn.table_name));
@@ -2071,7 +2086,7 @@ future<schema_ptr> create_table_from_name(distributed<service::storage_proxy>& p
 future<std::map<sstring, schema_ptr>> create_tables_from_tables_partition(distributed<service::storage_proxy>& proxy, const schema_result::mapped_type& result)
 {
     auto tables = make_lw_shared<std::map<sstring, schema_ptr>>();
-    return parallel_for_each(result->rows().begin(), result->rows().end(), [&proxy, tables] (auto&& row) {
+    return parallel_for_each(result->rows().begin(), result->rows().end(), [&proxy, tables] (const query::result_set_row& row) {
         return create_table_from_table_row(proxy, row).then([tables] (schema_ptr&& cfm) {
             tables->emplace(cfm->cf_name(), std::move(cfm));
         });
