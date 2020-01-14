@@ -970,9 +970,10 @@ static auto prefixed(const sstring& prefix, const RangeOfPrintable& r) {
 std::ostream&
 operator<<(std::ostream& os, const row::printer& p) {
     auto add_printer = [&] (const auto& c) {
-        return std::pair<column_id, atomic_cell_or_collection::printer>(std::piecewise_construct,
-            std::forward_as_tuple(c.first),
-            std::forward_as_tuple(p._schema.column_at(p._kind, c.first), c.second)
+        auto& column_def = p._schema.column_at(p._kind, c.first);
+        return std::pair<sstring, atomic_cell_or_collection::printer>(std::piecewise_construct,
+            std::forward_as_tuple(column_def.name_as_text()),
+            std::forward_as_tuple(column_def, c.second)
         );
     };
 
@@ -1714,7 +1715,7 @@ void row::apply_monotonically(const schema& s, column_kind kind, row&& other) {
 // we erase the live cells according to the shadowable_tombstone rules.
 static bool dead_marker_shadows_row(const schema& s, column_kind kind, const row_marker& marker) {
     return s.is_view()
-            && s.view_info()->base_non_pk_column_in_view_pk()
+            && !s.view_info()->base_non_pk_columns_in_view_pk().empty()
             && !marker.is_live()
             && kind == column_kind::regular_column; // not applicable to static rows
 }
