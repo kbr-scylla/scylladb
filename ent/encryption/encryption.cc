@@ -447,7 +447,11 @@ public:
 
         if (exta->map.count(key_id_attribute_ds)) {
             auto id = exta->map.at(key_id_attribute_ds).value;
-            opts["key_id"] = utils::UUID_gen::get_UUID(id).to_sstring();
+            auto id_str = id.size() == utils::UUID::serialized_size()
+                ? utils::UUID_gen::get_UUID(id).to_sstring()
+                : to_hex(id)
+                ;
+            opts["key_id"] = std::move(id_str);
         }
 
         if (exta->map.count(encrypted_components_attribute_ds)) {
