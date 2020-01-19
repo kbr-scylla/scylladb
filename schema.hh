@@ -620,6 +620,9 @@ private:
         std::unordered_map<sstring, dropped_column> _dropped_columns;
         std::map<bytes, data_type> _collections;
         std::unordered_map<sstring, index_metadata> _indices_by_name;
+        // The flag is not stored in the schema mutation and does not affects schema digest.
+        // It is set locally on a system tables that should be extra durable
+        bool _wait_for_sync = false; // true if all writes using this schema have to be synced immediately by commitlog
         bool _in_memory = false;
     };
     raw_schema _raw;
@@ -907,6 +910,24 @@ public:
     // Search for an existing index with same kind and options.
     std::optional<index_metadata> find_index_noname(const index_metadata& target) const;
     friend std::ostream& operator<<(std::ostream& os, const schema& s);
+    /*!
+     * \brief stream the CQL DESCRIBE output.
+     *
+     * CQL DESCRIBE is implemented at the driver level. This method mimic that functionality
+     * inside Scylla.
+     *
+     * The output of DESCRIBE is the CQL command to create the described table with its indexes and views.
+     *
+     * For tables with Indexes or Materialized Views, the CQL DESCRIBE is split between the base and view tables.
+     * Calling the describe method on the base table schema would result with the CQL "CREATE TABLE"
+     * command for creating that table only.
+     *
+     * Calling the describe method on a view schema would result with the appropriate "CREATE MATERIALIZED VIEW"
+     * or "CREATE INDEX" depends on the type of index that schema describes (ie. Materialized View, Global
+     * Index or Local Index).
+     *
+     */
+    std::ostream& describe(std::ostream& os) const;
     friend bool operator==(const schema&, const schema&);
     const column_mapping& get_column_mapping() const;
     friend class schema_registry_entry;
@@ -918,6 +939,9 @@ public:
     // recent as this version.
     bool is_synced() const;
     bool equal_columns(const schema&) const;
+    bool wait_for_sync_to_commitlog() const {
+        return _raw._wait_for_sync;
+    }
 public:
     const v3_columns& v3() const {
         return _v3_columns;

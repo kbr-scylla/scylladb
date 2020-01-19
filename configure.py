@@ -372,6 +372,7 @@ scylla_tests = [
     'test/perf/perf_row_cache_update',
     'test/perf/perf_simple_query',
     'test/perf/perf_sstable',
+    'test/tools/cql_repl',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
     'test/unit/memory_footprint_test',
@@ -1381,7 +1382,7 @@ with open(buildfile_tmp, 'w') as f:
             libs_{mode} = -l{fmt_lib}
             seastar_libs_{mode} = {seastar_libs}
             rule cxx.{mode}
-              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags -c -o $out $in
+              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags_{mode} $cxxflags $obj_cxxflags -c -o $out $in
               description = CXX $out
               depfile = $out.d
             rule link.{mode}
@@ -1550,9 +1551,12 @@ with open(buildfile_tmp, 'w') as f:
             for cc in grammar.sources('$builddir/{}/gen'.format(mode)):
                 obj = cc.replace('.cpp', '.o')
                 f.write('build {}: cxx.{} {} || {}\n'.format(obj, mode, cc, ' '.join(serializers)))
-                if cc.endswith('Parser.cpp') and has_sanitize_address_use_after_scope:
-                    # Parsers end up using huge amounts of stack space and overflowing their stack
-                    f.write('  obj_cxxflags = -fno-sanitize-address-use-after-scope\n')
+                if cc.endswith('Parser.cpp'):
+                    # Unoptimized parsers end up using huge amounts of stack space and overflowing their stack
+                    flags = '-O1'
+                    if has_sanitize_address_use_after_scope:
+                        flags += ' -fno-sanitize-address-use-after-scope'
+                    f.write('  obj_cxxflags = %s\n' % flags)
         for hh in headers:
             f.write('build $builddir/{mode}/{hh}.o: checkhh.{mode} {hh} || {gen_headers_dep}\n'.format(
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))

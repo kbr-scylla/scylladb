@@ -38,12 +38,16 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         distributed<database> db;
         database_config dbcfg;
         db::config cfg;
+        sharded<service::migration_notifier> mm_notif;
         sharded<abort_source> abort_sources;
         sharded<auth::service> auth_service;
         sharded<db::system_distributed_keyspace> sys_dist_ks;
         sharded<db::view::view_update_generator> view_update_generator;
         utils::fb_utilities::set_broadcast_address(gms::inet_address("127.0.0.1"));
         sharded<gms::feature_service> feature_service;
+
+        mm_notif.start().get();
+        auto stop_mm_notif = defer([&mm_notif] { mm_notif.stop().get(); });
 
         abort_sources.start().get();
         auto stop_abort_sources = defer([&] { abort_sources.stop().get(); });
@@ -61,7 +65,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         netw::get_messaging_service().start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000, false /* don't bind */).get();
         auto stop_messaging_service = defer([&] { netw::get_messaging_service().stop().get(); });
 
-        gms::get_gossiper().start(std::ref(feature_service), std::ref(cfg)).get();
+        gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(cfg)).get();
         auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
 
         service::storage_service_config sscfg;
@@ -70,10 +74,10 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         cql_config.start().get();
         auto stop_cql_config = defer([&] { cql_config.stop().get(); });
 
-        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(sl_controller), true).get();
+        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(sl_controller), true).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
-        db.start(std::ref(cfg), dbcfg).get();
+        db.start(std::ref(cfg), dbcfg, std::ref(mm_notif)).get();
         auto stop_db = defer([&] { db.stop().get(); });
         auto stop_database_d = defer([&db] {
             stop_database(db).get();

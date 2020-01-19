@@ -134,13 +134,14 @@ int get_generation_number() {
 }
 
 storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>& auth_service, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<qos::service_level_controller>& sl_controller, bool for_testing, std::set<sstring> disabled_features)
+        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller, bool for_testing, std::set<sstring> disabled_features)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
         , _db(db)
         , _gossiper(gossiper)
         , _auth_service(auth_service)
         , _cql_config(cql_config)
+        , _mnotifier(mn)
         , _sl_controller(sl_controller)
         , _disabled_features(std::move(disabled_features))
         , _service_memory_total(config.available_memory / 10)
@@ -795,10 +796,13 @@ void storage_service::join_token_ring(int delay) {
     _auth_service.start(
             permissions_cache_config_from_db_config(_db.local().get_config()),
             std::ref(cql3::get_query_processor()),
+            std::ref(_mnotifier),
             std::ref(service::get_migration_manager()),
             auth_service_config_from_db_config(_db.local().get_config())).get();
 
-    _auth_service.invoke_on_all(&auth::service::start).get();
+    _auth_service.invoke_on_all([] (auth::service& auth) {
+        return auth.start(service::get_local_migration_manager());
+    }).get();
 
     supervisor::notify("starting tracing");
     tracing::tracing::start_tracing().get();
@@ -1450,12 +1454,7 @@ future<> storage_service::drain_on_shutdown() {
             }).get();
             slogger.info("Drain on shutdown: shutdown commitlog done");
 
-            // NOTE: We currently don't destroy migration_manager nor
-            // storage_service in scylla, so when we reach here
-            // migration_manager should to be still alive. Be careful, when
-            // scylla starts to destroy migration_manager in the shutdown
-            // process.
-            service::get_local_migration_manager().unregister_listener(&ss);
+            ss._mnotifier.local().unregister_listener(&ss);
 
             slogger.info("Drain on shutdown: done");
         });
@@ -1532,9 +1531,9 @@ future<> storage_service::init_server(int delay, bind_messaging_port do_bind) {
 #endif
         _initialized = true;
 
-        // Register storage_service to migration_manager so we can update
+        // Register storage_service to migration_notifier so we can update
         // pending ranges when keyspace is chagned
-        service::get_local_migration_manager().register_listener(this);
+        _mnotifier.local().register_listener(this);
 #if 0
         try
         {
@@ -1606,12 +1605,14 @@ future<> storage_service::init_server(int delay, bind_messaging_port do_bind) {
 
 // Serialized
 future<> storage_service::replicate_tm_only() {
-    _shadow_token_metadata = _token_metadata;
+    auto tm = _token_metadata;
 
-    return get_storage_service().invoke_on_all([this](storage_service& local_ss){
-        if (engine().cpu_id() != 0) {
-            local_ss._token_metadata = _shadow_token_metadata;
-        }
+    return do_with(std::move(tm), [] (token_metadata& tm) {
+        return get_storage_service().invoke_on_all([&tm] (storage_service& local_ss){
+            if (engine().cpu_id() != 0) {
+                local_ss._token_metadata = tm;
+            }
+        });
     });
 }
 
@@ -2249,7 +2250,7 @@ future<> storage_service::start_native_transport() {
             cql_server_smp_service_group_config.max_nonlocal_requests = 5000;
             cql_server_config.bounce_request_smp_service_group = create_smp_service_group(cql_server_smp_service_group_config).get0();
             seastar::net::inet_address ip = gms::inet_address::lookup(addr, family, preferred).get0();
-            cserver->start(std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), cql_server_config, std::ref(ss._sl_controller)).get();
+            cserver->start(std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), std::ref(ss._mnotifier), cql_server_config, std::ref(ss._sl_controller)).get();
             struct listen_cfg {
                 socket_address addr;
                 std::shared_ptr<seastar::tls::credentials_builder> cred;
@@ -2568,43 +2569,6 @@ future<> storage_service::drain() {
         });
     });
 }
-
-double storage_service::get_load() const {
-    double bytes = 0;
-#if 0
-    for (String keyspaceName : Schema.instance.getKeyspaces())
-    {
-        Keyspace keyspace = Schema.instance.getKeyspaceInstance(keyspaceName);
-        if (keyspace == null)
-            continue;
-        for (ColumnFamilyStore cfs : keyspace.getColumnFamilyStores())
-            bytes += cfs.getLiveDiskSpaceUsed();
-    }
-#endif
-    return bytes;
-}
-
-sstring storage_service::get_load_string() const {
-    return format("{:f}", get_load());
-}
-
-future<std::map<sstring, double>> storage_service::get_load_map() {
-    return run_with_no_api_lock([] (storage_service& ss) {
-        std::map<sstring, double> load_map;
-        auto& lb = ss.get_load_broadcaster();
-        if (lb) {
-            for (auto& x : lb->get_load_info()) {
-                load_map.emplace(format("{}", x.first), x.second);
-                slogger.debug("get_load_map endpoint={}, load={}", x.first, x.second);
-            }
-        } else {
-            slogger.debug("load_broadcaster is not set yet!");
-        }
-        load_map.emplace(format("{}", ss.get_broadcast_address()), ss.get_load());
-        return load_map;
-    });
-}
-
 
 future<> storage_service::rebuild(sstring source_dc) {
     return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) {
@@ -3018,14 +2982,6 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name) {
     });
 }
 
-void storage_service::set_load_broadcaster(shared_ptr<load_broadcaster> lb) {
-    _lb = lb;
-}
-
-shared_ptr<load_broadcaster>& storage_service::get_load_broadcaster() {
-    return _lb;
-}
-
 future<> storage_service::shutdown_client_servers() {
     return do_stop_rpc_server().then([this] { return do_stop_native_transport(); });
 }
@@ -3375,10 +3331,10 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
 }
 
 future<> init_storage_service(sharded<abort_source>& abort_source, distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
-        sharded<cql3::cql_config>& cql_config,
-        sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, storage_service_config config, sharded<qos::service_level_controller>& sl_controller) {
-    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(sl_controller));
+        sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
+        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
+        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller) {
+    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(sl_controller));
 }
 
 future<> deinit_storage_service() {

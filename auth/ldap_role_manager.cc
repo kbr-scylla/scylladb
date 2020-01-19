@@ -25,6 +25,7 @@
 #include "exceptions/exceptions.hh"
 #include "seastarx.hh"
 #include "utils/class_registrator.hh"
+#include "db/config.hh"
 
 namespace {
 

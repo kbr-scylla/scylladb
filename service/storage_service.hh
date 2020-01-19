@@ -85,7 +85,6 @@ class gossiper;
 
 namespace service {
 
-class load_broadcaster;
 class storage_service;
 
 extern distributed<storage_service> _the_storage_service;
@@ -155,6 +154,7 @@ private:
     gms::gossiper& _gossiper;
     sharded<auth::service>& _auth_service;
     sharded<cql3::cql_config>& _cql_config;
+    sharded<service::migration_notifier>& _mnotifier;
     sharded<qos::service_level_controller>& _sl_controller;
     // Note that this is obviously only valid for the current shard. Users of
     // this facility should elect a shard to be the coordinator based on any
@@ -163,7 +163,6 @@ private:
     // It shouldn't be impossible to actively serialize two callers if the need
     // ever arise.
     bool _loading_new_sstables = false;
-    shared_ptr<load_broadcaster> _lb;
     std::optional<distributed<cql_transport::cql_server>> _cql_server;
     std::optional<distributed<thrift_server>> _thrift_server;
     sstring _operation_in_progress;
@@ -175,7 +174,7 @@ private:
     size_t _service_memory_total;
     semaphore _service_memory_limiter;
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false, /* only for tests */ std::set<sstring> disabled_features = {});
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false, /* only for tests */ std::set<sstring> disabled_features = {});
     void isolate_on_error();
     void isolate_on_commit_error();
 
@@ -208,10 +207,15 @@ public:
         return _token_metadata;
     }
 
-    future<> gossip_snitch_info();
+    const service::migration_notifier& get_migration_notifier() const {
+        return _mnotifier.local();
+    }
 
-    void set_load_broadcaster(shared_ptr<load_broadcaster> lb);
-    shared_ptr<load_broadcaster>& get_load_broadcaster();
+    service::migration_notifier& get_migration_notifier() {
+        return _mnotifier.local();
+    }
+
+    future<> gossip_snitch_info();
 
     distributed<database>& db() {
         return _db;
@@ -224,7 +228,6 @@ private:
     }
     /* This abstraction maintains the token/endpoint metadata information */
     token_metadata _token_metadata;
-    token_metadata _shadow_token_metadata;
 public:
     std::chrono::milliseconds get_ring_delay();
     gms::versioned_value::factory value_factory;
@@ -902,14 +905,6 @@ private:
 
     // needs to be modified to accept either a keyspace or ARS.
     std::unordered_multimap<dht::token_range, inet_address> get_changed_ranges_for_leaving(sstring keyspace_name, inet_address endpoint);
-public:
-    /** raw load value */
-    double get_load() const;
-
-    sstring get_load_string() const;
-
-    future<std::map<sstring, double>> get_load_map();
-
 #if 0
     public final void deliverHints(String host) throws UnknownHostException
     {
@@ -2411,7 +2406,8 @@ public:
 
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
         sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, storage_service_config config, sharded<qos::service_level_controller>& sl_controller);
+        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
+        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
 future<> read_sstables_format(distributed<storage_service>& ss);

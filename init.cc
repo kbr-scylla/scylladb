@@ -21,22 +21,6 @@
 
 logging::logger startlog("init");
 
-//
-// NOTE: there functions are (temporarily)
-// duplicated in cql_test_env.cc
-// until proper shutdown is done.
-
-void init_storage_service(sharded<abort_source>& abort_source,
-        distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
-        sharded<cql3::cql_config>& cql_config,
-        sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service, service::storage_service_config config,
-        sharded<qos::service_level_controller>& sl_controller) {
-    service::init_storage_service(abort_source, db, gossiper, auth_service, cql_config, sys_dist_ks, view_update_generator, feature_service, config, sl_controller).get();
-    // #293 - do not stop anything
-    //engine().at_exit([] { return service::deinit_storage_service(); });
-}
-
 void init_ms_fd_gossiper(sharded<qos::service_level_controller>& sl_controller
                 , sharded<gms::gossiper>& gossiper
                 , sharded<gms::feature_service>& features

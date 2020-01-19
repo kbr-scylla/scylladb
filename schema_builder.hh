@@ -221,6 +221,11 @@ public:
         return *this;
     }
 
+    schema_builder& set_wait_for_sync_to_commitlog(bool sync) {
+        _raw._wait_for_sync = sync;
+        return *this;
+    }
+
     schema_builder& set_in_memory(bool in_memory) {
         _raw._in_memory = in_memory;
         return *this;

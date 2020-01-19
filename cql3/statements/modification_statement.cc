@@ -28,7 +28,6 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "cdc/cdc.hh"
 #include "cql3/statements/modification_statement.hh"
 #include "cql3/statements/raw/modification_statement.hh"
 #include "cql3/statements/prepared_statement.hh"
@@ -316,23 +315,8 @@ modification_statement::execute_without_condition(service::storage_proxy& proxy,
         if (mutations.empty()) {
             return now();
         }
-
-        auto mutate = [&, cl, timeout] (std::vector<mutation> mutations) {
-            return proxy.mutate_with_triggers(std::move(mutations), cl, timeout, false, qs.get_trace_state(), qs.get_permit(), this->is_raw_counter_shard_write());
-        };
-
-        if (qs.get_client_state().is_internal() || qs.get_client_state().is_thrift() || !s->cdc_options().enabled()) {
-            return mutate(std::move(mutations));
-        }
-        return cdc::append_log_mutations(
-                cdc::db_context::builder(proxy).build(),
-                s,
-                timeout,
-                qs,
-                std::move(mutations))
-        .then([cl, timeout, &proxy, &qs, mutate = std::move(mutate)] (std::vector<mutation> mutations) {
-            return mutate(std::move(mutations));
-        });
+        
+        return proxy.mutate_with_triggers(std::move(mutations), cl, timeout, false, qs.get_trace_state(), qs.get_permit(), this->is_raw_counter_shard_write());
     });
 }
 

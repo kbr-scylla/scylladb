@@ -102,6 +102,7 @@ public:
     enum class sync_mode {
         PERIODIC, BATCH
     };
+    using force_sync = commitlog_entry_writer::force_sync;
     struct config {
         config() = default;
         config(const config&) = default;
@@ -183,7 +184,7 @@ public:
      *
      * @param mutation_func a function that writes 'size' bytes to the log, representing the mutation.
      */
-    future<rp_handle> add(const cf_id_type& id, size_t size, db::timeout_clock::time_point timeout, serializer_func mutation_func);
+    future<rp_handle> add(const cf_id_type& id, size_t size, db::timeout_clock::time_point timeout, force_sync sync, serializer_func mutation_func);
 
     /**
      * Template version of add.
@@ -191,8 +192,8 @@ public:
      * @param mu an invokable op that generates the serialized data. (Of size bytes)
      */
     template<typename _MutationOp>
-    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, db::timeout_clock::time_point timeout, _MutationOp&& mu) {
-        return add(id, size, timeout, [mu = std::forward<_MutationOp>(mu)](output& out) {
+    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, db::timeout_clock::time_point timeout, force_sync sync, _MutationOp&& mu) {
+        return add(id, size, timeout, sync, [mu = std::forward<_MutationOp>(mu)](output& out) {
             mu(out);
         });
     }
@@ -202,8 +203,8 @@ public:
      * @param mu an invokable op that generates the serialized data. (Of size bytes)
      */
     template<typename _MutationOp>
-    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, _MutationOp&& mu) {
-        return add_mutation(id, size, db::timeout_clock::time_point::max(), std::forward<_MutationOp>(mu));
+    future<rp_handle> add_mutation(const cf_id_type& id, size_t size, force_sync sync, _MutationOp&& mu) {
+        return add_mutation(id, size, db::timeout_clock::time_point::max(), sync, std::forward<_MutationOp>(mu));
     }
 
     /**
@@ -380,6 +381,8 @@ private:
     commitlog(config);
 
     struct entry_writer {
+        force_sync sync;
+        explicit entry_writer(force_sync sync_) : sync(sync_) {}
         virtual size_t size(segment&) = 0;
         // Returns segment-independent size of the entry. Must be <= than segment-dependant size.
         virtual size_t size() = 0;

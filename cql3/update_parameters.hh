@@ -49,7 +49,6 @@ public:
     static constexpr query::partition_slice::option_set options = query::partition_slice::option_set::of<
         query::partition_slice::option::send_partition_key,
         query::partition_slice::option::send_clustering_key,
-        query::partition_slice::option::always_return_static_content,
         query::partition_slice::option::collections_as_maps>();
 
     // Holder for data for

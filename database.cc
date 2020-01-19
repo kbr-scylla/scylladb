@@ -153,7 +153,7 @@ void keyspace::remove_user_type(const user_type ut) {
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
-database::database(const db::config& cfg, database_config dbcfg)
+database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn)
     : _stats(make_lw_shared<db_stats>())
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
@@ -202,6 +202,7 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>(*this))
+    , _mnotifier(mn)
 {
     local_schema_registry().init(*this); // TODO: we're never unbound.
     setup_metrics();
@@ -567,7 +568,7 @@ do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring
     });
 }
 
-future<> database::parse_system_tables(distributed<service::storage_proxy>& proxy) {
+future<> database::parse_system_tables(distributed<service::storage_proxy>& proxy, distributed<service::migration_manager>& mm) {
     using namespace db::schema_tables;
     return do_parse_schema_tables(proxy, db::schema_tables::KEYSPACES, [this] (schema_result_value_type &v) {
         auto ksm = create_keyspace_from_schema_partition(v);
@@ -597,12 +598,12 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
                 });
             });
             });
-    }).then([&proxy, this] {
-        return do_parse_schema_tables(proxy, db::schema_tables::VIEWS, [this, &proxy] (schema_result_value_type &v) {
-            return create_views_from_schema_partition(proxy, v.second).then([this] (std::vector<view_ptr> views) {
-                return parallel_for_each(views.begin(), views.end(), [this] (auto&& v) {
-                    return this->add_column_family_and_make_directory(v).then([this, v] {
-                        return maybe_update_legacy_secondary_index_mv_schema(*this, v);
+    }).then([&proxy, &mm, this] {
+        return do_parse_schema_tables(proxy, db::schema_tables::VIEWS, [this, &proxy, &mm] (schema_result_value_type &v) {
+            return create_views_from_schema_partition(proxy, v.second).then([this, &mm] (std::vector<view_ptr> views) {
+                return parallel_for_each(views.begin(), views.end(), [this, &mm] (auto&& v) {
+                    return this->add_column_family_and_make_directory(v).then([this, &mm, v] {
+                        return maybe_update_legacy_secondary_index_mv_schema(mm.local(), *this, v);
                     });
                 });
             });
@@ -661,7 +662,7 @@ future<> database::update_keyspace(const sstring& name) {
         auto new_ksm = ::make_lw_shared<keyspace_metadata>(tmp_ksm->name(), tmp_ksm->strategy_name(), tmp_ksm->strategy_options(), tmp_ksm->durable_writes(),
                         boost::copy_range<std::vector<schema_ptr>>(ks.metadata()->cf_meta_data() | boost::adaptors::map_values), std::move(ks.metadata()->user_types()));
         ks.update_from(std::move(new_ksm));
-        return service::get_local_migration_manager().notify_update_keyspace(ks.metadata());
+        return get_notifier().update_keyspace(ks.metadata());
     });
 }
 
@@ -1448,7 +1449,7 @@ static future<> maybe_handle_reorder(std::exception_ptr exp) {
 future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout) {
     if (cf.commitlog() != nullptr) {
         return do_with(freeze(m), [this, &m, &cf, timeout] (frozen_mutation& fm) {
-            commitlog_entry_writer cew(m.schema(), fm);
+            commitlog_entry_writer cew(m.schema(), fm, db::commitlog::force_sync::no);
             return cf.commitlog()->add_entry(m.schema()->id(), cew, timeout);
         }).then([this, &m, &cf, timeout] (db::rp_handle h) {
             return apply_in_memory(m, cf, std::move(h), timeout).handle_exception(maybe_handle_reorder);
@@ -1457,10 +1458,11 @@ future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db
     return apply_in_memory(m, cf, {}, timeout);
 }
 
-future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::UUID uuid, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
+future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::UUID uuid, const frozen_mutation& m, db::timeout_clock::time_point timeout,
+        db::commitlog::force_sync sync) {
     auto cl = cf.commitlog();
     if (cl != nullptr) {
-        commitlog_entry_writer cew(s, m);
+        commitlog_entry_writer cew(s, m, sync);
         return cf.commitlog()->add_entry(uuid, cew, timeout).then([&m, this, s, timeout, cl](db::rp_handle h) {
             return this->apply_in_memory(m, s, std::move(h), timeout).handle_exception(maybe_handle_reorder);
         });
@@ -1468,7 +1470,7 @@ future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::
     return apply_in_memory(m, std::move(s), {}, timeout);
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
@@ -1479,15 +1481,17 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_
                                  s->ks_name(), s->cf_name(), s->version()));
     }
 
+    sync = sync || db::commitlog::force_sync(s->wait_for_sync_to_commitlog());
+
     // Signal to view building code that a write is in progress,
     // so it knows when new writes start being sent to a new view.
     auto op = cf.write_in_progress();
     if (cf.views().empty()) {
-        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally([op = std::move(op)] { });
+        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout, sync).finally([op = std::move(op)] { });
     }
     future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m, timeout);
-    return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout, &cf, op = std::move(op)] (row_locker::lock_holder lock) mutable {
-        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally(
+    return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout, &cf, op = std::move(op), sync] (row_locker::lock_holder lock) mutable {
+        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout, sync).finally(
                 // Hold the local lock on the base-table partition or row
                 // taken before the read, until the update is done.
                 [lock = std::move(lock), op = std::move(op)] { });
@@ -1512,11 +1516,11 @@ Future database::update_write_metrics(Future&& f) {
     });
 }
 
-future<> database::apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
+future<> database::apply(schema_ptr s, const frozen_mutation& m, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
-    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout));
+    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout, sync));
 }
 
 future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
@@ -1853,7 +1857,7 @@ future<utils::UUID> update_schema_version(distributed<service::storage_proxy>& p
 }
 
 future<> announce_schema_version(utils::UUID schema_version) {
-    return service::get_local_migration_manager().passive_announce(schema_version);
+    return service::migration_manager::passive_announce(schema_version);
 }
 
 future<> update_schema_version_and_announce(distributed<service::storage_proxy>& proxy, schema_features features)
@@ -1970,3 +1974,4 @@ const timeout_config infinite_timeout_config = {
         // not really infinite, but long enough
         1h, 1h, 1h, 1h, 1h, 1h, 1h,
 };
+

@@ -72,20 +72,24 @@ int main(int ac, char ** av) {
             sharded<db::system_distributed_keyspace> sys_dist_ks;
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<abort_source> abort_sources;
+            sharded<service::migration_notifier> mnotif;
+
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
+            mnotif.start().get();
+            auto stop_mnotifier = defer([&] { mnotif.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
             sl_controller.start(qos::service_level_options{1000}).get();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
             cql_config.start().get();
-            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), auth_service, cql_config, sys_dist_ks, view_update_generator, feature_service, sscfg, sl_controller).get();
+            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), auth_service, cql_config, sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, sl_controller).get();
             netw::get_messaging_service().start(std::ref(sl_controller), listen).get();
             auto& server = netw::get_local_messaging_service();
             auto port = server.port();
             auto listen = server.listen_address();
             fmt::print("Messaging server listening on ip {} port {:d} ...\n", listen, port);
-            gms::get_gossiper().start(std::ref(feature_service), std::ref(cfg)).get();
+            gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(cfg)).get();
             std::set<gms::inet_address> seeds;
             for (auto s : config["seed"].as<std::vector<std::string>>()) {
                 seeds.emplace(std::move(s));

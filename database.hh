@@ -92,6 +92,8 @@ class reconcilable_result;
 
 namespace service {
 class storage_proxy;
+class migration_notifier;
+class migration_manager;
 }
 
 namespace netw {
@@ -816,6 +818,24 @@ public:
     future<> snapshot(sstring name);
     future<std::unordered_map<sstring, snapshot_details>> get_snapshot_details();
 
+    /*!
+     * \brief write the schema to a 'schema.cql' file at the given directory.
+     *
+     * When doing a snapshot, the snapshot directory contains a 'schema.cql' file
+     * with a CQL command that can be used to generate the schema.
+     * The content is is similar to the result of the CQL DESCRIBE command of the table.
+     *
+     * When a schema has indexes, local indexes or views, those indexes and views
+     * are represented by their own schemas.
+     * In those cases, the method would write the relevant information for each of the schemas:
+     *
+     * The schema of the base table would output a file with the CREATE TABLE command
+     * and the schema of the view that is used for the index would output a file with the
+     * CREATE INDEX command.
+     * The same is true for local index and MATERIALIZED VIEW.
+     */
+    future<> write_schema_as_cql(sstring dir) const;
+
     const bool incremental_backups_enabled() const {
         return _config.enable_incremental_backups;
     }
@@ -1277,7 +1297,8 @@ private:
             database*,
             schema_ptr,
             const frozen_mutation&,
-            db::timeout_clock::time_point> _apply_stage;
+            db::timeout_clock::time_point,
+            db::commitlog::force_sync> _apply_stage;
 
     std::unordered_map<sstring, keyspace> _keyspaces;
     std::unordered_map<utils::UUID, lw_shared_ptr<column_family>> _column_families;
@@ -1303,6 +1324,8 @@ private:
     friend db::data_listeners;
     std::unique_ptr<db::data_listeners> _data_listeners;
 
+    service::migration_notifier& _mnotifier;
+
     bool _supports_infinite_bound_range_deletions = false;
 
     future<> init_commitlog();
@@ -1318,8 +1341,8 @@ private:
     void setup_metrics();
 
     friend class db_apply_executor;
-    future<> do_apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout);
-    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout);
+    future<> do_apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
+    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
@@ -1336,8 +1359,8 @@ public:
 
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
-    future<> parse_system_tables(distributed<service::storage_proxy>&);
-    database(const db::config&, database_config dbcfg);
+    future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn);
     database(database&&) = delete;
     ~database();
 
@@ -1360,6 +1383,9 @@ public:
     const compaction_manager& get_compaction_manager() const {
         return *_compaction_manager;
     }
+
+    service::migration_notifier& get_notifier() { return _mnotifier; }
+    const service::migration_notifier& get_notifier() const { return _mnotifier; }
 
     void add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg);
     future<> add_column_family_and_make_directory(schema_ptr schema);
@@ -1411,7 +1437,7 @@ public:
                                                 db::timeout_clock::time_point timeout = db::no_timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout = db::no_timeout);
+    future<> apply(schema_ptr, const frozen_mutation&, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout = db::no_timeout);
     future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);

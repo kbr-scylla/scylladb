@@ -87,6 +87,7 @@
 #include "multishard_mutation_query.hh"
 #include "database.hh"
 #include "db/consistency_level_validations.hh"
+#include "cdc/cdc.hh"
 
 namespace bi = boost::intrusive;
 
@@ -193,7 +194,7 @@ public:
         auto m = _mutations[utils::fb_utilities::get_broadcast_address()];
         if (m) {
             tracing::trace(tr_state, "Executing a mutation locally");
-            return sp.mutate_locally(_schema, *m, timeout);
+            return sp.mutate_locally(_schema, *m, db::commitlog::force_sync::no, timeout);
         }
         return make_ready_future<>();
     }
@@ -244,7 +245,7 @@ public:
     virtual future<> apply_locally(storage_proxy& sp, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state) override {
         tracing::trace(tr_state, "Executing a mutation locally");
-        return sp.mutate_locally(_schema, *_mutation, timeout);
+        return sp.mutate_locally(_schema, *_mutation, db::commitlog::force_sync::no, timeout);
     }
     virtual future<> apply_remotely(storage_proxy& sp, gms::inet_address ep, std::vector<gms::inet_address>&& forward,
             storage_proxy::response_id_type response_id, storage_proxy::clock_type::time_point timeout,
@@ -1587,16 +1588,16 @@ storage_proxy::mutate_locally(const mutation& m, clock_type::time_point timeout)
     auto shard = _db.local().shard_of(m);
     _stats.replica_cross_shard_ops += shard != engine().cpu_id();
     return _db.invoke_on(shard, _write_smp_service_group, [s = global_schema_ptr(m.schema()), m = freeze(m), timeout] (database& db) -> future<> {
-        return db.apply(s, m, timeout);
+        return db.apply(s, m, db::commitlog::force_sync::no, timeout);
     });
 }
 
 future<>
-storage_proxy::mutate_locally(const schema_ptr& s, const frozen_mutation& m, clock_type::time_point timeout) {
+storage_proxy::mutate_locally(const schema_ptr& s, const frozen_mutation& m, db::commitlog::force_sync sync, clock_type::time_point timeout) {
     auto shard = _db.local().shard_of(m);
     _stats.replica_cross_shard_ops += shard != engine().cpu_id();
-    return _db.invoke_on(shard, _write_smp_service_group, [&m, gs = global_schema_ptr(s), timeout] (database& db) -> future<> {
-        return db.apply(gs, m, timeout);
+    return _db.invoke_on(shard, _write_smp_service_group, [&m, gs = global_schema_ptr(s), timeout, sync] (database& db) -> future<> {
+        return db.apply(gs, m, sync, timeout);
     });
 }
 
@@ -1921,6 +1922,8 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
                 return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
             } catch (timed_out_error&) {
                 return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
+            } catch (rpc::closed_error&) {
+                return make_exception_future<>(mutation_write_failure_exception(s->ks_name(), s->cf_name(), cl, 0, 1, db::block_for(ks, cl), db::write_type::COUNTER));
             }
         };
 
@@ -2009,6 +2012,17 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
  * @param tr_state trace state handle
  */
 future<> storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit, bool raw_counters) {
+    if (_cdc && _cdc->needs_cdc_augmentation(mutations)) {
+        return _cdc->augment_mutation_call(timeout, std::move(mutations)).then([this, cl, timeout, tr_state = std::move(tr_state), permit = std::move(permit), raw_counters](std::tuple<std::vector<mutation>, cdc::result_callback>&& t) mutable {
+            auto mutations = std::move(std::get<0>(t));
+            auto end_func = std::move(std::get<1>(t));
+            auto f = _mutate_stage(this, std::move(mutations), cl, timeout, std::move(tr_state), std::move(permit), raw_counters);
+            if (end_func) {
+                f = f.then(std::move(end_func));
+            }
+            return f;
+        });
+    }
     return _mutate_stage(this, std::move(mutations), cl, timeout, std::move(tr_state), std::move(permit), raw_counters);
 }
 
@@ -2166,19 +2180,35 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
         }
     };
 
-    auto mk_ctxt = [this, tr_state, timeout, permit = std::move(permit)] (std::vector<mutation> mutations, db::consistency_level cl) mutable {
+    auto mk_ctxt = [this, tr_state, timeout, permit = std::move(permit), cl] (std::vector<mutation> mutations) mutable {
       try {
           return make_ready_future<lw_shared_ptr<context>>(make_lw_shared<context>(*this, std::move(mutations), cl, timeout, std::move(tr_state), std::move(permit)));
       } catch(...) {
           return make_exception_future<lw_shared_ptr<context>>(std::current_exception());
       }
     };
-
-    return mk_ctxt(std::move(mutations), cl).then([this] (lw_shared_ptr<context> ctxt) {
-        return ctxt->run().finally([ctxt]{});
-    }).then_wrapped([p = shared_from_this(), lc, tr_state = std::move(tr_state)] (future<> f) mutable {
+    auto cleanup = [p = shared_from_this(), lc, tr_state = std::move(tr_state)] (future<> f) mutable {
         return p->mutate_end(std::move(f), lc, p->_stats, std::move(tr_state));
-    });
+    };
+
+    if (_cdc && _cdc->needs_cdc_augmentation(mutations)) {
+        return _cdc->augment_mutation_call(timeout, std::move(mutations)).then([this, mk_ctxt = std::move(mk_ctxt), cleanup = std::move(cleanup)](std::tuple<std::vector<mutation>, cdc::result_callback>&& t) mutable {
+            auto mutations = std::move(std::get<0>(t));
+            auto end_func = std::get<1>(t);
+            auto f = std::move(mk_ctxt)(std::move(mutations)).then([this] (lw_shared_ptr<context> ctxt) {
+                return ctxt->run().finally([ctxt]{});
+            }).then_wrapped(std::move(cleanup));
+
+            if (end_func) {
+                f = f.then(std::move(end_func));                
+            }
+            return f;
+        });
+    }
+
+    return mk_ctxt(std::move(mutations)).then([this] (lw_shared_ptr<context> ctxt) {
+        return ctxt->run().finally([ctxt]{});
+    }).then_wrapped(std::move(cleanup));
 }
 
 template<typename Range>
@@ -4046,7 +4076,7 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
                 return make_ready_future<storage_proxy::coordinator_query_result>(f.get0());
             } catch (request_timeout_exception& ex) {
                 _stats.cas_read_timeouts.mark();
-                return make_exception_future<storage_proxy::coordinator_query_result>(std::move(ex));
+                return make_exception_future<storage_proxy::coordinator_query_result>(std::current_exception());
             } catch (exceptions::unavailable_exception& ex) {
                 _stats.cas_read_unavailables.mark();
                 return make_exception_future<storage_proxy::coordinator_query_result>(std::move(ex));
@@ -4182,7 +4212,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
                 return make_ready_future<bool>(f.get0());
             } catch (request_timeout_exception& ex) {
                 _stats.cas_write_timeouts.mark();
-                return make_exception_future<bool>(std::move(ex));
+                return make_exception_future<bool>(std::current_exception());
             } catch (exceptions::unavailable_exception& ex) {
                 _stats.cas_write_unavailables.mark();
                 return make_exception_future<bool>(std::move(ex));
@@ -4502,7 +4532,7 @@ void storage_proxy::init_messaging_service() {
                 trace_info ? *trace_info : std::nullopt,
                 /* apply_fn */ [] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr, schema_ptr s, const frozen_mutation& m,
                         clock_type::time_point timeout) {
-                    return p->mutate_locally(std::move(s), m, timeout);
+                    return p->mutate_locally(std::move(s), m, db::commitlog::force_sync::no, timeout);
                 },
                 /* forward_fn */ [] (netw::messaging_service::msg_addr addr, clock_type::time_point timeout, const frozen_mutation& m,
                         gms::inet_address reply_to, unsigned shard, response_id_type response_id,

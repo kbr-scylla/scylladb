@@ -76,7 +76,8 @@ future<> await_background_jobs_on_all_shards();
 
 static const sstring testing_superuser = "tester";
 
-static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features, db::config& cfg, db::seed_provider_type seed_provider, sstring cluster_name = "Test Cluster") {
+static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features, db::config& cfg, db::seed_provider_type seed_provider,
+            sharded<abort_source>& abort_sources, sstring cluster_name = "Test Cluster") {
         // Init gossiper
         std::set<gms::inet_address> seeds;
         if (seed_provider.parameters.count("seeds") > 0) {
@@ -91,7 +92,7 @@ static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features,
         if (seeds.empty()) {
             seeds.emplace(gms::inet_address("127.0.0.1"));
         }
-        return gms::get_gossiper().start(std::ref(features), std::ref(cfg)).then([seeds, cluster_name] {
+        return gms::get_gossiper().start(std::ref(abort_sources), std::ref(features), std::ref(cfg)).then([seeds, cluster_name] {
             auto& gossiper = gms::get_local_gossiper();
             gossiper.set_seeds(seeds);
             gossiper.set_cluster_name(cluster_name);
@@ -109,6 +110,7 @@ private:
     ::shared_ptr<sharded<auth::service>> _auth_service;
     ::shared_ptr<sharded<db::view::view_builder>> _view_builder;
     ::shared_ptr<sharded<db::view::view_update_generator>> _view_update_generator;
+    ::shared_ptr<sharded<service::migration_notifier>> _mnotifier;
     sharded<qos::service_level_controller>& _sl_controller;
 private:
     struct core_local_state {
@@ -139,12 +141,14 @@ public:
             ::shared_ptr<sharded<auth::service>> auth_service,
             ::shared_ptr<sharded<db::view::view_builder>> view_builder,
             ::shared_ptr<sharded<db::view::view_update_generator>> view_update_generator,
+            ::shared_ptr<sharded<service::migration_notifier>> mnotifier,
              sharded<qos::service_level_controller> &sl_controller)
             : _feature_service(std::move(feature_service))
             , _db(db)
             , _auth_service(std::move(auth_service))
             , _view_builder(std::move(view_builder))
             , _view_update_generator(std::move(view_update_generator))
+            , _mnotifier(std::move(mnotifier))
             , _sl_controller(sl_controller)
     { }
 
@@ -295,6 +299,10 @@ public:
         return _view_update_generator->local();
     }
 
+    virtual service::migration_notifier& local_mnotifier() override {
+        return _mnotifier->local();
+    }
+
     future<> start() {
         return _core_local.start(std::ref(*_auth_service));
     }
@@ -369,6 +377,10 @@ public:
                 create_directories((cfg->view_hints_directory() + "/" + std::to_string(i)).c_str());
             }
 
+            auto mm_notif = ::make_shared<sharded<service::migration_notifier>>();
+            mm_notif->start().get();
+            auto stop_mm_notify = defer([mm_notif] { mm_notif->stop().get(); });
+
             set_abort_on_internal_error(true);
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
@@ -396,7 +408,7 @@ public:
             auto stop_feature_service = defer([&] { feature_service->stop().get(); });
 
             // FIXME: split
-            tst_init_ms_fd_gossiper(*feature_service, *cfg, db::config::seed_provider_type()).get();
+            tst_init_ms_fd_gossiper(*feature_service, *cfg, db::config::seed_provider_type(), abort_sources).get();
 
             distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
             distributed<service::migration_manager>& mm = service::get_migration_manager();
@@ -410,12 +422,12 @@ public:
             auto& ss = service::get_storage_service();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            ss.start(std::ref(abort_sources), std::ref(*db), std::ref(gms::get_gossiper()), std::ref(*auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), sscfg, std::ref(sl_controller), true, cfg_in.disabled_features).get();
+            ss.start(std::ref(abort_sources), std::ref(*db), std::ref(gms::get_gossiper()), std::ref(*auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(*view_update_generator), std::ref(*feature_service), sscfg, std::ref(*mm_notif), std::ref(sl_controller), true, cfg_in.disabled_features).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             database_config dbcfg;
             dbcfg.available_memory = memory::stats().total_memory();
-            db->start(std::ref(*cfg), dbcfg).get();
+            db->start(std::ref(*cfg), dbcfg, std::ref(*mm_notif)).get();
             auto stop_db = defer([db] {
                 db->stop().get();
             });
@@ -438,12 +450,12 @@ public:
             proxy.start(std::ref(*db), spcfg, std::ref(b)).get();
             auto stop_proxy = defer([&proxy] { proxy.stop().get(); });
 
-            mm.start().get();
+            mm.start(std::ref(*mm_notif)).get();
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
             auto& qp = cql3::get_query_processor();
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(*db), qp_mcfg, std::ref(sl_controller)).get();
+            qp.start(std::ref(proxy), std::ref(*db), std::ref(*mm_notif), qp_mcfg, std::ref(sl_controller)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             db::batchlog_manager_config bmcfg;
@@ -465,7 +477,7 @@ public:
                 auto cfm = pair.second;
                 return ks.make_directory_for_column_family(cfm->cf_name(), cfm->id());
             }).get();
-            distributed_loader::init_non_system_keyspaces(*db, proxy).get();
+            distributed_loader::init_non_system_keyspaces(*db, proxy, mm).get();
 
             sharded<cdc::cdc_service> cdc;
             cdc.start(std::ref(proxy)).get();
@@ -494,8 +506,10 @@ public:
             });
 
             auto view_builder = ::make_shared<seastar::sharded<db::view::view_builder>>();
-            view_builder->start(std::ref(*db), std::ref(sys_dist_ks), std::ref(mm)).get();
-            view_builder->invoke_on_all(&db::view::view_builder::start).get();
+            view_builder->start(std::ref(*db), std::ref(sys_dist_ks), std::ref(*mm_notif)).get();
+            view_builder->invoke_on_all([&mm] (db::view::view_builder& vb) {
+                return vb.start(mm.local());
+            }).get();
             auto stop_view_builder = defer([view_builder] {
                 view_builder->stop().get();
             });
@@ -515,7 +529,7 @@ public:
                 // The default user may already exist if this `cql_test_env` is starting with previously populated data.
             }
 
-            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator, std::ref(sl_controller));
+            single_node_cql_env env(feature_service, db, auth_service, view_builder, view_update_generator, mm_notif, std::ref(sl_controller));
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 

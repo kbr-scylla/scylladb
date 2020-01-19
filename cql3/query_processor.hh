@@ -46,7 +46,7 @@
 #include "cql3/untyped_result_set.hh"
 #include "exceptions/exceptions.hh"
 #include "log.hh"
-#include "service/migration_manager.hh"
+#include "service/migration_listener.hh"
 #include "service/query_state.hh"
 #include "transport/messages/result_message.hh"
 
@@ -98,6 +98,7 @@ private:
     std::unique_ptr<migration_subscriber> _migration_subscriber;
     service::storage_proxy& _proxy;
     database& _db;
+    service::migration_notifier& _mnotifier;
 
     struct stats {
         uint64_t prepare_invocations = 0;
@@ -131,7 +132,7 @@ public:
 
     static ::shared_ptr<statements::raw::parsed_statement> parse_statement(const std::string_view& query);
 
-    query_processor(service::storage_proxy& proxy, database& db, memory_config mcfg, sharded<qos::service_level_controller> &sl_controller);
+    query_processor(service::storage_proxy& proxy, database& db, service::migration_notifier& mn, memory_config mcfg, sharded<qos::service_level_controller> &sl_controller);
 
     ~query_processor();
 
