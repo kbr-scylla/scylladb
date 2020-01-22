@@ -1204,6 +1204,7 @@ SEASTAR_TEST_CASE(test_map_insert_update) {
             return e.execute_cql("update cf set map1 = {1003, 4003} where p1 = 'key1';");
         }).then_wrapped([&e](future<shared_ptr<cql_transport::messages::result_message>> f) {
             BOOST_REQUIRE(f.failed());
+            f.ignore_ready_future();
             // overwrite whole map
             return e.execute_cql(
                 "update cf set map1 = {1001: 5001, 1002: 5002, 1003: 5003} where p1 = 'key1';").discard_result();
@@ -4471,23 +4472,89 @@ SEASTAR_TEST_CASE(test_bigint_sum) {
 
 SEASTAR_TEST_CASE(test_int_sum_with_cast) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        return do_with_cql_env_thread([] (cql_test_env& e) {
-            cquery_nofail(e, "create table cf (pk text, val int, primary key(pk));");
-            cquery_nofail(e, "insert into cf (pk, val) values ('a', 2147483647);");
-            cquery_nofail(e, "insert into cf (pk, val) values ('b', 2147483647);");
-            auto sum_as_bigint_query = "select sum(val as bigint) from cf;";
-            assert_that(e.execute_cql(sum_as_bigint_query).get0())
-                .is_rows()
-                .with_size(1)
-                .with_row({long_type->decompose(int64_t(4294967294))});
+        cquery_nofail(e, "create table cf (pk text, val int, primary key(pk));");
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', 2147483647);");
+        cquery_nofail(e, "insert into cf (pk, val) values ('b', 2147483647);");
+        auto sum_as_bigint_query = "select sum(cast(val as bigint)) from cf;";
+        assert_that(e.execute_cql(sum_as_bigint_query).get0())
+            .is_rows()
+            .with_size(1)
+            .with_row({long_type->decompose(int64_t(4294967294))});
 
-            cquery_nofail(e, "insert into cf (pk, val) values ('a', -2147483648);");
-            cquery_nofail(e, "insert into cf (pk, val) values ('b', -2147483647);");
-            assert_that(e.execute_cql(sum_as_bigint_query).get0())
-                .is_rows()
-                .with_size(1)
-                .with_row({long_type->decompose(int64_t(-4294967296))});
-        });
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', -2147483648);");
+        cquery_nofail(e, "insert into cf (pk, val) values ('b', -2147483647);");
+        assert_that(e.execute_cql(sum_as_bigint_query).get0())
+            .is_rows()
+            .with_size(1)
+            .with_row({long_type->decompose(int64_t(-4294967295))});
+    });
+}
+
+SEASTAR_TEST_CASE(test_float_sum_overflow) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "create table cf (pk text, val float, primary key(pk));");
+        BOOST_TEST_MESSAGE("make sure we can sum close to the max value");
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', 3.4028234e+38);");
+        auto result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(3.4028234e+38f)});
+        BOOST_TEST_MESSAGE("cause overflow");
+        cquery_nofail(e, "insert into cf (pk, val) values ('b', 1e+38);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(std::numeric_limits<float>::infinity())});
+        BOOST_TEST_MESSAGE("test maximum negative value");
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', -3.4028234e+38);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(-2.4028234e+38f)});
+        BOOST_TEST_MESSAGE("cause negative overflow");
+        cquery_nofail(e, "insert into cf (pk, val) values ('c', -2e+38);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(-std::numeric_limits<float>::infinity())});
+    });
+}
+
+SEASTAR_TEST_CASE(test_double_sum_overflow) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "create table cf (pk text, val double, primary key(pk));");
+        BOOST_TEST_MESSAGE("make sure we can sum close to the max value");
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', 1.79769313486231570814527423732e+308);");
+        auto result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(1.79769313486231570814527423732E308)});
+        BOOST_TEST_MESSAGE("cause overflow");
+        cquery_nofail(e, "insert into cf (pk, val) values ('b', 0.5e+308);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(std::numeric_limits<double>::infinity())});
+        BOOST_TEST_MESSAGE("test maximum negative value");
+        cquery_nofail(e, "insert into cf (pk, val) values ('a', -1.79769313486231570814527423732e+308);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(-1.29769313486231570814527423732e+308)});
+        BOOST_TEST_MESSAGE("cause negative overflow");
+        cquery_nofail(e, "insert into cf (pk, val) values ('c', -1e+308);");
+        result = e.execute_cql("select sum(val) from cf;").get0();
+        assert_that(result)
+            .is_rows()
+            .with_size(1)
+            .with_row({serialized(-std::numeric_limits<double>::infinity())});
     });
 }
 
