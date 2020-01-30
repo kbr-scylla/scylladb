@@ -87,7 +87,7 @@ public:
      *
      * This is currently relevant to EC2/GCE(?) only.
      */
-    virtual void reload_gossiper_state() override;
+    virtual future<> reload_gossiper_state() override;
 
 private:
     void periodic_reader_callback();

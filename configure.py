@@ -124,16 +124,21 @@ def flag_supported(flag, compiler):
     return try_compile(flags=['-Werror'] + split, compiler=compiler)
 
 
-def gold_supported(compiler):
+def linker_flags(compiler):
     src_main = 'int main(int argc, char **argv) { return 0; }'
+    link_flags = ['-fuse-ld=lld']
+    if try_compile_and_link(source=src_main, flags=link_flags, compiler=compiler):
+        print('Note: using the lld linker')
+        return ' '.join(link_flags)
     link_flags = ['-fuse-ld=gold']
     if try_compile_and_link(source=src_main, flags=link_flags, compiler=compiler):
+        print('Note: using the gold linker')
         threads_flag = '-Wl,--threads'
         if try_compile_and_link(source=src_main, flags=link_flags + [threads_flag], compiler=compiler):
             link_flags.append(threads_flag)
         return ' '.join(link_flags)
     else:
-        print('Note: gold not found; using default system linker')
+        print('Note: neither lld nor gold found; using default system linker')
         return ''
 
 
@@ -242,12 +247,12 @@ modes = {
     }
 }
 
-ldap_tests = [
+ldap_tests = set([
     'test/ldap/ldap_connection_test',
     'test/ldap/role_manager_test',
-]
+])
 
-scylla_tests = [
+scylla_tests = set([
     'test/boost/UUID_test',
     'test/boost/aggregate_fcts_test',
     'test/boost/allocation_strategy_test',
@@ -364,6 +369,7 @@ scylla_tests = [
     'test/manual/partition_data_test',
     'test/manual/row_locker_test',
     'test/manual/streaming_histogram_test',
+    'test/manual/sstable_scan_footprint_test',
     'test/perf/perf_cache_eviction',
     'test/perf/perf_cql_parser',
     'test/perf/perf_fast_forward',
@@ -372,33 +378,33 @@ scylla_tests = [
     'test/perf/perf_row_cache_update',
     'test/perf/perf_simple_query',
     'test/perf/perf_sstable',
-    'test/tools/cql_repl',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
     'test/unit/memory_footprint_test',
     'test/unit/row_cache_alloc_stress_test',
     'test/unit/row_cache_stress_test',
-] + ldap_tests
+]) | ldap_tests
 
-perf_tests = [
+perf_tests = set([
     'test/perf/perf_mutation_readers',
     'test/perf/perf_checksum',
     'test/perf/perf_mutation_fragment',
     'test/perf/perf_idl',
     'test/perf/perf_vint',
-]
+])
 
-apps = [
+apps = set([
     'scylla',
-]
+    'test/tools/cql_repl',
+])
 
-tests = scylla_tests + perf_tests
+tests = scylla_tests | perf_tests
 
-other = [
+other = set([
     'iotune',
-]
+])
 
-all_artifacts = apps + tests + other
+all_artifacts = apps | tests | other
 
 arg_parser = argparse.ArgumentParser('Configure scylla')
 arg_parser.add_argument('--static', dest='static', action='store_const', default='',
@@ -673,8 +679,6 @@ scylla_core = (['database.cc',
                 'gms/inet_address.cc',
                 'dht/i_partitioner.cc',
                 'dht/murmur3_partitioner.cc',
-                'dht/byte_ordered_partitioner.cc',
-                'dht/random_partitioner.cc',
                 'dht/boot_strapper.cc',
                 'dht/range_streamer.cc',
                 'unimplemented.cc',
@@ -894,6 +898,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 
 deps = {
     'scylla': idls + ['main.cc', 'release.cc', 'build_id.cc'] + scylla_core + api + alternator + redis,
+    'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
 }
 
 pure_boost_tests = set([
@@ -946,6 +951,7 @@ tests_not_using_seastar_test_framework = set([
     'test/unit/memory_footprint_test',
     'test/unit/row_cache_alloc_stress_test',
     'test/unit/row_cache_stress_test',
+    'test/manual/sstable_scan_footprint_test',
 ]) | pure_boost_tests
 
 for t in tests_not_using_seastar_test_framework:
@@ -1031,7 +1037,7 @@ optimization_flags = [o
                       if flag_supported(flag=o, compiler=args.cxx)]
 modes['release']['cxx_ld_flags'] += ' ' + ' '.join(optimization_flags)
 
-gold_linker_flag = gold_supported(compiler=args.cxx)
+linker_flags = linker_flags(compiler=args.cxx)
 
 dbgflag = '-g -gz' if args.debuginfo else ''
 tests_link_rule = 'link' if args.tests_debuginfo else 'link_stripped'
@@ -1338,8 +1344,8 @@ with open(buildfile_tmp, 'w') as f:
         builddir = {outdir}
         cxx = {cxx}
         cxxflags = {user_cflags} {warnings} {defines}
-        ldflags = {gold_linker_flag} {user_ldflags}
-        ldflags_build = {gold_linker_flag}
+        ldflags = {linker_flags} {user_ldflags}
+        ldflags_build = {linker_flags}
         libs = {libs}
         pool link_pool
             depth = {link_pool_depth}
@@ -1409,7 +1415,11 @@ with open(buildfile_tmp, 'w') as f:
                 # name, we also add a global typedef to avoid compilation errors.
                 command = sed -e '/^#if 0/,/^#endif/d' $in > $builddir/{mode}/gen/$in $
                      && {antlr3_exec} $builddir/{mode}/gen/$in $
+                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Lexer.hpp $
+                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Lexer.cpp $
+                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Parser.hpp $
                      && sed -i -e 's/^\\( *\)\\(ImplTraits::CommonTokenType\\* [a-zA-Z0-9_]* = NULL;\\)$$/\\1const \\2/' $
+                        -e '/^.*On :.*$$/d' $
                         -e '1i using ExceptionBaseType = int;' $
                         -e 's/^{{/{{ ExceptionBaseType\* ex = nullptr;/; $
                             s/ExceptionBaseType\* ex = new/ex = new/; $
@@ -1458,7 +1468,7 @@ with open(buildfile_tmp, 'w') as f:
                     'zstd/lib/libzstd.a',
                 ]])
                 objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
-                if binary.startswith('test/'):
+                if binary in tests:
                     local_libs = '$seastar_libs_{} $libs'.format(mode)
                     if binary in pure_boost_tests:
                         local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')

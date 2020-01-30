@@ -56,7 +56,7 @@ abstract_marker::raw::raw(int32_t bind_index)
     : _bind_index{bind_index}
 { }
 
-::shared_ptr<term> abstract_marker::raw::prepare(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver)
+::shared_ptr<term> abstract_marker::raw::prepare(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver) const
 {
     if (receiver->type->is_collection()) {
         if (receiver->type->get_kind() == abstract_type::kind::list) {
@@ -76,7 +76,7 @@ abstract_marker::raw::raw(int32_t bind_index)
     return ::make_shared<constants::marker>(_bind_index, receiver);
 }
 
-assignment_testable::test_result abstract_marker::raw::test_assignment(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver) {
+assignment_testable::test_result abstract_marker::raw::test_assignment(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver) const {
     return assignment_testable::test_result::WEAKLY_ASSIGNABLE;
 }
 
@@ -93,7 +93,7 @@ abstract_marker::in_raw::in_raw(int32_t bind_index)
     return ::make_shared<column_specification>(receiver->ks_name, receiver->cf_name, in_name, list_type_impl::get_instance(receiver->type, false));
 }
 
-::shared_ptr<term> abstract_marker::in_raw::prepare(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver) {
+::shared_ptr<term> abstract_marker::in_raw::prepare(database& db, const sstring& keyspace, ::shared_ptr<column_specification> receiver) const {
     return ::make_shared<lists::marker>(_bind_index, make_in_receiver(receiver));
 }
 

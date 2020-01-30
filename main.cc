@@ -67,6 +67,7 @@
 #include "alternator/server.hh"
 #include "redis/service.hh"
 #include "cdc/cdc.hh"
+#include "alternator/tags_extension.hh"
 
 namespace fs = std::filesystem;
 
@@ -423,6 +424,10 @@ int main(int ac, char** av) {
     app_template app(std::move(app_cfg));
 
     auto ext = std::make_shared<db::extensions>();
+    ext->add_schema_extension(alternator::tags_extension::NAME, [](db::extensions::schema_ext_config cfg) {
+        return std::visit([](auto v) { return ::make_shared<alternator::tags_extension>(v); }, cfg);
+    });
+
     auto cfg = make_lw_shared<db::config>(ext);
     auto init = app.get_options_description().add_options();
 
@@ -950,6 +955,9 @@ int main(int ac, char** av) {
             }).get();
             auto max_memory_repair = db.local().get_available_memory() * 0.1;
             repair_service rs(gossiper, max_memory_repair);
+            auto stop_repair_service = defer_verbose_shutdown("repair service", [&rs] {
+                rs.stop().get();
+            });
             repair_init_messaging_service_handler(rs, sys_dist_ks, view_update_generator).get();
             supervisor::notify("starting storage service", true);
             auto& ss = service::get_local_storage_service();
@@ -957,6 +965,11 @@ int main(int ac, char** av) {
             api::set_server_messaging_service(ctx).get();
             api::set_server_storage_service(ctx).get();
             ss.init_server_without_the_messaging_service_part().get();
+            api::set_server_snapshot(ctx).get();
+            auto stop_snapshots = defer_verbose_shutdown("snapshots", [] {
+                service::get_storage_service().invoke_on_all(&service::storage_service::snapshots_close).get();
+            });
+
             supervisor::notify("starting batchlog manager");
             db::get_batchlog_manager().invoke_on_all([] (db::batchlog_manager& b) {
                 return b.start();
@@ -1026,6 +1039,9 @@ int main(int ac, char** av) {
             }
 
             if (cfg->alternator_port() || cfg->alternator_https_port()) {
+                if (!cfg->check_experimental(db::experimental_features_t::LWT)) {
+                    throw std::runtime_error("Alternator enabled, but needs experimental LWT feature which wasn't enabled");
+                }
                 net::inet_address addr;
                 try {
                     addr = net::dns::get_host_by_name(cfg->alternator_address(), family).get0().addr_list.front();
@@ -1059,7 +1075,10 @@ int main(int ac, char** av) {
                         creds->set_client_auth(seastar::tls::client_auth::REQUIRE);
                     }
                 }
-                alternator_server.init(addr, alternator_port, alternator_https_port, creds, cfg->alternator_enforce_authorization()).get();
+                bool alternator_enforce_authorization = cfg->alternator_enforce_authorization();
+                with_scheduling_group(dbcfg.statement_scheduling_group, [addr, alternator_port, alternator_https_port, creds = std::move(creds), alternator_enforce_authorization] {
+                    return alternator_server.init(addr, alternator_port, alternator_https_port, creds, alternator_enforce_authorization);
+                }).get();
             }
 
             static redis_service redis;

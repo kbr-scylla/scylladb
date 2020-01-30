@@ -35,7 +35,7 @@
 using namespace sstables;
 
 static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
-    return sst->as_mutation_source().make_reader(s, query::full_partition_range, s->full_slice());
+    return sst->as_mutation_source().make_reader(s, no_reader_permit(), query::full_partition_range, s->full_slice());
 
 }
 
