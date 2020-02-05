@@ -19,6 +19,7 @@
 #include "concrete_types.hh"
 #include <seastar/core/print.hh>
 #include <seastar/net/ip.hh>
+#include "utils/exceptions.hh"
 #include "utils/serialization.hh"
 #include "vint-serialization.hh"
 #include "combine.hh"
@@ -983,13 +984,13 @@ static size_t map_serialized_size(const map_type_impl::native_type* m) {
     return len;
 }
 
-void
-map_type_impl::serialize(const void* value, bytes::iterator& out, cql_serialization_format sf) const {
-    auto& m = from_value(value);
+static void
+serialize_map(const map_type_impl& t, const void* value, bytes::iterator& out, cql_serialization_format sf) {
+    auto& m = t.from_value(value);
     write_collection_size(out, m.size(), sf);
     for (auto&& kv : m) {
-        write_collection_value(out, sf, _keys, kv.first);
-        write_collection_value(out, sf, _values, kv.second);
+        write_collection_value(out, sf, t.get_keys_type(), kv.first);
+        write_collection_value(out, sf, t.get_values_type(), kv.second);
     }
 }
 
@@ -1071,6 +1072,8 @@ static std::optional<data_type> update_user_type_aux(
         map_type_impl::get_instance(k ? *k : old_keys, v ? *v : old_values, m.is_multi_cell())));
 }
 
+static void serialize(const abstract_type& t, const void* value, bytes::iterator& out, cql_serialization_format sf);
+
 bytes_opt
 collection_type_impl::reserialize(cql_serialization_format from, cql_serialization_format to, bytes_view_opt v) const {
     if (!v) {
@@ -1079,7 +1082,7 @@ collection_type_impl::reserialize(cql_serialization_format from, cql_serializati
     auto val = deserialize(*v, from);
     bytes ret(bytes::initialized_later(), val.serialized_size());  // FIXME: serialized_size want @to
     auto out = ret.begin();
-    serialize(get_value_ptr(val), out, to);
+    ::serialize(*this, get_value_ptr(val), out, to);
     return ret;
 }
 
@@ -1150,12 +1153,12 @@ static size_t listlike_serialized_size(const std::vector<data_value>* s) {
     return len;
 }
 
-void
-set_type_impl::serialize(const void* value, bytes::iterator& out, cql_serialization_format sf) const {
-    auto& s = from_value(value);
+static void
+serialize_set(const set_type_impl& t, const void* value, bytes::iterator& out, cql_serialization_format sf) {
+    auto& s = t.from_value(value);
     write_collection_size(out, s.size(), sf);
     for (auto&& e : s) {
-        write_collection_value(out, sf, _elements, e);
+        write_collection_value(out, sf, t.get_elements_type(), e);
     }
 }
 
@@ -1251,12 +1254,12 @@ static void validate_aux(const list_type_impl& t, bytes_view v, cql_serializatio
     }
 }
 
-void
-list_type_impl::serialize(const void* value, bytes::iterator& out, cql_serialization_format sf) const {
-    auto& s = from_value(value);
+static void
+serialize_list(const list_type_impl& t, const void* value, bytes::iterator& out, cql_serialization_format sf) {
+    auto& s = t.from_value(value);
     write_collection_size(out, s.size(), sf);
     for (auto&& e : s) {
-        write_collection_value(out, sf, _elements, e);
+        write_collection_value(out, sf, t.get_elements_type(), e);
     }
 }
 
@@ -1466,24 +1469,39 @@ static void serialize_aux(const tuple_type_impl& type, const tuple_type_impl::na
 
 static size_t concrete_serialized_size(const boost::multiprecision::cpp_int& num);
 
-static void serialize_varint(bytes::iterator& out, const boost::multiprecision::cpp_int& num) {
-    boost::multiprecision::cpp_int pnum = boost::multiprecision::abs(num);
-
-    std::vector<uint8_t> b;
-    auto size = concrete_serialized_size(num);
-    b.reserve(size);
-    if (num.sign() < 0) {
-        pnum -= 1;
-    }
-    for (unsigned i = 0; i < size; i++) {
-        auto v = boost::multiprecision::integer_modulus(pnum, 256);
-        pnum >>= 8;
-        if (num.sign() < 0) {
-            v = ~v;
+static void serialize_varint_aux(bytes::iterator& out, const boost::multiprecision::cpp_int& num, uint8_t mask) {
+    struct inserter_with_prefix {
+        bytes::iterator& out;
+        uint8_t mask;
+        bool first = true;
+        inserter_with_prefix& operator*() {
+            return *this;
         }
-        b.push_back(v);
+        inserter_with_prefix& operator=(uint8_t value) {
+            if (first) {
+                if (value & 0x80) {
+                    *out++ = 0 ^ mask;
+                }
+                first = false;
+            }
+            *out = value ^ mask;
+            return *this;
+        }
+        inserter_with_prefix& operator++() {
+            ++out;
+            return *this;
+        }
+    };
+
+    export_bits(num, inserter_with_prefix{out, mask}, 8);
+}
+
+static void serialize_varint(bytes::iterator& out, const boost::multiprecision::cpp_int& num) {
+    if (num < 0) {
+        serialize_varint_aux(out, -num - 1, 0xff);
+    } else {
+        serialize_varint_aux(out, num, 0);
     }
-    out = std::copy(b.crbegin(), b.crend(), out);
 }
 
 static void serialize(const abstract_type& t, const void* value, bytes::iterator& out);
@@ -1491,6 +1509,7 @@ static void serialize(const abstract_type& t, const void* value, bytes::iterator
 namespace {
 struct serialize_visitor {
     bytes::iterator& out;
+    cql_serialization_format sf;
     void operator()(const reversed_type_impl& t, const void* v) { return serialize(*t.underlying_type(), v, out); }
     template <typename T>
     void operator()(const integer_type_impl<T>& t, const typename integer_type_impl<T>::native_type* v1) {
@@ -1604,8 +1623,14 @@ struct serialize_visitor {
         out += signed_vint::serialize(d.days, out);
         out += signed_vint::serialize(d.nanoseconds, out);
     }
-    void operator()(const collection_type_impl& t, const void* value) {
-        return t.serialize(value, out, cql_serialization_format::internal());
+    void operator()(const list_type_impl& t, const void* value) {
+        serialize_list(t, value, out, sf);
+    }
+    void operator()(const map_type_impl& t, const void* value) {
+        serialize_map(t, value, out, sf);
+    }
+    void operator()(const set_type_impl& t, const void* value) {
+        serialize_set(t, value, out, sf);
     }
     void operator()(const tuple_type_impl& t, const tuple_type_impl::native_type* value) {
         return serialize_aux(t, value, out);
@@ -1613,8 +1638,12 @@ struct serialize_visitor {
 };
 }
 
+static void serialize(const abstract_type& t, const void* value, bytes::iterator& out, cql_serialization_format sf) {
+    visit(t, value, serialize_visitor{out, sf});
+}
+
 static void serialize(const abstract_type& t, const void* value, bytes::iterator& out)  {
-    visit(t, value, serialize_visitor{out});
+    return ::serialize(t, value, out, cql_serialization_format::internal());
 }
 
 static data_value deserialize_aux(const tuple_type_impl& t, bytes_view v) {
@@ -2071,12 +2100,19 @@ static size_t concrete_serialized_size(const string_type_impl::native_type& v) {
 static size_t concrete_serialized_size(const bytes_type_impl::native_type& v) { return v.size(); }
 static size_t concrete_serialized_size(const inet_addr_type_impl::native_type& v) { return v.get().size(); }
 
-static size_t concrete_serialized_size(const boost::multiprecision::cpp_int& num) {
-    if (!num) {
+static size_t concrete_serialized_size_aux(const boost::multiprecision::cpp_int& num) {
+    if (num) {
+        return align_up(boost::multiprecision::msb(num) + 2, 8u) / 8;
+    } else {
         return 1;
     }
-    auto pnum = abs(num);
-    return align_up(boost::multiprecision::msb(pnum) + 2, 8u) / 8;
+}
+
+static size_t concrete_serialized_size(const boost::multiprecision::cpp_int& num) {
+    if (num < 0) {
+        return concrete_serialized_size_aux(-num - 1);
+    }
+    return concrete_serialized_size_aux(num);
 }
 
 static size_t concrete_serialized_size(const varint_type_impl::native_type& v) {
@@ -2132,7 +2168,7 @@ template<typename T>
 static bytes serialize_value(const T& t, const typename T::native_type& v) {
     bytes b(bytes::initialized_later(), serialized_size_visitor{}(t, &v));
     auto i = b.begin();
-    serialize_visitor{i}(t, &v);
+    serialize_visitor{i, cql_serialization_format::internal()}(t, &v);
     return b;
 }
 
@@ -2587,6 +2623,19 @@ bytes abstract_type::decompose(const data_value& value) const {
     return b;
 }
 
+bool operator==(const data_value& x, const data_value& y) {
+    if (x._type != y._type) {
+        return false;
+    }
+    if (x.is_null() && y.is_null()) {
+        return true;
+    }
+    if (x.is_null() || y.is_null()) {
+        return false;
+    }
+    return x._type->equal(*x.serialize(), *y.serialize());
+}
+
 size_t data_value::serialized_size() const {
     if (!_value) {
         return 0;
@@ -2600,14 +2649,22 @@ void data_value::serialize(bytes::iterator& out) const {
     }
 }
 
-bytes data_value::serialize() const {
+bytes_opt data_value::serialize() const {
     if (!_value) {
-        return {};
+        return std::nullopt;
     }
     bytes b(bytes::initialized_later(), serialized_size());
     auto i = b.begin();
     serialize(i);
     return b;
+}
+
+bytes data_value::serialize_nonnull() const {
+    static logging::logger logger("types");
+    if (!_value) {
+        on_internal_error(logger, "serialize_nonnull called on null");
+    }
+    return std::move(*serialize());
 }
 
 sstring abstract_type::get_string(const bytes& b) const {

@@ -23,6 +23,7 @@
 #include <seastar/core/distributed.hh>
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/scheduling.hh>
 #include "utils/UUID_gen.hh"
 #include "service/migration_manager.hh"
 #include "sstables/compaction_manager.hh"
@@ -39,7 +40,6 @@
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
 #include "distributed_loader.hh"
-
 // TODO: remove (#293)
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
@@ -193,6 +193,20 @@ public:
         auto qs = make_query_state();
         return local_qp().process_statement_prepared(std::move(prepared), std::move(id), *qs, *options, true)
             .finally([options, qs] {});
+    }
+
+    virtual future<std::vector<mutation>> get_modification_mutations(const sstring& text) override {
+        auto qs = make_query_state();
+        auto cql_stmt = local_qp().get_statement(text, qs->get_client_state())->statement;
+        auto modif_stmt = dynamic_pointer_cast<cql3::statements::modification_statement>(std::move(cql_stmt));
+        if (!modif_stmt) {
+            throw std::runtime_error(format("get_stmt_mutations: not a modification statement: {}", text));
+        }
+        auto& qo = cql3::query_options::DEFAULT;
+        auto timeout = db::timeout_clock::now() + qo.get_timeout_config().write_timeout;
+
+        return modif_stmt->get_mutations(local_qp().proxy(), qo, timeout, false, qo.get_timestamp(*qs), *qs)
+            .finally([qs, modif_stmt = std::move(modif_stmt)] {});
     }
 
     virtual future<> create_table(std::function<schema(const sstring&)> schema_maker) override {
@@ -363,7 +377,6 @@ public:
             cfg->num_tokens.set(256);
             cfg->ring_delay_ms.set(500);
             auto features = cfg->experimental_features();
-            features.emplace_back(db::experimental_features_t::CDC);
             features.emplace_back(db::experimental_features_t::LWT);
             cfg->experimental_features(features);
             cfg->shutdown_announce_in_ms.set(0);
@@ -447,7 +460,9 @@ public:
             service::storage_proxy::config spcfg;
             spcfg.available_memory = memory::stats().total_memory();
             db::view::node_update_backlog b(smp::count, 10ms);
-            proxy.start(std::ref(*db), spcfg, std::ref(b)).get();
+            scheduling_group_key_config sg_conf =
+                    make_scheduling_group_key_config<service::storage_proxy_stats::stats>();
+            proxy.start(std::ref(*db), spcfg, std::ref(b), scheduling_group_key_create(sg_conf).get0()).get();
             auto stop_proxy = defer([&proxy] { proxy.stop().get(); });
 
             mm.start(std::ref(*mm_notif)).get();

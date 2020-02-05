@@ -69,7 +69,6 @@ public:
 
     using restrictions::uses_function;
     using restrictions::has_supporting_index;
-    using restrictions::values;
 
     bool empty() const override {
         return get_column_defs().empty();
@@ -123,7 +122,6 @@ public:
 
     using restrictions::uses_function;
     using restrictions::has_supporting_index;
-    using restrictions::values;
 
     bool empty() const override {
         return get_column_defs().empty();

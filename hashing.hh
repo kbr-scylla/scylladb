@@ -35,7 +35,7 @@ GCC6_CONCEPT(
     template<typename H>
     concept bool Hasher() {
         return requires(H& h, const char* ptr, size_t size) {
-            { h.update(ptr, size) } -> void
+            { h.update(ptr, size) } -> void;
         };
     }
 )

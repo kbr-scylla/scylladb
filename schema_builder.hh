@@ -12,7 +12,7 @@
 
 #include "schema.hh"
 #include "database_fwd.hh"
-#include "cdc/cdc.hh"
+#include "cdc/log.hh"
 
 struct schema_builder {
 public:

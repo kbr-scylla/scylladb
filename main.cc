@@ -66,7 +66,7 @@
 
 #include "alternator/server.hh"
 #include "redis/service.hh"
-#include "cdc/cdc.hh"
+#include "cdc/log.hh"
 #include "alternator/tags_extension.hh"
 
 namespace fs = std::filesystem;
@@ -804,7 +804,15 @@ int main(int ac, char** av) {
             spcfg.write_smp_service_group = create_smp_service_group(storage_proxy_smp_service_group_config).get0();
             spcfg.write_ack_smp_service_group = create_smp_service_group(storage_proxy_smp_service_group_config).get0();
             static db::view::node_update_backlog node_backlog(smp::count, 10ms);
-            proxy.start(std::ref(db), spcfg, std::ref(node_backlog)).get();
+            scheduling_group_key_config storage_proxy_stats_cfg =
+                    make_scheduling_group_key_config<service::storage_proxy_stats::stats>();
+            storage_proxy_stats_cfg.constructor = [plain_constructor = storage_proxy_stats_cfg.constructor] (void* ptr) {
+                plain_constructor(ptr);
+                reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
+                reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
+            };
+            proxy.start(std::ref(db), spcfg, std::ref(node_backlog),
+                    scheduling_group_key_create(storage_proxy_stats_cfg).get0()).get();
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
             supervisor::notify("starting migration manager");
@@ -964,6 +972,12 @@ int main(int ac, char** av) {
             ss.init_messaging_service_part().get();
             api::set_server_messaging_service(ctx).get();
             api::set_server_storage_service(ctx).get();
+
+            gossiper.local().register_(ss.shared_from_this());
+            auto stop_listening = defer_verbose_shutdown("storage service notifications", [&gossiper, &ss] {
+                gossiper.local().unregister_(ss.shared_from_this()).get();
+            });
+
             ss.init_server_without_the_messaging_service_part().get();
             api::set_server_snapshot(ctx).get();
             auto stop_snapshots = defer_verbose_shutdown("snapshots", [] {

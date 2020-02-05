@@ -1478,7 +1478,7 @@ struct aggregate_function_test {
             .with_size(1)
             .with_column_types({type})
             .with_row({
-                {expected.serialize()}
+                expected.serialize()
             });
     }
 public:

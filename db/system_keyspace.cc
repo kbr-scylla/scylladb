@@ -810,6 +810,33 @@ schema_ptr scylla_views_builds_in_progress() {
     return schema;
 }
 
+/*static*/ schema_ptr cdc_local() {
+    static thread_local auto cdc_local = [] {
+        schema_builder builder(make_lw_shared(schema(generate_legacy_id(NAME, CDC_LOCAL), NAME, CDC_LOCAL,
+        // partition key
+        {{"key", utf8_type}},
+        // clustering key
+        {},
+        // regular columns
+        {
+                /* Every node announces the timestamp of the newest known CDC generation to other nodes.
+                 * This timestamp is persisted here. */
+                {"streams_timestamp", timestamp_type},
+
+        },
+        // static columns
+        {},
+        // regular column name type
+        utf8_type,
+        // comment
+        "CDC-specific information that the local node stores"
+       )));
+       builder.with_version(generate_schema_version(builder.uuid()));
+       return builder.build(schema_builder::compact_storage::no);
+    }();
+    return cdc_local;
+}
+
 } //</v3>
 
 namespace legacy {
@@ -1657,6 +1684,12 @@ future<> update_tokens(const std::unordered_set<dht::token>& tokens) {
     });
 }
 
+future<> update_cdc_streams_timestamp(db_clock::time_point tp) {
+    return execute_cql(format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)",
+                v3::CDC_LOCAL), sstring(v3::CDC_LOCAL), tp)
+            .discard_result().then([] { return force_blocking_flush(v3::CDC_LOCAL); });
+}
+
 future<> force_blocking_flush(sstring cfname) {
     assert(qctx);
     return qctx->_db.invoke_on_all([cfname = std::move(cfname)](database& db) {
@@ -1709,6 +1742,17 @@ future<std::unordered_set<dht::token>> get_saved_tokens() {
     });
 }
 
+future<std::optional<db_clock::time_point>> get_saved_cdc_streams_timestamp() {
+    return execute_cql(format("SELECT streams_timestamp FROM system.{} WHERE key = ?", v3::CDC_LOCAL), sstring(v3::CDC_LOCAL))
+            .then([] (::shared_ptr<cql3::untyped_result_set> msg)-> std::optional<db_clock::time_point> {
+        if (msg->empty() || !msg->one().has("streams_timestamp")) {
+            return {};
+        }
+
+        return msg->one().get_as<db_clock::time_point>("streams_timestamp");
+    });
+}
+
 bool bootstrap_complete() {
     return get_bootstrap_state() == bootstrap_state::COMPLETED;
 }
@@ -1756,6 +1800,7 @@ std::vector<schema_ptr> all_tables() {
                     scylla_local(), v3::views_builds_in_progress(), v3::built_views(),
                     v3::scylla_views_builds_in_progress(),
                     v3::truncated(),
+                    v3::cdc_local(),
     });
     // legacy schema
     r.insert(r.end(), {
@@ -1781,7 +1826,7 @@ static void maybe_add_virtual_reader(schema_ptr s, database& db) {
 }
 
 static bool maybe_write_in_user_memory(schema_ptr s, database& db) {
-    return (s.get() == batchlog().get())
+    return (s.get() == batchlog().get()) || (s.get() == paxos().get())
             || s == v3::scylla_views_builds_in_progress();
 }
 

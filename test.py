@@ -326,6 +326,7 @@ class BoostTest(UnitTest):
         boost_args = []
         xmlout = os.path.join(options.tmpdir, self.mode, "xml", self.uname + ".xunit.xml")
         boost_args += ['--report_level=no', '--logger=HRF,test_suite:XML,test_suite,' + xmlout]
+        boost_args += ['--catch_system_errors=no']  # causes undebuggable cores
         boost_args += ['--']
         self.args = boost_args + self.args
 
@@ -503,7 +504,7 @@ async def run_test(test, options):
                          SEASTAR_LDAP_PORT=str(ldap_port),
                          UBSAN_OPTIONS='halt_on_error=1:abort_on_error=1',
                          ASAN_OPTIONS='disable_coredump=0:abort_on_error=1',
-                         BOOST_TEST_CATCH_SYSTEM_ERRORS="no"),
+                         ),
                 preexec_fn=os.setsid,
             )
         stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
@@ -790,7 +791,9 @@ async def main():
     for mode in options.modes:
         write_junit_report(options.tmpdir, mode)
 
-    return 0 if not failed_tests else -1
+    # Note: failure codes must be in the ranges 0-124, 126-127,
+    #       to cooperate with git bisect's expectations
+    return 0 if not failed_tests else 1
 
 if __name__ == "__main__":
     colorama.init()

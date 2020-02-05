@@ -881,14 +881,12 @@ public:
     }
 };
 
-static mutation make_item_mutation(const rjson::value& item, schema_ptr schema) {
+static mutation make_item_mutation(const rjson::value& item, schema_ptr schema, api::timestamp_type ts) {
     partition_key pk = pk_from_json(item, schema);
     clustering_key ck = ck_from_json(item, schema);
 
     mutation m(schema, pk);
     attribute_collector attrs_collector;
-
-    auto ts = api::new_timestamp();
 
     auto& row = m.partition().clustered_row(*schema, ck);
 
@@ -969,6 +967,9 @@ static lw_shared_ptr<query::read_command> read_nothing_read_command(schema_ptr s
 static dht::partition_range_vector to_partition_ranges(const schema& schema, const partition_key& pk) {
     return dht::partition_range_vector{dht::partition_range(dht::global_partitioner().decorate_key(schema, pk))};
 }
+static dht::partition_range_vector to_partition_ranges(const dht::decorated_key& pk) {
+    return dht::partition_range_vector{dht::partition_range(pk)};
+}
 
 
 // An rmw_operation encapsulates the common logic of all the item update
@@ -1010,15 +1011,15 @@ public:
     // conditional expression, apply() should return an empty optional.
     // apply() may throw if it encounters input errors not discovered during
     // the constructor.
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item) = 0;
+    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) = 0;
     // Convert the above apply() into the signature needed by cas_request:
     virtual std::optional<mutation> apply(query::result& qr, const query::partition_slice& slice, api::timestamp_type ts) override {
         if (qr.row_count()) {
             auto selection = cql3::selection::selection::wildcard(_schema);
             auto previous_item = describe_item(_schema, slice, *selection, qr, {});
-            return apply(std::make_unique<rjson::value>(std::move(previous_item)));
+            return apply(std::make_unique<rjson::value>(std::move(previous_item)), ts);
         } else {
-            return apply(std::unique_ptr<rjson::value>());
+            return apply(std::unique_ptr<rjson::value>(), ts);
         }
     }
     virtual ~rmw_operation() = default;
@@ -1049,7 +1050,8 @@ public:
     };
     // FIXME: Currently, the write isolation option is a constant chosen
     // during compilation. It should be a per-table configurable option.
-    const write_isolation _write_isolation = write_isolation::LWT_ALWAYS;
+    static constexpr write_isolation default_write_isolation = write_isolation::LWT_ALWAYS;
+    const write_isolation _write_isolation = default_write_isolation;
 };
 
 // shard_for_execute() checks whether execute() must be called on a specific
@@ -1089,7 +1091,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             // This is the old, unsafe, read before write which does first
             // a read, then a write. TODO: remove this mode entirely.
             return get_previous_item(proxy, client_state, schema(), _pk, _ck, stats).then([this, &client_state, &proxy] (std::unique_ptr<rjson::value> previous_item) mutable {
-                std::optional<mutation> m = apply(previous_item);
+                std::optional<mutation> m = apply(previous_item, api::new_timestamp());
                 if (!m) {
                     return make_ready_future<executor::request_return_type>(api_error("ConditionalCheckFailedException", "Failed condition."));
                 }
@@ -1101,7 +1103,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             });
         }
     } else if (_write_isolation != write_isolation::LWT_ALWAYS) {
-        std::optional<mutation> m = apply(nullptr);
+        std::optional<mutation> m = apply(nullptr, api::new_timestamp());
         assert(m); // !needs_read_before_write, so apply() did not check a condition
         return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), client_state.get_trace_state(), empty_service_permit()).then([] () {
             return make_ready_future<executor::request_return_type>(json_string(""));
@@ -1189,7 +1191,7 @@ public:
         }
         _condition_expression = get_parsed_condition_expression(_request);
     }
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item) override {
+    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override {
         std::unordered_set<std::string> used_attribute_values;
         std::unordered_set<std::string> used_attribute_names;
         if (!verify_expected(_request, previous_item) ||
@@ -1205,7 +1207,7 @@ public:
             verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
             verify_all_are_used(_request, "ExpressionAttributeValues", used_attribute_values, "UpdateExpression");
         }
-        return make_item_mutation(_item, schema());
+        return make_item_mutation(_item, schema(), ts);
     }
     virtual ~put_item_operation() = default;
 };
@@ -1247,13 +1249,13 @@ static void check_key(const rjson::value& key, const schema_ptr& schema) {
     }
 }
 
-static mutation make_delete_item_mutation(const rjson::value& key, schema_ptr schema) {
+static mutation make_delete_item_mutation(const rjson::value& key, schema_ptr schema, api::timestamp_type ts) {
     partition_key pk = pk_from_json(key, schema);
     clustering_key ck = ck_from_json(key, schema);
     check_key(key, schema);
     mutation m(schema, pk);
     auto& row = m.partition().clustered_row(*schema, ck);
-    row.apply(tombstone(api::new_timestamp(), gc_clock::now()));
+    row.apply(tombstone(ts, gc_clock::now()));
     return m;
 }
 
@@ -1275,7 +1277,7 @@ public:
         }
         _condition_expression = get_parsed_condition_expression(_request);
     }
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item) override {
+    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override {
         std::unordered_set<std::string> used_attribute_values;
         std::unordered_set<std::string> used_attribute_names;
         if (!verify_expected(_request, previous_item) ||
@@ -1291,7 +1293,7 @@ public:
             verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
             verify_all_are_used(_request, "ExpressionAttributeValues", used_attribute_values, "UpdateExpression");
         }
-        return make_delete_item_mutation(_key, schema());
+        return make_delete_item_mutation(_key, schema(), ts);
     }
     virtual ~delete_item_operation() = default;
 };
@@ -1348,6 +1350,111 @@ struct primary_key_equal {
     }
 };
 
+struct decorated_key_hash {
+    size_t operator()(const dht::decorated_key& k) const {
+        return std::hash<dht::token>()(k.token());
+    }
+};
+struct decorated_key_equal {
+    schema_ptr _s;
+    bool operator()(const dht::decorated_key& k1, const dht::decorated_key& k2) const {
+        return k1.equal(*_s, k2);
+    }
+};
+
+// This is a cas_request subclass for applying a given mutation to one
+// partition using LWT. This is a write-only operation, not needing the
+// previous value of the item (the mutation to be done is known prior
+// to starting the operation). Nevertheless, we want to do this mutation
+// via LWT to ensure that it is serialized with other LWT mutations to
+// the same partition.
+class mutation_cas_request : public service::cas_request {
+    mutation _mutation;
+public:
+    mutation_cas_request(mutation&& m) : _mutation(std::move(m)) { }
+    virtual ~mutation_cas_request() = default;
+    virtual std::optional<mutation> apply(query::result& qr, const query::partition_slice& slice, api::timestamp_type ts) override {
+        // This function is only called once so we can move _mutation.
+        return std::move(_mutation);
+    }
+    const dht::decorated_key& decorated_key() const { return _mutation.decorated_key(); }
+};
+
+static future<> cas_write(service::storage_proxy& proxy, schema_ptr schema, mutation&& m, service::client_state& client_state) {
+    auto timeout = default_timeout();
+    auto read_command = read_nothing_read_command(schema);
+    auto op = make_shared<mutation_cas_request>(std::move(m));
+    return proxy.cas(schema, op, read_command, to_partition_ranges(op->decorated_key()),
+            {timeout, empty_service_permit(), client_state, client_state.get_trace_state()},
+            db::consistency_level::LOCAL_SERIAL, db::consistency_level::LOCAL_QUORUM,
+            timeout, timeout).discard_result();
+    // We discarded cas()'s future value ("is_applied") because it's always
+    // true, as mutation_cas_request::apply() always returns a mutation.
+}
+
+// FIXME: if we failed writing some of the mutations, need to return a list
+// of these failed mutations rather than fail the whole write (issue #5650).
+static future<> do_batch_write(service::storage_proxy& proxy,
+        std::vector<mutation> mutations,
+        service::client_state& client_state,
+        stats& stats) {
+    if (mutations.empty()) {
+        return make_ready_future<>();
+    }
+    // FIXME: Currently, the write isolation option is a constant chosen
+    // during compilation. It should be a per-table configurable option.
+    const rmw_operation::write_isolation write_isolation = rmw_operation::default_write_isolation;
+    if (write_isolation != rmw_operation::write_isolation::LWT_ALWAYS) {
+        // Do a normal write, without LWT:
+        return proxy.mutate(std::move(mutations),
+                db::consistency_level::LOCAL_QUORUM,
+                default_timeout(),
+                client_state.get_trace_state(),
+                empty_service_permit());
+    } else {
+        // Do the write via LWT:
+        // Multiple mutations may be destined for the same partition, adding
+        // or deleting different items of one partition. Join them together
+        // because we can do them in one cas() call.
+        schema_ptr schema = mutations.front().schema();
+        std::unordered_map<dht::decorated_key, mutation, decorated_key_hash, decorated_key_equal>
+            key_mutations(1, decorated_key_hash{}, decorated_key_equal{schema});
+        for (auto& m : mutations) {
+            auto it = key_mutations.find(m.decorated_key());
+            if (it == key_mutations.end()) {
+                key_mutations.emplace(m.decorated_key(), m);
+            } else {
+                it->second.apply(m);
+            }
+        }
+        return parallel_for_each(std::move(key_mutations), [&proxy, &client_state, &stats] (auto& key_mutation) {
+            stats.write_using_lwt++;
+            auto schema = key_mutation.second.schema();
+            auto desired_shard = service::storage_proxy::cas_shard(key_mutation.second.decorated_key().token());
+            if (desired_shard == engine().cpu_id()) {
+                return cas_write(proxy, schema, std::move(key_mutation.second), client_state);
+            } else {
+                stats.shard_bounce_for_lwt++;
+                // FIXME: create separate smp_service_group
+                // FIXME: don't use the global function get_storage_proxy().
+                // Instead make storage_proxy a peering_sharded_service and
+                // use proxy.container().
+                return service::get_storage_proxy().invoke_on(desired_shard, default_smp_service_group(),
+                            [cs = client_state.move_to_other_shard(),
+                             fm = frozen_mutation(key_mutation.second),
+                             ks = schema->ks_name(), cf = schema->cf_name()]
+                            (service::storage_proxy& proxy) mutable {
+                        return do_with(cs.get(), [&proxy, fm = std::move(fm), ks = std::move(ks), cf = std::move(cf)]
+                                                 (service::client_state& client_state) {
+                            auto schema = proxy.get_db().local().find_schema(ks, cf);
+                            return cas_write(proxy, schema, fm.unfreeze(schema), client_state);
+                        });
+                    });
+            }
+        });
+    }
+}
+
 future<executor::request_return_type> executor::batch_write_item(client_state& client_state, std::string content) {
     _stats.api_operations.batch_write_item++;
     rjson::value batch_info = rjson::parse(content);
@@ -1369,7 +1476,13 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
             if (r_name == "PutRequest") {
                 const rjson::value& put_request = r->value;
                 const rjson::value& item = put_request["Item"];
-                mutations.push_back(make_item_mutation(item, schema));
+                // FIXME: Because of issue #5653, we must not call
+                // make_item_mutation() here with the current timestamp!
+                // Rather, instead of collecting mutations, we should collect
+                // the operations themselves, and mutation_cas_request will
+                // call make_item_mutation() or make_delete_item_mutation() in
+                // its apply(), with the right timestamp.
+                mutations.push_back(make_item_mutation(item, schema, api::new_timestamp()));
                 // make_item_mutation returns a mutation with a single clustering row
                 auto mut_key = std::make_pair(mutations.back().key(), mutations.back().partition().clustered_rows().begin()->key());
                 if (used_keys.count(mut_key) > 0) {
@@ -1378,7 +1491,7 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
                 used_keys.insert(std::move(mut_key));
             } else if (r_name == "DeleteRequest") {
                 const rjson::value& key = (r->value)["Key"];
-                mutations.push_back(make_delete_item_mutation(key, schema));
+                mutations.push_back(make_delete_item_mutation(key, schema, api::new_timestamp()));
                 // make_delete_item_mutation returns a mutation with a single clustering row
                 auto mut_key = std::make_pair(mutations.back().key(), mutations.back().partition().clustered_rows().begin()->key());
                 if (used_keys.count(mut_key) > 0) {
@@ -1391,10 +1504,10 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
         }
     }
 
-    return _proxy.mutate(std::move(mutations), db::consistency_level::LOCAL_QUORUM, default_timeout(), client_state.get_trace_state(), empty_service_permit()).then([] () {
-        // Without special options on what to return, BatchWriteItem returns nothing,
-        // unless there are UnprocessedItems - it's possible to just stop processing a batch
-        // due to throttling. TODO(sarna): Consider UnprocessedItems when returning.
+    return do_batch_write(_proxy, std::move(mutations), client_state, _stats).then([] () {
+        // FIXME: Issue #5650: If we failed writing some of the updates,
+        // need to return a list of these failed updates in UnprocessedItems
+        // rather than fail the whole write (issue #5650).
         rjson::value ret = rjson::empty_object();
         rjson::set(ret, "UnprocessedItems", rjson::empty_object());
         return make_ready_future<executor::request_return_type>(make_jsonable(std::move(ret)));
@@ -2043,7 +2156,7 @@ public:
 
     update_item_operation(service::storage_proxy& proxy, rjson::value&& request);
     virtual ~update_item_operation() = default;
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item) override;
+    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override;
 };
 
 update_item_operation::update_item_operation(service::storage_proxy& proxy, rjson::value&& update_info)
@@ -2104,7 +2217,7 @@ update_item_operation::update_item_operation(service::storage_proxy& proxy, rjso
 }
 
 std::optional<mutation>
-update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item) {
+update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) {
     std::unordered_set<std::string> used_attribute_values;
     std::unordered_set<std::string> used_attribute_names;
     if (!verify_expected(_request, previous_item) ||
@@ -2120,7 +2233,6 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item)
     mutation m(_schema, _pk);
     auto& row = m.partition().clustered_row(*_schema, _ck);
     attribute_collector attrs_collector;
-    auto ts = api::new_timestamp();
     auto do_update = [&] (bytes&& column_name, const rjson::value& json_value) {
         const column_definition* cdef = _schema->get_column_definition(column_name);
         if (cdef) {

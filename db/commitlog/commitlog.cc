@@ -1070,15 +1070,15 @@ db::commitlog::segment_manager::list_descriptors(sstring dirname) {
         sstring _dirname;
         file _file;
         sstring _fname_prefix;
-        subscription<directory_entry> _list;
+        future<> _list_done;
         std::vector<db::commitlog::descriptor> _result;
 
         helper(helper&&) = default;
         helper(sstring n, sstring fname_prefix, file && f)
-                : _dirname(std::move(n)), _file(std::move(f)), _fname_prefix(std::move(fname_prefix)), _list(
+                : _dirname(std::move(n)), _file(std::move(f)), _fname_prefix(std::move(fname_prefix)), _list_done(
                         _file.list_directory(
                                 std::bind(&helper::process, this,
-                                        std::placeholders::_1))) {
+                                        std::placeholders::_1)).done()) {
         }
 
         future<> process(directory_entry de) {
@@ -1101,7 +1101,7 @@ db::commitlog::segment_manager::list_descriptors(sstring dirname) {
         }
 
         future<> done() {
-            return _list.done();
+            return std::move(_list_done);
         }
 
         static bool is_cassandra_segment(sstring name) {
@@ -1851,7 +1851,7 @@ const db::commitlog::config& db::commitlog::active_config() const {
 
 // No commit_io_check needed in the log reader since the database will fail
 // on error at startup if required
-future<std::unique_ptr<subscription<db::commitlog::buffer_and_replay_position>>>
+future<>
 db::commitlog::read_log_file(const sstring& filename, const sstring& pfx, seastar::io_priority_class read_io_prio_class, commit_load_reader_func next, position_type off, const db::extensions* exts) {
     struct work {
     private:
@@ -2106,7 +2106,7 @@ db::commitlog::read_log_file(const sstring& filename, const sstring& pfx, seasta
             w->s.set_exception(ep);
         });
 
-        return std::make_unique<subscription<buffer_and_replay_position>>(std::move(ret));
+        return ret.done();
     });
 }
 

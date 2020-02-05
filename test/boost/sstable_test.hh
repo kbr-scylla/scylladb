@@ -232,7 +232,7 @@ inline std::array<sstables::sstable::version_types, 3> all_sstable_versions = {
 };
 
 template<typename AsyncAction>
-GCC6_CONCEPT( requires requires (AsyncAction aa, sstables::sstable::version_types& c) { { aa(c) } -> future<> } )
+GCC6_CONCEPT( requires requires (AsyncAction aa, sstables::sstable::version_types& c) { { aa(c) } -> future<>; } )
 inline
 future<> for_each_sstable_version(AsyncAction action) {
     return seastar::do_for_each(all_sstable_versions, std::move(action));
@@ -611,7 +611,7 @@ class test_setup {
     file _f;
     std::function<future<> (directory_entry de)> _walker;
     sstring _path;
-    subscription<directory_entry> _listing;
+    future<> _listing_done;
 
     static sstring& path() {
         static sstring _p = "test/resource/sstables/tests-temporary";
@@ -622,7 +622,7 @@ public:
     test_setup(file f, sstring path)
             : _f(std::move(f))
             , _path(path)
-            , _listing(_f.list_directory([this] (directory_entry de) { return _remove(de); })) {
+            , _listing_done(_f.list_directory([this] (directory_entry de) { return _remove(de); }).done()) {
     }
     ~test_setup() {
         // FIXME: discarded future.
@@ -648,7 +648,7 @@ protected:
             });
         });
     }
-    future<> done() { return _listing.done(); }
+    future<> done() { return std::move(_listing_done); }
 
     static future<> empty_test_dir(sstring p = path()) {
         return engine().open_directory(p).then([p] (file f) {

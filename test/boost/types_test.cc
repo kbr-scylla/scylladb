@@ -50,6 +50,12 @@ BOOST_AUTO_TEST_CASE(test_value_cast) {
     BOOST_REQUIRE_EQUAL(v1, "");
 }
 
+BOOST_AUTO_TEST_CASE(test_null_is_not_empty) {
+    data_value empty(sstring(""));
+    data_value null = data_value::make_null(utf8_type);
+    BOOST_REQUIRE(empty != null);
+}
+
 BOOST_AUTO_TEST_CASE(test_bytes_type_string_conversions) {
     BOOST_REQUIRE(bytes_type->equal(bytes_type->from_string("616263646566"), bytes_type->decompose(data_value(bytes{"abcdef"}))));
 }
@@ -403,6 +409,8 @@ BOOST_AUTO_TEST_CASE(test_varint) {
 
     BOOST_CHECK_EQUAL(value_cast<boost::multiprecision::cpp_int>(varint_type->deserialize(from_hex("00deadbeef"))), boost::multiprecision::cpp_int("0xdeadbeef"));
     BOOST_CHECK_EQUAL(value_cast<boost::multiprecision::cpp_int>(varint_type->deserialize(from_hex("00ffffffffffffffffffffffffffffffff"))), boost::multiprecision::cpp_int("340282366920938463463374607431768211455"));
+
+    BOOST_REQUIRE_EQUAL(from_hex("80000000"), varint_type->decompose(boost::multiprecision::cpp_int(-2147483648)));
 
     test_parsing_fails(varint_type, "1A");
 }
@@ -814,7 +822,7 @@ BOOST_AUTO_TEST_CASE(test_map_to_string) {
     native_type native{std::pair(n, n), std::pair(n, n)};
     auto ptr = std::make_unique<native_type>(std::move(native));
     auto v = data_value::make(m, std::move(ptr));
-    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize()), "{42 : 42}, {42 : 42}");
+    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize_nonnull()), "{42 : 42}, {42 : 42}");
 }
 
 BOOST_AUTO_TEST_CASE(test_map_to_json) {
@@ -834,7 +842,7 @@ BOOST_AUTO_TEST_CASE(test_set_to_string) {
     native_type native{data_value(int32_t(41)), data_value(int32_t(42))};
     auto ptr = std::make_unique<native_type>(std::move(native));
     auto v = data_value::make(m, std::move(ptr));
-    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize()), "41; 42");
+    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize_nonnull()), "41; 42");
 }
 
 BOOST_AUTO_TEST_CASE(test_list_to_string) {
@@ -843,7 +851,7 @@ BOOST_AUTO_TEST_CASE(test_list_to_string) {
     native_type native{data_value(int32_t(41)), data_value(int32_t(42))};
     auto ptr = std::make_unique<native_type>(std::move(native));
     auto v = data_value::make(m, std::move(ptr));
-    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize()), "41, 42");
+    BOOST_REQUIRE_EQUAL(m->to_string(v.serialize_nonnull()), "41, 42");
 }
 
 BOOST_AUTO_TEST_CASE(test_collection_type_compatibility) {

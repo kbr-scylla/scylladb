@@ -524,7 +524,9 @@ scylla_core = (['database.cc',
                 'transport/event_notifier.cc',
                 'transport/server.cc',
                 'transport/messages/result_message.cc',
-                'cdc/cdc.cc',
+                'cdc/log.cc',
+                'cdc/generation.cc',
+                'cdc/metadata.cc',
                 'cql3/type_json.cc',
                 'cql3/abstract_marker.cc',
                 'cql3/attributes.cc',
@@ -1160,7 +1162,6 @@ for m in ['debug', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
 
 seastar_cflags = args.user_cflags
-seastar_cflags += ' -Wno-error'
 if args.target != '':
     seastar_cflags += ' -march=' + args.target
 seastar_ldflags = args.user_ldflags
@@ -1576,7 +1577,7 @@ with open(buildfile_tmp, 'w') as f:
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
         f.write('  target = seastar\n'.format(**locals()))
-        f.write('build build/{mode}/seastar/libseastar_testing.a: ninja\n'
+        f.write('build build/{mode}/seastar/libseastar_testing.a: ninja | always\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
@@ -1608,7 +1609,7 @@ with open(buildfile_tmp, 'w') as f:
         rule configure
           command = {python} configure.py $configure_args
           generator = 1
-        build build.ninja: configure | configure.py SCYLLA-VERSION-GEN
+        build build.ninja: configure | configure.py SCYLLA-VERSION-GEN seastar/CMakeLists.txt
         rule cscope
             command = find -name '*.[chS]' -o -name "*.cc" -o -name "*.hh" | cscope -bq -i-
             description = CSCOPE

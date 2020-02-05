@@ -113,6 +113,9 @@ std::unique_ptr<cql3::query_options> repl_options() {
 
 // Read-evaluate-print-loop for CQL
 void repl(seastar::app_template& app) {
+    auto db_cfg = make_shared<db::config>();
+    db_cfg->enable_user_defined_functions({true}, db::config::config_source::CommandLine);
+    db_cfg->experimental_features(db::experimental_features_t::all(), db::config::config_source::CommandLine);
     do_with_cql_env_thread([] (cql_test_env& e) {
 
         // Comments allowed by CQL - -- and //
@@ -142,18 +145,32 @@ void repl(seastar::app_template& app) {
             // Print the statement
             std_cout << stmt.str();
             Json::Value json;
+
+            auto execute = [&json, &stmt, &e] () mutable {
+                return seastar::async([&] () mutable -> std::optional<unsigned> {
+                    auto qo = repl_options();
+                    auto msg = e.execute_cql(stmt.str(), std::move(qo)).get0();
+                    if (msg->move_to_shard()) {
+                        return *msg->move_to_shard();
+                    }
+                    json_visitor visitor(json);
+                    msg->accept(visitor);
+                    return std::nullopt;
+                });
+            };
+
             try {
-                auto qo = repl_options();
-                auto msg = e.execute_cql(stmt.str(), std::move(qo)).get0();
-                json_visitor visitor(json);
-                msg->accept(visitor);
+                auto shard = execute().get0();
+                if (shard) {
+                    smp::submit_to(*shard, std::move(execute)).get();
+                }
             } catch (std::exception& e) {
                 json["status"] = "error";
                 json["message"] = fmt::format("{}", e);
             }
             std_cout << json << std::endl;
         }
-    }).get0();
+    }, db_cfg).get0();
 }
 
 // Reset stdin/stdout/log streams to locations pointed

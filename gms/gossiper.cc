@@ -1286,11 +1286,11 @@ future<> gossiper::reset_endpoint_state_map() {
     });
 }
 
-std::unordered_map<inet_address, endpoint_state>& gms::gossiper::get_endpoint_states() {
+const std::unordered_map<inet_address, endpoint_state>& gms::gossiper::get_endpoint_states() const {
     return endpoint_state_map;
 }
 
-bool gossiper::uses_host_id(inet_address endpoint) {
+bool gossiper::uses_host_id(inet_address endpoint) const {
     return netw::get_local_messaging_service().knows_version(endpoint) ||
             get_application_state_ptr(endpoint, application_state::NET_VERSION);
 }
@@ -1314,7 +1314,7 @@ bool gossiper::is_cql_ready(const inet_address& endpoint) const {
     return ready;
 }
 
-utils::UUID gossiper::get_host_id(inet_address endpoint) {
+utils::UUID gossiper::get_host_id(inet_address endpoint) const {
     if (!uses_host_id(endpoint)) {
         throw std::runtime_error(format("Host {} does not use new-style tokens!", endpoint));
     }
@@ -1924,7 +1924,8 @@ future<> gossiper::do_stop_gossiping() {
         if (my_ep_state && !is_silent_shutdown_state(*my_ep_state)) {
             logger.info("Announcing shutdown");
             add_local_application_state(application_state::STATUS, _value_factory.shutdown(true)).get();
-            for (inet_address addr : _live_endpoints) {
+            auto live_endpoints = _live_endpoints;
+            for (inet_address addr : live_endpoints) {
                 msg_addr id = get_msg_addr(addr);
                 logger.trace("Sending a GossipShutdown to {}", id);
                 ms().send_gossip_shutdown(id, get_broadcast_address()).then_wrapped([id] (auto&&f) {
@@ -2043,6 +2044,14 @@ const versioned_value* gossiper::get_application_state_ptr(inet_address endpoint
         return nullptr;
     }
     return eps->get_application_state_ptr(appstate);
+}
+
+sstring gossiper::get_application_state_value(inet_address endpoint, application_state appstate) const {
+    auto v = get_application_state_ptr(endpoint, appstate);
+    if (!v) {
+        return {};
+    }
+    return v->value;
 }
 
 /**
