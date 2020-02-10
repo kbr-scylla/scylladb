@@ -43,7 +43,6 @@
 #include "cql3/untyped_result_set.hh"
 #include "utils/fb_utilities.hh"
 #include "utils/hash.hh"
-#include "dht/i_partitioner.hh"
 #include "version.hh"
 #include "thrift/server.hh"
 #include "exceptions/exceptions.hh"
@@ -51,6 +50,7 @@
 #include "query_context.hh"
 #include "partition_slice_builder.hh"
 #include "db/config.hh"
+#include "gms/feature_service.hh"
 #include "system_keyspace_view_types.hh"
 #include "schema_builder.hh"
 #include "hashers.hh"
@@ -1143,7 +1143,7 @@ static future<> setup_version() {
                              to_sstring(cql_serialization_format::latest_version),
                              snitch->get_datacenter(utils::fb_utilities::get_broadcast_address()),
                              snitch->get_rack(utils::fb_utilities::get_broadcast_address()),
-                             sstring(dht::global_partitioner().name()),
+                             sstring(qctx->db().get_config().partitioner()),
                              a.addr(),
                              utils::fb_utilities::get_broadcast_address().addr(),
                              netw::get_local_messaging_service().listen_address().addr(),
@@ -1232,6 +1232,8 @@ void minimal_setup(distributed<database>& db, distributed<cql3::query_processor>
     qctx = std::make_unique<query_context>(db, qp);
 }
 
+static future<> cache_truncation_record(distributed<database>& db);
+
 future<> setup(distributed<database>& db,
                distributed<cql3::query_processor>& qp,
                distributed<service::storage_service>& ss) {
@@ -1251,6 +1253,8 @@ future<> setup(distributed<database>& db,
     }).then([] {
         // #2514 - make sure "system" is written to system_schema.keyspaces.
         return db::schema_tables::save_system_schema(NAME);
+    }).then([&db] {
+        return cache_truncation_record(db);
     }).then([] {
         return netw::get_messaging_service().invoke_on_all([] (auto& ms){
             return ms.init_local_preferred_ip_cache();
@@ -1316,9 +1320,32 @@ static future<truncation_record> get_truncation_record(utils::UUID cf_id) {
     });
 }
 
-future<> migrate_truncation_records() {
+// Read system.truncate table and cache last truncation time in `table` object for each table on every shard
+static future<> cache_truncation_record(distributed<database>& db) {
+    sstring req = format("SELECT DISTINCT table_uuid, truncated_at from system.{}", TRUNCATED);
+    return qctx->qp().execute_internal(req).then([&db] (::shared_ptr<cql3::untyped_result_set> rs) {
+        return parallel_for_each(rs->begin(), rs->end(), [&db] (const cql3::untyped_result_set_row& row) {
+            auto table_uuid = row.get_as<utils::UUID>("table_uuid");
+            auto ts = row.get_as<db_clock::time_point>("truncated_at");
+
+            auto cpus = boost::irange(0u, smp::count);
+            return parallel_for_each(cpus.begin(), cpus.end(), [table_uuid, ts, &db] (unsigned int c) mutable {
+                return smp::submit_to(c, [table_uuid, ts, &db] () mutable {
+                    try {
+                        table& cf = db.local().find_column_family(table_uuid);
+                        cf.cache_truncation_record(ts);
+                    } catch (no_such_column_family&) {
+                        slogger.debug("Skip caching truncation time for {} since the table is no longer present", table_uuid);
+                    }
+                });
+            });
+        });
+    });
+}
+
+future<> migrate_truncation_records(const gms::feature& cluster_supports_truncation_table) {
     sstring req = format("SELECT truncated_at FROM system.{} WHERE key = '{}'", LOCAL, LOCAL);
-    return qctx->qp().execute_internal(req).then([](::shared_ptr<cql3::untyped_result_set> rs) {
+    return qctx->qp().execute_internal(req).then([&cluster_supports_truncation_table](::shared_ptr<cql3::untyped_result_set> rs) {
         truncation_map tmp;
         if (!rs->empty() && rs->one().has("truncated_at")) {
             auto map = rs->one().get_map<utils::UUID, bytes>("truncated_at");
@@ -1385,13 +1412,10 @@ future<> migrate_truncation_records() {
                     return save_truncation_record(uuid, tr.time_stamp, rp);
                 });
             });
-        }).then([tmp = std::move(tmp)] {
-            auto& ss = service::get_local_storage_service();
-            need_legacy_truncation_records = !ss.cluster_supports_truncation_table();
-
-            if (need_legacy_truncation_records || !tmp.empty()) {
+        }).then([&cluster_supports_truncation_table, tmp = std::move(tmp)] {
+            if (!cluster_supports_truncation_table || !tmp.empty()) {
                 //FIXME: discarded future.
-                (void)ss.cluster_supports_truncation_table().when_enabled().then([] {
+                (void)cluster_supports_truncation_table.when_enabled().then([] {
                     // this potentially races with a truncation, i.e. someone could be inserting into
                     // the legacy column while we delete it. But this is ok, it will just mean we have
                     // some unneeded data and will do a merge again next boot, but eventually we
@@ -1499,7 +1523,7 @@ future<db_clock::time_point> get_truncated_at(utils::UUID cf_id) {
 static set_type_impl::native_type prepare_tokens(const std::unordered_set<dht::token>& tokens) {
     set_type_impl::native_type tset;
     for (auto& t: tokens) {
-        tset.push_back(dht::global_partitioner().to_sstring(t));
+        tset.push_back(t.to_sstring());
     }
     return tset;
 }
@@ -1508,8 +1532,8 @@ std::unordered_set<dht::token> decode_tokens(set_type_impl::native_type& tokens)
     std::unordered_set<dht::token> tset;
     for (auto& t: tokens) {
         auto str = value_cast<sstring>(t);
-        assert(str == dht::global_partitioner().to_sstring(dht::global_partitioner().from_sstring(str)));
-        tset.insert(dht::global_partitioner().from_sstring(str));
+        assert(str == dht::token::from_sstring(str).to_sstring());
+        tset.insert(dht::token::from_sstring(str));
     }
     return tset;
 }
@@ -2062,7 +2086,7 @@ future<> register_view_for_building(sstring ks_name, sstring view_name, const dh
             std::move(view_name),
             0,
             int32_t(engine().cpu_id()),
-            dht::global_partitioner().to_sstring(token)).discard_result();
+            token.to_sstring()).discard_result();
 }
 
 future<> update_view_build_progress(sstring ks_name, sstring view_name, const dht::token& token) {
@@ -2072,7 +2096,7 @@ future<> update_view_build_progress(sstring ks_name, sstring view_name, const dh
             std::move(req),
             std::move(ks_name),
             std::move(view_name),
-            dht::global_partitioner().to_sstring(token),
+            token.to_sstring(),
             int32_t(engine().cpu_id())).discard_result();
 }
 
@@ -2123,11 +2147,11 @@ future<std::vector<view_build_progress>> load_view_build_progress() {
         for (auto& row : *cql_result) {
             auto ks_name = row.get_as<sstring>("keyspace_name");
             auto cf_name = row.get_as<sstring>("view_name");
-            auto first_token = dht::global_partitioner().from_sstring(row.get_as<sstring>("first_token"));
+            auto first_token = dht::token::from_sstring(row.get_as<sstring>("first_token"));
             auto next_token_sstring = row.get_opt<sstring>("next_token");
             std::optional<dht::token> next_token;
             if (next_token_sstring) {
-                next_token = dht::global_partitioner().from_sstring(std::move(next_token_sstring).value());
+                next_token = dht::token::from_sstring(std::move(next_token_sstring).value());
             }
             auto cpu_id = row.get_as<int32_t>("cpu_id");
             progress.emplace_back(view_build_progress{

@@ -51,8 +51,9 @@ private:
     std::vector<gms::feature::listener_registration> _feature_listeners;
     seastar::gate _background_tasks;
     static const std::chrono::milliseconds migration_delay;
+    gms::feature_service& _feat;
 public:
-    explicit migration_manager(migration_notifier&);
+    migration_manager(migration_notifier&, gms::feature_service&);
 
     migration_notifier& get_notifier() { return _notifier; }
     const migration_notifier& get_notifier() const { return _notifier; }
@@ -142,6 +143,12 @@ public:
     void init_messaging_service();
 private:
     future<> uninit_messaging_service();
+
+    static future<> include_keyspace_and_announce(
+            const keyspace_metadata& keyspace, std::vector<mutation> mutations, bool announce_locally);
+
+    static future<> do_announce_new_type(user_type new_type, bool announce_locally);
+
     future<> validate(schema_ptr);
 };
 

@@ -83,10 +83,10 @@ static future<result_message_ptr> void_result_message() {
     return make_ready_future<result_message_ptr>(nullptr);
 }
 
-void validate_cluster_support() {
+void validate_cluster_support(service::storage_proxy& proxy) {
     // TODO(jhaberku): All other feature-checking CQL statements also grab the `storage_service` globally. I'm not sure
     // if it's accessible through some other object, but for now I'm sticking with convention.
-    if (!service::get_local_storage_service().cluster_supports_roles()) {
+    if (!proxy.features().cluster_supports_roles()) {
         throw exceptions::invalid_request_exception(
                 "You cannot modify access-control information until the cluster has fully upgraded.");
     }
@@ -107,8 +107,8 @@ future<> create_role_statement::grant_permissions_to_creator(const service::clie
     });
 }
 
-void create_role_statement::validate(service::storage_proxy&, const service::client_state&) const {
-    validate_cluster_support();
+void create_role_statement::validate(service::storage_proxy& p, const service::client_state&) const {
+    validate_cluster_support(p);
 }
 
 future<> create_role_statement::check_access(const service::client_state& state) const {
@@ -213,8 +213,8 @@ void create_role_statement::sanitize_audit_info() {
 // `alter_role_statement`
 //
 
-void alter_role_statement::validate(service::storage_proxy&, const service::client_state&) const {
-    validate_cluster_support();
+void alter_role_statement::validate(service::storage_proxy& p, const service::client_state&) const {
+    validate_cluster_support(p);
 }
 
 future<> alter_role_statement::check_access(const service::client_state& state) const {
@@ -300,8 +300,8 @@ void alter_role_statement::sanitize_audit_info() {
 // `drop_role_statement`
 //
 
-void drop_role_statement::validate(service::storage_proxy&, const service::client_state& state) const {
-    validate_cluster_support();
+void drop_role_statement::validate(service::storage_proxy& p, const service::client_state& state) const {
+    validate_cluster_support(p);
 
     if (*state.user() == auth::authenticated_user(_role)) {
         throw request_validations::invalid_request("Cannot DROP primary role for current login.");

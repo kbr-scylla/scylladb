@@ -640,7 +640,7 @@ repair_info::repair_info(seastar::sharded<database>& db_,
     , shard(engine().cpu_id())
     , data_centers(data_centers_)
     , hosts(hosts_)
-    , _row_level_repair(service::get_local_storage_service().cluster_supports_row_level_repair()) {
+    , _row_level_repair(db.local().features().cluster_supports_row_level_repair()) {
 }
 
 future<> repair_info::do_streaming() {
@@ -758,7 +758,7 @@ static future<> repair_cf_range(repair_info& ri,
             check_in_shutdown();
             ri.check_in_abort();
             return seastar::get_units(parallelism_semaphore, 1).then([&ri, &completion, &success, &neighbors, &cf, range] (auto signal_sem) {
-                auto checksum_type = service::get_local_storage_service().cluster_supports_large_partitions()
+                auto checksum_type = ri.db.local().features().cluster_supports_large_partitions()
                                      ? repair_checksum::streamed : repair_checksum::legacy;
 
                 // Ask this node, and all neighbors, to calculate checksums in
@@ -1221,8 +1221,8 @@ private:
                 throw(std::runtime_error("range must have two components "
                         "separated by ':', got '" + range + "'"));
             }
-            auto tok_start = dht::global_partitioner().from_sstring(token_strings[0]);
-            auto tok_end = dht::global_partitioner().from_sstring(token_strings[1]);
+            auto tok_start = dht::token::from_sstring(token_strings[0]);
+            auto tok_end = dht::token::from_sstring(token_strings[1]);
             auto rng = wrapping_range<dht::token>(
                     ::range<dht::token>::bound(tok_start, false),
                     ::range<dht::token>::bound(tok_end, true));
@@ -1366,12 +1366,12 @@ static int do_repair_start(seastar::sharded<database>& db, sstring keyspace,
         std::optional<::range<dht::token>::bound> tok_end;
         if (!options.start_token.empty()) {
             tok_start = ::range<dht::token>::bound(
-                dht::global_partitioner().from_sstring(options.start_token),
+                dht::token::from_sstring(options.start_token),
                 true);
         }
         if (!options.end_token.empty()) {
             tok_end = ::range<dht::token>::bound(
-                dht::global_partitioner().from_sstring(options.end_token),
+                dht::token::from_sstring(options.end_token),
                 false);
         }
         dht::token_range given_range_complement(tok_end, tok_start);

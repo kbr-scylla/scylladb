@@ -69,7 +69,7 @@
 #include "tracing/trace_keyspace_helper.hh"
 
 #include "checked-file-impl.hh"
-#include "disk-error-handler.hh"
+#include "utils/disk-error-handler.hh"
 
 #include "db/timeout_clock.hh"
 #include "db/large_data_handler.hh"
@@ -153,7 +153,7 @@ void keyspace::remove_user_type(const user_type ut) {
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
-database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn)
+database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat)
     : _stats(make_lw_shared<db_stats>())
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
@@ -203,6 +203,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>(*this))
     , _mnotifier(mn)
+    , _feat(feat)
 {
     local_schema_registry().init(*this); // TODO: we're never unbound.
     setup_metrics();
@@ -572,7 +573,7 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
     using namespace db::schema_tables;
     return do_parse_schema_tables(proxy, db::schema_tables::KEYSPACES, [this] (schema_result_value_type &v) {
         auto ksm = create_keyspace_from_schema_partition(v);
-        return create_keyspace(ksm);
+        return create_keyspace(ksm, true /* bootstrap. do not mark populated yet */);
     }).then([&proxy, this] {
         return do_parse_schema_tables(proxy, db::schema_tables::TYPES, [this, &proxy] (schema_result_value_type &v) {
             auto& ks = this->find_keyspace(v.first);
@@ -871,6 +872,17 @@ void keyspace::update_from(::lw_shared_ptr<keyspace_metadata> ksm) {
    create_replication_strategy(_metadata->strategy_options());
 }
 
+future<> keyspace::ensure_populated() const {
+    return _populated.get_shared_future();
+}
+
+void keyspace::mark_as_populated() {
+    if (!_populated.available()) {
+        _populated.set_value();
+    }
+}
+
+
 static bool is_system_table(const schema& s) {
     return s.ks_name() == db::system_keyspace::NAME || s.ks_name() == db::system_distributed_keyspace::NAME;
 }
@@ -1054,13 +1066,26 @@ void database::create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>&
 
 future<>
 database::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
+    return create_keyspace(ksm, false);
+}
+
+future<>
+database::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, bool is_bootstrap) {
     auto i = _keyspaces.find(ksm->name());
     if (i != _keyspaces.end()) {
         return make_ready_future<>();
     }
 
     create_in_memory_keyspace(ksm);
-    auto& datadir = _keyspaces.at(ksm->name()).datadir();
+    auto& ks = _keyspaces.at(ksm->name());
+    auto& datadir = ks.datadir();
+
+    // keyspace created by either cql or migration 
+    // is by definition populated
+    if (!is_bootstrap) {
+        ks.mark_as_populated();
+    }
+
     if (datadir != "") {
         return io_check([&datadir] { return touch_directory(datadir); });
     } else {
@@ -1667,6 +1692,12 @@ future<> database::close_tables(table_kind kind_to_close) {
     });
 }
 
+future<> start_large_data_handler(sharded<database>& db) {
+    return db.invoke_on_all([](database& db) {
+        db.get_large_data_handler()->start();
+    });
+}
+
 future<> stop_database(sharded<database>& sdb) {
     return sdb.invoke_on_all([](database& db) {
         return db.get_compaction_manager().stop();
@@ -1693,7 +1724,7 @@ future<> database::stop_large_data_handler() {
 
 future<>
 database::stop() {
-    assert(_large_data_handler->stopped());
+    assert(!_large_data_handler->running());
     assert(_compaction_manager->stopped());
 
     // try to ensure that CL has done disk flushing
@@ -1769,6 +1800,10 @@ future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_fun
                             assert(low_mark <= rp || rp == db::replay_position());
                             rp = std::max(low_mark, rp);
                             return truncate_views(cf, truncated_at, should_flush).then([&cf, truncated_at, rp] {
+                                // save_truncation_record() may actually fail after we cached the truncation time
+                                // but this is not be worse that if failing without caching: at least the correct time
+                                // will be available until next reboot and a client will have to retry truncation anyway.
+                                cf.cache_truncation_record(truncated_at);
                                 return db::system_keyspace::save_truncation_record(cf, truncated_at, rp);
                             });
                         });

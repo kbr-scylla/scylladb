@@ -67,6 +67,7 @@
 #include "alternator/server.hh"
 #include "redis/service.hh"
 #include "cdc/log.hh"
+#include "cdc/cdc_extension.hh"
 #include "alternator/tags_extension.hh"
 
 namespace fs = std::filesystem;
@@ -427,6 +428,9 @@ int main(int ac, char** av) {
     ext->add_schema_extension(alternator::tags_extension::NAME, [](db::extensions::schema_ext_config cfg) {
         return std::visit([](auto v) { return ::make_shared<alternator::tags_extension>(v); }, cfg);
     });
+    ext->add_schema_extension(cdc::cdc_extension::NAME, [](db::extensions::schema_ext_config cfg) {
+        return std::visit([](auto v) { return ::make_shared<cdc::cdc_extension>(v); }, cfg);
+    });
 
     auto cfg = make_lw_shared<db::config>(ext);
     auto init = app.get_options_description().add_options();
@@ -536,8 +540,13 @@ int main(int ac, char** av) {
                     throw bad_configuration_error();
                 }
             }
-            feature_service.start().get();
-            // FIXME: feature_service.stop(), when we fix up shutdown
+            gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg);
+
+            feature_service.start(fcfg).get();
+            auto stop_feature_service = defer_verbose_shutdown("feature service", [&feature_service] {
+                feature_service.stop().get();
+            });
+
             dht::set_global_partitioner(cfg->partitioner(), cfg->murmur3_partitioner_ignore_msb_bits());
             auto make_sched_group = [&] (sstring name, unsigned shares) {
                 if (cfg->cpu_scheduler()) {
@@ -719,7 +728,8 @@ int main(int ac, char** av) {
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
             dbcfg.available_memory = get_available_memory();
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier)).get();
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service)).get();
+            start_large_data_handler(db).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -812,11 +822,11 @@ int main(int ac, char** av) {
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
             };
             proxy.start(std::ref(db), spcfg, std::ref(node_backlog),
-                    scheduling_group_key_create(storage_proxy_stats_cfg).get0()).get();
+                    scheduling_group_key_create(storage_proxy_stats_cfg).get0(), std::ref(feature_service)).get();
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
             supervisor::notify("starting migration manager");
-            mm.start(std::ref(mm_notifier)).get();
+            mm.start(std::ref(mm_notifier), std::ref(feature_service)).get();
             auto stop_migration_manager = defer_verbose_shutdown("migration manager", [&mm] {
                 mm.stop().get();
             });
@@ -842,7 +852,7 @@ int main(int ac, char** av) {
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
 
             // truncation record migration
-            db::system_keyspace::migrate_truncation_records().get();
+            db::system_keyspace::migrate_truncation_records(feature_service.local().cluster_supports_truncation_table()).get();
 
             supervisor::notify("loading system sstables");
 
@@ -858,7 +868,7 @@ int main(int ac, char** av) {
             distributed_loader::init_non_system_keyspaces(db, proxy, mm).get();
 
             supervisor::notify("starting view update generator");
-            view_update_generator.start(std::ref(db), std::ref(proxy)).get();
+            view_update_generator.start(std::ref(db)).get();
             supervisor::notify("discovering staging sstables");
             db.invoke_on_all([] (database& db) {
                 for (auto& x : db.get_column_families()) {

@@ -61,14 +61,14 @@ future<> boot_strapper::bootstrap() {
 
 }
 
-std::unordered_set<token> boot_strapper::get_bootstrap_tokens(token_metadata metadata, database& db) {
+std::unordered_set<token> boot_strapper::get_bootstrap_tokens(const token_metadata& metadata, database& db) {
     auto initial_tokens = db.get_initial_tokens();
     // if user specified tokens, use those
     if (initial_tokens.size() > 0) {
         blogger.debug("tokens manually specified as {}", initial_tokens);
         std::unordered_set<token> tokens;
         for (auto& token_string : initial_tokens) {
-            auto token = dht::global_partitioner().from_sstring(token_string);
+            auto token = dht::token::from_sstring(token_string);
             if (metadata.get_endpoint(token)) {
                 throw std::runtime_error(format("Bootstrapping to existing token {} is not allowed (decommission/removenode the old node first).", token_string));
             }
@@ -92,10 +92,10 @@ std::unordered_set<token> boot_strapper::get_bootstrap_tokens(token_metadata met
     return tokens;
 }
 
-std::unordered_set<token> boot_strapper::get_random_tokens(token_metadata metadata, size_t num_tokens) {
+std::unordered_set<token> boot_strapper::get_random_tokens(const token_metadata& metadata, size_t num_tokens) {
     std::unordered_set<token> tokens;
     while (tokens.size() < num_tokens) {
-        auto token = global_partitioner().get_random_token();
+        auto token = dht::token::get_random_token();
         auto ep = metadata.get_endpoint(token);
         if (!ep) {
             tokens.emplace(token);

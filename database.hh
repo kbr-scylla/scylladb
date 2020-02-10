@@ -79,7 +79,7 @@
 #include "mutation_query.hh"
 #include "cache_temperature.hh"
 #include <unordered_set>
-#include "disk-error-handler.hh"
+#include "utils/disk-error-handler.hh"
 #include "utils/updateable_value.hh"
 #include "user_types_metadata.hh"
 
@@ -98,6 +98,10 @@ class migration_manager;
 
 namespace netw {
 class messaging_service;
+}
+
+namespace gms {
+class feature_service;
 }
 
 namespace sstables {
@@ -523,6 +527,11 @@ private:
     utils::phased_barrier _pending_reads_phaser;
     // Corresponding phaser for in-progress streams
     utils::phased_barrier _pending_streams_phaser;
+
+    // This field cashes the last truncation time for the table.
+    // The master resides in system.truncated table
+    db_clock::time_point _truncated_at = db_clock::time_point::min();
+
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst);
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);
@@ -535,6 +544,12 @@ public:
     sstables::shared_sstable make_sstable(sstring dir, int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
     sstables::shared_sstable make_sstable(sstring dir);
     sstables::shared_sstable make_sstable();
+    void cache_truncation_record(db_clock::time_point truncated_at) {
+        _truncated_at = truncated_at;
+    }
+    db_clock::time_point get_truncation_record() {
+        return _truncated_at;
+    }
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, const std::vector<unsigned>& shards_for_the_sstable) noexcept;
     // Adds new sstable to the set of sstables
@@ -1145,6 +1160,7 @@ public:
 private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
     lw_shared_ptr<keyspace_metadata> _metadata;
+    shared_promise<> _populated;
     config _config;
 public:
     explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg);
@@ -1189,6 +1205,9 @@ public:
 
     sstring column_family_directory(const sstring& base_path, const sstring& name, utils::UUID uuid) const;
     sstring column_family_directory(const sstring& name, utils::UUID uuid) const;
+
+    future<> ensure_populated() const;
+    void mark_as_populated();
 };
 
 class no_such_keyspace : public std::runtime_error {
@@ -1325,11 +1344,13 @@ private:
     std::unique_ptr<db::data_listeners> _data_listeners;
 
     service::migration_notifier& _mnotifier;
+    gms::feature_service& _feat;
 
     bool _supports_infinite_bound_range_deletions = false;
 
     future<> init_commitlog();
 public:
+    const gms::feature_service& features() const { return _feat; }
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
 private:
@@ -1351,6 +1372,7 @@ private:
     template<typename Future>
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
+    future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, bool is_bootstrap);
 public:
     static utils::UUID empty_version;
 
@@ -1361,7 +1383,7 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat);
     database(database&&) = delete;
     ~database();
 
@@ -1556,6 +1578,7 @@ public:
     }
 };
 
+future<> start_large_data_handler(sharded<database>& db);
 future<> stop_database(sharded<database>& db);
 
 // Creates a streaming reader that reads from all shards.

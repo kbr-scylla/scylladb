@@ -38,6 +38,7 @@
 #include "to_string.hh"
 #include "gms/gossiper.hh"
 #include "gms/failure_detector.hh"
+#include "gms/feature_service.hh"
 #include <seastar/core/thread.hh>
 #include <sstream>
 #include <algorithm>
@@ -84,35 +85,6 @@ namespace service {
 
 static logging::logger slogger("storage_service");
 
-static const sstring RANGE_TOMBSTONES_FEATURE = "RANGE_TOMBSTONES";
-static const sstring LARGE_PARTITIONS_FEATURE = "LARGE_PARTITIONS";
-static const sstring MATERIALIZED_VIEWS_FEATURE = "MATERIALIZED_VIEWS";
-static const sstring COUNTERS_FEATURE = "COUNTERS";
-static const sstring INDEXES_FEATURE = "INDEXES";
-static const sstring DIGEST_MULTIPARTITION_READ_FEATURE = "DIGEST_MULTIPARTITION_READ";
-static const sstring CORRECT_COUNTER_ORDER_FEATURE = "CORRECT_COUNTER_ORDER";
-static const sstring SCHEMA_TABLES_V3 = "SCHEMA_TABLES_V3";
-static const sstring CORRECT_NON_COMPOUND_RANGE_TOMBSTONES = "CORRECT_NON_COMPOUND_RANGE_TOMBSTONES";
-static const sstring WRITE_FAILURE_REPLY_FEATURE = "WRITE_FAILURE_REPLY";
-static const sstring XXHASH_FEATURE = "XXHASH";
-static const sstring UDF_FEATURE = "UDF";
-static const sstring ROLES_FEATURE = "ROLES";
-static const sstring LA_SSTABLE_FEATURE = "LA_SSTABLE_FORMAT";
-static const sstring STREAM_WITH_RPC_STREAM = "STREAM_WITH_RPC_STREAM";
-static const sstring MC_SSTABLE_FEATURE = "MC_SSTABLE_FORMAT";
-static const sstring ROW_LEVEL_REPAIR = "ROW_LEVEL_REPAIR";
-static const sstring TRUNCATION_TABLE = "TRUNCATION_TABLE";
-static const sstring CORRECT_STATIC_COMPACT_IN_MC = "CORRECT_STATIC_COMPACT_IN_MC";
-static const sstring UNBOUNDED_RANGE_TOMBSTONES_FEATURE = "UNBOUNDED_RANGE_TOMBSTONES";
-static const sstring VIEW_VIRTUAL_COLUMNS = "VIEW_VIRTUAL_COLUMNS";
-static const sstring DIGEST_INSENSITIVE_TO_EXPIRY = "DIGEST_INSENSITIVE_TO_EXPIRY";
-static const sstring COMPUTED_COLUMNS_FEATURE = "COMPUTED_COLUMNS";
-static const sstring CDC_FEATURE = "CDC";
-static const sstring NONFROZEN_UDTS_FEATURE = "NONFROZEN_UDTS";
-static const sstring HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE = "HINTED_HANDOFF_SEPARATE_CONNECTION";
-static const sstring LWT_FEATURE = "LWT";
-static const sstring IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
-
 static const sstring SSTABLE_FORMAT_PARAM_NAME = "sstable_format";
 
 distributed<storage_service> _the_storage_service;
@@ -138,7 +110,7 @@ int get_generation_number() {
 }
 
 storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>& auth_service, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller, bool for_testing, std::set<sstring> disabled_features)
+        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller, bool for_testing)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
         , _db(db)
@@ -147,38 +119,9 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
         , _cql_config(cql_config)
         , _mnotifier(mn)
         , _sl_controller(sl_controller)
-        , _disabled_features(std::move(disabled_features))
         , _service_memory_total(config.available_memory / 10)
         , _service_memory_limiter(_service_memory_total)
         , _for_testing(for_testing)
-        , _range_tombstones_feature(_feature_service, RANGE_TOMBSTONES_FEATURE)
-        , _large_partitions_feature(_feature_service, LARGE_PARTITIONS_FEATURE)
-        , _materialized_views_feature(_feature_service, MATERIALIZED_VIEWS_FEATURE)
-        , _counters_feature(_feature_service, COUNTERS_FEATURE)
-        , _indexes_feature(_feature_service, INDEXES_FEATURE)
-        , _digest_multipartition_read_feature(_feature_service, DIGEST_MULTIPARTITION_READ_FEATURE)
-        , _correct_counter_order_feature(_feature_service, CORRECT_COUNTER_ORDER_FEATURE)
-        , _schema_tables_v3(_feature_service, SCHEMA_TABLES_V3)
-        , _correct_non_compound_range_tombstones(_feature_service, CORRECT_NON_COMPOUND_RANGE_TOMBSTONES)
-        , _write_failure_reply_feature(_feature_service, WRITE_FAILURE_REPLY_FEATURE)
-        , _xxhash_feature(_feature_service, XXHASH_FEATURE)
-        , _udf_feature(_feature_service, UDF_FEATURE)
-        , _roles_feature(_feature_service, ROLES_FEATURE)
-        , _la_sstable_feature(_feature_service, LA_SSTABLE_FEATURE)
-        , _stream_with_rpc_stream_feature(_feature_service, STREAM_WITH_RPC_STREAM)
-        , _mc_sstable_feature(_feature_service, MC_SSTABLE_FEATURE)
-        , _row_level_repair_feature(_feature_service, ROW_LEVEL_REPAIR)
-        , _truncation_table(_feature_service, TRUNCATION_TABLE)
-        , _correct_static_compact_in_mc(_feature_service, CORRECT_STATIC_COMPACT_IN_MC)
-        , _unbounded_range_tombstones_feature(_feature_service, UNBOUNDED_RANGE_TOMBSTONES_FEATURE)
-        , _view_virtual_columns(_feature_service, VIEW_VIRTUAL_COLUMNS)
-        , _digest_insensitive_to_expiry(_feature_service, DIGEST_INSENSITIVE_TO_EXPIRY)
-        , _computed_columns(_feature_service, COMPUTED_COLUMNS_FEATURE)
-        , _cdc_feature(_feature_service, CDC_FEATURE)
-        , _nonfrozen_udts(_feature_service, NONFROZEN_UDTS_FEATURE)
-        , _hinted_handoff_separate_connection(_feature_service, HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE)
-        , _lwt_feature(_feature_service, LWT_FEATURE)
-        , _in_memory_tables(_feature_service, IN_MEMORY_TABLES)
         , _la_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::la)
         , _mc_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::mc)
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
@@ -193,15 +136,15 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
 
     if (!for_testing) {
         if (engine().cpu_id() == 0) {
-            _la_sstable_feature.when_enabled(_la_feature_listener);
-            _mc_sstable_feature.when_enabled(_mc_feature_listener);
+            _feature_service.cluster_supports_la_sstable().when_enabled(_la_feature_listener);
+            _feature_service.cluster_supports_mc_sstable().when_enabled(_mc_feature_listener);
         }
     } else {
         _sstables_format = sstables::sstable_version_types::mc;
     }
 
     //FIXME: discarded future.
-    (void)_unbounded_range_tombstones_feature.when_enabled().then([&db] () mutable {
+    (void)_feature_service.cluster_supports_unbounded_range_tombstones().when_enabled().then([&db] () mutable {
         slogger.debug("Enabling infinite bound range deletions");
         //FIXME: discarded future.
         (void)db.invoke_on_all([] (database& local_db) mutable {
@@ -212,42 +155,7 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
 
 void storage_service::enable_all_features() {
     auto features = get_config_supported_features_set();
-
-    for (gms::feature& f : {
-        std::ref(_range_tombstones_feature),
-        std::ref(_large_partitions_feature),
-        std::ref(_materialized_views_feature),
-        std::ref(_counters_feature),
-        std::ref(_indexes_feature),
-        std::ref(_digest_multipartition_read_feature),
-        std::ref(_correct_counter_order_feature),
-        std::ref(_schema_tables_v3),
-        std::ref(_correct_non_compound_range_tombstones),
-        std::ref(_write_failure_reply_feature),
-        std::ref(_xxhash_feature),
-        std::ref(_udf_feature),
-        std::ref(_roles_feature),
-        std::ref(_la_sstable_feature),
-        std::ref(_stream_with_rpc_stream_feature),
-        std::ref(_mc_sstable_feature),
-        std::ref(_row_level_repair_feature),
-        std::ref(_truncation_table),
-        std::ref(_correct_static_compact_in_mc),
-        std::ref(_unbounded_range_tombstones_feature),
-        std::ref(_view_virtual_columns),
-        std::ref(_digest_insensitive_to_expiry),
-        std::ref(_computed_columns),
-        std::ref(_cdc_feature),
-        std::ref(_nonfrozen_udts),
-        std::ref(_hinted_handoff_separate_connection),
-        std::ref(_lwt_feature),
-        std::ref(_in_memory_tables),
-    })
-    {
-        if (features.count(f.name())) {
-            f.enable();
-        }
-    }
+    _feature_service.enable(features);
 }
 
 enum class node_external_status {
@@ -304,17 +212,10 @@ storage_service::isolate_on_commit_error() {
 bool storage_service::is_auto_bootstrap() const {
     return _db.local().get_config().auto_bootstrap();
 }
-sstring storage_service::get_known_features() {
-    return join(",", get_known_features_set());
-}
 
 // The features this node supports
 std::set<sstring> storage_service::get_known_features_set() {
-    auto s = get_config_supported_features_set();
-    if (_disabled_features.count(UNBOUNDED_RANGE_TOMBSTONES_FEATURE) == 0) {
-        s.insert(UNBOUNDED_RANGE_TOMBSTONES_FEATURE);
-    }
-    return s;
+    return _feature_service.known_feature_set();
 }
 
 sstring storage_service::get_config_supported_features() {
@@ -323,69 +224,13 @@ sstring storage_service::get_config_supported_features() {
 
 // The features this node supports and is allowed to advertise to other nodes
 std::set<sstring> storage_service::get_config_supported_features_set() {
-    // Add features supported by this local node. When a new feature is
-    // introduced in scylla, update it here, e.g.,
-    // return sstring("FEATURE1,FEATURE2")
-    std::set<sstring> features = {
-        RANGE_TOMBSTONES_FEATURE,
-        LARGE_PARTITIONS_FEATURE,
-        COUNTERS_FEATURE,
-        DIGEST_MULTIPARTITION_READ_FEATURE,
-        CORRECT_COUNTER_ORDER_FEATURE,
-        SCHEMA_TABLES_V3,
-        CORRECT_NON_COMPOUND_RANGE_TOMBSTONES,
-        WRITE_FAILURE_REPLY_FEATURE,
-        XXHASH_FEATURE,
-        ROLES_FEATURE,
-        LA_SSTABLE_FEATURE,
-        STREAM_WITH_RPC_STREAM,
-        MATERIALIZED_VIEWS_FEATURE,
-        INDEXES_FEATURE,
-        ROW_LEVEL_REPAIR,
-        TRUNCATION_TABLE,
-        CORRECT_STATIC_COMPACT_IN_MC,
-        VIEW_VIRTUAL_COLUMNS,
-        DIGEST_INSENSITIVE_TO_EXPIRY,
-        COMPUTED_COLUMNS_FEATURE,
-        NONFROZEN_UDTS_FEATURE,
-        HINTED_HANDOFF_SEPARATE_CONNECTION_FEATURE,
-        IN_MEMORY_TABLES,
-    };
+    auto features = _feature_service.known_feature_set();
 
-    // Do not respect config in the case database is not started
-    // This should only be true in tests (see cql_test_env.cc:storage_service_for_tests)
-    auto& db = service::get_local_storage_service().db();
-    if (db.local_is_initialized()) {
-        auto& config = db.local().get_config();
-        if (config.enable_sstables_mc_format()) {
-            features.insert(MC_SSTABLE_FEATURE);
-        }
-        if (config.enable_user_defined_functions()) {
-            if (!config.check_experimental(db::experimental_features_t::UDF)) {
-                throw std::runtime_error(
-                        "You must use both enable_user_defined_functions and experimental_features:udf "
-                        "to enable user-defined functions");
-            }
-            features.insert(UDF_FEATURE);
-        }
-        if (config.check_experimental(db::experimental_features_t::CDC)) {
-            features.insert(CDC_FEATURE);
-        }
-        if (config.check_experimental(db::experimental_features_t::LWT)) {
-            features.insert(LWT_FEATURE);
-        }
+    if (sstables::is_later(sstables::sstable_version_types::mc, _sstables_format)) {
+        features.erase(gms::features::UNBOUNDED_RANGE_TOMBSTONES);
     }
-    if (!sstables::is_later(sstables::sstable_version_types::mc, _sstables_format)) {
-        features.insert(UNBOUNDED_RANGE_TOMBSTONES_FEATURE);
-    }
-    for (const sstring& s : _disabled_features) {
-        features.erase(s);
-    }
+
     return features;
-}
-
-void storage_service::set_disabled_features(std::set<sstring> s) {
-    _disabled_features = std::move(s);
 }
 
 std::unordered_set<token> get_replace_tokens() {
@@ -399,7 +244,7 @@ std::unordered_set<token> get_replace_tokens() {
     }
     tokens.erase("");
     for (auto token_string : tokens) {
-        auto token = dht::global_partitioner().from_sstring(token_string);
+        auto token = dht::token::from_sstring(token_string);
         ret.insert(token);
     }
     return ret;
@@ -467,7 +312,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     } else {
         auto seeds = _gossiper.get_seeds();
         auto my_ep = get_broadcast_address();
-        auto local_features = get_known_features();
+        auto local_features = get_known_features_set();
 
         if (seeds.count(my_ep)) {
             // This node is a seed node
@@ -563,7 +408,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     auto broadcast_rpc_address = utils::fb_utilities::get_broadcast_rpc_address();
     auto& proxy = service::get_storage_proxy();
     // Ensure we know our own actual Schema UUID in preparation for updates
-    auto schema_version = update_schema_version(proxy, cluster_schema_features()).get0();
+    auto schema_version = update_schema_version(proxy, _feature_service.cluster_schema_features()).get0();
     app_states.emplace(gms::application_state::NET_VERSION, value_factory.network_version());
     app_states.emplace(gms::application_state::HOST_ID, value_factory.host_id(local_host_id));
     app_states.emplace(gms::application_state::RPC_ADDRESS, value_factory.rpcaddress(broadcast_rpc_address));
@@ -801,7 +646,7 @@ void storage_service::join_token_ring(int delay) {
                 }
             } else {
                 for (auto token_string : initial_tokens) {
-                    auto token = dht::global_partitioner().from_sstring(token_string);
+                    auto token = dht::token::from_sstring(token_string);
                     _bootstrap_tokens.insert(token);
                 }
                 slogger.info("Saved tokens not found. Using configuration value: {}", _bootstrap_tokens);
@@ -1102,7 +947,7 @@ void storage_service::bootstrap() {
         } else {
             // We should not be able to join the cluster if other nodes support CDC but we don't.
             // The check should have been made somewhere in prepare_to_join (`check_knows_remote_features`).
-            assert(!cluster_supports_cdc());
+            assert(!_feature_service.cluster_supports_cdc());
         }
 
         _gossiper.add_local_application_state({
@@ -1649,7 +1494,7 @@ std::unordered_set<locator::token> storage_service::get_tokens_for(inet_address 
     std::unordered_set<token> ret;
     boost::split(tokens, tokens_string, boost::is_any_of(";"));
     for (auto str : tokens) {
-        auto t = dht::global_partitioner().from_sstring(str);
+        auto t = dht::token::from_sstring(str);
         slogger.trace("endpoint={}, token_str={} token={}", endpoint, str, t);
         ret.emplace(std::move(t));
     }
@@ -1943,7 +1788,7 @@ future<> storage_service::gossip_snitch_info() {
 future<> storage_service::gossip_sharding_info() {
     return _gossiper.add_local_application_state({
         { gms::application_state::SHARD_COUNT, value_factory.shard_count(smp::count) },
-        { gms::application_state::IGNORE_MSB_BITS, value_factory.ignore_msb_bits(dht::global_partitioner().sharding_ignore_msb()) },
+        { gms::application_state::IGNORE_MSB_BITS, value_factory.ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()) },
     });
 }
 
@@ -1964,7 +1809,7 @@ future<> storage_service::check_for_endpoint_collision(const std::unordered_map<
     return seastar::async([this, loaded_peer_features] {
         auto t = gms::gossiper::clk::now();
         bool found_bootstrapping_node = false;
-        auto local_features = get_known_features();
+        auto local_features = get_known_features_set();
         do {
             slogger.info("Checking remote features with gossip");
             _gossiper.do_shadow_round().get();
@@ -2037,7 +1882,8 @@ storage_service::prepare_replacement_info(const std::unordered_map<gms::inet_add
     // make magic happen
     slogger.info("Checking remote features with gossip");
     return _gossiper.do_shadow_round().then([this, loaded_peer_features, replace_address] {
-        _gossiper.check_knows_remote_features(get_known_features(), loaded_peer_features);
+        auto local_features = get_known_features_set();
+        _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
 
         // now that we've gossiped at least once, we should be able to find the node we're replacing
         auto* state = _gossiper.get_endpoint_state_for_endpoint_ptr(replace_address);
@@ -2065,7 +1911,7 @@ storage_service::prepare_replacement_info(const std::unordered_map<gms::inet_add
 
 future<std::map<gms::inet_address, float>> storage_service::get_ownership() {
     return run_with_no_api_lock([] (storage_service& ss) {
-        auto token_map = dht::global_partitioner().describe_ownership(ss._token_metadata.sorted_tokens());
+        auto token_map = dht::token::describe_ownership(ss._token_metadata.sorted_tokens());
         // describeOwnership returns tokens in an unspecified order, let's re-order them
         std::map<gms::inet_address, float> ownership;
         for (auto entry : token_map) {
@@ -2101,7 +1947,7 @@ future<std::map<gms::inet_address, float>> storage_service::effective_ownership(
             }
             keyspace_name = "system_traces";
         }
-        auto token_ownership = dht::global_partitioner().describe_ownership(ss._token_metadata.sorted_tokens());
+        auto token_ownership = dht::token::describe_ownership(ss._token_metadata.sorted_tokens());
 
         std::map<gms::inet_address, float> final_ownership;
 
@@ -2548,6 +2394,8 @@ future<> storage_service::start_native_transport() {
             cql_server_config.max_request_size = ss._service_memory_total;
             cql_server_config.get_service_memory_limiter_semaphore = [ss = std::ref(get_storage_service())] () -> semaphore& { return ss.get().local()._service_memory_limiter; };
             cql_server_config.allow_shard_aware_drivers = cfg.enable_shard_aware_drivers();
+            cql_server_config.sharding_ignore_msb = cfg.murmur3_partitioner_ignore_msb_bits();
+            cql_server_config.partitioner_name = cfg.partitioner();
             smp_service_group_config cql_server_smp_service_group_config;
             cql_server_smp_service_group_config.max_nonlocal_requests = 5000;
             cql_server_config.bounce_request_smp_service_group = create_smp_service_group(cql_server_smp_service_group_config).get0();
@@ -3350,10 +3198,10 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
         auto addresses = entry.second;
         token_range_endpoints tr;
         if (range.start()) {
-            tr._start_token = dht::global_partitioner().to_sstring(range.start()->value());
+            tr._start_token = range.start()->value().to_sstring();
         }
         if (range.end()) {
-            tr._end_token = dht::global_partitioner().to_sstring(range.end()->value());
+            tr._end_token = range.end()->value().to_sstring();
         }
         for (auto endpoint : addresses) {
             endpoint_details details;
@@ -3762,28 +3610,6 @@ void storage_service::notify_cql_change(inet_address endpoint, bool ready)
     } else {
         notify_down(endpoint);
     }
-}
-
-db::schema_features storage_service::cluster_schema_features() const {
-    db::schema_features f;
-    f.set_if<db::schema_feature::VIEW_VIRTUAL_COLUMNS>(bool(_view_virtual_columns));
-    f.set_if<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>(bool(_digest_insensitive_to_expiry));
-    f.set_if<db::schema_feature::COMPUTED_COLUMNS>(bool(_computed_columns));
-    f.set_if<db::schema_feature::CDC_OPTIONS>(bool(_cdc_feature));
-    // We wish to be able to migrate from 2.3 and 3.0, as well as enterprise-2018.1.
-    // So we set the IN_MEMORY_TABLES feature if either the cluster feature IN_MEMORY_TABLES is present
-    // (indicating 2019.1 or later) or if the cluster XXHASH feature is not present (indicating enterprise-2018.1).
-    //
-    // Equivalently, we disable the feature if we don't have the cluster in-memory feature and do have the xxhash
-    // feature (indicating a recent open-source version).
-    bool some_features_were_propagated = bool(_range_tombstones_feature);
-    bool older_than_2019_1_or_2_3 = !_xxhash_feature;
-    bool upgrading_from_2018_1 = some_features_were_propagated && older_than_2019_1_or_2_3;
-    slogger.info("range_tombstones: {} xxhash: {} in_memory: {} result: {}",
-            bool(_range_tombstones_feature), bool(_xxhash_feature), bool(_in_memory_tables),
-            bool(_in_memory_tables) || upgrading_from_2018_1);
-    f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(_in_memory_tables) || upgrading_from_2018_1);
-    return f;
 }
 
 future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {

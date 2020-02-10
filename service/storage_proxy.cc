@@ -117,8 +117,8 @@ using namespace exceptions;
 using fbu = utils::fb_utilities;
 
 static inline
-query::digest_algorithm digest_algorithm() {
-    return service::get_local_storage_service().cluster_supports_xxhash_digest_algorithm()
+query::digest_algorithm digest_algorithm(service::storage_proxy& proxy) {
+    return proxy.features().cluster_supports_xxhash_digest_algorithm()
          ? query::digest_algorithm::xxHash
          : query::digest_algorithm::MD5;
 }
@@ -760,7 +760,7 @@ static future<std::optional<paxos_response_handler::ballot_and_data>> sleep_and_
  */
 future<paxos_response_handler::ballot_and_data>
 paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& contentions, bool is_write) {
-    if (!service::get_local_storage_service().cluster_supports_lwt()) {
+    if (!_proxy->features().cluster_supports_lwt()) {
         throw std::runtime_error("The cluster does not support Paxos. Upgrade all the nodes to the version with LWT support.");
     }
 
@@ -910,7 +910,7 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                 // To generate less network traffic, only the closest replica (first one in the list of participants)
                 // sends query result content while other replicas send digests needed to check consistency.
                 bool only_digest = peer != _live_endpoints[0];
-                auto da = digest_algorithm();
+                auto da = digest_algorithm(get_local_storage_proxy());
                 if (fbu::is_me(peer)) {
                     return paxos::paxos_state::prepare(tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
                 } else {
@@ -1621,7 +1621,7 @@ using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog,
-        scheduling_group_key stats_key)
+        scheduling_group_key stats_key, gms::feature_service& feat)
     : _db(db)
     , _read_smp_service_group(cfg.read_smp_service_group)
     , _write_smp_service_group(cfg.write_smp_service_group)
@@ -1630,6 +1630,7 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
     , _hints_resource_manager(cfg.available_memory / 10)
     , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _stats_key(stats_key)
+    , _features(feat)
     , _background_write_throttle_threahsold(cfg.available_memory / 10)
     , _mutate_stage{"storage_proxy_mutate", &storage_proxy::do_mutate}
     , _max_view_update_backlog(max_view_update_backlog)
@@ -2383,7 +2384,7 @@ future<> storage_proxy::send_to_endpoint(
 }
 
 future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {
-    if (!service::get_local_storage_service().cluster_supports_hinted_handoff_separate_connection()) {
+    if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
         return send_to_endpoint(
                 std::make_unique<shared_mutation>(std::move(fm_a_s)),
                 std::move(target),
@@ -3235,7 +3236,7 @@ protected:
     future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> make_data_request(gms::inet_address ep, clock_type::time_point timeout, bool want_digest) {
         ++_proxy->get_stats().data_read_attempts.get_ep_stat(ep);
         auto opts = want_digest
-                  ? query::result_options{query::result_request::result_and_digest, digest_algorithm()}
+                  ? query::result_options{query::result_request::result_and_digest, digest_algorithm(*_proxy)}
                   : query::result_options{query::result_request::only_result, query::digest_algorithm::none};
         if (fbu::is_me(ep)) {
             tracing::trace(_trace_state, "read_data: querying locally");
@@ -3254,11 +3255,13 @@ protected:
         ++_proxy->get_stats().digest_read_attempts.get_ep_stat(ep);
         if (fbu::is_me(ep)) {
             tracing::trace(_trace_state, "read_digest: querying locally");
-            return _proxy->query_result_local_digest(_schema, _cmd, _partition_range, _trace_state, timeout, digest_algorithm());
+            return _proxy->query_result_local_digest(_schema, _cmd, _partition_range, _trace_state,
+                        timeout, digest_algorithm(*_proxy));
         } else {
             auto& ms = netw::get_local_messaging_service();
             tracing::trace(_trace_state, "read_digest: sending a message to /{}", ep);
-            return ms.send_read_digest(netw::messaging_service::msg_addr{ep, 0}, timeout, *_cmd, _partition_range, digest_algorithm()).then([this, ep] (
+            return ms.send_read_digest(netw::messaging_service::msg_addr{ep, 0}, timeout, *_cmd,
+                        _partition_range, digest_algorithm(*_proxy)).then([this, ep] (
                     rpc::tuple<query::result_digest, rpc::optional<api::timestamp_type>, rpc::optional<cache_temperature>> digest_timestamp_hit_rate) {
                 auto&& [d, t, hit_rate] = digest_timestamp_hit_rate;
                 tracing::trace(_trace_state, "read_digest: got response from /{}", ep);
@@ -3563,7 +3566,7 @@ class range_slice_read_executor : public never_speculating_read_executor {
 public:
     using never_speculating_read_executor::never_speculating_read_executor;
     virtual future<foreign_ptr<lw_shared_ptr<query::result>>> execute(storage_proxy::clock_type::time_point timeout) override {
-        if (!service::get_local_storage_service().cluster_supports_digest_multipartition_reads()) {
+        if (!_proxy->features().cluster_supports_digest_multipartition_reads()) {
             reconcile(_cl, timeout);
             return _result_promise.get_future();
         }
@@ -4608,7 +4611,7 @@ void storage_proxy::init_messaging_service() {
                 // ignore results, since we'll be returning them via MUTATION_DONE/MUTATION_FAILURE verbs
                 auto fut = make_ready_future<seastar::rpc::no_wait_type>(netw::messaging_service::no_wait());
                 if (errors) {
-                    if (get_local_storage_service().cluster_supports_write_failure_reply()) {
+                    if (p->features().cluster_supports_write_failure_reply()) {
                         tracing::trace(trace_state_ptr, "Sending mutation_failure with {} failures to /{}", errors, reply_to);
                         auto& ms = netw::get_local_messaging_service();
                         fut = ms.send_mutation_failed(
@@ -4674,7 +4677,7 @@ void storage_proxy::init_messaging_service() {
     ms.register_mutation_done([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
-        return get_storage_proxy().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
+        return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
             sp.got_response(response_id, from, std::move(backlog));
             return netw::messaging_service::no_wait();
         });
@@ -4682,7 +4685,7 @@ void storage_proxy::init_messaging_service() {
     ms.register_mutation_failed([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
-        return get_storage_proxy().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, num_failed, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
+        return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, num_failed, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
             sp.got_failure_response(response_id, from, num_failed, std::move(backlog));
             return netw::messaging_service::no_wait();
         });
@@ -4774,7 +4777,7 @@ void storage_proxy::init_messaging_service() {
     ms.register_truncate([this](sstring ksname, sstring cfname) {
         return do_with(utils::make_joinpoint([] { return db_clock::now();}),
                         [this, ksname, cfname](auto& tsf) {
-            return get_storage_proxy().invoke_on_all(_write_smp_service_group, [ksname, cfname, &tsf](storage_proxy& sp) {
+            return container().invoke_on_all(_write_smp_service_group, [ksname, cfname, &tsf](storage_proxy& sp) {
                 return sp._db.local().truncate(ksname, cfname, [&tsf] { return tsf.value(); });
             });
         });
@@ -4783,7 +4786,7 @@ void storage_proxy::init_messaging_service() {
     ms.register_get_schema_version([this] (unsigned shard, table_schema_version v) {
         get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
         // FIXME: should this get an smp_service_group? Probably one separate from reads and writes.
-        return get_storage_proxy().invoke_on(shard, [v] (auto&& sp) {
+        return container().invoke_on(shard, [v] (auto&& sp) {
             slogger.debug("Schema version request for {}", v);
             return local_schema_registry().get_frozen(v);
         });
