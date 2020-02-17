@@ -17,7 +17,7 @@ uint32_t service_level_statement::get_bound_terms() const {
 
 std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::service_level_statement::prepare(
         database &db, cql_stats &stats) {
-    return std::make_unique<prepared>(std::move(audit_info()), this->shared_from_this());
+    return std::make_unique<prepared_statement>(std::move(audit_info()), this->shared_from_this());
 }
 
 bool service_level_statement::uses_function(

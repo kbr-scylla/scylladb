@@ -32,6 +32,7 @@
 #include <stdexcept>
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
+#include "utils/overloaded_functor.hh"
 
 #include "expressions_eval.hh"
 
@@ -75,7 +76,7 @@ static ::shared_ptr<cql3::restrictions::single_column_restriction::contains> mak
 }
 
 static ::shared_ptr<cql3::restrictions::single_column_restriction::EQ> make_key_eq_restriction(const column_definition& cdef, const rjson::value& value) {
-    bytes raw_value = get_key_from_typed_value(value, cdef, type_to_string(cdef.type));
+    bytes raw_value = get_key_from_typed_value(value, cdef);
     auto restriction_value = ::make_shared<cql3::constants::value>(cql3::raw_value::make_value(std::move(raw_value)));
     return make_shared<cql3::restrictions::single_column_restriction::EQ>(cdef, std::move(restriction_value));
 }
@@ -229,10 +230,6 @@ static bool check_BEGINS_WITH(const rjson::value* v1, const rjson::value& v2) {
     }
 }
 
-static std::string_view to_string_view(const rjson::value& v) {
-    return std::string_view(v.GetString(), v.GetStringLength());
-}
-
 static bool is_set_of(const rjson::value& type1, const rjson::value& type2) {
     return (type2 == "S" && type1 == "SS") || (type2 == "N" && type1 == "NS") || (type2 == "B" && type1 == "BS");
 }
@@ -250,7 +247,7 @@ bool check_CONTAINS(const rjson::value* v1, const rjson::value& v2) {
                                "got {} instead", kv2.name));
     }
     if (kv1.name == "S" && kv2.name == "S") {
-        return to_string_view(kv1.value).find(to_string_view(kv2.value)) != std::string_view::npos;
+        return rjson::to_string_view(kv1.value).find(rjson::to_string_view(kv2.value)) != std::string_view::npos;
     } else if (kv1.name == "B" && kv2.name == "B") {
         return base64_decode(kv1.value).find(base64_decode(kv2.value)) != bytes::npos;
     } else if (is_set_of(kv1.name, kv2.name)) {
@@ -575,9 +572,6 @@ bool verify_expected(const rjson::value& req, const std::unique_ptr<rjson::value
     return require_all;
 }
 
-template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
-
 bool calculate_primitive_condition(const parsed::primitive_condition& cond,
         std::unordered_set<std::string>& used_attribute_values,
         std::unordered_set<std::string>& used_attribute_names,
@@ -657,7 +651,7 @@ bool verify_condition_expression(
     if (condition_expression.empty()) {
         return true;
     }
-    bool ret = std::visit(overloaded {
+    bool ret = std::visit(overloaded_functor {
         [&] (const parsed::primitive_condition& cond) -> bool {
             return calculate_primitive_condition(cond, used_attribute_values,
                     used_attribute_names, req, schema, previous_item);

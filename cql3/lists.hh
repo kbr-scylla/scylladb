@@ -73,7 +73,7 @@ public:
         virtual cql3::raw_value get(const query_options& options) override;
         virtual bytes get_with_protocol_version(cql_serialization_format sf) override;
         bool equals(shared_ptr<list_type_impl> lt, const value& v);
-        virtual const std::vector<bytes_opt>& get_elements() override;
+        virtual const std::vector<bytes_opt>& get_elements() const override;
         virtual sstring to_string() const;
         friend class lists;
     };
@@ -93,7 +93,7 @@ public:
                 : _elements(std::move(elements)) {
         }
         virtual bool contains_bind_marker() const override;
-        virtual void collect_marker_specification(variable_specifications& bound_names);
+        virtual void collect_marker_specification(variable_specifications& bound_names) const override;
         virtual shared_ptr<terminal> bind(const query_options& options) override;
     };
 
@@ -148,7 +148,7 @@ public:
             : operation(column, std::move(t)), _idx(std::move(idx)) {
         }
         virtual bool requires_read() const override;
-        virtual void collect_marker_specification(variable_specifications& bound_names);
+        virtual void collect_marker_specification(variable_specifications& bound_names) const;
         virtual void execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) override;
     };
 

@@ -39,7 +39,7 @@ drop_function_statement::audit_info() const {
 }
 
 std::unique_ptr<prepared_statement> drop_function_statement::prepare(database& db, cql_stats& stats) {
-    return std::make_unique<prepared>(audit_info(), make_shared<drop_function_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<drop_function_statement>(*this));
 }
 
 future<shared_ptr<cql_transport::event::schema_change>> drop_function_statement::announce_migration(

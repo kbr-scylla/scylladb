@@ -32,16 +32,22 @@ private:
 public:
     query_state(client_state& client_state, service_permit permit)
             : _client_state(client_state)
-            , _trace_state_ptr(_client_state.get_trace_state())
+            , _trace_state_ptr(tracing::trace_state_ptr())
             , _permit(std::move(permit))
     {}
 
     query_state(client_state& client_state, service_permit permit, qos::service_level_controller &sl_controller)
         : _client_state(client_state)
-        , _trace_state_ptr(_client_state.get_trace_state())
+        , _trace_state_ptr(tracing::trace_state_ptr())
         , _permit(std::move(permit))
         , _sl_controller(sl_controller)
     {}
+
+    query_state(client_state& client_state, tracing::trace_state_ptr trace_state_ptr, service_permit permit)
+        : _client_state(client_state)
+        , _trace_state_ptr(std::move(trace_state_ptr))
+        , _permit(std::move(permit))
+    { }
 
     query_state(client_state& client_state, tracing::trace_state_ptr trace_state_ptr, service_permit permit, qos::service_level_controller& sl_controller)
         : _client_state(client_state)

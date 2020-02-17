@@ -8,6 +8,7 @@
 #include "cql3/statements/attach_service_level_statement.hh"
 #include "service/qos/service_level_controller.hh"
 #include "exceptions/exceptions.hh"
+#include "transport/messages/result_message.hh"
 
 namespace cql3 {
 

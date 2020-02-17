@@ -41,9 +41,6 @@
 #include "cql3/authorized_prepared_statements_cache.hh"
 #include "cql3/query_options.hh"
 #include "cql3/statements/prepared_statement.hh"
-#include "cql3/statements/raw/parsed_statement.hh"
-#include "cql3/statements/raw/cf_statement.hh"
-#include "cql3/untyped_result_set.hh"
 #include "exceptions/exceptions.hh"
 #include "log.hh"
 #include "service/migration_listener.hh"
@@ -54,6 +51,12 @@ namespace cql3 {
 
 namespace statements {
 class batch_statement;
+
+namespace raw {
+
+class parsed_statement;
+
+}
 }
 
 class untyped_result_set;
@@ -172,32 +175,27 @@ public:
     }
 
     future<::shared_ptr<cql_transport::messages::result_message>>
-    process_statement_unprepared(
-            ::shared_ptr<cql_statement> statement,
-            service::query_state& query_state,
-            const query_options& options);
-
-    future<::shared_ptr<cql_transport::messages::result_message>>
-    process_statement_prepared(
+    execute_prepared(
             statements::prepared_statement::checked_weak_ptr statement,
             cql3::prepared_cache_key_type cache_key,
             service::query_state& query_state,
             const query_options& options,
             bool needs_authorization);
 
+    /// Execute a client statement that was not prepared.
     future<::shared_ptr<cql_transport::messages::result_message>>
-    process(
+    execute_direct(
             const std::string_view& query_string,
             service::query_state& query_state,
             query_options& options);
 
     future<::shared_ptr<untyped_result_set>>
-    execute_internal(const sstring& query_string, const std::initializer_list<data_value>& = { });
+    execute_internal(const sstring& query_string, const std::initializer_list<data_value>& values = { }) {
+        return execute_internal(query_string, db::consistency_level::ONE,
+                infinite_timeout_config, values, true);
+    }
 
     statements::prepared_statement::checked_weak_ptr prepare_internal(const sstring& query);
-
-    future<::shared_ptr<untyped_result_set>>
-    execute_internal(statements::prepared_statement::checked_weak_ptr p, const std::initializer_list<data_value>& = { });
 
     /*!
      * \brief iterate over all cql results using paging
@@ -291,7 +289,7 @@ public:
     /*
      * See \ref process_internal.
      */
-    future<::shared_ptr<untyped_result_set>> process(
+    future<::shared_ptr<untyped_result_set>> execute_internal(
             const sstring& query_string,
             db::consistency_level,
             const timeout_config& timeout_config,
@@ -301,7 +299,7 @@ public:
     /*
      * See \ref process_internal .
      */
-    future<::shared_ptr<untyped_result_set>> process(
+    future<::shared_ptr<untyped_result_set>> execute_with_params(
             statements::prepared_statement::checked_weak_ptr p,
             db::consistency_level,
             const timeout_config& timeout_config,
@@ -316,7 +314,7 @@ public:
     future<> stop();
 
     future<::shared_ptr<cql_transport::messages::result_message>>
-    process_batch(
+    execute_batch(
             ::shared_ptr<statements::batch_statement>,
             service::query_state& query_state,
             query_options& options,

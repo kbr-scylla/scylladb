@@ -912,8 +912,10 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                 bool only_digest = peer != _live_endpoints[0];
                 auto da = digest_algorithm(get_local_storage_proxy());
                 if (fbu::is_me(peer)) {
+                    tracing::trace(tr_state, "prepare_ballot: prepare {} locally", ballot);
                     return paxos::paxos_state::prepare(tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
                 } else {
+                    tracing::trace(tr_state, "prepare_ballot: sending prepare {} to {}", ballot, peer);
                     netw::messaging_service& ms = netw::get_local_messaging_service();
                     return ms.send_paxos_prepare(peer, _timeout, *_cmd, _key.key(), ballot, only_digest, da,
                             tracing::make_trace_info(tr_state));
@@ -947,9 +949,11 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                     }
                     return;
                 }
+
                 auto on_prepare_response = [&] (auto&& response) {
                     using T = std::decay_t<decltype(response)>;
                     if constexpr (std::is_same_v<T, utils::UUID>) {
+                        tracing::trace(tr_state, "prepare_ballot: got more up to date ballot {} from /{}", response, peer);
                         paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got more up to date ballot {} from {}", _id, response, peer);
                         // We got an UUID that prevented our proposal from succeeding
                         summary.update_most_recent_promised_ballot(response);
@@ -960,6 +964,7 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                         utils::UUID mrc_ballot = utils::UUID_gen::min_time_UUID(0);
 
                         paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got a response {} from {}", _id, response, peer);
+                        tracing::trace(tr_state, "prepare_ballot: got a response {} from /{}", response, peer);
 
                         // Find the newest learned value among all replicas that answered.
                         // It will be used to "repair" replicas that did not learn this value yet.
@@ -1013,6 +1018,7 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                         }
 
                         if (summary.committed_ballots_by_replica.size() == _required_participants) { // got all replies
+                            tracing::trace(tr_state, "prepare_ballot: got enough replies to proceed");
                             paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got enough replies to proceed", _id);
                             request_tracker.set_value(std::move(summary));
                         }
@@ -1066,8 +1072,10 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
         return parallel_for_each(_live_endpoints, [this, &request_tracker, timeout_if_partially_accepted, &proposal] (gms::inet_address peer) mutable {
             return futurize_apply([&] {
                 if (fbu::is_me(peer)) {
+                    tracing::trace(tr_state, "accept_proposal: accept {} locally", proposal);
                     return paxos::paxos_state::accept(tr_state, _schema, proposal.update.decorated_key(*_schema).token(), proposal, _timeout);
                 } else {
+                    tracing::trace(tr_state, "accept_proposal: send accept {} to {}", proposal, peer);
                     netw::messaging_service& ms = netw::get_local_messaging_service();
                     return ms.send_paxos_accept(peer, _timeout, proposal, tracing::make_trace_info(tr_state));
                 }
@@ -1092,6 +1100,7 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
                     }
                 } else {
                     bool accepted = accepted_f.get0();
+                    tracing::trace(tr_state, "accept_proposal: got \"{}\" from /{}", accepted ? "accepted" : "rejected", peer);
                     paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got \"{}\" from {}", _id,
                             accepted ? "accepted" : "rejected", peer);
 
@@ -1111,6 +1120,7 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
                  * can; see CASSANDRA-6013.
                  */
                 if (request_tracker.accepts == _required_participants) {
+                    tracing::trace(tr_state, "accept_proposal: got enough accepts to proceed");
                     paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough accepts to proceed", _id);
                     request_tracker.set_value(true);
                 } else if (is_timeout) {
@@ -1128,10 +1138,12 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
                 } else if (_required_participants + request_tracker.non_accept_replies()  > _live_endpoints.size() && !timeout_if_partially_accepted) {
                     // In case there is no need to reply with a timeout if at least one node is accepted
                     // we can fail the request as soon is we know a quorum is unreachable.
+                    tracing::trace(tr_state, "accept_proposal: got enough rejects to proceed");
                     paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough rejects to proceed", _id);
                     request_tracker.set_value(false);
                 } else if (request_tracker.all_replies() == _live_endpoints.size()) { // wait for all replies
                     if (request_tracker.accepts == 0 && request_tracker.errors == 0) {
+                        tracing::trace(tr_state, "accept_proposal: proposal is fully rejected");
                         paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is fully rejected", _id);
                         // Return false if fully refused. Consider errors as accepts here since it
                         // is not possible to know for sure.
@@ -1141,6 +1153,8 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
                         // sure that the proposal is fully rejected, and it is obviously not
                         // accepted, either.
                         paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is partially rejected", _id);
+                        tracing::trace(tr_state, "accept_proposal: proposal is partially rejected");
+                        _proxy->get_stats().cas_write_timeout_due_to_uncertainty++;
                         // TODO: we report write timeout exception to be compatible with Cassandra,
                         // which uses write_timeout_exception to signal any "unknown" state.
                         // To be changed in scope of work on https://issues.apache.org/jira/browse/CASSANDRA-15350
@@ -1159,7 +1173,8 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
 
 // This function implements learning stage of Paxos protocol
 future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool allow_hints) {
-    paxos::paxos_state::logger.trace("CAS[{}] learn_decision: commiting {} with cl={}", _id, decision, _cl_for_learn);
+    tracing::trace(tr_state, "learn_decision: committing {} with cl={}", decision, _cl_for_learn);
+    paxos::paxos_state::logger.trace("CAS[{}] learn_decision: committing {} with cl={}", _id, decision, _cl_for_learn);
     std::array<std::tuple<paxos::proposal, schema_ptr, dht::token>, 1> m{std::make_tuple(std::move(decision), _schema, _key.token())};
     // FIXME: allow_hints is ignored. Consider if we should follow it and remove if not.
     // Right now we do not store hints for when committing decisions.
@@ -1167,9 +1182,7 @@ future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool a
 }
 
 static std::vector<gms::inet_address>
-replica_ids_to_endpoints(const std::vector<utils::UUID>& replica_ids) {
-    const auto& tm = get_local_storage_service().get_token_metadata();
-
+replica_ids_to_endpoints(locator::token_metadata& tm, const std::vector<utils::UUID>& replica_ids) {
     std::vector<gms::inet_address> endpoints;
     endpoints.reserve(replica_ids.size());
 
@@ -1183,9 +1196,7 @@ replica_ids_to_endpoints(const std::vector<utils::UUID>& replica_ids) {
 }
 
 static std::vector<utils::UUID>
-endpoints_to_replica_ids(const std::vector<gms::inet_address>& endpoints) {
-    const auto& tm = get_local_storage_service().get_token_metadata();
-
+endpoints_to_replica_ids(locator::token_metadata& tm, const std::vector<gms::inet_address>& endpoints) {
     std::vector<utils::UUID> replica_ids;
     replica_ids.reserve(endpoints.size());
 
@@ -1520,6 +1531,10 @@ void storage_proxy_stats::stats::register_stats() {
                        sm::description("number of transaction preconditions that did not match current values"),
                        {storage_proxy_stats::current_scheduling_group_label()}),
 
+        sm::make_total_operations("cas_write_timeout_due_to_uncertainty", cas_write_timeout_due_to_uncertainty,
+                       sm::description("how many times write timeout was reported because of uncertainty in the result"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
+
         sm::make_histogram("cas_read_contention", sm::description("how many contended reads were encountered"),
                        {storage_proxy_stats::current_scheduling_group_label()},
                        [this]{ return cas_read_contention.get_histogram(1, 8);}),
@@ -1621,8 +1636,9 @@ using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog,
-        scheduling_group_key stats_key, gms::feature_service& feat)
+        scheduling_group_key stats_key, gms::feature_service& feat, locator::token_metadata& tm)
     : _db(db)
+    , _token_metadata(tm)
     , _read_smp_service_group(cfg.read_smp_service_group)
     , _write_smp_service_group(cfg.write_smp_service_group)
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
@@ -1739,8 +1755,7 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     keyspace& ks = _db.local().find_keyspace(keyspace_name);
     auto& rs = ks.get_replication_strategy();
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(token);
-    std::vector<gms::inet_address> pending_endpoints =
-        get_local_storage_service().get_token_metadata().pending_endpoints_for(token, keyspace_name);
+    std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, keyspace_name);
 
     slogger.trace("creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints, pending_endpoints);
     tracing::trace(tr_state, "Creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints ,pending_endpoints);
@@ -2034,8 +2049,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     keyspace& ks = _db.local().find_keyspace(ks_name);
     locator::abstract_replication_strategy& rs = ks.get_replication_strategy();
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(token);
-    std::vector<gms::inet_address> pending_endpoints =
-        get_local_storage_service().get_token_metadata().pending_endpoints_for(token, ks_name);
+    std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, ks_name);
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
         auto itend = boost::range::remove_if(natural_endpoints, std::not1(std::cref(db::is_local)));
@@ -2210,7 +2224,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                 , _batchlog_endpoints(
                         [this]() -> std::unordered_set<gms::inet_address> {
                             auto local_addr = utils::fb_utilities::get_broadcast_address();
-                            auto& topology = service::get_storage_service().local().get_token_metadata().get_topology();
+                            auto& topology = _p._token_metadata.get_topology();
                             auto& local_endpoints = topology.get_datacenter_racks().at(get_local_dc());
                             auto local_rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(local_addr);
                             auto chosen_endpoints = db::get_batchlog_manager().local().endpoint_filter(local_rack, local_endpoints);
@@ -3735,7 +3749,7 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
         auto token_range = dht::token_range::make_singular(pr.start()->value().token());
         auto it = query_options.preferred_replicas.find(token_range);
         const auto replicas = it == query_options.preferred_replicas.end()
-            ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(it->second);
+            ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(_token_metadata, it->second);
 
         auto read_executor = get_read_executor(cmd, schema, std::move(pr), cl, repair_decision,
                                                query_options.trace_state, replicas, is_read_non_local,
@@ -3752,15 +3766,15 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
 
     auto used_replicas = make_lw_shared<replicas_per_token_range>();
 
-    auto f = ::map_reduce(exec.begin(), exec.end(), [timeout = query_options.timeout(*this), used_replicas] (
+    auto f = ::map_reduce(exec.begin(), exec.end(), [p = shared_from_this(), timeout = query_options.timeout(*this), used_replicas] (
                 std::pair<::shared_ptr<abstract_read_executor>, dht::token_range>& executor_and_token_range) {
         auto& [rex, token_range] = executor_and_token_range;
         utils::latency_counter lc;
         lc.start();
-        return rex->execute(timeout).then_wrapped([lc, rex, used_replicas, token_range = std::move(token_range)] (
+        return rex->execute(timeout).then_wrapped([p = std::move(p), lc, rex, used_replicas, token_range = std::move(token_range)] (
                     future<foreign_ptr<lw_shared_ptr<query::result>>> f) mutable {
             if (!f.failed()) {
-                used_replicas->emplace(std::move(token_range), endpoints_to_replica_ids(rex->used_targets()));
+                used_replicas->emplace(std::move(token_range), endpoints_to_replica_ids(p->_token_metadata, rex->used_targets()));
             }
             if (lc.is_start()) {
                 rex->get_cf()->add_coordinator_read_latency(lc.stop().latency());
@@ -3803,9 +3817,9 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
     auto pcf = _db.local().get_config().cache_hit_rate_read_balancing() ? &cf : nullptr;
     std::unordered_map<abstract_read_executor*, std::vector<dht::token_range>> ranges_per_exec;
 
-    const auto preferred_replicas_for_range = [&preferred_replicas] (const dht::partition_range& r) {
+    const auto preferred_replicas_for_range = [this, &preferred_replicas] (const dht::partition_range& r) {
         auto it = preferred_replicas.find(r.transform(std::mem_fn(&dht::ring_position::token)));
-        return it == preferred_replicas.end() ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(it->second);
+        return it == preferred_replicas.end() ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(_token_metadata, it->second);
     };
     const auto to_token_range = [] (const dht::partition_range& r) { return r.transform(std::mem_fn(&dht::ring_position::token)); };
 
@@ -3935,7 +3949,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
                 // 1) The list of replicas is determined for each vnode
                 // separately and thus this makes lookups more convenient.
                 // 2) On the next page the ranges might not be merged.
-                auto replica_ids = endpoints_to_replica_ids(e->used_targets());
+                auto replica_ids = endpoints_to_replica_ids(p->_token_metadata, e->used_targets());
                 for (auto& r : ranges_per_exec[e.get()]) {
                     used_replicas.emplace(std::move(r), replica_ids);
                 }
@@ -3963,7 +3977,7 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
 
     // when dealing with LocalStrategy keyspaces, we can skip the range splitting and merging (which can be
     // expensive in clusters with vnodes)
-    query_ranges_to_vnodes_generator ranges_to_vnodes(schema, std::move(partition_ranges), ks.get_replication_strategy().get_type() == locator::replication_strategy_type::local);
+    query_ranges_to_vnodes_generator ranges_to_vnodes(_token_metadata, schema, std::move(partition_ranges), ks.get_replication_strategy().get_type() == locator::replication_strategy_type::local);
 
     int result_rows_per_range = 0;
     int concurrency_factor = 1;
@@ -4363,8 +4377,6 @@ std::vector<gms::inet_address> storage_proxy::intersection(const std::vector<gms
     return inter;
 }
 
-query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(schema_ptr s, dht::partition_range_vector ranges, bool local) :
-        query_ranges_to_vnodes_generator(get_local_storage_service().get_token_metadata(), std::move(s), std::move(ranges), local) {}
 query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(locator::token_metadata& tm, schema_ptr s, dht::partition_range_vector ranges, bool local) :
         _s(s), _ranges(std::move(ranges)), _i(_ranges.begin()), _local(local), _tm(tm) {}
 
@@ -4797,22 +4809,26 @@ void storage_proxy::init_messaging_service() {
                 query::read_command cmd, partition_key key, utils::UUID ballot, bool only_digest, query::digest_algorithm da,
                 std::optional<tracing::trace_info> trace_info) {
         auto src_addr = netw::messaging_service::get_source(cinfo);
+        auto src_ip = src_addr.addr;
         tracing::trace_state_ptr tr_state;
         if (trace_info) {
             tr_state = tracing::tracing::get_local_tracing_instance().create_session(*trace_info);
             tracing::begin(tr_state);
+            tracing::trace(tr_state, "paxos_prepare: message received from /{} ballot {}", src_ip, ballot);
         }
 
         return get_schema_for_read(cmd.schema_version, src_addr).then([this, cmd = std::move(cmd), key = std::move(key), ballot,
-                         only_digest, da, timeout, tr_state = std::move(tr_state)] (schema_ptr schema) mutable {
+                         only_digest, da, timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
             dht::token token = dht::global_partitioner().get_token(*schema, key);
             unsigned shard = _db.local().shard_of(token);
             bool local = shard == engine().cpu_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
                                      local, cmd = make_lw_shared<query::read_command>(std::move(cmd)), key = std::move(key),
-                                     ballot, only_digest, da, timeout] () {
-                return paxos::paxos_state::prepare(gt, gs, *cmd, key, ballot, only_digest, da, *timeout).then([] (paxos::prepare_response r) {
+                                     ballot, only_digest, da, timeout, src_ip] () {
+                tracing::trace_state_ptr tr_state = gt;
+                return paxos::paxos_state::prepare(tr_state, gs, *cmd, key, ballot, only_digest, da, *timeout).then([src_ip, tr_state] (paxos::prepare_response r) {
+                    tracing::trace(tr_state, "paxos_prepare: handling is done, sending a response to /{}", src_ip);
                     return make_foreign(std::make_unique<paxos::prepare_response>(std::move(r)));
                 });
             });
@@ -4821,13 +4837,15 @@ void storage_proxy::init_messaging_service() {
     ms.register_paxos_accept([this] (const rpc::client_info& cinfo, rpc::opt_time_point timeout, paxos::proposal proposal,
             std::optional<tracing::trace_info> trace_info) {
         auto src_addr = netw::messaging_service::get_source(cinfo);
+        auto src_ip = src_addr.addr;
         tracing::trace_state_ptr tr_state;
         if (trace_info) {
             tr_state = tracing::tracing::get_local_tracing_instance().create_session(*trace_info);
             tracing::begin(tr_state);
+            tracing::trace(tr_state, "paxos_accept: message received from /{} ballot {}", src_ip, proposal);
         }
 
-        return get_schema_for_read(proposal.update.schema_version(), src_addr).then([this, tr_state = std::move(tr_state),
+        auto f = get_schema_for_read(proposal.update.schema_version(), src_addr).then([this, tr_state = std::move(tr_state),
                                                               proposal = std::move(proposal), timeout] (schema_ptr schema) mutable {
             dht::token token = proposal.update.decorated_key(*schema).token();
             unsigned shard = _db.local().shard_of(token);
@@ -4838,6 +4856,14 @@ void storage_proxy::init_messaging_service() {
                 return paxos::paxos_state::accept(gt, gs, token, proposal, *timeout);
             });
         });
+
+        if (tr_state) {
+            f = f.finally([tr_state, src_ip] {
+                tracing::trace(tr_state, "paxos_accept: handling is done, sending a response to /{}", src_ip);
+            });
+        }
+
+        return f;
     });
 }
 

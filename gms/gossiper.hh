@@ -58,6 +58,10 @@ namespace db {
 class config;
 }
 
+namespace locator {
+class token_metadata;
+}
+
 namespace gms {
 
 class gossip_digest_syn;
@@ -172,7 +176,6 @@ public:
 
     std::chrono::milliseconds quarantine_delay();
 private:
-
     std::default_random_engine _random_engine{std::random_device{}()};
 
     /**
@@ -219,7 +222,7 @@ private:
     // The value must be kept alive until completes and not change.
     future<> replicate(inet_address, application_state key, const versioned_value& value);
 public:
-    explicit gossiper(abort_source& as, feature_service& features, db::config& cfg);
+    explicit gossiper(abort_source& as, feature_service& features, locator::token_metadata& tokens, db::config& cfg);
 
     void set_last_processed_message_at();
     void set_last_processed_message_at(clk::time_point tp);
@@ -556,6 +559,7 @@ private:
     abort_source& _abort_source;
     condition_variable _features_condvar;
     feature_service& _feature_service;
+    locator::token_metadata& _token_metadata;
     db::config& _cfg;
     failure_detector _fd;
     friend class feature;

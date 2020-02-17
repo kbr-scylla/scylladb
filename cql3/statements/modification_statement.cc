@@ -28,6 +28,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include "types/map.hh"
 #include "cql3/statements/modification_statement.hh"
 #include "cql3/statements/raw/modification_statement.hh"
 #include "cql3/statements/prepared_statement.hh"
@@ -41,6 +42,7 @@
 #include "db/config.hh"
 #include "dht/murmur3_partitioner.hh"
 #include "service/storage_service.hh"
+#include "transport/messages/result_message.hh"
 #include "database.hh"
 #include <seastar/core/execution_stage.hh>
 #include "utils/UUID_gen.hh"
@@ -526,7 +528,7 @@ modification_statement::prepare(database& db, cql_stats& stats) {
     auto bound_names = get_bound_variables();
     auto statement = prepare(db, bound_names, stats);
     auto partition_key_bind_indices = bound_names.get_partition_key_bind_indexes(schema);
-    return std::make_unique<prepared>(audit_info(), std::move(statement), bound_names, std::move(partition_key_bind_indices));
+    return std::make_unique<prepared_statement>(audit_info(), std::move(statement), bound_names, std::move(partition_key_bind_indices));
 }
 
 ::shared_ptr<cql3::statements::modification_statement>

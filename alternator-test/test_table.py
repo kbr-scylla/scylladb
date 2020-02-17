@@ -74,6 +74,11 @@ def create_and_delete_table(dynamodb, name, **kwargs):
 def test_create_and_delete_table(dynamodb):
     create_and_delete_table(dynamodb, 'alternator_test')
 
+# Test that recreating a table right after deleting it works without issues
+def test_recreate_table(dynamodb):
+    create_and_delete_table(dynamodb, 'alternator_recr_test')
+    create_and_delete_table(dynamodb, 'alternator_recr_test')
+
 # DynamoDB documentation specifies that table names must be 3-255 characters,
 # and match the regex [a-zA-Z0-9._-]+. Names not matching these rules should
 # be rejected, and no table be created.
@@ -226,6 +231,34 @@ def test_create_table_billing_mode_errors(dynamodb, test_table):
         dynamodb.create_table(TableName=test_table_name(),
             KeySchema=[{ 'AttributeName': 'p', 'KeyType': 'HASH' }],
             AttributeDefinitions=[{ 'AttributeName': 'p', 'AttributeType': 'S' }])
+
+# Even before Alternator gains full support for the DynamoDB stream API
+# and CreateTable's StreamSpecification option, we should support the
+# options which mean it is turned *off*.
+def test_table_streams_off(dynamodb):
+    # If StreamSpecification is given, but has StreamEnabled=false, it's as
+    # if StreamSpecification was missing. StreamViewType isn't needed.
+    table = create_test_table(dynamodb, StreamSpecification={'StreamEnabled': False},
+        KeySchema=[{ 'AttributeName': 'p', 'KeyType': 'HASH' }],
+        AttributeDefinitions=[{ 'AttributeName': 'p', 'AttributeType': 'S' }]);
+    table.delete();
+    # DynamoDB doesn't allow StreamSpecification to be empty map - if it
+    # exists, it must have a StreamEnabled
+    with pytest.raises(ClientError, match='ValidationException'):
+        table = create_test_table(dynamodb, StreamSpecification={},
+            KeySchema=[{ 'AttributeName': 'p', 'KeyType': 'HASH' }],
+            AttributeDefinitions=[{ 'AttributeName': 'p', 'AttributeType': 'S' }]);
+        table.delete();
+    # Unfortunately, boto3 doesn't allow us to pass StreamSpecification=None.
+    # This is what we had in issue #5796.
+
+@pytest.mark.xfail(reason="streams not yet implemented")
+def test_table_streams_on(dynamodb):
+    table = create_test_table(dynamodb,
+        StreamSpecification={'StreamEnabled': True, 'StreamViewType': 'OLD_IMAGE'},
+        KeySchema=[{ 'AttributeName': 'p', 'KeyType': 'HASH' }],
+        AttributeDefinitions=[{ 'AttributeName': 'p', 'AttributeType': 'S' }]);
+    table.delete();
 
 # Our first implementation had a special column name called "attrs" where
 # we stored a map for all non-key columns. If the user tried to name one

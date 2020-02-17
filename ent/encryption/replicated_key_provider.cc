@@ -137,7 +137,7 @@ future<::shared_ptr<cql3::untyped_result_set>> replicated_key_provider::query(ss
             return _ctxt.get_query_processor().local().execute_internal(q, { (params)...});
         };
         auto query_normal = [this](const sstring& q, auto&& ...params) {
-            return _ctxt.get_query_processor().local().process(q, db::consistency_level::ONE, rkp_db_timeout_config, { (params)...}, false);
+            return _ctxt.get_query_processor().local().execute_internal(q, db::consistency_level::ONE, rkp_db_timeout_config, { (params)...}, false);
         };
         return starting ? seastar::apply(query_internal, t) : seastar::apply(query_normal, t);
     });

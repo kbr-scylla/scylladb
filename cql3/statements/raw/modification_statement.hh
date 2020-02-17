@@ -71,7 +71,7 @@ protected:
     modification_statement(::shared_ptr<cf_name> name, ::shared_ptr<attributes::raw> attrs, conditions_vector conditions, bool if_not_exists, bool if_exists);
 
 public:
-    virtual std::unique_ptr<prepared> prepare(database& db, cql_stats& stats) override;
+    virtual std::unique_ptr<prepared_statement> prepare(database& db, cql_stats& stats) override;
     ::shared_ptr<cql3::statements::modification_statement> prepare(database& db, variable_specifications& bound_names, cql_stats& stats);
     void add_raw(sstring&& raw) { _raw_cql = std::move(raw); }
     const sstring& get_raw_cql() const { return _raw_cql; }

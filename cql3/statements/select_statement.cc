@@ -36,6 +36,7 @@
 #include "cql3/selection/selection.hh"
 #include "cql3/util.hh"
 #include "cql3/restrictions/single_column_primary_key_restrictions.hh"
+#include "cql3/selection/selector_factories.hh"
 #include <seastar/core/shared_ptr.hh>
 #include "query-result-reader.hh"
 #include "query_result_merger.hh"
@@ -466,7 +467,7 @@ indexed_table_select_statement::do_execute_base_query(
     auto cmd = prepare_command_for_base_query(options, state, now, bool(paging_state));
     auto timeout = db::timeout_clock::now() + options.get_timeout_config().*get_timeout_config_selector();
     uint32_t queried_ranges_count = partition_ranges.size();
-    service::query_ranges_to_vnodes_generator ranges_to_vnodes(_schema, std::move(partition_ranges));
+    service::query_ranges_to_vnodes_generator ranges_to_vnodes(proxy.get_token_metadata(), _schema, std::move(partition_ranges));
 
     struct base_query_state {
         query::result_merger merger;
@@ -1334,7 +1335,7 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
 
     auto partition_key_bind_indices = bound_names.get_partition_key_bind_indexes(schema);
 
-    return std::make_unique<prepared>(audit_info(), std::move(stmt), bound_names, std::move(partition_key_bind_indices));
+    return std::make_unique<prepared_statement>(audit_info(), std::move(stmt), bound_names, std::move(partition_key_bind_indices));
 }
 
 ::shared_ptr<restrictions::statement_restrictions>

@@ -31,6 +31,7 @@
 #include "bytes.hh"
 #include "database.hh"
 #include "db/config.hh"
+#include "db/schema_tables.hh"
 #include "partition_slice_builder.hh"
 #include "schema.hh"
 #include "schema_builder.hh"
@@ -40,6 +41,7 @@
 #include "cql3/statements/select_statement.hh"
 #include "cql3/multi_column_relation.hh"
 #include "cql3/tuples.hh"
+#include "cql3/untyped_result_set.hh"
 #include "log.hh"
 #include "json.hh"
 
@@ -85,15 +87,15 @@ public:
         if (schema.cdc_options().enabled()) {
             auto& db = _ctxt._proxy.get_db().local();
             auto logname = log_name(schema.cf_name());
-            if (!db.has_schema(schema.ks_name(), logname)) {
-                // in seastar thread
-                auto log_schema = create_log_schema(schema);
-                auto& keyspace = db.find_keyspace(schema.ks_name());
+            check_that_cdc_log_table_does_not_exist(db, schema, logname);
 
-                auto log_mut = db::schema_tables::make_create_table_mutations(keyspace.metadata(), log_schema, timestamp);
+            // in seastar thread
+            auto log_schema = create_log_schema(schema);
+            auto& keyspace = db.find_keyspace(schema.ks_name());
 
-                mutations.insert(mutations.end(), std::make_move_iterator(log_mut.begin()), std::make_move_iterator(log_mut.end()));
-            }
+            auto log_mut = db::schema_tables::make_create_table_mutations(keyspace.metadata(), log_schema, timestamp);
+
+            mutations.insert(mutations.end(), std::make_move_iterator(log_mut.begin()), std::make_move_iterator(log_mut.end()));
         }
     }
 
@@ -105,8 +107,13 @@ public:
         // or if cdc is on now unconditionally, since then any actual base schema changes will affect the column 
         // etc.
         if (was_cdc || is_cdc) {
-            auto logname = log_name(old_schema.cf_name());
             auto& db = _ctxt._proxy.get_db().local();
+
+            if (!was_cdc) {
+                check_that_cdc_log_table_does_not_exist(db, new_schema, log_name(new_schema.cf_name()));
+            }
+
+            auto logname = log_name(old_schema.cf_name());
             auto& keyspace = db.find_keyspace(old_schema.ks_name());
             auto log_schema = was_cdc ? db.find_column_family(old_schema.ks_name(), logname).schema() : nullptr;
 
@@ -148,6 +155,15 @@ public:
 
     template<typename Iter>
     future<> append_mutations(Iter i, Iter e, schema_ptr s, lowres_clock::time_point, std::vector<mutation>&);
+
+private:
+    static void check_that_cdc_log_table_does_not_exist(database& db, const schema& schema, const sstring& logname) {
+        if (db.has_schema(schema.ks_name(), logname)) {
+            throw exceptions::invalid_request_exception(format("Cannot create CDC log table for table {}.{} because a table of name {}.{} already exists",
+                    schema.ks_name(), schema.cf_name(),
+                    schema.ks_name(), logname));
+        }
+    }
 };
 
 cdc::cdc_service::cdc_service(service::storage_proxy& proxy)
@@ -180,6 +196,9 @@ cdc::options::options(const std::map<sstring, sstring>& map) {
             _postimage = p.second == "true";
         } else if (p.first == "ttl") {
             _ttl = std::stoi(p.second);
+            if (_ttl < 0) {
+                throw exceptions::configuration_exception("Invalid CDC option: ttl must be >= 0");
+            }
         } else {
             throw exceptions::configuration_exception("Invalid CDC option: " + p.first);
         }
@@ -214,14 +233,27 @@ namespace cdc {
 using operation_native_type = std::underlying_type_t<operation>;
 using column_op_native_type = std::underlying_type_t<column_op>;
 
+static const sstring cdc_log_suffix = "_scylla_cdc_log";
+
+static bool is_log_name(const std::string_view& table_name) {
+    return boost::ends_with(table_name, cdc_log_suffix);
+}
+
+bool is_log_for_some_table(const sstring& ks_name, const std::string_view& table_name) {
+    if (!is_log_name(table_name)) {
+        return false;
+    }
+    const auto base_name = sstring(table_name.data(), table_name.size() - cdc_log_suffix.size());
+    const auto base_schema = service::get_local_storage_proxy().get_db().local().find_schema(ks_name, base_name);
+    return bool(base_schema) && base_schema->cdc_options().enabled();
+}
+
 sstring log_name(const sstring& table_name) {
-    static constexpr auto cdc_log_suffix = "_scylla_cdc_log";
     return table_name + cdc_log_suffix;
 }
 
 static schema_ptr create_log_schema(const schema& s, std::optional<utils::UUID> uuid) {
     schema_builder b(s.ks_name(), log_name(s.cf_name()));
-    b.set_default_time_to_live(gc_clock::duration{s.cdc_options().ttl()});
     b.set_comment(sprint("CDC log for %s.%s", s.ks_name(), s.cf_name()));
     b.with_column("stream_id_1", long_type, column_kind::partition_key);
     b.with_column("stream_id_2", long_type, column_kind::partition_key);
@@ -391,6 +423,7 @@ private:
     schema_ptr _log_schema;
     const column_definition& _op_col;
     const column_definition& _ttl_col;
+    ttl_opt _cdc_ttl_opt;
 
     clustering_key set_pk_columns(const partition_key& pk, api::timestamp_type ts, bytes decomposed_tuuid, int batch_no, mutation& m) const {
         const auto log_ck = clustering_key::from_exploded(
@@ -402,7 +435,8 @@ private:
             auto cdef = m.schema()->get_column_definition(to_bytes("_" + column.name()));
             auto value = atomic_cell::make_live(*column.type,
                                                 ts,
-                                                bytes_view(pk_value[pos]));
+                                                bytes_view(pk_value[pos]),
+                                                _cdc_ttl_opt);
             m.set_cell(log_ck, *cdef, std::move(value));
             ++pos;
         }
@@ -410,11 +444,11 @@ private:
     }
 
     void set_operation(const clustering_key& ck, api::timestamp_type ts, operation op, mutation& m) const {
-        m.set_cell(ck, _op_col, atomic_cell::make_live(*_op_col.type, ts, _op_col.type->decompose(operation_native_type(op))));
+        m.set_cell(ck, _op_col, atomic_cell::make_live(*_op_col.type, ts, _op_col.type->decompose(operation_native_type(op)), _cdc_ttl_opt));
     }
 
     void set_ttl(const clustering_key& ck, api::timestamp_type ts, gc_clock::duration ttl, mutation& m) const {
-        m.set_cell(ck, _ttl_col, atomic_cell::make_live(*_ttl_col.type, ts, _ttl_col.type->decompose(ttl.count())));
+        m.set_cell(ck, _ttl_col, atomic_cell::make_live(*_ttl_col.type, ts, _ttl_col.type->decompose(ttl.count()), _cdc_ttl_opt));
     }
 
 public:
@@ -424,7 +458,11 @@ public:
         , _log_schema(ctx._proxy.get_db().local().find_schema(_schema->ks_name(), log_name(_schema->cf_name())))
         , _op_col(*_log_schema->get_column_definition(to_bytes("operation")))
         , _ttl_col(*_log_schema->get_column_definition(to_bytes("ttl")))
-    {}
+    {
+        if (_schema->cdc_options().ttl()) {
+            _cdc_ttl_opt = std::chrono::seconds(_schema->cdc_options().ttl());
+        }
+    }
 
     // TODO: is pre-image data based on query enough. We only have actual column data. Do we need
     // more details like tombstones/ttl? Probably not but keep in mind.
@@ -453,7 +491,8 @@ public:
                         auto cdef = _log_schema->get_column_definition(to_bytes("_" + column.name()));
                         auto value = atomic_cell::make_live(*column.type,
                                                             ts,
-                                                            bytes_view(exploded[pos]));
+                                                            bytes_view(exploded[pos]),
+                                                            _cdc_ttl_opt);
                         res.set_cell(log_ck, *cdef, std::move(value));
                         ++pos;
                     }
@@ -509,11 +548,11 @@ public:
                 for (const auto& column : _schema->clustering_key_columns()) {
                     assert (pos < ck_value.size());
                     auto cdef = _log_schema->get_column_definition(to_bytes("_" + column.name()));
-                    res.set_cell(log_ck, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos])));
+                    res.set_cell(log_ck, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos]), _cdc_ttl_opt));
 
                     if (pirow) {
                         assert(pirow->has(column.name_as_text()));
-                        res.set_cell(*pikey, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos])));
+                        res.set_cell(*pikey, *cdef, atomic_cell::make_live(*column.type, ts, bytes_view(ck_value[pos]), _cdc_ttl_opt));
                     }
 
                     ++pos;
@@ -543,7 +582,7 @@ public:
                             }
 
                             values[0] = data_type_for<column_op_native_type>()->decompose(data_value(static_cast<column_op_native_type>(op)));
-                            res.set_cell(log_ck, *dst, atomic_cell::make_live(*dst->type, ts, tuple_type_impl::build_value(values)));
+                            res.set_cell(log_ck, *dst, atomic_cell::make_live(*dst->type, ts, tuple_type_impl::build_value(values), _cdc_ttl_opt));
 
                             if (pirow && pirow->has(cdef.name_as_text())) {
                                 values[0] = data_type_for<column_op_native_type>()->decompose(data_value(static_cast<column_op_native_type>(column_op::set)));
@@ -551,7 +590,7 @@ public:
 
                                 assert(std::addressof(res.partition().clustered_row(*_log_schema, *pikey)) != std::addressof(res.partition().clustered_row(*_log_schema, log_ck)));
                                 assert(pikey->explode() != log_ck.explode());
-                                res.set_cell(*pikey, *dst, atomic_cell::make_live(*dst->type, ts, tuple_type_impl::build_value(values)));
+                                res.set_cell(*pikey, *dst, atomic_cell::make_live(*dst->type, ts, tuple_type_impl::build_value(values), _cdc_ttl_opt));
                             }
                         } else {
                             cdc_log.warn("Non-atomic cell ignored {}.{}:{}", _schema->ks_name(), _schema->cf_name(), cdef.name_as_text());

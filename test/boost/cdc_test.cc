@@ -27,6 +27,7 @@
 #include "schema_builder.hh"
 #include "test/lib/cql_assertions.hh"
 #include "test/lib/cql_test_env.hh"
+#include "test/lib/exception_utils.hh"
 #include "transport/messages/result_message.hh"
 
 #include "types.hh"
@@ -193,6 +194,80 @@ SEASTAR_THREAD_TEST_CASE(test_with_cdc_parameter) {
         test("WITH cdc = {'enabled':'false'}", "{'enabled':'true'}", "{'enabled':'false'}", {false}, {true}, {false});
         test("", "{'enabled':'true','preimage':'true','postimage':'true','ttl':'1'}", "{'enabled':'false'}", {false}, {true, true, true, 1}, {false});
         test("WITH cdc = {'enabled':'true','preimage':'true','postimage':'true','ttl':'1'}", "{'enabled':'false'}", "{'enabled':'true','preimage':'false','postimage':'true','ttl':'2'}", {true, true, true, 1}, {false}, {true, false, true, 2});
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_detecting_conflict_of_cdc_log_table_with_existing_table) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        // Conflict on CREATE which enables cdc log
+        e.execute_cql("CREATE TABLE ks.tbl_scylla_cdc_log (a int PRIMARY KEY)").get();
+        BOOST_REQUIRE_THROW(e.execute_cql("CREATE TABLE ks.tbl (a int PRIMARY KEY) WITH cdc = {'enabled': true}").get(), exceptions::invalid_request_exception);
+        e.require_table_does_not_exist("ks", "tbl").get();
+
+        // Conflict on ALTER which enables cdc log
+        e.execute_cql("CREATE TABLE ks.tbl (a int PRIMARY KEY)").get();
+        e.require_table_exists("ks", "tbl").get();
+        BOOST_REQUIRE_THROW(e.execute_cql("ALTER TABLE ks.tbl WITH cdc = {'enabled': true}").get(), exceptions::invalid_request_exception);
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_permissions_of_cdc_log_table) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        auto assert_unauthorized = [&e] (const sstring& stmt) {
+            BOOST_TEST_MESSAGE(format("Must throw unauthorized_exception: {}", stmt));
+            BOOST_REQUIRE_THROW(e.execute_cql(stmt).get(), exceptions::unauthorized_exception);
+        };
+
+        e.execute_cql("CREATE TABLE ks.tbl (a int PRIMARY KEY) WITH cdc = {'enabled': true}").get();
+        e.require_table_exists("ks", "tbl").get();
+
+        // Allow MODIFY, SELECT, ALTER
+        e.execute_cql("INSERT INTO ks.tbl_scylla_cdc_log (stream_id_1, stream_id_2, time, batch_seq_no) VALUES (0, 0, now(), 0)").get();
+        e.execute_cql("UPDATE ks.tbl_scylla_cdc_log SET ttl = 100 WHERE stream_id_1 = 0 AND stream_id_2 = 0 AND time = now() AND batch_seq_no = 0").get();
+        e.execute_cql("DELETE FROM ks.tbl_scylla_cdc_log WHERE stream_id_1 = 0 AND stream_id_2 = 0 AND time = now() AND batch_seq_no = 0").get();
+        e.execute_cql("SELECT * FROM ks.tbl_scylla_cdc_log").get();
+        e.execute_cql("ALTER TABLE ks.tbl_scylla_cdc_log ALTER ttl TYPE blob").get();
+
+        // Disallow DROP
+        assert_unauthorized("DROP TABLE ks.tbl_scylla_cdc_log");
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_disallow_cdc_on_materialized_view) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("CREATE TABLE ks.tbl (a int PRIMARY KEY)").get();
+        e.require_table_exists("ks", "tbl").get();
+
+        BOOST_REQUIRE_THROW(e.execute_cql("CREATE MATERIALIZED VIEW ks.mv AS SELECT a FROM ks.tbl PRIMARY KEY (a) WITH cdc = {'enabled': true}").get(), exceptions::invalid_request_exception);
+        e.require_table_does_not_exist("ks", "mv").get();
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_permissions_of_cdc_description) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        auto test_table = [&e] (const sstring& table_name) {
+            auto assert_unauthorized = [&e] (const sstring& stmt) {
+                BOOST_TEST_MESSAGE(format("Must throw unauthorized_exception: {}", stmt));
+                BOOST_REQUIRE_THROW(e.execute_cql(stmt).get(), exceptions::unauthorized_exception);
+            };
+
+            e.require_table_exists("system_distributed", table_name).get();
+
+            const sstring full_name = "system_distributed." + table_name;
+
+            // Allow MODIFY, SELECT
+            e.execute_cql(format("INSERT INTO {} (time) VALUES (toTimeStamp(now()))", full_name)).get();
+            e.execute_cql(format("UPDATE {} SET expired = toTimeStamp(now()) WHERE time = toTimeStamp(now())", full_name)).get();
+            e.execute_cql(format("DELETE FROM {} WHERE time = toTimeStamp(now())", full_name)).get();
+            e.execute_cql(format("SELECT * FROM {}", full_name)).get();
+
+            // Disallow ALTER, DROP
+            assert_unauthorized(format("ALTER TABLE {} ALTER time TYPE blob", full_name));
+            assert_unauthorized(format("DROP TABLE {}", full_name));
+        };
+
+        test_table("cdc_description");
+        test_table("cdc_topology_description");
     }, mk_cdc_test_config()).get();
 }
 
@@ -417,6 +492,10 @@ SEASTAR_THREAD_TEST_CASE(test_add_columns) {
 // and still get the logs proper. 
 SEASTAR_THREAD_TEST_CASE(test_cdc_across_shards) {
     do_with_cql_env_thread([](cql_test_env& e) {
+        if (smp::count < 2) {
+            tlog.warn("This test case requires at least 2 shards");
+            return;
+        }
         smp::submit_to(1, [&e] {
             // this is actually ok. there is no members of cql_test_env actually used in call
             return seastar::async([&] {
@@ -428,5 +507,67 @@ SEASTAR_THREAD_TEST_CASE(test_cdc_across_shards) {
         auto rows = select_log(e, "tbl");
 
         BOOST_REQUIRE(!to_bytes_filtered(*rows, cdc::operation::update).empty());
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_negative_ttl_fail) {
+    do_with_cql_env_thread([](cql_test_env& e) {
+        BOOST_REQUIRE_EXCEPTION(e.execute_cql("CREATE TABLE ks.fail (a int PRIMARY KEY, b int) WITH cdc = {'enabled':true,'ttl':'-1'}").get0(),
+                exceptions::configuration_exception,
+                exception_predicate::message_contains("ttl"));
+    }, mk_cdc_test_config()).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_ttls) {
+    do_with_cql_env_thread([](cql_test_env& e) {
+        auto test_ttl = [&e] (int ttl_seconds) {
+            const auto base_tbl_name = "tbl" + std::to_string(ttl_seconds);
+            cquery_nofail(e, format("CREATE TABLE ks.{} (pk int, ck int, val int, PRIMARY KEY(pk, ck)) WITH cdc = {{'enabled':'true', 'ttl':{}}}", base_tbl_name, ttl_seconds));
+            BOOST_REQUIRE_EQUAL(e.local_db().find_schema("ks", base_tbl_name)->cdc_options().ttl(), ttl_seconds);
+            cquery_nofail(e, format("INSERT INTO ks.{} (pk, ck, val) VALUES(1, 11, 111)", base_tbl_name));
+
+            auto log_schema = e.local_db().find_schema("ks", cdc::log_name(base_tbl_name));
+
+            // Construct a query like "SELECT _pk, ttl(_pk), _ck, ttl(_ck), ...  FROM ks.tbl_log_tablename"
+            sstring query = "SELECT";
+            bool first_token = true;
+            std::vector<bytes> log_column_names; // {"_pk", "_ck", "_val", ...}
+            for (auto& reg_col : log_schema->regular_columns()) {
+                if (!first_token) {
+                    query += ",";
+                }
+                first_token = false;
+                query += format(" \"{0}\", ttl(\"{0}\")", reg_col.name_as_text());
+                log_column_names.push_back(reg_col.name_as_text().c_str());
+            }
+            query += format(" FROM ks.{}", cdc::log_name(base_tbl_name));
+
+            // Execute query and get the first (and only) row of results:
+            auto msg = e.execute_cql(query).get0();
+            auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(msg);
+            BOOST_REQUIRE(rows);
+            auto results = to_bytes(*rows);
+            BOOST_REQUIRE(!results.empty());
+            auto& row = results.front(); // serialized {_pk, ttl(_pk), _ck, ttl(_ck), ...}
+            BOOST_REQUIRE(!(row.size()%2));
+
+            // Traverse the result - serialized pairs of (_column, ttl(_column))
+            for (size_t i = 0u; i < row.size(); i += 2u) {
+                auto cell_type = log_schema->column_name_type(*log_schema->get_column_definition(log_column_names[i/2]));
+                if (!row[i].has_value() || cell_type->deserialize(*row[i]).is_null()) {
+                    continue; // NULL cell cannot have TTL
+                }
+                if (!row[i+1].has_value() && !ttl_seconds) {
+                    continue; // NULL TTL value is acceptable when records are kept forever (TTL==0)
+                }
+                data_value cell_ttl = int32_type->deserialize(*row[i+1]);
+                BOOST_REQUIRE(!cell_ttl.is_null());
+                auto cell_ttl_seconds = value_cast<int32_t>(cell_ttl);
+                // 30% tolerance in case of slow execution (a little flaky...)
+                BOOST_REQUIRE_CLOSE((float)cell_ttl_seconds, (float)ttl_seconds, 30.f);
+            }            
+        };
+        test_ttl(0);
+        test_ttl(10);
     }, mk_cdc_test_config()).get();
 }

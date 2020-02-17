@@ -49,12 +49,14 @@
 #include "cql3/constants.hh"
 #include <optional>
 #include "utils/big_decimal.hh"
+#include "utils/overloaded_functor.hh"
 #include "seastar/json/json_elements.hh"
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "collection_mutation.hh"
 #include "db/query_context.hh"
 #include "schema.hh"
 #include "alternator/tags_extension.hh"
+#include "alternator/rmw_operation.hh"
 
 #include <boost/range/adaptors.hpp>
 
@@ -168,7 +170,6 @@ static std::string get_table_name(const rjson::value& request) {
     return table_name;
 }
 
-
 /** Extract table schema from a request.
  *  Many requests expect the table's name to be listed in a "TableName" field
  *  and need to look it up as an existing table. This convenience function
@@ -179,7 +180,7 @@ static std::string get_table_name(const rjson::value& request) {
 static schema_ptr get_table(service::storage_proxy& proxy, const rjson::value& request) {
     std::string table_name = get_table_name(request);
     try {
-        return proxy.get_db().local().find_schema(executor::KEYSPACE_NAME, table_name);
+        return proxy.get_db().local().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + sstring(table_name), table_name);
     } catch(no_such_column_family&) {
         throw api_error("ResourceNotFoundException",
                 format("Requested resource not found: Table: {} not found", table_name));
@@ -192,6 +193,7 @@ static schema_ptr get_table(service::storage_proxy& proxy, const rjson::value& r
 // which allow IndexName should use this function.
 static schema_ptr get_table_or_view(service::storage_proxy& proxy, const rjson::value& request) {
     std::string table_name = get_table_name(request);
+    std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     const rjson::value* index_name = rjson::find(request, "IndexName");
     std::string orig_table_name;
     if (index_name) {
@@ -205,18 +207,18 @@ static schema_ptr get_table_or_view(service::storage_proxy& proxy, const rjson::
     }
 
     // If no tables for global indexes were found, the index may be local
-    if (!proxy.get_db().local().has_schema(executor::KEYSPACE_NAME, table_name)) {
+    if (!proxy.get_db().local().has_schema(keyspace_name, table_name)) {
         table_name = lsi_name(orig_table_name, index_name->GetString());
     }
 
     try {
-        return proxy.get_db().local().find_schema(executor::KEYSPACE_NAME, table_name);
+        return proxy.get_db().local().find_schema(keyspace_name, table_name);
     } catch(no_such_column_family&) {
         if (index_name) {
             // DynamoDB returns a different error depending on whether the
             // base table doesn't exist (ResourceNotFoundException) or it
             // does exist but the index does not (ValidationException).
-            if (proxy.get_db().local().has_schema(executor::KEYSPACE_NAME, orig_table_name)) {
+            if (proxy.get_db().local().has_schema(keyspace_name, orig_table_name)) {
                 throw api_error("ValidationException",
                     format("Requested resource not found: Index '{}' for table '{}'", index_name->GetString(), orig_table_name));
             } else {
@@ -307,14 +309,14 @@ static rjson::value generate_arn_for_table(const schema& schema) {
     return rjson::from_string(format("arn:scylla:alternator:{}:scylla:table/{}", schema.ks_name(), schema.cf_name()));
 }
 
-future<executor::request_return_type> executor::describe_table(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::describe_table(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.describe_table++;
     rjson::value request = rjson::parse(content);
     elogger.trace("Describing table {}", request);
 
     schema_ptr schema = get_table(_proxy, request);
 
-    tracing::add_table_name(client_state.get_trace_state(), schema->ks_name(), schema->cf_name());
+    tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
 
     rjson::value table_description = rjson::empty_object();
     rjson::set(table_description, "TableName", rjson::from_string(schema->cf_name()));
@@ -387,19 +389,22 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
     return make_ready_future<executor::request_return_type>(make_jsonable(std::move(response)));
 }
 
-future<executor::request_return_type> executor::delete_table(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::delete_table(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.delete_table++;
     rjson::value request = rjson::parse(content);
     elogger.trace("Deleting table {}", request);
 
     std::string table_name = get_table_name(request);
-    tracing::add_table_name(client_state.get_trace_state(), KEYSPACE_NAME, table_name);
+    std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
+    tracing::add_table_name(trace_state, keyspace_name, table_name);
 
-    if (!_proxy.get_db().local().has_schema(KEYSPACE_NAME, table_name)) {
+    if (!_proxy.get_db().local().has_schema(keyspace_name, table_name)) {
         return make_ready_future<request_return_type>(api_error("ResourceNotFoundException",
                 format("Requested resource not found: Table: {} not found", table_name)));
     }
-    return _mm.announce_column_family_drop(KEYSPACE_NAME, table_name, false, service::migration_manager::drop_views::yes).then([table_name = std::move(table_name)] {
+    return _mm.announce_column_family_drop(keyspace_name, table_name, false, service::migration_manager::drop_views::yes).then([this, keyspace_name] {
+        return _mm.announce_keyspace_drop(keyspace_name, false);
+    }).then([table_name = std::move(table_name)] {
         // FIXME: need more attributes?
         rjson::value table_description = rjson::empty_object();
         rjson::set(table_description, "TableName", rjson::from_string(table_name));
@@ -536,6 +541,24 @@ static bool validate_legal_tag_chars(std::string_view tag) {
     return std::all_of(tag.begin(), tag.end(), &is_legal_tag_char);
 }
 
+static void validate_tags(const std::map<sstring, sstring>& tags) {
+    static const std::unordered_set<std::string_view> allowed_values = {
+        "f", "forbid", "forbid_rmw",
+        "a", "always", "always_use_lwt",
+        "o", "only_rmw_uses_lwt",
+        "u", "unsafe", "unsafe_rmw",
+    };
+    auto it = tags.find(rmw_operation::WRITE_ISOLATION_TAG_KEY);
+    if (it != tags.end()) {
+        std::string_view value = it->second;
+        elogger.warn("Allowed values count {} {}", value, allowed_values.count(value));
+        if (allowed_values.count(value) == 0) {
+            throw api_error("ValidationException",
+                    format("Incorrect write isolation tag {}. Allowed values: {}", value, allowed_values));
+        }
+    }
+}
+
 // FIXME: Updating tags currently relies on updating schema, which may be subject
 // to races during concurrent updates of the same table. Once Scylla schema updates
 // are fixed, this issue will automatically get fixed as well.
@@ -565,6 +588,7 @@ static future<> update_tags(const rjson::value& tags, schema_ptr schema, std::ma
     if (tags_map.size() > 50) {
         return make_exception_future<>(api_error("ValidationException", "Number of Tags exceed the current limit for the provided ResourceArn"));
     }
+    validate_tags(tags_map);
 
     std::stringstream serialized_tags;
     serialized_tags << '{';
@@ -657,16 +681,17 @@ future<executor::request_return_type> executor::list_tags_of_resource(client_sta
     return make_ready_future<executor::request_return_type>(make_jsonable(std::move(ret)));
 }
 
-future<executor::request_return_type> executor::create_table(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::create_table(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.create_table++;
     rjson::value table_info = rjson::parse(content);
     elogger.trace("Creating table {}", table_info);
     std::string table_name = get_table_name(table_info);
+    std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     const rjson::value& attribute_definitions = table_info["AttributeDefinitions"];
 
-    tracing::add_table_name(client_state.get_trace_state(), KEYSPACE_NAME, table_name);
+    tracing::add_table_name(trace_state, keyspace_name, table_name);
 
-    schema_builder builder(KEYSPACE_NAME, table_name);
+    schema_builder builder(keyspace_name, table_name);
     auto [hash_key, range_key] = parse_key_schema(table_info);
     add_column(builder, hash_key, attribute_definitions, column_kind::partition_key);
     if (!range_key.empty()) {
@@ -713,7 +738,7 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             elogger.trace("Adding GSI {}", index_name->GetString());
             // FIXME: read and handle "Projection" parameter. This will
             // require the MV code to copy just parts of the attrs map.
-            schema_builder view_builder(KEYSPACE_NAME, vname);
+            schema_builder view_builder(keyspace_name, vname);
             auto [view_hash_key, view_range_key] = parse_key_schema(g);
             if (partial_schema->get_column_definition(to_bytes(view_hash_key)) == nullptr) {
                 // A column that exists in a global secondary index is upgraded from being a map entry
@@ -766,7 +791,7 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             elogger.trace("Adding LSI {}", index_name->GetString());
             // FIXME: read and handle "Projection" parameter. This will
             // require the MV code to copy just parts of the attrs map.
-            schema_builder view_builder(KEYSPACE_NAME, vname);
+            schema_builder view_builder(keyspace_name, vname);
             auto [view_hash_key, view_range_key] = parse_key_schema(l);
             if (view_hash_key != hash_key) {
                 return make_ready_future<request_return_type>(api_error("ValidationException",
@@ -804,8 +829,18 @@ future<executor::request_return_type> executor::create_table(client_state& clien
     if (rjson::find(table_info, "SSESpecification")) {
         return make_ready_future<request_return_type>(api_error("ValidationException", "SSESpecification: configuring encryption-at-rest is not yet supported."));
     }
-    if (rjson::find(table_info, "StreamSpecification")) {
-        return make_ready_future<request_return_type>(api_error("ValidationException", "StreamSpecification: streams (CDC) is not yet supported."));
+    // We don't yet support streams (CDC), but a StreamSpecification asking
+    // *not* to use streams should be accepted:
+    rjson::value* stream_specification = rjson::find(table_info, "StreamSpecification");
+    if (stream_specification && stream_specification->IsObject()) {
+        rjson::value* stream_enabled = rjson::find(*stream_specification, "StreamEnabled");
+        if (!stream_enabled || !stream_enabled->IsBool()) {
+            return make_ready_future<request_return_type>(api_error("ValidationException", "StreamSpecification needs boolean StreamEnabled"));
+        }
+        if (stream_enabled->GetBool()) {
+            // TODO: support streams
+            return make_ready_future<request_return_type>(api_error("ValidationException", "StreamSpecification: streams (CDC) is not yet supported."));
+        }
     }
 
     builder.set_extensions(schema::extensions_map{{sstring(tags_extension::NAME), ::make_shared<tags_extension>()}});
@@ -829,25 +864,31 @@ future<executor::request_return_type> executor::create_table(client_state& clien
         ++where_clause_it;
     }
 
-    return futurize_apply([&] { return _mm.announce_new_column_family(schema, false); }).then([this, table_info = std::move(table_info), schema, view_builders = std::move(view_builders)] () mutable {
-        return parallel_for_each(std::move(view_builders), [schema] (schema_builder builder) {
-            return service::get_local_migration_manager().announce_new_view(view_ptr(builder.build()));
-        }).then([this, table_info = std::move(table_info), schema] () mutable {
-            future<> f = make_ready_future<>();
-            if (rjson::find(table_info, "Tags")) {
-                f = add_tags(_proxy, schema, table_info);
-            }
-            return f.then([table_info = std::move(table_info), schema] () mutable {
-                rjson::value status = rjson::empty_object();
-                supplement_table_info(table_info, *schema);
-                rjson::set(status, "TableDescription", std::move(table_info));
-                return make_ready_future<executor::request_return_type>(make_jsonable(std::move(status)));
+    return create_keyspace(keyspace_name).then([this, table_name, table_info = std::move(table_info), schema, view_builders = std::move(view_builders)] () mutable {
+        return futurize_apply([&] { return _mm.announce_new_column_family(schema, false); }).then([this, table_info = std::move(table_info), schema, view_builders = std::move(view_builders)] () mutable {
+            return parallel_for_each(std::move(view_builders), [schema] (schema_builder builder) {
+                return service::get_local_migration_manager().announce_new_view(view_ptr(builder.build()));
+            }).then([this, table_info = std::move(table_info), schema] () mutable {
+                future<> f = make_ready_future<>();
+                if (rjson::find(table_info, "Tags")) {
+                    f = add_tags(_proxy, schema, table_info);
+                }
+                return f.then([table_info = std::move(table_info), schema] () mutable {
+                    rjson::value status = rjson::empty_object();
+                    supplement_table_info(table_info, *schema);
+                    rjson::set(status, "TableDescription", std::move(table_info));
+                    return make_ready_future<executor::request_return_type>(make_jsonable(std::move(status)));
+                });
             });
+        }).handle_exception_type([table_name = std::move(table_name)] (exceptions::already_exists_exception&) {
+            return make_exception_future<executor::request_return_type>(
+                    api_error("ResourceInUseException",
+                            format("Table {} already exists", table_name)));
         });
     }).handle_exception_type([table_name = std::move(table_name)] (exceptions::already_exists_exception&) {
         return make_exception_future<executor::request_return_type>(
                 api_error("ResourceInUseException",
-                        format("Table {} already exists", table_name)));
+                        format("Keyspace for table {} already exists", table_name)));
     });
 }
 
@@ -942,7 +983,7 @@ put_or_delete_item::put_or_delete_item(const rjson::value& item, schema_ptr sche
         } else if (!cdef->is_primary_key()) {
             // Fixed-type regular column can be used for GSI key
             _cells->push_back({std::move(column_name),
-                    get_key_from_typed_value(it->value, *cdef, type_to_string(cdef->type))});
+                    get_key_from_typed_value(it->value, *cdef)});
         }
     }
 }
@@ -1033,110 +1074,46 @@ static dht::partition_range_vector to_partition_ranges(const dht::decorated_key&
     return dht::partition_range_vector{dht::partition_range(pk)};
 }
 
+rmw_operation::rmw_operation(service::storage_proxy& proxy, rjson::value&& request)
+    : _request(std::move(request))
+    , _schema(get_table(proxy, _request))
+    , _write_isolation(get_write_isolation_for_schema(_schema)) {
+    // _pk and _ck will be assigned later, by the subclass's constructor
+    // (each operation puts the key in a slightly different location in
+    // the request).
+}
 
-// An rmw_operation encapsulates the common logic of all the item update
-// operations which may involve a read of the item before the write
-// (so-called Read-Modify-Write operations). These operations include PutItem,
-// UpdateItem and DeleteItem: All of these may be conditional operations (the
-// "Expected" parameter) which requir a read before the write, and UpdateItem
-// may also have an update expression which refers to the item's old value.
-//
-// The code below supports running the read and the write together as one
-// transaction using LWT (this is why rmw_operation is a subclass of
-// cas_request, as required by storage_proxy::cas()), but also has optional
-// modes not using LWT.
-class rmw_operation : public service::cas_request, public enable_shared_from_this<rmw_operation> {
-public:
-    // The following options choose which mechanism to use for isolating
-    // parallel write operations:
-    // * The FORBID_RMW option forbids RMW (read-modify-write) operations
-    //   such as conditional updates. For the remaining write-only
-    //   operations, ordinary quorum writes are isolated enough.
-    // * The LWT_ALWAYS option always uses LWT (lightweight transactions)
-    //   for any write operation - whether or not it also has a read.
-    // * The LWT_RMW_ONLY option uses LWT only for RMW operations, and uses
-    //   ordinary quorum writes for write-only operations.
-    //   This option is not safe if the user may send both RMW and write-only
-    //   operations on the same item.
-    // * The UNSAFE_RMW option does read-modify-write operations as separate
-    //   read and write. It is unsafe - concurrent RMW operations are not
-    //   isolated at all. This option will likely be removed in the future.
-    enum class write_isolation {
-        FORBID_RMW, LWT_ALWAYS, LWT_RMW_ONLY, UNSAFE_RMW
-    };
-    static constexpr auto WRITE_ISOLATION_TAG_KEY = "system:write_isolation";
+std::optional<mutation> rmw_operation::apply(query::result& qr, const query::partition_slice& slice, api::timestamp_type ts) {
+    if (qr.row_count()) {
+        auto selection = cql3::selection::selection::wildcard(_schema);
+        auto previous_item = describe_item(_schema, slice, *selection, qr, {});
+        return apply(std::make_unique<rjson::value>(std::move(previous_item)), ts);
+    } else {
+        return apply(std::unique_ptr<rjson::value>(), ts);
+    }
+}
 
-    static write_isolation get_write_isolation_for_schema(schema_ptr schema) {
-        const auto& tags = get_tags_of_table(schema);
-        auto it = tags.find(WRITE_ISOLATION_TAG_KEY);
-        if (it == tags.end() || it->second.empty()) {
-            // By default, fall back to always enforcing LWT
-            return write_isolation::LWT_ALWAYS;
-        }
-        switch (it->second[0]) {
-        case 'f':
-            return write_isolation::FORBID_RMW;
-        case 'a':
-            return write_isolation::LWT_ALWAYS;
-        case 'o':
-            return write_isolation::LWT_RMW_ONLY;
-        case 'u':
-            return write_isolation::UNSAFE_RMW;
-        default:
-            // In case of an incorrect tag, fall back to the safest option: LWT_ALWAYS
-            return write_isolation::LWT_ALWAYS;
-        }
+rmw_operation::write_isolation rmw_operation::get_write_isolation_for_schema(schema_ptr schema) {
+    const auto& tags = get_tags_of_table(schema);
+    auto it = tags.find(WRITE_ISOLATION_TAG_KEY);
+    if (it == tags.end() || it->second.empty()) {
+        // By default, fall back to always enforcing LWT
+        return write_isolation::LWT_ALWAYS;
     }
-
-protected:
-    // The full request JSON
-    rjson::value _request;
-    // All RMW operations involve a single item with a specific partition
-    // and optional clustering key, in a single table, so the following
-    // information is common to all of them:
-    schema_ptr _schema;
-    partition_key _pk = partition_key::make_empty();
-    clustering_key _ck = clustering_key::make_empty();
-    write_isolation _write_isolation;
-public:
-    // The constructor of a rmw_operation subclass should parse the request
-    // and try to discover as many input errors as it can before really
-    // attempting the read or write operations.
-    rmw_operation(service::storage_proxy& proxy, rjson::value&& request)
-        : _request(std::move(request))
-        , _schema(get_table(proxy, _request))
-        , _write_isolation(get_write_isolation_for_schema(_schema)) {
-        // _pk and _ck will be assigned later, by the subclass's constructor
-        // (each operation puts the key in a slightly different location in
-        // the request).
+    switch (it->second[0]) {
+    case 'f':
+        return write_isolation::FORBID_RMW;
+    case 'a':
+        return write_isolation::LWT_ALWAYS;
+    case 'o':
+        return write_isolation::LWT_RMW_ONLY;
+    case 'u':
+        return write_isolation::UNSAFE_RMW;
+    default:
+        // In case of an incorrect tag, fall back to the safest option: LWT_ALWAYS
+        return write_isolation::LWT_ALWAYS;
     }
-    // rmw_operation subclasses (update_item_operation, put_item_operation
-    // and delete_item_operation) shall implement an apply() function which
-    // takes the previous value of the item (if it was read) and creates the
-    // write mutation. If the previous value of item does not pass the needed
-    // conditional expression, apply() should return an empty optional.
-    // apply() may throw if it encounters input errors not discovered during
-    // the constructor.
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) = 0;
-    // Convert the above apply() into the signature needed by cas_request:
-    virtual std::optional<mutation> apply(query::result& qr, const query::partition_slice& slice, api::timestamp_type ts) override {
-        if (qr.row_count()) {
-            auto selection = cql3::selection::selection::wildcard(_schema);
-            auto previous_item = describe_item(_schema, slice, *selection, qr, {});
-            return apply(std::make_unique<rjson::value>(std::move(previous_item)), ts);
-        } else {
-            return apply(std::unique_ptr<rjson::value>(), ts);
-        }
-    }
-    virtual ~rmw_operation() = default;
-    schema_ptr schema() const { return _schema; }
-    const rjson::value& request() const { return _request; }
-    future<executor::request_return_type> execute(service::storage_proxy& proxy,
-            service::client_state& client_state,
-            bool needs_read_before_write,
-            stats& stats);
-    std::optional<shard_id> shard_for_execute(bool needs_read_before_write);
-};
+}
 
 // shard_for_execute() checks whether execute() must be called on a specific
 // other shard. Running execute() on a specific shard is necessary only if it
@@ -1164,6 +1141,7 @@ std::optional<shard_id> rmw_operation::shard_for_execute(bool needs_read_before_
 
 future<executor::request_return_type> rmw_operation::execute(service::storage_proxy& proxy,
         service::client_state& client_state,
+        tracing::trace_state_ptr trace_state,
         bool needs_read_before_write,
         stats& stats) {
     if (needs_read_before_write) {
@@ -1174,12 +1152,12 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
         if (_write_isolation == write_isolation::UNSAFE_RMW) {
             // This is the old, unsafe, read before write which does first
             // a read, then a write. TODO: remove this mode entirely.
-            return get_previous_item(proxy, client_state, schema(), _pk, _ck, stats).then([this, &client_state, &proxy] (std::unique_ptr<rjson::value> previous_item) mutable {
+            return get_previous_item(proxy, client_state, schema(), _pk, _ck, stats).then([this, &client_state, &proxy, trace_state] (std::unique_ptr<rjson::value> previous_item) mutable {
                 std::optional<mutation> m = apply(previous_item, api::new_timestamp());
                 if (!m) {
                     return make_ready_future<executor::request_return_type>(api_error("ConditionalCheckFailedException", "Failed condition."));
                 }
-                return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), client_state.get_trace_state(), empty_service_permit()).then([] () {
+                return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([] () {
                     // Without special options on what to return, all these
                     // operations return nothing. FIXME: support those options
                     return make_ready_future<executor::request_return_type>(json_string(""));
@@ -1189,7 +1167,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
     } else if (_write_isolation != write_isolation::LWT_ALWAYS) {
         std::optional<mutation> m = apply(nullptr, api::new_timestamp());
         assert(m); // !needs_read_before_write, so apply() did not check a condition
-        return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), client_state.get_trace_state(), empty_service_permit()).then([] () {
+        return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([] () {
             return make_ready_future<executor::request_return_type>(json_string(""));
         });
     }
@@ -1201,7 +1179,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             previous_item_read_command(schema(), _ck, selection) :
             read_nothing_read_command(schema());
     return proxy.cas(schema(), shared_from_this(), read_command, to_partition_ranges(*schema(), _pk),
-            {timeout, empty_service_permit(), client_state, client_state.get_trace_state()},
+            {timeout, empty_service_permit(), client_state, trace_state},
             db::consistency_level::LOCAL_SERIAL, db::consistency_level::LOCAL_QUORUM, timeout, timeout).then([read_command] (bool is_applied) {
         if (!is_applied) {
             return make_ready_future<executor::request_return_type>(api_error("ConditionalCheckFailedException", "Failed condition."));
@@ -1296,14 +1274,14 @@ public:
     virtual ~put_item_operation() = default;
 };
 
-future<executor::request_return_type> executor::put_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::put_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.put_item++;
     auto start_time = std::chrono::steady_clock::now();
     rjson::value request = rjson::parse(content);
     elogger.trace("put_item {}", request);
 
     auto op = make_shared<put_item_operation>(_proxy, std::move(request));
-    tracing::add_table_name(client_state.get_trace_state(), op->schema()->ks_name(), op->schema()->cf_name());
+    tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
     const bool needs_read_before_write = op->request().HasMember("Expected") ||
             check_needs_read_before_write(op->_condition_expression);
     if (auto shard = op->shard_for_execute(needs_read_before_write); shard) {
@@ -1311,15 +1289,15 @@ future<executor::request_return_type> executor::put_item(client_state& client_st
         _stats.shard_bounce_for_lwt++;
         // FIXME: create separate smp_service_group
         return container().invoke_on(*shard, default_smp_service_group(),
-                [content = std::move(content), cs = client_state.move_to_other_shard()]
+                [content = std::move(content), cs = client_state.move_to_other_shard(), gt = tracing::global_trace_state_ptr(trace_state)]
                 (executor& e) mutable {
-            return do_with(cs.get(), [&e, content = std::move(content)]
-                                     (service::client_state& client_state) {
-                return e.put_item(client_state, std::move(content));
+            return do_with(cs.get(), [&e, content = std::move(content), trace_state = tracing::trace_state_ptr(gt)]
+                                     (service::client_state& client_state) mutable {
+                return e.put_item(client_state, std::move(trace_state), std::move(content));
             });
         });
     }
-    return op->execute(_proxy, client_state, needs_read_before_write, _stats).finally([op, start_time, this] {
+    return op->execute(_proxy, client_state, trace_state, needs_read_before_write, _stats).finally([op, start_time, this] {
         _stats.api_operations.put_item_latency.add(std::chrono::steady_clock::now() - start_time, _stats.api_operations.put_item_latency._count + 1);
     });
 }
@@ -1362,14 +1340,14 @@ public:
     virtual ~delete_item_operation() = default;
 };
 
-future<executor::request_return_type> executor::delete_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::delete_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.delete_item++;
     auto start_time = std::chrono::steady_clock::now();
     rjson::value request = rjson::parse(content);
     elogger.trace("delete_item {}", request);
 
     auto op = make_shared<delete_item_operation>(_proxy, std::move(request));
-    tracing::add_table_name(client_state.get_trace_state(), op->schema()->ks_name(), op->schema()->cf_name());
+    tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
     const bool needs_read_before_write = op->request().HasMember("Expected") ||
             check_needs_read_before_write(op->_condition_expression);
     if (auto shard = op->shard_for_execute(needs_read_before_write); shard) {
@@ -1377,24 +1355,24 @@ future<executor::request_return_type> executor::delete_item(client_state& client
         _stats.shard_bounce_for_lwt++;
         // FIXME: create separate smp_service_group
         return container().invoke_on(*shard, default_smp_service_group(),
-                [content = std::move(content), cs = client_state.move_to_other_shard()]
+                [content = std::move(content), cs = client_state.move_to_other_shard(), gt = tracing::global_trace_state_ptr(trace_state)]
                 (executor& e) mutable {
-            return do_with(cs.get(), [&e, content = std::move(content)]
-                                     (service::client_state& client_state) {
-                return e.delete_item(client_state, std::move(content));
+            return do_with(cs.get(), [&e, content = std::move(content), trace_state = tracing::trace_state_ptr(gt)]
+                                     (service::client_state& client_state) mutable {
+                return e.delete_item(client_state, std::move(trace_state), std::move(content));
             });
         });
     }
-    return op->execute(_proxy, client_state, needs_read_before_write, _stats).finally([op, start_time, this] {
+    return op->execute(_proxy, client_state, trace_state, needs_read_before_write, _stats).finally([op, start_time, this] {
         _stats.api_operations.delete_item_latency.add(std::chrono::steady_clock::now() - start_time, _stats.api_operations.delete_item_latency._count + 1);
     });
 }
 
 static schema_ptr get_table_from_batch_request(const service::storage_proxy& proxy, const rjson::value::ConstMemberIterator& batch_request) {
-    std::string table_name = batch_request->name.GetString(); // JSON keys are always strings
+    sstring table_name = batch_request->name.GetString(); // JSON keys are always strings
     validate_table_name(table_name);
     try {
-        return proxy.get_db().local().find_schema(executor::KEYSPACE_NAME, table_name);
+        return proxy.get_db().local().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + table_name, table_name);
     } catch(no_such_column_family&) {
         throw api_error("ResourceNotFoundException", format("Requested resource not found: Table: {} not found", table_name));
     }
@@ -1441,12 +1419,12 @@ public:
     }
 };
 
-static future<> cas_write(service::storage_proxy& proxy, schema_ptr schema, dht::decorated_key dk, std::vector<put_or_delete_item>&& mutation_builders, service::client_state& client_state) {
+static future<> cas_write(service::storage_proxy& proxy, schema_ptr schema, dht::decorated_key dk, std::vector<put_or_delete_item>&& mutation_builders, service::client_state& client_state, tracing::trace_state_ptr trace_state) {
     auto timeout = default_timeout();
     auto read_command = read_nothing_read_command(schema);
     auto op = seastar::make_shared<put_or_delete_item_cas_request>(schema, std::move(mutation_builders));
     return proxy.cas(schema, op, read_command, to_partition_ranges(dk),
-            {timeout, empty_service_permit(), client_state, client_state.get_trace_state()},
+            {timeout, empty_service_permit(), client_state, trace_state},
             db::consistency_level::LOCAL_SERIAL, db::consistency_level::LOCAL_QUORUM,
             timeout, timeout).discard_result();
     // We discarded cas()'s future value ("is_applied") because BatchWriteItems
@@ -1474,6 +1452,7 @@ struct schema_decorated_key_equal {
 static future<> do_batch_write(service::storage_proxy& proxy,
         std::vector<std::pair<schema_ptr, put_or_delete_item>> mutation_builders,
         service::client_state& client_state,
+        tracing::trace_state_ptr trace_state,
         stats& stats) {
     if (mutation_builders.empty()) {
         return make_ready_future<>();
@@ -1497,7 +1476,7 @@ static future<> do_batch_write(service::storage_proxy& proxy,
         return proxy.mutate(std::move(mutations),
                 db::consistency_level::LOCAL_QUORUM,
                 default_timeout(),
-                client_state.get_trace_state(),
+                trace_state,
                 empty_service_permit());
     } else {
         // Do the write via LWT:
@@ -1515,11 +1494,11 @@ static future<> do_batch_write(service::storage_proxy& proxy,
                 it->second.push_back(std::move(b.second));
             }
         }
-        return parallel_for_each(std::move(key_builders), [&proxy, &client_state, &stats] (auto& e) {
+        return parallel_for_each(std::move(key_builders), [&proxy, &client_state, &stats, trace_state] (auto& e) {
             stats.write_using_lwt++;
             auto desired_shard = service::storage_proxy::cas_shard(e.first.dk.token());
             if (desired_shard == engine().cpu_id()) {
-                return cas_write(proxy, e.first.schema, e.first.dk, std::move(e.second), client_state);
+                return cas_write(proxy, e.first.schema, e.first.dk, std::move(e.second), client_state, trace_state);
             } else {
                 stats.shard_bounce_for_lwt++;
                 // FIXME: create separate smp_service_group
@@ -1528,12 +1507,13 @@ static future<> do_batch_write(service::storage_proxy& proxy,
                              mb = e.second,
                              dk = e.first.dk,
                              ks = e.first.schema->ks_name(),
-                             cf = e.first.schema->cf_name()]
+                             cf = e.first.schema->cf_name(), gt =  tracing::global_trace_state_ptr(trace_state)]
                             (service::storage_proxy& proxy) mutable {
-                    return do_with(cs.get(), [&proxy, mb = std::move(mb), dk = std::move(dk), ks = std::move(ks), cf = std::move(cf)]
+                    return do_with(cs.get(), [&proxy, mb = std::move(mb), dk = std::move(dk), ks = std::move(ks), cf = std::move(cf),
+                                              trace_state = tracing::trace_state_ptr(gt)]
                                               (service::client_state& client_state) mutable {
                         auto schema = proxy.get_db().local().find_schema(ks, cf);
-                        return cas_write(proxy, schema, dk, std::move(mb), client_state);
+                        return cas_write(proxy, schema, dk, std::move(mb), client_state, std::move(trace_state));
                     });
                 });
             }
@@ -1541,7 +1521,7 @@ static future<> do_batch_write(service::storage_proxy& proxy,
     }
 }
 
-future<executor::request_return_type> executor::batch_write_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::batch_write_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.batch_write_item++;
     rjson::value batch_info = rjson::parse(content);
     rjson::value& request_items = batch_info["RequestItems"];
@@ -1551,7 +1531,7 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
 
     for (auto it = request_items.MemberBegin(); it != request_items.MemberEnd(); ++it) {
         schema_ptr schema = get_table_from_batch_request(_proxy, it);
-        tracing::add_table_name(client_state.get_trace_state(), schema->ks_name(), schema->cf_name());
+        tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
         std::unordered_set<primary_key, primary_key_hash, primary_key_equal> used_keys(
                 1, primary_key_hash{schema}, primary_key_equal{schema});
         for (auto& request : it->value.GetArray()) {
@@ -1586,7 +1566,7 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
         }
     }
 
-    return do_batch_write(_proxy, std::move(mutation_builders), client_state, _stats).then([] () {
+    return do_batch_write(_proxy, std::move(mutation_builders), client_state, trace_state, _stats).then([] () {
         // FIXME: Issue #5650: If we failed writing some of the updates,
         // need to return a list of these failed updates in UnprocessedItems
         // rather than fail the whole write (issue #5650).
@@ -1745,9 +1725,6 @@ static rjson::value number_subtract(const rjson::value& v1, const rjson::value& 
     return ret;
 }
 
-template<class... Ts> struct overloaded : Ts... { using Ts::operator()...; };
-template<class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
-
 // calculate_size() is ConditionExpression's size() function, i.e., it takes
 // a JSON-encoded value and returns its "size" as defined differently for the
 // different types - also as a JSON-encoded number.
@@ -1814,7 +1791,7 @@ rjson::value calculate_value(const parsed::value& v,
         const rjson::value& update_info,
         schema_ptr schema,
         const std::unique_ptr<rjson::value>& previous_item) {
-    return std::visit(overloaded {
+    return std::visit(overloaded_functor {
         [&] (const std::string& valref) -> rjson::value {
             if (!expression_attribute_values) {
                 throw api_error("ValidationException",
@@ -2172,7 +2149,7 @@ static rjson::value describe_item(schema_ptr schema,
 }
 
 static bool check_needs_read_before_write(const parsed::value& v) {
-    return std::visit(overloaded {
+    return std::visit(overloaded_functor {
         [&] (const std::string& valref) -> bool {
             return false;
         },
@@ -2189,7 +2166,7 @@ static bool check_needs_read_before_write(const parsed::value& v) {
 
 static bool check_needs_read_before_write(const parsed::update_expression& update_expression) {
     return boost::algorithm::any_of(update_expression.actions(), [](const parsed::update_expression::action& action) {
-        return std::visit(overloaded {
+        return std::visit(overloaded_functor {
             [&] (const parsed::update_expression::action::set& a) -> bool {
                 return check_needs_read_before_write(a._rhs._v1) || (a._rhs._op != 'v' && check_needs_read_before_write(a._rhs._v2));
             },
@@ -2318,7 +2295,7 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
     auto do_update = [&] (bytes&& column_name, const rjson::value& json_value) {
         const column_definition* cdef = _schema->get_column_definition(column_name);
         if (cdef) {
-            bytes column_value = get_key_from_typed_value(json_value, *cdef, type_to_string(cdef->type));
+            bytes column_value = get_key_from_typed_value(json_value, *cdef);
             row.cells().apply(*cdef, atomic_cell::make_live(*cdef->type, ts, column_value));
         } else {
             attrs_collector.put(std::move(column_name), serialize_item(json_value), ts);
@@ -2348,7 +2325,7 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
                         format("Invalid UpdateExpression: two document paths overlap with each other: {} and {}.",
                                 column_name, column_name));
             }
-            std::visit(overloaded {
+            std::visit(overloaded_functor {
                 [&] (const parsed::update_expression::action::set& a) {
                     auto value = calculate_value(a._rhs, attr_values, used_attribute_names, used_attribute_values, _request, _schema, previous_item);
                     do_update(to_bytes(column_name), value);
@@ -2442,14 +2419,14 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
     return m;
 }
 
-future<executor::request_return_type> executor::update_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::update_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.update_item++;
     auto start_time = std::chrono::steady_clock::now();
     rjson::value update_info = rjson::parse(content);
     elogger.trace("update_item {}", update_info);
 
     auto op = make_shared<update_item_operation>(_proxy, std::move(update_info));
-    tracing::add_table_name(client_state.get_trace_state(), op->schema()->ks_name(), op->schema()->cf_name());
+    tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
     const bool needs_read_before_write = check_needs_read_before_write(op->_update_expression) ||
                     check_needs_read_before_write(op->_condition_expression) ||
                     op->request().HasMember("Expected");
@@ -2458,15 +2435,15 @@ future<executor::request_return_type> executor::update_item(client_state& client
         _stats.shard_bounce_for_lwt++;
         // FIXME: create separate smp_service_group
         return container().invoke_on(*shard, default_smp_service_group(),
-                [content = std::move(content), cs = client_state.move_to_other_shard()]
+                [content = std::move(content), cs = client_state.move_to_other_shard(), gt = tracing::global_trace_state_ptr(trace_state)]
                 (executor& e) mutable {
-            return do_with(cs.get(), [&e, content = std::move(content)]
-                                     (service::client_state& client_state) {
-                return e.update_item(client_state, std::move(content));
+            return do_with(cs.get(), [&e, content = std::move(content), trace_state = tracing::trace_state_ptr(gt)]
+                                     (service::client_state& client_state) mutable {
+                return e.update_item(client_state, std::move(trace_state), std::move(content));
             });
         });
     }
-    return op->execute(_proxy, client_state, needs_read_before_write, _stats).finally([op, start_time, this] {
+    return op->execute(_proxy, client_state, trace_state, needs_read_before_write, _stats).finally([op, start_time, this] {
         _stats.api_operations.update_item_latency.add(std::chrono::steady_clock::now() - start_time, _stats.api_operations.update_item_latency._count + 1);
     });
 }
@@ -2490,7 +2467,7 @@ static db::consistency_level get_read_consistency(const rjson::value& request) {
     return consistent_read ? db::consistency_level::LOCAL_QUORUM : db::consistency_level::LOCAL_ONE;
 }
 
-future<executor::request_return_type> executor::get_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::get_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.get_item++;
     auto start_time = std::chrono::steady_clock::now();
     rjson::value table_info = rjson::parse(content);
@@ -2498,7 +2475,7 @@ future<executor::request_return_type> executor::get_item(client_state& client_st
 
     schema_ptr schema = get_table(_proxy, table_info);
 
-    tracing::add_table_name(client_state.get_trace_state(), schema->ks_name(), schema->cf_name());
+    tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
 
     rjson::value& query_key = table_info["Key"];
     db::consistency_level cl = get_read_consistency(table_info);
@@ -2533,7 +2510,7 @@ future<executor::request_return_type> executor::get_item(client_state& client_st
     });
 }
 
-future<executor::request_return_type> executor::batch_get_item(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::batch_get_item(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     // FIXME: In this implementation, an unbounded batch size can cause
     // unbounded response JSON object to be buffered in memory, unbounded
     // parallelism of the requests, and unbounded amount of non-preemptable
@@ -2561,7 +2538,7 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
     for (auto it = request_items.MemberBegin(); it != request_items.MemberEnd(); ++it) {
         table_requests rs;
         rs.schema = get_table_from_batch_request(_proxy, it);
-        tracing::add_table_name(client_state.get_trace_state(), KEYSPACE_NAME, rs.schema->cf_name());
+        tracing::add_table_name(trace_state, sstring(executor::KEYSPACE_NAME_PREFIX) + rs.schema->cf_name(), rs.schema->cf_name());
         rs.cl = get_read_consistency(it->value);
         rs.attrs_to_get = calculate_attrs_to_get(it->value);
         auto& keys = (it->value)["Keys"];
@@ -2727,10 +2704,11 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
         db::consistency_level cl,
         ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions,
         service::client_state& client_state,
-        cql3::cql_stats& cql_stats) {
+        cql3::cql_stats& cql_stats,
+        tracing::trace_state_ptr trace_state) {
     ::shared_ptr<service::pager::paging_state> paging_state = nullptr;
 
-    tracing::trace(client_state.get_trace_state(), "Performing a database query");
+    tracing::trace(trace_state, "Performing a database query");
 
     if (exclusive_start_key) {
         partition_key pk = pk_from_json(*exclusive_start_key, schema);
@@ -2747,7 +2725,7 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
     auto partition_slice = query::partition_slice(std::move(ck_bounds), {}, std::move(regular_columns), selection->get_query_options());
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, query::max_partitions);
 
-    auto query_state_ptr = std::make_unique<service::query_state>(client_state, empty_service_permit());
+    auto query_state_ptr = std::make_unique<service::query_state>(client_state, trace_state, empty_service_permit());
 
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto query_options = std::make_unique<cql3::query_options>(cl, infinite_timeout_config, std::vector<cql3::raw_value>{});
@@ -2779,7 +2757,7 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
 // 2. Filtering - by passing appropriately created restrictions to pager as a last parameter
 // 3. Proper timeouts instead of gc_clock::now() and db::no_timeout
 // 4. Implement parallel scanning via Segments
-future<executor::request_return_type> executor::scan(client_state& client_state, std::string content) {
+future<executor::request_return_type> executor::scan(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.scan++;
     rjson::value request_info = rjson::parse(content);
     elogger.trace("Scanning {}", request_info);
@@ -2818,7 +2796,7 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
         partition_ranges = filtering_restrictions->get_partition_key_ranges(query_options);
         ck_bounds = filtering_restrictions->get_clustering_bounds(query_options);
     }
-    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats);
+    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats, trace_state);
 }
 
 static dht::partition_range calculate_pk_bound(schema_ptr schema, const column_definition& pk_cdef, comparison_operator_type op, const rjson::value& attrs) {
@@ -2886,9 +2864,9 @@ static query::clustering_range calculate_ck_bound(schema_ptr schema, const colum
     }
 }
 
-// Calculates primary key bounds from the list of conditions
+// Calculates primary key bounds from KeyConditions
 static std::pair<dht::partition_range_vector, std::vector<query::clustering_range>>
-calculate_bounds(schema_ptr schema, const rjson::value& conditions) {
+calculate_bounds_conditions(schema_ptr schema, const rjson::value& conditions) {
     dht::partition_range_vector partition_ranges;
     std::vector<query::clustering_range> ck_bounds;
 
@@ -2941,14 +2919,314 @@ calculate_bounds(schema_ptr schema, const rjson::value& conditions) {
     return {std::move(partition_ranges), std::move(ck_bounds)};
 }
 
-future<executor::request_return_type> executor::query(client_state& client_state, std::string content) {
+// Extract the top-level column name specified in a KeyConditionExpression.
+// If a nested attribute path is given, a ValidationException is generated.
+// If the column name is a #reference to ExpressionAttributeNames, the
+// reference is resolved.
+// Note this function returns a string_view, which may refer to data in the
+// given parsed::value or expression_attribute_names.
+static std::string_view get_toplevel(const parsed::value& v,
+        const rjson::value* expression_attribute_names,
+        std::unordered_set<std::string>& used_attribute_names)
+{
+    const parsed::path& path = std::get<parsed::path>(v._value);
+    if (path.has_operators()) {
+        throw api_error("ValidationException", "KeyConditionExpression does not support nested attributes");
+    }
+    std::string_view column_name = path.root();
+    if (column_name.size() > 0 && column_name[0] == '#') {
+        used_attribute_names.emplace(column_name);
+        if (!expression_attribute_names) {
+            throw api_error("ValidationException",
+                    format("ExpressionAttributeNames missing, entry '{}' required by KeyConditionExpression",
+                            column_name));
+        }
+        const rjson::value* value = rjson::find(*expression_attribute_names,
+                rjson::string_ref_type(column_name.data(), column_name.size()));
+        if (!value || !value->IsString()) {
+            throw api_error("ValidationException",
+                    format("ExpressionAttributeNames missing entry '{}' required by KeyConditionExpression",
+                            column_name));
+        }
+        column_name = rjson::to_string_view(*value);
+    }
+    return column_name;
+}
+
+// Extract a constant value specified in a KeyConditionExpression.
+// This constant is always in the form of a reference (:name) to a member of
+// ExpressionAttributeValues.
+// This function decodes the value (using its given expected type) into bytes
+// which Scylla uses as the actual key value. If the value has the wrong type,
+// or the input had other problems, a ValidationException is thrown.
+static bytes get_valref_value(const parsed::value& v,
+        const rjson::value* expression_attribute_values,
+        std::unordered_set<std::string>& used_attribute_values,
+        const column_definition& column)
+{
+    const std::string& valref = std::get<std::string>(v._value);
+    if (!expression_attribute_values) {
+        throw api_error("ValidationException",
+                format("ExpressionAttributeValues missing, entry '{}' required by KeyConditionExpression", valref));
+    }
+    const rjson::value* value = rjson::find(*expression_attribute_values,
+            rjson::string_ref_type(valref.c_str()));
+    if (!value) {
+        throw api_error("ValidationException",
+                format("ExpressionAttributeValues missing entry '{}' required by KeyConditionExpression", valref));
+    }
+    used_attribute_values.emplace(std::move(valref));
+    return get_key_from_typed_value(*value, column);
+}
+
+// condition_expression_and_list extracts a list of ANDed primitive conditions
+// from a condition_expression. This is useful for KeyConditionExpression,
+// which may not use OR or NOT. If the given condition_expression does use
+// OR or NOT, this function throws a ValidationException.
+static void condition_expression_and_list(
+        const parsed::condition_expression& condition_expression,
+        std::vector<const parsed::primitive_condition*>& conditions)
+{
+    if (condition_expression._negated) {
+        throw api_error("ValidationException", "KeyConditionExpression cannot use NOT");
+    }
+    std::visit(overloaded_functor {
+        [&] (const parsed::primitive_condition& cond) {
+            conditions.push_back(&cond);
+        },
+        [&] (const parsed::condition_expression::condition_list& list) {
+            if (list.op == '|' && list.conditions.size() > 1) {
+                throw api_error("ValidationException", "KeyConditionExpression cannot use OR");
+            }
+            for (const parsed::condition_expression& cond : list.conditions) {
+                condition_expression_and_list(cond, conditions);
+            }
+        }
+    }, condition_expression._expression);
+}
+
+// Calculates primary key bounds from KeyConditionExpression
+static std::pair<dht::partition_range_vector, std::vector<query::clustering_range>>
+calculate_bounds_condition_expression(schema_ptr schema,
+        const rjson::value& expression,
+        const rjson::value* expression_attribute_values,
+        std::unordered_set<std::string>& used_attribute_values,
+        const rjson::value* expression_attribute_names,
+        std::unordered_set<std::string>& used_attribute_names)
+{
+    if (!expression.IsString()) {
+        throw api_error("ValidationException", "KeyConditionExpression must be a string");
+    }
+    if (expression.GetStringLength() == 0) {
+        throw api_error("ValidationException", "KeyConditionExpression must not be empty");
+    }
+    // We parse the KeyConditionExpression with the same parser we use for
+    // ConditionExpression. But KeyConditionExpression only supports a subset
+    // of the ConditionExpression features, so we have many additional
+    // verifications below that the key condition is legal. Briefly, a valid
+    // key condition must contain a single partition key and a single
+    // sort-key range.
+    parsed::condition_expression p;
+    try {
+        p = parse_condition_expression(std::string(rjson::to_string_view(expression)));
+    } catch(expressions_syntax_error& e) {
+        throw api_error("ValidationException", e.what());
+    }
+    std::vector<const parsed::primitive_condition*> conditions;
+    condition_expression_and_list(p, conditions);
+
+    if (conditions.size() < 1 || conditions.size() > 2) {
+        throw api_error("ValidationException",
+                "KeyConditionExpression syntax error: must have 1 or 2 conditions");
+    }
+    // Scylla allows us to have an (equality) constraint on the partition key
+    // pk_cdef, and a range constraint on the *first* clustering key ck_cdef.
+    // Note that this is also good enough for our GSI implementation - the
+    // GSI's user-specified sort key will be the first clustering key.
+    // FIXME: In the case described in issue #5320 (base and GSI both have
+    // just hash key - but different ones), this may allow the user to Query
+    // using the base key which isn't officially part of the GSI.
+    const column_definition& pk_cdef = schema->partition_key_columns().front();
+    const column_definition* ck_cdef = schema->clustering_key_size() > 0 ?
+            &schema->clustering_key_columns().front() : nullptr;
+
+    dht::partition_range_vector partition_ranges;
+    std::vector<query::clustering_range> ck_bounds;
+    for (const parsed::primitive_condition* condp : conditions) {
+        const parsed::primitive_condition& cond = *condp;
+        // In all comparison operators, one operand must be a column name,
+        // the other is a constant (value reference). We remember which is
+        // which in toplevel_ind, and also the column name in key (not just
+        // for comparison operators).
+        std::string_view key;
+        int toplevel_ind;
+        switch (cond._values.size()) {
+        case 1: {
+            // The only legal single-value condition is a begin_with() function,
+            // and it must have two parameters - a top-level attribute and a
+            // value reference..
+            const parsed::value::function_call *f = std::get_if<parsed::value::function_call>(&cond._values[0]._value);
+            if (!f) {
+                throw api_error("ValidationException", "KeyConditionExpression cannot be just a value");
+            }
+            if (f->_function_name != "begins_with") {
+                throw api_error("ValidationException",
+                        format("KeyConditionExpression function '{}' not supported",f->_function_name));
+            }
+            if (f->_parameters.size() != 2 || !f->_parameters[0].is_path() ||
+                    !f->_parameters[1].is_valref()) {
+                throw api_error("ValidationException",
+                        "KeyConditionExpression begins_with() takes attribute and value");
+            }
+            key = get_toplevel(f->_parameters[0], expression_attribute_names, used_attribute_names);
+            toplevel_ind = -1;
+            break;
+        }
+        case 2:
+            if (cond._values[0].is_path() && cond._values[1].is_valref()) {
+                toplevel_ind = 0;
+            } else if (cond._values[1].is_path() && cond._values[0].is_valref()) {
+                toplevel_ind = 1;
+            } else {
+                throw api_error("ValidationException", "KeyConditionExpression must compare attribute with constant");
+            }
+            key = get_toplevel(cond._values[toplevel_ind],  expression_attribute_names, used_attribute_names);
+            break;
+        case 3:
+            // Only BETWEEN has three operands. First must be a column name,
+            // two other must be value references (constants):
+            if (cond._op != parsed::primitive_condition::type::BETWEEN) {
+                // Shouldn't happen unless we have a bug in the parser
+                throw std::logic_error(format("Wrong number of values {} in primitive_condition", cond._values.size()));
+            }
+            if (cond._values[0].is_path() && cond._values[1].is_valref() && cond._values[2].is_valref()) {
+                toplevel_ind = 0;
+                key = get_toplevel(cond._values[0], expression_attribute_names, used_attribute_names);
+            } else {
+                throw api_error("ValidationException", "KeyConditionExpression must compare attribute with constants");
+            }
+            break;
+        default:
+            // Shouldn't happen unless we have a bug in the parser
+            throw std::logic_error(format("Wrong number of values {} in primitive_condition", cond._values.size()));
+        }
+        if (cond._op == parsed::primitive_condition::type::IN) {
+            throw api_error("ValidationException", "KeyConditionExpression does not support IN operator");
+        } else if (cond._op == parsed::primitive_condition::type::NE) {
+            throw api_error("ValidationException", "KeyConditionExpression does not support NE operator");
+        } else if (cond._op == parsed::primitive_condition::type::EQ) {
+            // the EQ operator (=) is the only one which can be used for both
+            // the partition key and sort key:
+            if (sstring(key) == pk_cdef.name_as_text()) {
+                if (!partition_ranges.empty()) {
+                    throw api_error("ValidationException",
+                            "KeyConditionExpression allows only one condition for each key");
+                }
+                bytes raw_value = get_valref_value(cond._values[!toplevel_ind],
+                        expression_attribute_values, used_attribute_values, pk_cdef);
+                partition_key pk = partition_key::from_singular(*schema, pk_cdef.type->deserialize(raw_value));
+                auto decorated_key = dht::global_partitioner().decorate_key(*schema, pk);
+                partition_ranges.push_back(dht::partition_range(decorated_key));
+            } else if (ck_cdef && sstring(key) == ck_cdef->name_as_text()) {
+                if (!ck_bounds.empty()) {
+                    throw api_error("ValidationException",
+                            "KeyConditionExpression allows only one condition for each key");
+                }
+                bytes raw_value = get_valref_value(cond._values[!toplevel_ind],
+                        expression_attribute_values, used_attribute_values, *ck_cdef);
+                clustering_key ck = clustering_key::from_single_value(*schema, raw_value);
+                ck_bounds.push_back(query::clustering_range(ck));
+            } else {
+                throw api_error("ValidationException",
+                        format("KeyConditionExpression condition on non-key attribute {}", key));
+            }
+            continue;
+        }
+        // If we're still here, it's any other operator besides EQ, and these
+        // are allowed *only* on the clustering key:
+        if (sstring(key) == pk_cdef.name_as_text()) {
+            throw api_error("ValidationException",
+                    format("KeyConditionExpression only '=' condition is supported on partition key {}", key));
+        } else if (!ck_cdef || sstring(key) != ck_cdef->name_as_text()) {
+            throw api_error("ValidationException",
+                    format("KeyConditionExpression condition on non-key attribute {}", key));
+        }
+        if (!ck_bounds.empty()) {
+            throw api_error("ValidationException",
+                    "KeyConditionExpression allows only one condition for each key");
+        }
+        if (cond._op == parsed::primitive_condition::type::BETWEEN) {
+            clustering_key ck1 = clustering_key::from_single_value(*schema,
+                    get_valref_value(cond._values[1], expression_attribute_values,
+                                     used_attribute_values, *ck_cdef));
+            clustering_key ck2 = clustering_key::from_single_value(*schema,
+                    get_valref_value(cond._values[2], expression_attribute_values,
+                                     used_attribute_values, *ck_cdef));
+            ck_bounds.push_back(query::clustering_range::make(
+                    query::clustering_range::bound(ck1), query::clustering_range::bound(ck2)));
+            continue;
+        } else if (cond._values.size() == 1) {
+            // We already verified above, that this case this can only be a
+            // function call to begins_with(), with the first parameter the
+            // key, the second the value reference.
+            bytes raw_value = get_valref_value(
+                    std::get<parsed::value::function_call>(cond._values[0]._value)._parameters[1],
+                    expression_attribute_values, used_attribute_values, *ck_cdef);
+            if (!ck_cdef->type->is_compatible_with(*utf8_type)) {
+                // begins_with() supported on bytes and strings (both stored
+                // in the database as strings) but not on numbers.
+                throw api_error("ValidationException",
+                        format("KeyConditionExpression begins_with() not supported on type {}",
+                                type_to_string(ck_cdef->type)));
+            } else if (raw_value.empty()) {
+                ck_bounds.push_back(query::clustering_range::make_open_ended_both_sides());
+            } else {
+                clustering_key ck = clustering_key::from_single_value(*schema, raw_value);
+                ck_bounds.push_back(get_clustering_range_for_begins_with(std::move(raw_value), ck, schema, ck_cdef->type));
+            }
+            continue;
+        }
+
+        // All remaining operator have one value reference parameter in index
+        // !toplevel_ind. Note how toplevel_ind==1 reverses the direction of
+        // an inequality.
+        bytes raw_value = get_valref_value(cond._values[!toplevel_ind],
+                expression_attribute_values, used_attribute_values, *ck_cdef);
+        clustering_key ck = clustering_key::from_single_value(*schema, raw_value);
+        if ((cond._op == parsed::primitive_condition::type::LT && toplevel_ind == 0) ||
+            (cond._op == parsed::primitive_condition::type::GT && toplevel_ind == 1)) {
+            ck_bounds.push_back(query::clustering_range::make_ending_with(query::clustering_range::bound(ck, false)));
+        } else if ((cond._op == parsed::primitive_condition::type::GT && toplevel_ind == 0) ||
+                   (cond._op == parsed::primitive_condition::type::LT && toplevel_ind == 1)) {
+            ck_bounds.push_back(query::clustering_range::make_starting_with(query::clustering_range::bound(ck, false)));
+        } else if ((cond._op == parsed::primitive_condition::type::LE && toplevel_ind == 0) ||
+                   (cond._op == parsed::primitive_condition::type::GE && toplevel_ind == 1)) {
+            ck_bounds.push_back(query::clustering_range::make_ending_with(query::clustering_range::bound(ck)));
+        } else if ((cond._op == parsed::primitive_condition::type::GE && toplevel_ind == 0) ||
+                   (cond._op == parsed::primitive_condition::type::LE && toplevel_ind == 1)) {
+            ck_bounds.push_back(query::clustering_range::make_starting_with(query::clustering_range::bound(ck)));
+        }
+    }
+
+    if (partition_ranges.empty()) {
+        throw api_error("ValidationException",
+                format("KeyConditionExpression requires a condition on partition key {}", pk_cdef.name_as_text()));
+    }
+    if (ck_bounds.empty()) {
+        ck_bounds.push_back(query::clustering_range::make_open_ended_both_sides());
+    }
+    return {std::move(partition_ranges), std::move(ck_bounds)};
+}
+
+
+future<executor::request_return_type> executor::query(client_state& client_state, tracing::trace_state_ptr trace_state, std::string content) {
     _stats.api_operations.query++;
     rjson::value request_info = rjson::parse(content);
     elogger.trace("Querying {}", request_info);
 
     schema_ptr schema = get_table_or_view(_proxy, request_info);
 
-    tracing::add_table_name(client_state.get_trace_state(), schema->ks_name(), schema->cf_name());
+    tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
 
     rjson::value* exclusive_start_key = rjson::find(request_info, "ExclusiveStartKey");
     db::consistency_level cl = get_read_consistency(request_info);
@@ -2958,9 +3236,6 @@ future<executor::request_return_type> executor::query(client_state& client_state
         return make_ready_future<request_return_type>(api_error("ValidationException", "Limit must be greater than 0"));
     }
 
-    if (rjson::find(request_info, "KeyConditionExpression")) {
-        return make_ready_future<request_return_type>(api_error("ValidationException", "KeyConditionExpression is not yet implemented in alternator"));
-    }
     if (rjson::find(request_info, "FilterExpression")) {
         return make_ready_future<request_return_type>(api_error("ValidationException", "FilterExpression is not yet implemented in alternator"));
     }
@@ -2970,12 +3245,28 @@ future<executor::request_return_type> executor::query(client_state& client_state
         return make_ready_future<request_return_type>(api_error("ValidationException", "ScanIndexForward=false is not yet implemented in alternator"));
     }
 
-    //FIXME(sarna): KeyConditions are deprecated in favor of KeyConditionExpression
-    rjson::value& conditions = rjson::get(request_info, "KeyConditions");
+    rjson::value* key_conditions = rjson::find(request_info, "KeyConditions");
+    rjson::value* key_condition_expression = rjson::find(request_info, "KeyConditionExpression");
+    std::unordered_set<std::string> used_attribute_values;
+    std::unordered_set<std::string> used_attribute_names;
+    if (key_conditions && key_condition_expression) {
+        throw api_error("ValidationException", "Query does not allow both "
+                "KeyConditions and KeyConditionExpression to be given together");
+    } else if (!key_conditions && !key_condition_expression) {
+        throw api_error("ValidationException", "Query must have one of "
+                "KeyConditions or KeyConditionExpression");
+    }
+    // exactly one of key_conditions or key_condition_expression
+    auto [partition_ranges, ck_bounds] = key_conditions
+                ? calculate_bounds_conditions(schema, *key_conditions)
+                : calculate_bounds_condition_expression(schema, *key_condition_expression,
+                        rjson::find(request_info, "ExpressionAttributeValues"),
+                        used_attribute_values,
+                        rjson::find(request_info, "ExpressionAttributeNames"),
+                        used_attribute_names);
+
     //FIXME(sarna): QueryFilter is deprecated in favor of FilterExpression
     rjson::value* query_filter = rjson::find(request_info, "QueryFilter");
-
-    auto [partition_ranges, ck_bounds] = calculate_bounds(schema, conditions);
 
     auto attrs_to_get = calculate_attrs_to_get(request_info);
 
@@ -2993,7 +3284,9 @@ future<executor::request_return_type> executor::query(client_state& client_state
                     format("QueryFilter can only contain non-primary key attributes: Primary key attribute: {}", ck_defs.front()->name_as_text())));
         }
     }
-    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats);
+    verify_all_are_used(request_info, "ExpressionAttributeValues", used_attribute_values, "KeyConditionExpression");
+    verify_all_are_used(request_info, "ExpressionAttributeNames", used_attribute_names, "KeyConditionExpression");
+    return do_query(schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl, std::move(filtering_restrictions), client_state, _stats.cql_stats, std::move(trace_state));
 }
 
 future<executor::request_return_type> executor::list_tables(client_state& client_state, std::string content) {
@@ -3012,7 +3305,7 @@ future<executor::request_return_type> executor::list_tables(client_state& client
     auto table_names = _proxy.get_db().local().get_column_families()
             | boost::adaptors::map_values
             | boost::adaptors::filtered([] (const lw_shared_ptr<table>& t) {
-                        return t->schema()->ks_name() == KEYSPACE_NAME && !t->schema()->is_view();
+                        return t->schema()->ks_name().find(KEYSPACE_NAME_PREFIX) == 0 && !t->schema()->is_view();
                     })
             | boost::adaptors::transformed([] (const lw_shared_ptr<table>& t) {
                         return t->schema()->cf_name();
@@ -3068,53 +3361,55 @@ future<executor::request_return_type> executor::describe_endpoints(client_state&
     return make_ready_future<executor::request_return_type>(make_jsonable(std::move(response)));
 }
 
-// Create the keyspace in which we put all Alternator tables, if it doesn't
+static std::map<sstring, sstring> get_network_topology_options(int rf) {
+    std::map<sstring, sstring> options;
+    sstring rf_str = std::to_string(rf);
+    for (const gms::inet_address& addr : gms::get_local_gossiper().get_live_members()) {
+        options.emplace(locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(addr), rf_str);
+    };
+    return options;
+}
+
+// Create the keyspace in which we put the alternator table, if it doesn't
 // already exist.
 // Currently, we automatically configure the keyspace based on the number
 // of nodes in the cluster: A cluster with 3 or more live nodes, gets RF=3.
 // A smaller cluster (presumably, a test only), gets RF=1. The user may
 // manually create the keyspace to override this predefined behavior.
-future<> executor::maybe_create_keyspace() {
-    if (_proxy.get_db().local().has_keyspace(KEYSPACE_NAME)) {
-        return make_ready_future<>();
-    }
-    return gms::get_up_endpoint_count().then([this] (int up_endpoint_count) {
+future<> executor::create_keyspace(std::string_view keyspace_name) {
+    sstring keyspace_name_str(keyspace_name);
+    return gms::get_up_endpoint_count().then([this, keyspace_name_str = std::move(keyspace_name_str)] (int up_endpoint_count) {
         int rf = 3;
         if (up_endpoint_count < rf) {
             rf = 1;
             elogger.warn("Creating keyspace '{}' for Alternator with unsafe RF={} because cluster only has {} live nodes.",
-                    KEYSPACE_NAME, rf, up_endpoint_count);
-        } else {
-            elogger.info("Creating keyspace '{}' for Alternator with RF={}.", KEYSPACE_NAME, rf);
+                    keyspace_name_str, rf, up_endpoint_count);
         }
-        auto ksm = keyspace_metadata::new_keyspace(KEYSPACE_NAME, "org.apache.cassandra.locator.SimpleStrategy", {{"replication_factor", std::to_string(rf)}}, true);
-        try {
-            return _mm.announce_new_keyspace(ksm, api::min_timestamp, false);
-        } catch (exceptions::already_exists_exception& ignored) {
-            return make_ready_future<>();
-        } catch (...) {
-            return make_exception_future(std::current_exception());
-        }
+        auto opts = get_network_topology_options(rf);
+        auto ksm = keyspace_metadata::new_keyspace(keyspace_name_str, "org.apache.cassandra.locator.NetworkTopologyStrategy", std::move(opts), true);
+        return _mm.announce_new_keyspace(ksm, api::new_timestamp(), false);
     });
 }
 
-static void create_tracing_session(executor::client_state& client_state) {
+static tracing::trace_state_ptr create_tracing_session() {
     tracing::trace_state_props_set props;
     props.set<tracing::trace_state_props::full_tracing>();
-    client_state.create_tracing_session(tracing::trace_type::QUERY, props);
+    return tracing::tracing::get_local_tracing_instance().create_session(tracing::trace_type::QUERY, props);
 }
 
-void executor::maybe_trace_query(client_state& client_state, sstring_view op, sstring_view query) {
+tracing::trace_state_ptr executor::maybe_trace_query(client_state& client_state, sstring_view op, sstring_view query) {
+    tracing::trace_state_ptr trace_state;
     if (tracing::tracing::get_local_tracing_instance().trace_next_query()) {
-        create_tracing_session(client_state);
-        tracing::add_query(client_state.get_trace_state(), query);
-        tracing::begin(client_state.get_trace_state(), format("Alternator {}", op), client_state.get_client_address());
+        trace_state = create_tracing_session();
+        tracing::add_query(trace_state, query);
+        tracing::begin(trace_state, format("Alternator {}", op), client_state.get_client_address());
     }
+    return trace_state;
 }
 
 future<> executor::start() {
     // Currently, nothing to do on initialization. We delay the keyspace
-    // creation (maybe_create_keyspace()) until a table is actually created.
+    // creation (create_keyspace()) until a table is actually created.
     return make_ready_future<>();
 }
 

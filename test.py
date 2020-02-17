@@ -444,57 +444,68 @@ class CqlTest(Test):
             print_unidiff(self.result, self.reject)
 
 
-def print_start_blurb():
-    print("="*80)
-    print("{:7s} {:50s} {:^8s} {:8s}".format("[N/TOTAL]", "TEST", "MODE", "RESULT"))
-    print("-"*78)
+class TabularConsoleOutput:
+    """Print test progress to the console"""
 
+    def __init__(self, verbose, test_count):
+        self.verbose = verbose
+        self.test_count = test_count
+        self.print_newline = False
+        self.last_test_no = 0
+        self.last_line_len = 1
 
-def print_end_blurb(verbose):
-    if not verbose:
-        sys.stdout.write('\n')
-    print("-"*78)
+    def print_start_blurb(self):
+        print("="*80)
+        print("{:7s} {:50s} {:^8s} {:8s}".format("[N/TOTAL]", "TEST", "MODE", "RESULT"))
+        print("-"*78)
 
+    def print_end_blurb(self):
+        if self.print_newline:
+            print("")
+        print("-"*78)
 
-def print_progress(test, cookie, verbose):
-    if isinstance(cookie, int):
-        cookie = (0, 1, cookie)
-
-    last_len, n, n_total = cookie
-    msg = "{:9s} {:50s} {:^8s} {:8s}".format(
-        "[{}/{}]".format(n, n_total),
-        test.name, test.mode[:8],
-        palette.ok("[ PASS ]") if test.success else palette.fail("[ FAIL ]")
-    )
-    if verbose is False:
-        print('\r' + ' ' * last_len, end='')
-        last_len = len(msg)
-        print('\r' + msg, end='')
-    else:
-        print(msg)
-
-    return (last_len, n + 1, n_total)
+    def print_progress(self, test):
+        self.last_test_no += 1
+        msg = "{:9s} {:50s} {:^8s} {:8s}".format(
+            "[{}/{}]".format(self.last_test_no, self.test_count),
+            test.name, test.mode[:8],
+            palette.ok("[ PASS ]") if test.success else palette.fail("[ FAIL ]")
+        )
+        if self.verbose is False:
+            if test.success:
+                print("\r" + " " * self.last_line_len, end="")
+                self.last_line_len = len(msg)
+                print("\r" + msg, end="")
+                self.print_newline = True
+            else:
+                if self.print_newline:
+                    print("")
+                print(msg)
+                self.print_newline = False
+        else:
+            print(msg)
 
 
 async def run_test(test, options):
     """Run test program, return True if success else False"""
-    file = io.StringIO()
 
-    def report_error(out, failure_injection_desc = None):
-        print('=== stdout START ===', file=file)
-        print(out, file=file)
-        print('=== stdout END ===', file=file)
-        if failure_injection_desc is not None:
-            print('failure injection: {}'.format(failure_injection_desc), file=file)
-    process = None
-    stdout = None
-    logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
-    ldap_port = 5000 + test.id * 3
-    cleanup_fn = None
-    finject_desc = None
-    try:
-        with open(test.log_filename, "wb") as log:
-            cleanup_fn, finject_desc = await test.setup(ldap_port, options)
+    with open(test.log_filename, "wb") as log:
+        ldap_port = 5000 + test.id * 3
+        cleanup_fn = None
+        finject_desc = None
+        cleanup_fn, finject_desc = await test.setup(ldap_port, options)
+
+        def report_error(error):
+            msg = "=== TEST.PY SUMMARY START ===\n"
+            msg += "{}\n".format(error)
+            msg += "=== TEST.PY SUMMARY END ===\n"
+            log.write(msg.encode(encoding="UTF-8"))
+            if failure_injection_desc is not None:
+                print('failure injection: {}'.format(failure_injection_desc), file=file)
+        process = None
+        stdout = None
+        logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
+        try:
             process = await asyncio.create_subprocess_exec(
                 test.path,
                 *test.args,
@@ -507,26 +518,24 @@ async def run_test(test, options):
                          ),
                 preexec_fn=os.setsid,
             )
-        stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
-        if process.returncode != 0:
-            print('  with error code {code}\n'.format(code=process.returncode), file=file)
-            report_error(stdout.decode(encoding='UTF-8'))
-        return process.returncode == 0
-    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        if process is not None:
-            process.kill()
-            stdout, _ = await process.communicate()
-        if isinstance(e, asyncio.TimeoutError):
-            print('  timed out', file=file)
-            report_error(stdout.decode(encoding='UTF-8') if stdout else "No output", finject_desc)
-        elif isinstance(e, asyncio.CancelledError):
-            print(test.name, end=" ")
-    except Exception as e:
-        print('  with error {e}\n'.format(e=e), file=file)
-        report_error(e, finject_desc)
-    finally:
-        if cleanup_fn is not None:
-            cleanup_fn()
+            stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
+            if process.returncode != 0:
+                report_error('Test exited with code {code}\n'.format(code=process.returncode))
+            return process.returncode == 0
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            if process is not None:
+                process.kill()
+                stdout, _ = await process.communicate()
+            if isinstance(e, asyncio.TimeoutError):
+                report_error("Test timed out")
+            elif isinstance(e, asyncio.CancelledError):
+                print(test.name, end=" ")
+                report_error("Test was cancelled")
+        except Exception as e:
+            report_error("Failed to run the test:\n{e}".format(e=e))
+        finally:
+            if cleanup_fn is not None:
+                cleanup_fn()
     return False
 
 
@@ -610,7 +619,8 @@ def parse_cmd_line():
     prepare_dir(args.tmpdir, "*.log")
 
     for mode in args.modes:
-        prepare_dir(os.path.join(args.tmpdir, mode), "*.{log,reject}")
+        prepare_dir(os.path.join(args.tmpdir, mode), "*.log")
+        prepare_dir(os.path.join(args.tmpdir, mode), "*.reject")
         prepare_dir(os.path.join(args.tmpdir, mode, "xml"), "*.xml")
 
     return args
@@ -633,7 +643,7 @@ def find_tests(options):
 
 
 async def run_all_tests(signaled, options):
-    cookie = TestSuite.test_count()
+    console = TabularConsoleOutput(options.verbose, TestSuite.test_count())
     signaled_task = asyncio.create_task(signaled.wait())
     pending = set([signaled_task])
 
@@ -645,15 +655,15 @@ async def run_all_tests(signaled, options):
         raise asyncio.CancelledError
 
     async def reap(done, pending, signaled):
-        nonlocal cookie
+        nonlocal console
         if signaled.is_set():
             await cancel(pending)
         for coro in done:
             result = coro.result()
             if isinstance(result, bool):
                 continue    # skip signaled task result
-            cookie = print_progress(result, cookie, options.verbose)
-    print_start_blurb()
+            console.print_progress(result)
+    console.print_start_blurb()
     try:
         for test in TestSuite.tests():
             # +1 for 'signaled' event
@@ -671,7 +681,7 @@ async def run_all_tests(signaled, options):
     except asyncio.CancelledError:
         return
 
-    print_end_blurb(options.verbose)
+    console.print_end_blurb()
 
 
 def read_log(log_filename):

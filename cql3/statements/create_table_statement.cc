@@ -384,7 +384,7 @@ std::unique_ptr<prepared_statement> create_table_statement::raw_statement::prepa
         }
     }
 
-    return std::make_unique<prepared>(audit_info(), stmt);
+    return std::make_unique<prepared_statement>(audit_info(), stmt);
 }
 
 data_type create_table_statement::raw_statement::get_type_and_remove(column_map_type& columns, ::shared_ptr<column_identifier> t)

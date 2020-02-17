@@ -11,12 +11,15 @@
 
 #pragma once
 
+#include "types/map.hh"
 #include "sstables/writer.hh"
 #include "sstables/sstables.hh"
 #include "sstables/binary_search.hh"
 #include "database.hh"
 #include "schema.hh"
 #include "schema_builder.hh"
+#include "types/set.hh"
+#include "types/list.hh"
 #include <seastar/core/thread.hh>
 #include "sstables/index_reader.hh"
 #include "test/lib/test_services.hh"

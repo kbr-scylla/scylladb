@@ -28,9 +28,9 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "raw/parsed_statement.hh"
+#include "parsed_statement.hh"
 
-#include "prepared_statement.hh"
+#include "cql3/statements/prepared_statement.hh"
 
 namespace cql3 {
 

@@ -50,7 +50,6 @@
 #include "dht/token_range_endpoints.hh"
 #include <seastar/core/sleep.hh>
 #include "gms/application_state.hh"
-#include "db/system_distributed_keyspace.hh"
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/gate.hh>
 #include "utils/fb_utilities.hh"
@@ -58,15 +57,26 @@
 #include "database_fwd.hh"
 #include "db/schema_features.hh"
 #include "streaming/stream_state.hh"
-#include "streaming/stream_plan.hh"
 #include <seastar/core/distributed.hh>
 #include "utils/disk-error-handler.hh"
 #include "gms/feature.hh"
+#include "service/migration_listener.hh"
 #include "gms/feature_service.hh"
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/rwlock.hh>
 #include "sstables/version.hh"
 #include "cdc/metadata.hh"
+
+namespace db {
+class system_distributed_keyspace;
+namespace view {
+class view_update_generator;
+}
+}
+
+namespace cql3 {
+class cql_config;
+}
 
 namespace cql_transport {
     class cql_server;
@@ -185,7 +195,7 @@ private:
      */
     bool _for_testing;
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::token_metadata& tm, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
     void isolate_on_error();
     void isolate_on_commit_error();
 
@@ -243,7 +253,7 @@ private:
         return utils::fb_utilities::get_broadcast_address();
     }
     /* This abstraction maintains the token/endpoint metadata information */
-    token_metadata _token_metadata;
+    token_metadata& _token_metadata;
 
     // Maintains the set of known CDC generations used to pick streams for log writes (i.e., the partition keys of these log writes).
     // Updated in response to certain gossip events (see the handle_cdc_generation function).
@@ -941,11 +951,7 @@ private:
     {
         HintedHandOffManager.instance.scheduleHintDelivery(host);
     }
-#endif
-public:
-    future<std::unordered_set<dht::token>> get_local_tokens();
 
-#if 0
     /* These methods belong to the MBean interface */
 
     public List<String> getTokens()
@@ -966,6 +972,7 @@ public:
         return strTokens;
     }
 #endif
+public:
 
     sstring get_release_version();
 
@@ -2329,7 +2336,7 @@ public:
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
         sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<qos::service_level_controller>& sl_controller);
+        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::token_metadata>& tm, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
 future<> read_sstables_format(distributed<storage_service>& ss);

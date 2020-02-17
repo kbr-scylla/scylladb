@@ -5074,3 +5074,71 @@ SEASTAR_TEST_CASE(test_time_uuid_fcts_result) {
         require_timestamp_timeuuid_or_date("tounixtimestamp");
     });
 }
+
+// Test that tombstones with future timestamps work correctly
+// when a write with lower timestamp arrives - in such case,
+// if the base row is covered by such a tombstone, a view update
+// needs to take it into account. Refs #5793
+SEASTAR_TEST_CASE(test_views_with_future_tombstones) {
+    return do_with_cql_env_thread([] (auto& e) {
+        cquery_nofail(e, "CREATE TABLE t (a int, b int, c int, d int, e int, PRIMARY KEY (a,b,c));");
+        cquery_nofail(e, "CREATE MATERIALIZED VIEW tv AS SELECT * FROM t"
+                " WHERE a IS NOT NULL AND b IS NOT NULL AND c IS NOT NULL PRIMARY KEY (b,a,c);");
+
+        // Partition tombstone
+        cquery_nofail(e, "delete from t using timestamp 10 where a=1;");
+        auto msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        cquery_nofail(e, "insert into t (a,b,c,d,e) values (1,2,3,4,5) using timestamp 8;");
+        msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        msg = cquery_nofail(e, "select * from tv;");
+        assert_that(msg).is_rows().with_size(0);
+
+        // Range tombstone
+        cquery_nofail(e, "delete from t using timestamp 16 where a=2 and b > 1 and b < 4;");
+        msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        cquery_nofail(e, "insert into t (a,b,c,d,e) values (2,3,4,5,6) using timestamp 12;");
+        msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        msg = cquery_nofail(e, "select * from tv;");
+        assert_that(msg).is_rows().with_size(0);
+
+        // Row tombstone
+        cquery_nofail(e, "delete from t using timestamp 24 where a=3 and b=4 and c=5;");
+        msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        cquery_nofail(e, "insert into t (a,b,c,d,e) values (3,4,5,6,7) using timestamp 18;");
+        msg = cquery_nofail(e, "select * from t;");
+        assert_that(msg).is_rows().with_size(0);
+        msg = cquery_nofail(e, "select * from tv;");
+        assert_that(msg).is_rows().with_size(0);
+    });
+}
+
+SEASTAR_TEST_CASE(test_null_value_tuple_floating_types_and_uuids) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        auto test_for_single_type = [&e] (const shared_ptr<const abstract_type>& type, auto update_value) {
+            cquery_nofail(e, format("CREATE TABLE IF NOT EXISTS t (k int PRIMARY KEY, test {})", type->cql3_type_name()));
+            cquery_nofail(e, "INSERT INTO t (k, test) VALUES (0, null)");
+
+            auto stmt = e.prepare(format("UPDATE t SET test={} WHERE k=0 IF test IN ?", update_value)).get0();
+            auto list_type = list_type_impl::get_instance(type, true);
+            // decomposed (null) value
+            auto arg_value = list_type->decompose(
+                make_list_value(list_type, {data_value::make_null(type)}));
+
+            require_rows(e, stmt,
+                {cql3::raw_value::make_value(std::move(arg_value))},
+                {{boolean_type->decompose(true), std::nullopt}});
+
+            cquery_nofail(e, "DROP TABLE t");
+        };
+
+        test_for_single_type(double_type, 1.0);
+        test_for_single_type(float_type, 1.0f);
+        test_for_single_type(uuid_type, utils::make_random_uuid());
+        test_for_single_type(timeuuid_type, utils::UUID("00000000-0000-1000-0000-000000000000"));
+    });
+}
