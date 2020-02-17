@@ -672,12 +672,15 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
     if (!::strcasecmp(sie("enabled").value_or("false").c_str(), "true")) {
         // commitlog/system table encryption should not use replicated keys,
         // We default to local keys, but KMIP should be ok as well.
-        // TODO: maybe forbid replicated.
         opts[KEY_PROVIDER] = sie(KEY_PROVIDER).value_or(LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY);
         if (opts[KEY_PROVIDER] == LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY && !sie(SECRET_KEY_FILE)) {
             // system encryption uses different key folder than user tables.
             // explicitly set the key file path
             opts[SECRET_KEY_FILE] = (bfs::path(cfg.system_key_directory()) / bfs::path("system") / bfs::path(sie("key_name").value_or("system_table_keytab"))).string();
+        }
+        // forbid replicated. we cannot guarantee being able to open sstables on populate
+        if (opts[KEY_PROVIDER] == REPLICATED_KEY_PROVIDER_FACTORY) {
+            throw std::invalid_argument("Replicated provider is not allowed for system table encryption");
         }
 
         logg.info("Adding system info encryption using {}", opts);
