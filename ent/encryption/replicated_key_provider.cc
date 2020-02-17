@@ -36,6 +36,7 @@
 #include "utils/hash.hh"
 #include "service/storage_service.hh"
 #include "sstables/compaction_manager.hh"
+#include "distributed_loader.hh"
 
 namespace encryption {
 
@@ -307,12 +308,14 @@ future<> replicated_key_provider::validate() const {
 
 future<> replicated_key_provider::maybe_initialize_tables() {
     auto& db = _ctxt.get_database().local();
-    auto f = make_ready_future();
 
     if (db.has_schema(KSNAME, TABLENAME)) {
-        _initialized = true;
-        return f;
+        return db.find_keyspace(KSNAME).ensure_populated().then([this] {
+            _initialized = true;
+        });
     }
+
+    auto f = make_ready_future();
 
     if (!db.has_keyspace(KSNAME)) {
         log.debug("Creating keyspace and table");
