@@ -32,6 +32,12 @@
 #include "column_computation.hh"
 #include "cdc/cdc_options.hh"
 
+namespace dht {
+
+class i_partitioner;
+
+}
+
 using column_count_type = uint32_t;
 
 // Column ID, unique within column_kind
@@ -804,9 +810,12 @@ public:
         return _raw._caching_options;
     }
 
+    dht::i_partitioner& get_partitioner() const;
+
     bool is_in_memory() const {
         return _raw._in_memory;
     }
+
     const column_definition* get_column_definition(const bytes& name) const;
     const column_definition& column_at(column_kind, column_id) const;
     // Find a column definition given column ordinal id in the schema

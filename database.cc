@@ -630,13 +630,8 @@ database::init_commitlog() {
 }
 
 unsigned
-database::shard_of(const dht::token& t) {
-    return dht::shard_of(t);
-}
-
-unsigned
 database::shard_of(const mutation& m) {
-    return shard_of(m.token());
+    return dht::shard_of(*m.schema(), m.token());
 }
 
 unsigned
@@ -645,7 +640,7 @@ database::shard_of(const frozen_mutation& m) {
     // sent the partition key in legacy form or together
     // with token.
     schema_ptr schema = find_schema(m.column_family_id());
-    return shard_of(dht::global_partitioner().get_token(*schema, m.key(*schema)));
+    return dht::shard_of(*schema, dht::get_token(*schema, m.key(*schema)));
 }
 
 void database::add_keyspace(sstring name, keyspace k) {
@@ -1571,6 +1566,15 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, db::commitlog::
         return make_exception_future<>(timed_out_error{});
     }
     return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout, sync));
+}
+
+future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
+    if (dblog.is_enabled(logging::log_level::trace)) {
+        dblog.trace("apply hint {}", m.pretty_printer(s));
+    }
+    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, timeout] () mutable {
+        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout, db::commitlog::force_sync::no));
+    });
 }
 
 future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {

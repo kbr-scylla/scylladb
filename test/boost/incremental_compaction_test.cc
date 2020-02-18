@@ -54,7 +54,7 @@ static std::vector<std::pair<sstring, dht::token>> token_generation_for_shard(un
 
     while (tokens < tokens_to_generate) {
         sstring key = to_sstring(key_id++);
-        dht::token token = create_token_from_key(key);
+        dht::token token = create_token_from_key(*dht::default_partitioner, key);
         if (shard != dht::global_partitioner().shard_of(token)) {
             continue;
         }

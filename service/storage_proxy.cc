@@ -147,8 +147,8 @@ sstring get_local_dc() {
     return get_dc(local_addr);
 }
 
-unsigned storage_proxy::cas_shard(dht::token token) {
-    return dht::shard_of(token);
+unsigned storage_proxy::cas_shard(const schema& s, dht::token token) {
+    return dht::shard_of(s, token);
 }
 
 class mutation_holder {
@@ -282,7 +282,9 @@ public:
     }
     virtual future<> apply_locally(storage_proxy& sp, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state) override {
-        return make_exception_future<>(std::runtime_error("Executing hint locally doesn't make sense"));
+        // A hint will be sent to all relevant endpoints when the endpoint it was originally intended for
+        // becomes unavailable - this might include the current node
+        return sp.mutate_hint(_schema, *_mutation, timeout);
     }
     virtual future<> apply_remotely(storage_proxy& sp, gms::inet_address ep, std::vector<gms::inet_address>&& forward,
             storage_proxy::response_id_type response_id, storage_proxy::clock_type::time_point timeout,
@@ -1394,13 +1396,6 @@ void storage_proxy_stats::write_stats::register_stats() {
         });
 }
 
-void storage_proxy_stats::write_stats::register_split_metrics_for(gms::inet_address ep) {
-    writes_attempts.register_metrics_for(ep);
-    writes_errors.register_metrics_for(ep);
-    background_replica_writes_failed.register_metrics_for(ep);
-    read_repair_write_attempts.register_metrics_for(ep);
-}
-
 storage_proxy_stats::stats::stats()
         : write_stats()
         , data_read_attempts(COORDINATOR_STATS_CATEGORY, "reads", "number of data read requests", "data")
@@ -1424,18 +1419,6 @@ void storage_proxy_stats::stats::register_split_metrics_local() {
     mutation_data_read_attempts.register_metrics_local();
     mutation_data_read_completed.register_metrics_local();
     mutation_data_read_errors.register_metrics_local();
-}
-
-void storage_proxy_stats::stats::register_split_metrics_for(gms::inet_address ep) {
-    write_stats::register_split_metrics_for(ep);
-    data_read_attempts.register_metrics_for(ep);
-    data_read_completed.register_metrics_for(ep);
-    data_read_errors.register_metrics_for(ep);
-    digest_read_attempts.register_metrics_for(ep);
-    digest_read_completed.register_metrics_for(ep);
-    mutation_data_read_attempts.register_metrics_for(ep);
-    mutation_data_read_completed.register_metrics_for(ep);
-    mutation_data_read_errors.register_metrics_for(ep);
 }
 
 void storage_proxy_stats::stats::register_stats() {
@@ -1612,6 +1595,7 @@ void storage_proxy_stats::split_stats::register_metrics_for(gms::inet_address ep
             sm::make_derive(_short_description_prefix + sstring("_remote_node"), [this, dc] { return _dc_stats[dc].val; },
                             sm::description(seastar::format("{} when communicating with external Nodes in DC {}", _long_description_prefix, dc)), {storage_proxy_stats::current_scheduling_group_label(), datacenter_label(dc), op_type_label(_op_type)})
         });
+        _dc_stats.emplace(dc, stats_counter{});
     }
 }
 
@@ -1707,6 +1691,15 @@ storage_proxy::mutate_locally(std::vector<mutation> mutations, clock_type::time_
         return parallel_for_each(pmut.begin(), pmut.end(), [this, timeout] (const mutation& m) {
             return mutate_locally(m, timeout);
         });
+    });
+}
+
+future<>
+storage_proxy::mutate_hint(const schema_ptr& s, const frozen_mutation& m, clock_type::time_point timeout) {
+    auto shard = _db.local().shard_of(m);
+    get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+    return _db.invoke_on(shard, _write_smp_service_group, [&m, gs = global_schema_ptr(s), timeout] (database& db) -> future<> {
+        return db.apply_hint(gs, m, timeout);
     });
 }
 
@@ -1815,6 +1808,12 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
 storage_proxy::response_id_type
 storage_proxy::create_write_response_handler(const mutation& m, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
     return create_write_response_handler_helper(m.schema(), m.token(), std::make_unique<shared_mutation>(m), cl, type, tr_state,
+            std::move(permit));
+}
+
+storage_proxy::response_id_type
+storage_proxy::create_write_response_handler(const hint_wrapper& h, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
+    return create_write_response_handler_helper(h.mut.schema(), h.mut.token(), std::make_unique<hint_mutation>(h.mut), cl, type, tr_state,
             std::move(permit));
 }
 
@@ -2415,6 +2414,16 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
             db::write_type::SIMPLE,
             get_stats(),
             allow_hints::no);
+}
+
+future<> storage_proxy::mutate_hint_from_scratch(frozen_mutation_and_schema fm_a_s) {
+    const auto timeout = db::timeout_clock::now() + 1h;
+    if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
+        return mutate({fm_a_s.fm.unfreeze(fm_a_s.s)}, db::consistency_level::ALL, timeout, nullptr, empty_service_permit());
+    }
+
+    std::array<hint_wrapper, 1> ms{hint_wrapper { std::move(fm_a_s.fm.unfreeze(fm_a_s.s)) }};
+    return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit(), timeout);
 }
 
 /**
@@ -3689,7 +3698,7 @@ storage_proxy::query_result_local(schema_ptr s, lw_shared_ptr<query::read_comman
                                   tracing::trace_state_ptr trace_state, storage_proxy::clock_type::time_point timeout, uint64_t max_size) {
     cmd->slice.options.set_if<query::partition_slice::option::with_digest>(opts.request != query::result_request::only_result);
     if (pr.is_singular()) {
-        unsigned shard = _db.local().shard_of(pr.start()->value().token());
+        unsigned shard = dht::shard_of(*s, pr.start()->value().token());
         get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
         return _db.invoke_on(shard, _read_smp_service_group, [max_size, gs = global_schema_ptr(s), prv = dht::partition_range_vector({pr}) /* FIXME: pr is copied */, cmd, opts, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state))] (database& db) mutable {
             auto trace_state = gt.get();
@@ -4122,7 +4131,7 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
     auto cl_for_learn = cl == db::consistency_level::LOCAL_SERIAL ? db::consistency_level::LOCAL_QUORUM :
             db::consistency_level::QUORUM;
 
-    if (cas_shard(partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
+    if (cas_shard(*s, partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
         throw std::logic_error("storage_proxy::do_query_with_paxos called on a wrong shard");
     }
     // All cas networking operations run with query provided timeout
@@ -4242,7 +4251,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
     db::validate_for_cas(cl_for_paxos);
     db::validate_for_cas_commit(cl_for_commit, schema->ks_name());
 
-    if (cas_shard(partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
+    if (cas_shard(*schema, partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
         throw std::logic_error("storage_proxy::cas called on a wrong shard");
     }
 
@@ -4819,8 +4828,8 @@ void storage_proxy::init_messaging_service() {
 
         return get_schema_for_read(cmd.schema_version, src_addr).then([this, cmd = std::move(cmd), key = std::move(key), ballot,
                          only_digest, da, timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
-            dht::token token = dht::global_partitioner().get_token(*schema, key);
-            unsigned shard = _db.local().shard_of(token);
+            dht::token token = dht::get_token(*schema, key);
+            unsigned shard = dht::shard_of(*schema, token);
             bool local = shard == engine().cpu_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
@@ -4848,7 +4857,7 @@ void storage_proxy::init_messaging_service() {
         auto f = get_schema_for_read(proposal.update.schema_version(), src_addr).then([this, tr_state = std::move(tr_state),
                                                               proposal = std::move(proposal), timeout] (schema_ptr schema) mutable {
             dht::token token = proposal.update.decorated_key(*schema).token();
-            unsigned shard = _db.local().shard_of(token);
+            unsigned shard = dht::shard_of(*schema, token);
             bool local = shard == engine().cpu_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
@@ -4888,7 +4897,7 @@ storage_proxy::query_mutations_locally(schema_ptr s, lw_shared_ptr<query::read_c
                                        storage_proxy::clock_type::time_point timeout,
                                        tracing::trace_state_ptr trace_state, uint64_t max_size) {
     if (pr.is_singular()) {
-        unsigned shard = _db.local().shard_of(pr.start()->value().token());
+        unsigned shard = dht::shard_of(*s, pr.start()->value().token());
         get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
         return _db.invoke_on(shard, _read_smp_service_group, [max_size, cmd, &pr, gs=global_schema_ptr(s), timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state))] (database& db) mutable {
           return db.get_result_memory_limiter().new_mutation_read(max_size).then([&] (query::result_memory_accounter ma) {

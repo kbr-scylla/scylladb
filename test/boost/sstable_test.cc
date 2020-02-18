@@ -710,7 +710,7 @@ SEASTAR_TEST_CASE(find_key_map) {
         kk.push_back(make_map_value(map_type, map));
 
         auto key = sstables::key::from_deeply_exploded(*s, kk);
-        BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == 0);
+        BOOST_REQUIRE(sstables::test(sstp).binary_search(s->get_partitioner(), summary.entries, key) == 0);
         return make_ready_future<>();
     });
 }
@@ -732,7 +732,7 @@ SEASTAR_TEST_CASE(find_key_set) {
         kk.push_back(make_set_value(set_type, set));
 
         auto key = sstables::key::from_deeply_exploded(*s, kk);
-        BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == 0);
+        BOOST_REQUIRE(sstables::test(sstp).binary_search(s->get_partitioner(), summary.entries, key) == 0);
         return make_ready_future<>();
     });
 }
@@ -754,7 +754,7 @@ SEASTAR_TEST_CASE(find_key_list) {
         kk.push_back(make_list_value(list_type, list));
 
         auto key = sstables::key::from_deeply_exploded(*s, kk);
-        BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == 0);
+        BOOST_REQUIRE(sstables::test(sstp).binary_search(s->get_partitioner(), summary.entries, key) == 0);
         return make_ready_future<>();
     });
 }
@@ -773,7 +773,7 @@ SEASTAR_TEST_CASE(find_key_composite) {
         kk.push_back(data_value(b2));
 
         auto key = sstables::key::from_deeply_exploded(*s, kk);
-        BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == 0);
+        BOOST_REQUIRE(sstables::test(sstp).binary_search(s->get_partitioner(), summary.entries, key) == 0);
         return make_ready_future<>();
     });
 }
@@ -785,7 +785,7 @@ SEASTAR_TEST_CASE(all_in_place) {
         int idx = 0;
         for (auto& e: summary.entries) {
             auto key = sstables::key::from_bytes(bytes(e.key));
-            BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == idx++);
+            BOOST_REQUIRE(sstables::test(sstp).binary_search(sstp->get_schema()->get_partitioner(), summary.entries, key) == idx++);
         }
         return make_ready_future<>();
     });
@@ -797,7 +797,7 @@ SEASTAR_TEST_CASE(full_index_search) {
             int idx = 0;
             for (auto& ie: index_list) {
                 auto key = key::from_bytes(to_bytes(ie.get_key_bytes()));
-                BOOST_REQUIRE(sstables::test(sstp).binary_search(index_list, key) == idx++);
+                BOOST_REQUIRE(sstables::test(sstp).binary_search(sstp->get_schema()->get_partitioner(), index_list, key) == idx++);
             }
         });
     });
@@ -817,7 +817,7 @@ SEASTAR_TEST_CASE(not_find_key_composite_bucket0) {
 
         auto key = sstables::key::from_deeply_exploded(*s, kk);
         // (result + 1) * -1 -1 = 0
-        BOOST_REQUIRE(sstables::test(sstp).binary_search(summary.entries, key) == -2);
+        BOOST_REQUIRE(sstables::test(sstp).binary_search(s->get_partitioner(), summary.entries, key) == -2);
         return make_ready_future<>();
     });
 }

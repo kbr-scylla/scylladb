@@ -405,11 +405,7 @@ future<> manager::end_point_hints_manager::sender::do_send_one_mutation(frozen_m
             return _proxy.send_hint_to_endpoint(std::move(m), end_point_key());
         } else {
             manager_logger.trace("Endpoints set has changed and {} is no longer a replica. Mutating from scratch...", end_point_key());
-            // FIXME: using 1h as infinite timeout. If a node is down, we should get an
-            // unavailable exception.
-            auto timeout = db::timeout_clock::now() + 1h;
-            //FIXME: Add required frozen_mutation overloads
-            return _proxy.mutate({m.fm.unfreeze(m.s)}, consistency_level::ALL, timeout, nullptr, empty_service_permit());
+            return _proxy.mutate_hint_from_scratch(std::move(m));
         }
     });
 }
@@ -679,7 +675,7 @@ void manager::end_point_hints_manager::sender::start() {
 future<> manager::end_point_hints_manager::sender::send_one_mutation(frozen_mutation_and_schema m) {
     keyspace& ks = _db.find_keyspace(m.s->ks_name());
     auto& rs = ks.get_replication_strategy();
-    auto token = dht::global_partitioner().get_token(*m.s, m.fm.key(*m.s));
+    auto token = dht::get_token(*m.s, m.fm.key(*m.s));
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(std::move(token));
 
     return do_send_one_mutation(std::move(m), natural_endpoints);

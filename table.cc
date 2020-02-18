@@ -53,11 +53,6 @@ using namespace std::chrono_literals;
 
 sstables::sstable::version_types get_highest_supported_format();
 
-static
-bool belongs_to_current_shard(const dht::decorated_key& dk) {
-    return dht::shard_of(dk.token()) == engine().cpu_id();
-}
-
 // Stores ranges for all components of the same clustering key, index 0 referring to component
 // range 0, and so on.
 using ck_filter_clustering_key_components = std::vector<nonwrapping_range<bytes_view>>;
@@ -350,7 +345,7 @@ table::make_sstable_reader(schema_ptr s,
     auto ms = [&] () -> mutation_source {
         if (pr.is_singular() && pr.start()->value().has_key()) {
             const dht::ring_position& pos = pr.start()->value();
-            if (dht::shard_of(pos.token()) != engine().cpu_id()) {
+            if (dht::shard_of(*s, pos.token()) != engine().cpu_id()) {
                 return mutation_source([] (
                         schema_ptr s,
                         reader_permit permit,
@@ -416,7 +411,7 @@ table::find_partition(schema_ptr s, const dht::decorated_key& key) const {
 
 future<table::const_mutation_partition_ptr>
 table::find_partition_slow(schema_ptr s, const partition_key& key) const {
-    return find_partition(s, dht::global_partitioner().decorate_key(*s, key));
+    return find_partition(s, dht::decorate_key(*s, key));
 }
 
 future<table::const_row_ptr>
@@ -593,8 +588,10 @@ flat_mutation_reader make_local_shard_sstable_reader(schema_ptr s,
         flat_mutation_reader reader = sst->read_range_rows_flat(s, permit, pr, slice, pc,
                 trace_state, fwd, fwd_mr, monitor_generator(sst));
         if (sst->is_shared()) {
-            using sig = bool (&)(const dht::decorated_key&);
-            reader = make_filtering_reader(std::move(reader), sig(belongs_to_current_shard));
+            auto filter = [&s = *s](const dht::decorated_key& dk) -> bool {
+                return dht::shard_of(s, dk.token()) == engine().cpu_id();
+            };
+            reader = make_filtering_reader(std::move(reader), std::move(filter));
         }
         return reader;
     };
@@ -1320,50 +1317,23 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
     });
 }
 
-static bool needs_cleanup(const sstables::shared_sstable& sst,
-                   const dht::token_range_vector& owned_ranges,
-                   schema_ptr s) {
-    auto first = sst->get_first_partition_key();
-    auto last = sst->get_last_partition_key();
-    auto first_token = dht::global_partitioner().get_token(*s, first);
-    auto last_token = dht::global_partitioner().get_token(*s, last);
-    dht::token_range sst_token_range = dht::token_range::make(first_token, last_token);
-
-    // return true iff sst partition range isn't fully contained in any of the owned ranges.
-    for (auto& r : owned_ranges) {
-        if (r.contains(sst_token_range, dht::token_comparator())) {
-            return false;
-        }
-    }
-    return true;
-}
-
-future<> table::cleanup_sstables(sstables::compaction_descriptor descriptor, bool is_actual_cleanup) {
-    dht::token_range_vector r;
-
-    if (is_actual_cleanup) {
-        r = service::get_local_storage_service().get_local_ranges(_schema->ks_name());
-    }
-
-    return do_with(std::move(descriptor.sstables), std::move(r), std::move(descriptor.release_exhausted), [this, is_actual_cleanup] (auto& sstables, auto& owned_ranges, auto& release_fn) {
-        return do_for_each(sstables, [this, &owned_ranges, &release_fn, is_actual_cleanup] (auto& sst) {
-            if (!owned_ranges.empty() && !needs_cleanup(sst, owned_ranges, _schema)) {
-                return make_ready_future<>();
-            }
-
-            // this semaphore ensures that only one cleanup will run per shard.
+future<> table::rewrite_sstables(sstables::compaction_descriptor descriptor) {
+    return do_with(std::move(descriptor.sstables), std::move(descriptor.release_exhausted),
+            [this, options = descriptor.options] (auto& sstables, auto& release_fn) {
+        return do_for_each(sstables, [this, &release_fn, options] (auto& sst) {
+            // this semaphore ensures that only one rewrite will run per shard.
             // That's to prevent node from running out of space when almost all sstables
-            // need cleanup, so if sstables are cleaned in parallel, we may need almost
+            // need rewrite, so if sstables are rewritten in parallel, we may need almost
             // twice the disk space used by those sstables.
-            static thread_local named_semaphore sem(1, named_semaphore_exception_factory{"cleanup sstables"});
+            static thread_local named_semaphore sem(1, named_semaphore_exception_factory{"rewrite sstables"});
 
-            return with_semaphore(sem, 1, [this, &sst, &release_fn, is_actual_cleanup] {
+            return with_semaphore(sem, 1, [this, &sst, &release_fn, options] {
                 // release reference to sstables cleaned up, otherwise space usage from their data and index
                 // components cannot be reclaimed until all of them are cleaned.
                 auto sstable_level = sst->get_sstable_level();
                 auto run_identifier = sst->run_identifier();
                 auto descriptor = sstables::compaction_descriptor({ std::move(sst) }, sstable_level,
-                    sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, is_actual_cleanup);
+                    sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, options);
                 descriptor.release_exhausted = release_fn;
                 return this->compact_sstables(std::move(descriptor));
             });
@@ -1456,7 +1426,7 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
     return do_with(std::unordered_set<sstring>(), lw_shared_ptr<sstables::sstable_set::incremental_selector>(make_lw_shared(get_sstable_set().make_incremental_selector())),
             partition_key(partition_key::from_nodetool_style_string(_schema, key)),
             [this] (std::unordered_set<sstring>& filenames, lw_shared_ptr<sstables::sstable_set::incremental_selector>& sel, partition_key& pk) {
-        return do_with(dht::decorated_key(dht::global_partitioner().decorate_key(*_schema, pk)),
+        return do_with(dht::decorated_key(dht::decorate_key(*_schema, pk)),
                 [this, &filenames, &sel, &pk](dht::decorated_key& dk) mutable {
             auto sst = sel->select(dk).sstables;
             auto hk = sstables::sstable::make_hashed_key(*_schema, dk.key());

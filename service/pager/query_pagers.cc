@@ -89,7 +89,7 @@ static bool has_clustering_keys(const schema& s, const query::read_command& cmd)
         qlogger.trace("fetch_page query id {}", _cmd->query_uuid);
 
         if (_last_pkey) {
-            auto dpk = dht::global_partitioner().decorate_key(*_schema, *_last_pkey);
+            auto dpk = dht::decorate_key(*_schema, *_last_pkey);
             dht::ring_position lo(dpk);
 
             auto reversed = _cmd->slice.options.contains<query::partition_slice::option::reversed>();
@@ -358,8 +358,8 @@ public:
         }
     }
 
-    ::shared_ptr<const paging_state> query_pager::state() const {
-        return ::make_shared<paging_state>(_last_pkey.value_or(partition_key::make_empty()), _last_ckey, _exhausted ? 0 : _max, _cmd->query_uuid, _last_replicas, _query_read_repair_decision, _rows_fetched_for_last_partition);
+    lw_shared_ptr<const paging_state> query_pager::state() const {
+        return make_lw_shared<paging_state>(_last_pkey.value_or(partition_key::make_empty()), _last_ckey, _exhausted ? 0 : _max, _cmd->query_uuid, _last_replicas, _query_read_repair_decision, _rows_fetched_for_last_partition);
     }
 
 }
