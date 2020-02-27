@@ -77,20 +77,18 @@ progresses and compatibility continues to improve.
 * GetItem: Support almost complete except that projection expressions can
   only ask for top-level attributes.
 * PutItem: Support almost complete except that condition expressions can
-  only refer to to-level attributes, and return values (optional return of
+  only refer to to-level attributes.
   pre-put content) not yet supported.
-* UpdateItem: Like PutItem does not yet support return values. Nested
-  documents are supported but updates to nested attributes are not (e.g.,
-  `SET a.b[3].c=val`), and neither are nested attributes in condition
-  expressions.
+* UpdateItem: Nested documents are supported but updates to nested attributes
+  are not (e.g., `SET a.b[3].c=val`), and neither are nested attributes in
+  condition expressions.
 * DeleteItem: Mostly works, but again does not support nested attributes
-  in condition expressions, or return values.
+  in condition expressions.
 ### Batch Operations
 * BatchGetItem: Almost complete except that projection expressions can only
   ask for top-level attributes.
-* BatchWriteItem: Supported. Doesn't yet verify that there are no duplicates
-  in the list of items. Doesn't limit the number of items (DynamoDB limits to
-  25) or size of items (400 KB) or total request size (16 MB).
+* BatchWriteItem: Supported. Doesn't limit the number of items (DynamoDB
+  limits to 25) or size of items (400 KB) or total request size (16 MB).
 ### Scans
 * Scan: As usual, projection expressions only support top-level attributes.
   Filter expressions (to filter some of the items) partially supported:

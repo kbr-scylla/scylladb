@@ -748,6 +748,7 @@ int main(int ac, char** av) {
                     return sstables::await_background_jobs_on_all_shards();
                 }).get();
             });
+            api::set_server_config(ctx).get();
             verify_seastar_io_scheduler(opts.count("max-io-requests"), opts.count("io-properties") || opts.count("io-properties-file"),
                                         cfg->developer_mode()).get();
 
@@ -994,6 +995,15 @@ int main(int ac, char** av) {
                 gossiper.local().unregister_(ss.shared_from_this()).get();
             });
 
+            /*
+             * This fuse prevents gossiper from staying active in case the
+             * drain_on_shutdown below is not registered. When we fix the
+             * start-stop sequence it will be removed.
+             */
+            auto gossiping_fuse = defer_verbose_shutdown("gossiping", [] {
+                gms::stop_gossiping().get();
+            });
+
             ss.init_server_without_the_messaging_service_part().get();
             api::set_server_snapshot(ctx).get();
             auto stop_snapshots = defer_verbose_shutdown("snapshots", [] {
@@ -1068,9 +1078,10 @@ int main(int ac, char** av) {
                 }).get();
             }
 
-            static sharded<alternator::executor> alternator_executor;
-            static alternator::server alternator_server(alternator_executor);
             if (cfg->alternator_port() || cfg->alternator_https_port()) {
+                static sharded<alternator::executor> alternator_executor;
+                static alternator::server alternator_server(alternator_executor);
+
                 if (!cfg->check_experimental(db::experimental_features_t::LWT)) {
                     throw std::runtime_error("Alternator enabled, but needs experimental LWT feature which wasn't enabled");
                 }
@@ -1109,6 +1120,12 @@ int main(int ac, char** av) {
                 with_scheduling_group(dbcfg.statement_scheduling_group, [addr, alternator_port, alternator_https_port, creds = std::move(creds), alternator_enforce_authorization] {
                     return alternator_server.init(addr, alternator_port, alternator_https_port, creds, alternator_enforce_authorization);
                 }).get();
+                auto stop_alternator = [] {
+                    alternator_server.stop().get();
+                    alternator_executor.stop().get();
+                };
+
+                ss.register_client_shutdown_hook("alternator", std::move(stop_alternator));
             }
 
             static redis_service redis;
@@ -1146,13 +1163,6 @@ int main(int ac, char** av) {
 
             auto do_drain = defer_verbose_shutdown("local storage", [] {
                 service::get_local_storage_service().drain_on_shutdown().get();
-            });
-
-            auto stop_alternator = defer_verbose_shutdown("alternator", [cfg] {
-                if (cfg->alternator_port() || cfg->alternator_https_port()) {
-                    alternator_server.stop().get();
-                    alternator_executor.stop().get();
-                }
             });
 
             auto stop_view_builder = defer_verbose_shutdown("view builder", [cfg] {

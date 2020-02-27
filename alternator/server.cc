@@ -191,7 +191,7 @@ future<> server::verify_signature(const request& req) {
         throw api_error("InvalidSignatureException", "Host header is mandatory for signature verification");
     }
     auto authorization_it = req._headers.find("Authorization");
-    if (host_it == req._headers.end()) {
+    if (authorization_it == req._headers.end()) {
         throw api_error("InvalidSignatureException", "Authorization header is mandatory for signature verification");
     }
     std::string host = host_it->second;
@@ -269,6 +269,7 @@ future<> server::verify_signature(const request& req) {
 }
 
 future<executor::request_return_type> server::handle_api_request(std::unique_ptr<request>&& req) {
+    _executor.local()._stats.total_operations++;
     sstring target = req->get_header(TARGET);
     std::vector<std::string_view> split_target = split(target, '.');
     //NOTICE(sarna): Target consists of Dynamo API version followed by a dot '.' and operation type (e.g. CreateTable)
@@ -357,6 +358,9 @@ future<> server::init(net::inet_address addr, std::optional<uint16_t> port, std:
                 _control.start().get();
                 _control.set_routes(std::bind(&server::set_routes, this, std::placeholders::_1)).get();
                 _control.listen(socket_address{addr, *port}).get();
+                _control.server().invoke_on_all([] (http_server& serv) {
+                    serv.set_content_length_limit(server::content_length_limit);
+                }).get();
                 _enabled_servers.push_back(std::ref(_control));
                 slogger.info("Alternator HTTP server listening on {} port {}", addr, *port);
             }
@@ -364,6 +368,7 @@ future<> server::init(net::inet_address addr, std::optional<uint16_t> port, std:
                 _https_control.start().get();
                 _https_control.set_routes(std::bind(&server::set_routes, this, std::placeholders::_1)).get();
                 _https_control.server().invoke_on_all([creds] (http_server& serv) {
+                    serv.set_content_length_limit(server::content_length_limit);
                     return serv.set_tls_credentials(creds->build_server_credentials());
                 }).get();
 

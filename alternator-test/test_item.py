@@ -151,14 +151,14 @@ def test_basic_string_more_update(test_table):
     assert item['a2'] == val2
     assert not 'a3' in item
 
-# Test that item operations on a non-existant table name fail with correct
+# Test that item operations on a non-existent table name fail with correct
 # error code.
 def test_item_operations_nonexistent_table(dynamodb):
     with pytest.raises(ClientError, match='ResourceNotFoundException'):
         dynamodb.meta.client.put_item(TableName='non_existent_table',
             Item={'a':{'S':'b'}})
 
-# Fetching a non-existant item. According to the DynamoDB doc, "If there is no
+# Fetching a non-existent item. According to the DynamoDB doc, "If there is no
 # matching item, GetItem does not return any data and there will be no Item
 # element in the response."
 def test_get_item_missing_item(test_table):
@@ -400,3 +400,232 @@ def test_put_item_replace(test_table_s, test_table):
     assert test_table.get_item(Key={'p': p, 'c': c}, ConsistentRead=True)['Item'] == {'p': p, 'c': c, 'a': 'hi'}
     test_table.put_item(Item={'p': p, 'c': c, 'b': 'hello'})
     assert test_table.get_item(Key={'p': p, 'c': c}, ConsistentRead=True)['Item'] == {'p': p, 'c': c, 'b': 'hello'}
+
+# Test what UpdateItem does on a non-existent item. An operation that puts an
+# attribute, creates this item. Even an empty operation creates an item
+# (this is test_empty_update() above). But an operation that only deletes
+# attributes, does not create an empty item. This reproduces issue #5862.
+def test_update_item_non_existent(test_table_s):
+    # An update that puts an attribute on a non-existent item, creates it:
+    p = random_string()
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Value': 3, 'Action': 'PUT'}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': 3}
+    # An update that does *nothing* on a non-existent item, still creates it:
+    p = random_string()
+    test_table_s.update_item(Key={'p': p}, AttributeUpdates={})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p}
+    # HOWEVER, an update that only deletes an attribute on a non-existent
+    # item, does NOT creates it: (issue #5862 was about Alternator wrongly
+    # creating and empty item in this case).
+    p = random_string()
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE'}})
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+    # Test the same thing - that an attribute-deleting update does not
+    # create a non-existing item - but now with the update expression syntax:
+    p = random_string()
+    test_table_s.update_item(Key={'p': p}, UpdateExpression='REMOVE a')
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+
+# UpdateItem's AttributeUpdate's DELETE operations has two different
+# meanings. It can be used to delete an entire attribute, but can also be
+# used to delete elements from a set attribute. The latter is a RMW operation,
+# because it requires testing the existing value of the attribute, if it
+# is indeed a set of the desired type.
+@pytest.mark.xfail(reason="UpdateItem AttributeUpdates DELETE not implemented for sets")
+def test_update_item_delete(test_table_s):
+    p = random_string()
+    a = random_string()
+    test_table_s.put_item(Item={'p': p, 'a': a})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': a}
+    # An Value-less DELETE just deletes the entire attribute
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE'}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p}
+    # The "Value" parameter is rejected for *most* types, except sets.
+    # Even lists (supported by the ADD operation) are rejected.
+    for value in ['b', 3, bytearray('b', 'utf-8'), True, False, None,
+                  [2,3], {'a': 3}]:
+        test_table_s.put_item(Item={'p': p, 'a': value})
+        with pytest.raises(ClientError, match='ValidationException.*type'):
+            test_table_s.update_item(Key={'p': p},
+                AttributeUpdates={'a': {'Action': 'DELETE', 'Value': value}})
+    # "Value" is allowed for sets, but the existing content of the attribute
+    # must be a set as well, otherwise we get an error on mismatched type
+    with pytest.raises(ClientError, match='ValidationException.*mismatch'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([1, 2])}})
+    # When "Value" is a set and the attribute is a set of the same type,
+    # DELETE remove these items from the set attribute. It works on all
+    # three set types (string, bytes, number):
+    test_table_s.put_item(Item={'p': p, 'a': set([1, 2, 3, 4, 5])})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([2, 4])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 3, 5])}
+    test_table_s.put_item(Item={'p': p, 'a': set(['dog', 'cat', 'lion'])})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set(['dog'])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set(['cat', 'lion'])}
+    test_table_s.put_item(Item={'p': p, 'a': set([b'dog', b'cat', b'lion'])})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([b'cat'])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([b'dog', b'lion'])}
+    # If the item and value are both sets, but not of the same type, we
+    # get an error on the mismatched types:
+    test_table_s.put_item(Item={'p': p, 'a': set([1, 2, 3, 4, 5])})
+    with pytest.raises(ClientError, match='ValidationException.*mismatch'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set(['hi'])}})
+    # An empty set is not allowed as Value:
+    test_table_s.put_item(Item={'p': p, 'a': set([1, 2, 3])})
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([])}})
+    # Deleting all the elments from a set doesn't leave an empty set
+    # (which DynamoDB doesn't allow) but rather deletes the attribute:
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([1, 2, 3])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p}
+    # Removing an item not already in the set is fine, and ignores it:
+    test_table_s.put_item(Item={'p': p, 'a': set([1, 2, 3])})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([4])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 2, 3])}
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([2, 5])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 3])}
+    # Asking to delete an attribute or parts of a set attribute is silently
+    # ignored if the item doesn't exist (no error, and item isn't created).
+    p = random_string()
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE'}})
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'DELETE', 'Value': set([4])}})
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+
+# Test for UpdateItem's AttributeUpdate's ADD operation, which has different
+# meanings for numbers and sets - but not for other types.
+@pytest.mark.xfail(reason="UpdateItem AttributeUpdates ADD not implemented")
+def test_update_item_add(test_table_s):
+    p = random_string()
+
+    # ADD operations on numbers:
+    test_table_s.put_item(Item={'p': p, 'a': 7})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': 2}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': 9}
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': Decimal(-3.5)}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': Decimal(5.5)}
+    # Incrementing a non-existent attribute is allowed (as if the value is 0)
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'b': {'Action': 'ADD', 'Value': 2}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': Decimal(5.5), 'b': 2}
+
+    # ADD operation on sets:
+    test_table_s.put_item(Item={'p': p, 'a': set([1, 2])})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': set([3, 4])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 2, 3, 4])}
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': set([3, 5])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 2, 3, 4, 5])}
+    # Adding a set to a non-existent attribute is allowed (as if empty set)
+    # The DynamoDB documentation suggests this is only allowed for a set
+    # of numbers, but it actually works for any set type.
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'b': {'Action': 'ADD', 'Value': set([7])}})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'c': {'Action': 'ADD', 'Value': set(['a', 'b'])}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': set([1, 2, 3, 4, 5]), 'b': set([7]), 'c': set(['a', 'b'])}
+    # The set type in the attribute and the Value argument needs to match:
+    with pytest.raises(ClientError, match='ValidationException.*mismatch'):
+        test_table_s.put_item(Item={'p': p, 'a': set([1, 2])})
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'ADD', 'Value': set(['a'])}})
+
+    # ADD operation on lists (not documented, but works similar to sets!)
+    test_table_s.put_item(Item={'p': p, 'a': [1, 2]})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': [3, 4]}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': [1, 2, 3, 4]}
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Action': 'ADD', 'Value': [3, 5]}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': [1, 2, 3, 4, 3, 5]}
+    # Adding a list to a non-existent attribute is allowed (as if empty list)
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'b': {'Action': 'ADD', 'Value': [7]}})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'c': {'Action': 'ADD', 'Value': ['a', 'b']}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': [1, 2, 3, 4, 3, 5], 'b': [7], 'c': ['a', 'b']}
+    # Unlike sets which have a homogeneous element type, lists don't, and
+    # elements of any type can be appended to a list:
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'c': {'Action': 'ADD', 'Value': [3]}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['c'] == ['a', 'b', 3]
+
+    # ADD doesn't support any other type as the value parameter.
+    # In particular, it can't do things like append strings, or add items to
+    # a map, or add a single string value to a set.
+    with pytest.raises(ClientError, match='ValidationException.*type'):
+        test_table_s.put_item(Item={'p': p, 'a': 'dog'})
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'ADD', 'Value': 's'}})
+    with pytest.raises(ClientError, match='ValidationException.*type'):
+        test_table_s.put_item(Item={'p': p, 'a': {'x': 1}})
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'ADD', 'Value': {'y': 2}}})
+    with pytest.raises(ClientError, match='ValidationException.*type'):
+        test_table_s.put_item(Item={'p': p, 'a': set(['dog'])})
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'ADD', 'Value': 'cat'}})
+
+    # If the entire item doesn't exist, ADD can create it just like we
+    # tested above that it can create an attribute.
+    for value in [3, set([1, 2]), set(['a', 'b']), [1, 2]]:
+        test_table_s.delete_item(Key={'p': p})
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'ADD', 'Value': value}})
+        assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': value}
+
+# DynamoDB Does not allow empty strings, empty byte arrays, or empty sets.
+# Trying to ask UpdateItem to PUT one of these in an attribute should be
+# forbidden. Empty lists and maps *are* allowed.
+def test_update_item_empty_attribute(test_table_s):
+    p = random_string()
+    # Empty string, byte array and set are *not* allowed
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'a': {'Action': 'PUT', 'Value': ''}})
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'b': {'Action': 'PUT', 'Value': bytearray('', 'utf-8')}})
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.update_item(Key={'p': p},
+            AttributeUpdates={'c': {'Action': 'PUT', 'Value': set([])}})
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+    # But empty lists and maps *are* allowed:
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'d': {'Action': 'PUT', 'Value': []}})
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'e': {'Action': 'PUT', 'Value': {}}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'd': [], 'e': {}}
+
+# Same as the above test (that we cannot create empty strings, blobs or
+# sets), but using PutItem
+def test_put_item_empty_attribute(test_table_s):
+    p = random_string()
+    # Empty string, byte array and set are *not* allowed
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.put_item(Item={'p': p, 'a': ''})
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.put_item(Item={'p': p, 'a': bytearray('', 'utf-8')})
+    with pytest.raises(ClientError, match='ValidationException.*empty'):
+        test_table_s.put_item(Item={'p': p, 'a': set([])})
+    assert not 'Item' in test_table_s.get_item(Key={'p': p}, ConsistentRead=True)
+    # But empty lists and maps *are* allowed:
+    test_table_s.put_item(Item={'p': p, 'a': [], 'b': {}})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': [], 'b': {}}

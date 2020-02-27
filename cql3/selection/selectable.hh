@@ -61,7 +61,7 @@ public:
     public:
         virtual ~raw() {}
 
-        virtual ::shared_ptr<selectable> prepare(const schema& s) = 0;
+        virtual ::shared_ptr<selectable> prepare(const schema& s) const = 0;
 
         /**
          * Returns true if any processing is performed on the selected column.
@@ -99,7 +99,7 @@ public:
         raw(functions::function_name function_name, std::vector<shared_ptr<selectable::raw>> args)
                 : _function_name(std::move(function_name)), _args(std::move(args)) {
         }
-        virtual shared_ptr<selectable> prepare(const schema& s) override;
+        virtual shared_ptr<selectable> prepare(const schema& s) const override;
         virtual bool processes_selection() const override;
         static ::shared_ptr<selectable::with_function::raw> make_count_rows_function();
     };
@@ -123,7 +123,7 @@ public:
         raw(shared_ptr<functions::function> f, std::vector<shared_ptr<selectable::raw>> args)
                 : _function(f), _args(std::move(args)) {
         }
-        virtual shared_ptr<selectable> prepare(const schema& s) override;
+        virtual shared_ptr<selectable> prepare(const schema& s) const override;
         virtual bool processes_selection() const override;
     };
 };
@@ -146,7 +146,7 @@ public:
         raw(shared_ptr<selectable::raw> arg, cql3_type type)
                 : _arg(std::move(arg)), _type(std::move(type)) {
         }
-        virtual shared_ptr<selectable> prepare(const schema& s) override;
+        virtual shared_ptr<selectable> prepare(const schema& s) const override;
         virtual bool processes_selection() const override;
     };
 };

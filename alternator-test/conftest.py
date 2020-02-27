@@ -70,7 +70,8 @@ def dynamodb(request):
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         return boto3.resource('dynamodb', endpoint_url=local_url, verify=verify,
-            region_name='us-east-1', aws_access_key_id='alternator', aws_secret_access_key='secret_pass')
+            region_name='us-east-1', aws_access_key_id='alternator', aws_secret_access_key='secret_pass',
+            config=botocore.client.Config(retries={"max_attempts": 3}))
 
 # "test_table" fixture: Create and return a temporary table to be used in tests
 # that need a table to work on. The table is automatically deleted at the end.
@@ -110,6 +111,15 @@ def test_table(dynamodb):
 # tables with different key schemas.
 @pytest.fixture(scope="session")
 def test_table_s(dynamodb):
+    table = create_test_table(dynamodb,
+        KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' }, ],
+        AttributeDefinitions=[ { 'AttributeName': 'p', 'AttributeType': 'S' } ])
+    yield table
+    table.delete()
+# test_table_s_2 has exactly the same schema as test_table_s, and is useful
+# for tests which need two different tables with the same schema.
+@pytest.fixture(scope="session")
+def test_table_s_2(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' }, ],
         AttributeDefinitions=[ { 'AttributeName': 'p', 'AttributeType': 'S' } ])

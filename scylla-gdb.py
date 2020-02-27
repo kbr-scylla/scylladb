@@ -268,6 +268,77 @@ class std_vector:
         return int(self.ref['_M_impl']['_M_end_of_storage']) - int(self.ref['_M_impl']['_M_start'])
 
 
+class std_deque:
+    # should reflect the value of _GLIBCXX_DEQUE_BUF_SIZE
+    DEQUE_BUF_SIZE = 512
+
+    class iterator:
+        def __init__(self, ref, buf_size):
+            self.cur = ref['_M_cur']
+            self.first = ref['_M_first']
+            self.last = ref['_M_last']
+            self.node = ref['_M_node']
+            self.buf_size = buf_size
+
+        def _set_node(self, node):
+            self.first = node.dereference()
+            self.last = self.first + self.buf_size
+            self.node = node
+
+        def __eq__(self, other):
+            return self.node == other.node and self.cur == other.cur
+
+        def __str__(self):
+            return "{{node=0x{:x}, first=0x{:x}, last=0x{:x}, cur=0x{:x}}}".format(
+                    int(self.node),
+                    int(self.first),
+                    int(self.last),
+                    int(self.cur))
+
+        def next(self):
+            self.cur += 1
+            if self.cur == self.last:
+                self._set_node(self.node + 1)
+                self.cur = self.first
+
+        def get(self):
+            return self.cur.dereference()
+
+
+    def __init__(self, ref):
+        self.ref = ref
+        self.value_type = self.ref.type.strip_typedefs().template_argument(0)
+        if self.value_type.sizeof < std_deque.DEQUE_BUF_SIZE:
+            self.buf_size = int(std_deque.DEQUE_BUF_SIZE / self.value_type.sizeof)
+        else:
+            self.buf_size = 1
+
+    def __len__(self):
+        start = self.ref['_M_impl']['_M_start']
+        finish = self.ref['_M_impl']['_M_finish']
+        return (self.buf_size * (max(1, finish['_M_node'] - start['_M_node']) - 1) +
+            start['_M_last'] - start['_M_cur'] +
+            finish['_M_cur'] - finish['_M_first'])
+
+    def __nonzero__(self):
+        return self.__len__() > 0
+
+    def __bool__(self):
+        return self.__len__() > 0
+
+    def __iter__(self):
+        it = std_deque.iterator(self.ref['_M_impl']['_M_start'], self.buf_size)
+        finish = std_deque.iterator(self.ref['_M_impl']['_M_finish'], self.buf_size)
+
+        while it != finish:
+            yield it.get()
+            it.next()
+
+    def __str__(self):
+        items = [str(item) for item in self]
+        return "{{size={}, [{}]}}".format(len(self), ", ".join(items))
+
+
 class static_vector:
     def __init__(self, ref):
         self.ref = ref
@@ -562,10 +633,26 @@ def list_unordered_set(map, cache=True):
 
 
 def get_text_range():
+    try:
+        vptr_type = gdb.lookup_type('uintptr_t').pointer()
+        reactor_backend = gdb.parse_and_eval('&seastar::local_engine->_backend')
+        known_vptr = int(reactor_backend.reinterpret_cast(vptr_type).dereference())
+    except Exception as e:
+        gdb.write("get_text_range(): Falling back to locating .rodata section because lookup to reactor backend to use as known vptr failed: {}\n".format(e))
+        known_vptr = None
+
     sections = gdb.execute('info files', False, True).split('\n')
     for line in sections:
+        if known_vptr:
+            if not " is ." in line:
+                continue
+            items = line.split()
+            start = int(items[0], 16)
+            end = int(items[2], 16)
+            if start <= known_vptr and known_vptr <= end:
+                return start, end
         # vptrs are in .rodata section
-        if line.endswith("is .rodata"):
+        elif line.endswith("is .rodata"):
             items = line.split()
             text_start = int(items[0], 16)
             text_end = int(items[2], 16)
@@ -2705,6 +2792,19 @@ class scylla_cache(gdb.Command):
             gdb.write("\n")
 
 
+def find_sstables_attached_to_tables():
+    db = find_db(current_shard())
+    for table in all_tables(db):
+        for (key, value) in list_unordered_map(table['_streaming_memtables_big']):
+            memtables = seastar_lw_shared_ptr(value)['memtables']
+            sstables = seastar_lw_shared_ptr(value)['sstables']
+            for sst_ptr in std_vector(sstables):
+                yield seastar_lw_shared_ptr(sst_ptr).get()
+
+        for sst_ptr in list_unordered_set(seastar_lw_shared_ptr(seastar_lw_shared_ptr(table['_sstables']).get()['_all']).get().dereference()):
+            yield seastar_lw_shared_ptr(sst_ptr).get()
+
+
 def find_sstables():
     """A generator which yields pointers to all live sstable objects on current shard."""
     for sst in intrusive_list(gdb.parse_and_eval('sstables::tracker._sstables')):
@@ -2731,7 +2831,7 @@ class scylla_sstables(gdb.Command):
             ]
         schema = schema_ptr(sst['_schema'])
         int_type = gdb.lookup_type('int')
-        return formats[sst['_version']].format(
+        return formats[int(sst['_version'])].format(
                 keyspace=str(schema.ks_name)[1:-1],
                 table=str(schema.cf_name)[1:-1],
                 version=version_to_str[int(sst['_version'].cast(int_type))],
@@ -2740,13 +2840,22 @@ class scylla_sstables(gdb.Command):
             )
 
     def invoke(self, arg, from_tty):
+        parser = argparse.ArgumentParser(description="scylla generate-object-graph")
+        parser.add_argument("-t", "--tables", action="store_true", help="Only consider sstables attached to tables")
+        try:
+            args = parser.parse_args(arg.split())
+        except SystemExit:
+            return
+
         filter_type = gdb.lookup_type('utils::filter::murmur3_bloom_filter')
         cpu_id = current_shard()
         total_size = 0 # in memory
         total_on_disk_size = 0
         count = 0
 
-        for sst in find_sstables():
+        sstable_generator = find_sstables_attached_to_tables if args.tables else find_sstables
+
+        for sst in sstable_generator():
             if not sst['_open']:
                 continue
             count += 1

@@ -56,6 +56,9 @@ class cql_statement {
     timeout_config_selector _timeout_config_selector;
     audit::audit_info_ptr _audit_info;
 public:
+    // CQL statement text
+    sstring raw_cql_statement;
+
     explicit cql_statement(timeout_config_selector timeout_selector) : _timeout_config_selector(timeout_selector) {}
     cql_statement(cql_statement&& o) = default;
     cql_statement(const cql_statement& o) : _timeout_config_selector(o._timeout_config_selector), _audit_info(o._audit_info ? std::make_unique<audit::audit_info>(*o._audit_info) : nullptr) { }

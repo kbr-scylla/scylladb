@@ -60,31 +60,12 @@ both.
 Seastar documentation can be found [here](http://docs.seastar.io/master/index.html).
 User documentation can be found [here](https://docs.scylladb.com/).
 
-## Building Fedora RPM
+## Training 
 
-As a pre-requisite, you need to install [Mock](https://fedoraproject.org/wiki/Mock) on your machine:
-
-```
-# Install mock:
-sudo yum install mock
-
-# Add user to the "mock" group:
-usermod -a -G mock $USER && newgrp mock
-```
-
-Then, to build an RPM, run:
-
-```
-./dist/redhat/build_rpm.sh
-```
-
-The built RPM is stored in ``/var/lib/mock/<configuration>/result`` directory.
-For example, on Fedora 21 mock reports the following:
-
-```
-INFO: Done(scylla-server-0.00-1.fc21.src.rpm) Config(default) 20 minutes 7 seconds
-INFO: Results and/or logs in: /var/lib/mock/fedora-21-x86_64/result
-```
+Training material and online courses can be found at [Scylla University](https://university.scylladb.com/). 
+The courses are free, self-paced and include hands-on examples. They cover a variety of topics including Scylla data modeling, 
+administration, architecture, basic NoSQL concepts, using drivers for application development, Scylla setup, failover, compactions, 
+multi-datacenters and how Scylla integrates with third-party applications.
 
 ## Building Fedora-based Docker image
 

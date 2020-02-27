@@ -243,7 +243,7 @@ static std::string get_string_attribute(const rjson::value& value, rjson::string
         throw api_error("ValidationException", format("Expected string value for attribute {}, got: {}",
                 attribute_name, value));
     }
-    return attribute_value->GetString();
+    return std::string(attribute_value->GetString(), attribute_value->GetStringLength());
 }
 
 // Convenience function for getting the value of a boolean attribute, or a
@@ -931,6 +931,35 @@ static void check_key(const rjson::value& key, const schema_ptr& schema) {
     }
 }
 
+// Verify that a value parsed from the user input is legal. In particular,
+// we check that the value is not an empty set, string or bytes - which is
+// (somewhat artificially) forbidden by DynamoDB.
+static void validate_value(const rjson::value& v, const char* caller) {
+    if (!v.IsObject() || v.MemberCount() != 1) {
+        throw api_error("ValidationException", format("{}: improperly formatted value '{}'", caller, v));
+    }
+    auto it = v.MemberBegin();
+    const std::string_view type = rjson::to_string_view(it->name);
+    if (type == "SS" || type == "BS" || type == "NS") {
+        if (!it->value.IsArray()) {
+            throw api_error("ValidationException", format("{}: improperly formatted set '{}'", caller, v));
+        }
+        if (it->value.Size() == 0) {
+            throw api_error("ValidationException", format("{}: empty set not allowed", caller));
+        }
+    } else if (type == "S" || type == "B") {
+        if (!it->value.IsString()) {
+            throw api_error("ValidationException", format("{}: improperly formatted value '{}'", caller, v));
+        }
+        if (it->value.GetStringLength() == 0) {
+            throw api_error("ValidationException", format("{}: empty string not allowed", caller));
+        }
+    } else if (type != "N" && type != "L" && type != "M" && type != "BOOL" && type != "NULL") {
+        // TODO: can do more sanity checks on the content of the above types.
+        throw api_error("ValidationException", format("{}: unknown type {} for value {}", caller, type, v));
+    }
+}
+
 // The put_or_delete_item class builds the mutations needed by the PutItem and
 // DeleteItem operations - either as stand-alone commands or part of a list
 // of commands in BatchWriteItems.
@@ -976,6 +1005,7 @@ put_or_delete_item::put_or_delete_item(const rjson::value& item, schema_ptr sche
     _cells->reserve(item.MemberCount());
     for (auto it = item.MemberBegin(); it != item.MemberEnd(); ++it) {
         bytes column_name = to_bytes(it->name.GetString());
+        validate_value(it->value, "PutItem");
         const column_definition* cdef = schema->get_column_definition(column_name);
         if (!cdef) {
             bytes value = serialize_item(it->value);
@@ -1074,10 +1104,39 @@ static dht::partition_range_vector to_partition_ranges(const dht::decorated_key&
     return dht::partition_range_vector{dht::partition_range(pk)};
 }
 
+// Parse the different options for the ReturnValues parameter. We parse all
+// the known options, but only UpdateItem actually supports all of them. The
+// other operations (DeleteItem and PutItem) will refuse some of them.
+rmw_operation::returnvalues rmw_operation::parse_returnvalues(const rjson::value& request) {
+    const rjson::value* attribute_value = rjson::find(request, "ReturnValues");
+    if (!attribute_value) {
+        return rmw_operation::returnvalues::NONE;
+    }
+    if (!attribute_value->IsString()) {
+        throw api_error("ValidationException", format("Expected string value for ReturnValues, got: {}", *attribute_value));
+    }
+    auto s = rjson::to_string_view(*attribute_value);
+    if (s == "NONE") {
+        return rmw_operation::returnvalues::NONE;
+    } else if (s == "ALL_OLD") {
+        return rmw_operation::returnvalues::ALL_OLD;
+    } else if (s == "UPDATED_OLD") {
+        return rmw_operation::returnvalues::UPDATED_OLD;
+    } else if (s == "ALL_NEW") {
+        return rmw_operation::returnvalues::ALL_NEW;
+    } else if (s == "UPDATED_NEW") {
+        return rmw_operation::returnvalues::UPDATED_NEW;
+    } else {
+        throw api_error("ValidationException", format("Unrecognized value for ReturnValues: {}", s));
+    }
+}
+
 rmw_operation::rmw_operation(service::storage_proxy& proxy, rjson::value&& request)
     : _request(std::move(request))
     , _schema(get_table(proxy, _request))
-    , _write_isolation(get_write_isolation_for_schema(_schema)) {
+    , _write_isolation(get_write_isolation_for_schema(_schema))
+    , _returnvalues(parse_returnvalues(_request))
+{
     // _pk and _ck will be assigned later, by the subclass's constructor
     // (each operation puts the key in a slightly different location in
     // the request).
@@ -1139,6 +1198,22 @@ std::optional<shard_id> rmw_operation::shard_for_execute(bool needs_read_before_
     return desired_shard;
 }
 
+// Build the return value from the different RMW operations (UpdateItem,
+// PutItem, DeleteItem). All these return nothing by default, but can
+// optionally return Attributes if requested via the ReturnValues option.
+static future<executor::request_return_type> rmw_operation_return(rjson::value&& attributes) {
+    // As an optimization, in the simple and common case that nothing is to be
+    // returned, quickly return an empty result:
+    if (attributes.IsNull()) {
+        return make_ready_future<executor::request_return_type>(json_string(""));
+    }
+    rjson::value ret = rjson::empty_object();
+    if (!attributes.IsNull()) {
+        rjson::set(ret, "Attributes", std::move(attributes));
+    }
+    return make_ready_future<executor::request_return_type>(make_jsonable(std::move(ret)));
+}
+
 future<executor::request_return_type> rmw_operation::execute(service::storage_proxy& proxy,
         service::client_state& client_state,
         tracing::trace_state_ptr trace_state,
@@ -1153,22 +1228,20 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             // This is the old, unsafe, read before write which does first
             // a read, then a write. TODO: remove this mode entirely.
             return get_previous_item(proxy, client_state, schema(), _pk, _ck, stats).then([this, &client_state, &proxy, trace_state] (std::unique_ptr<rjson::value> previous_item) mutable {
-                std::optional<mutation> m = apply(previous_item, api::new_timestamp());
+                std::optional<mutation> m = apply(std::move(previous_item), api::new_timestamp());
                 if (!m) {
                     return make_ready_future<executor::request_return_type>(api_error("ConditionalCheckFailedException", "Failed condition."));
                 }
-                return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([] () {
-                    // Without special options on what to return, all these
-                    // operations return nothing. FIXME: support those options
-                    return make_ready_future<executor::request_return_type>(json_string(""));
+                return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([this] () mutable {
+                    return rmw_operation_return(std::move(_return_attributes));
                 });
             });
         }
     } else if (_write_isolation != write_isolation::LWT_ALWAYS) {
         std::optional<mutation> m = apply(nullptr, api::new_timestamp());
         assert(m); // !needs_read_before_write, so apply() did not check a condition
-        return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([] () {
-            return make_ready_future<executor::request_return_type>(json_string(""));
+        return proxy.mutate(std::vector<mutation>{std::move(*m)}, db::consistency_level::LOCAL_QUORUM, default_timeout(), trace_state, empty_service_permit()).then([this] () mutable {
+            return rmw_operation_return(std::move(_return_attributes));
         });
     }
     // If we're still here, we need to do this write using LWT:
@@ -1180,11 +1253,11 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             read_nothing_read_command(schema());
     return proxy.cas(schema(), shared_from_this(), read_command, to_partition_ranges(*schema(), _pk),
             {timeout, empty_service_permit(), client_state, trace_state},
-            db::consistency_level::LOCAL_SERIAL, db::consistency_level::LOCAL_QUORUM, timeout, timeout).then([read_command] (bool is_applied) {
+            db::consistency_level::LOCAL_SERIAL, db::consistency_level::LOCAL_QUORUM, timeout, timeout).then([this, read_command] (bool is_applied) mutable {
         if (!is_applied) {
             return make_ready_future<executor::request_return_type>(api_error("ConditionalCheckFailedException", "Failed condition."));
         }
-        return make_ready_future<executor::request_return_type>(json_string(""));
+        return rmw_operation_return(std::move(_return_attributes));
     });
 }
 
@@ -1246,14 +1319,17 @@ public:
         , _mutation_builder(rjson::get(_request, "Item"), schema(), put_or_delete_item::put_item{}) {
         _pk = _mutation_builder.pk();
         _ck = _mutation_builder.ck();
-        auto return_values = get_string_attribute(_request, "ReturnValues", "NONE");
-        if (return_values != "NONE") {
-            // FIXME: Need to support also the ALL_OLD option. See issue #5053.
-            throw api_error("ValidationException", format("Unsupported ReturnValues={} for PutItem operation", return_values));
+        if (_returnvalues != returnvalues::NONE && _returnvalues != returnvalues::ALL_OLD) {
+            throw api_error("ValidationException", format("PutItem supports only NONE or ALL_OLD for ReturnValues"));
         }
         _condition_expression = get_parsed_condition_expression(_request);
     }
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override {
+    bool needs_read_before_write() const {
+        return _request.HasMember("Expected") ||
+               check_needs_read_before_write(_condition_expression) ||
+               _returnvalues == returnvalues::ALL_OLD;
+    }
+    virtual std::optional<mutation> apply(std::unique_ptr<rjson::value> previous_item, api::timestamp_type ts) override {
         std::unordered_set<std::string> used_attribute_values;
         std::unordered_set<std::string> used_attribute_names;
         if (!verify_expected(_request, previous_item) ||
@@ -1264,6 +1340,14 @@ public:
             // condition, return an empty optional mutation, which is more
             // efficient than throwing an exception.
             return {};
+        }
+        if (_returnvalues == returnvalues::ALL_OLD && previous_item) {
+            // previous_item is supposed to have been created with
+            // describe_item(), so has the "Item" attribute:
+            rjson::value* item = rjson::find(*previous_item, "Item");
+            if (item) {
+                _return_attributes = std::move(*item);
+            }
         }
         if (!_condition_expression.empty()) {
             verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
@@ -1282,8 +1366,7 @@ future<executor::request_return_type> executor::put_item(client_state& client_st
 
     auto op = make_shared<put_item_operation>(_proxy, std::move(request));
     tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
-    const bool needs_read_before_write = op->request().HasMember("Expected") ||
-            check_needs_read_before_write(op->_condition_expression);
+    const bool needs_read_before_write = op->needs_read_before_write();
     if (auto shard = op->shard_for_execute(needs_read_before_write); shard) {
         _stats.api_operations.put_item--; // uncount on this shard, will be counted in other shard
         _stats.shard_bounce_for_lwt++;
@@ -1312,14 +1395,17 @@ public:
         , _mutation_builder(rjson::get(_request, "Key"), schema(), put_or_delete_item::delete_item{}) {
         _pk = _mutation_builder.pk();
         _ck = _mutation_builder.ck();
-        auto return_values = get_string_attribute(_request, "ReturnValues", "NONE");
-        if (return_values != "NONE") {
-            // FIXME: Need to support also the ALL_OLD option. See issue #5053.
-            throw api_error("ValidationException", format("Unsupported ReturnValues={} for DeleteItem operation", return_values));
+        if (_returnvalues != returnvalues::NONE && _returnvalues != returnvalues::ALL_OLD) {
+            throw api_error("ValidationException", format("DeleteItem supports only NONE or ALL_OLD for ReturnValues"));
         }
         _condition_expression = get_parsed_condition_expression(_request);
     }
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override {
+    bool needs_read_before_write() const {
+        return _request.HasMember("Expected") ||
+                check_needs_read_before_write(_condition_expression) ||
+                _returnvalues == returnvalues::ALL_OLD;
+    }
+    virtual std::optional<mutation> apply(std::unique_ptr<rjson::value> previous_item, api::timestamp_type ts) override {
         std::unordered_set<std::string> used_attribute_values;
         std::unordered_set<std::string> used_attribute_names;
         if (!verify_expected(_request, previous_item) ||
@@ -1330,6 +1416,12 @@ public:
             // condition, return an empty optional mutation, which is more
             // efficient than throwing an exception.
             return {};
+        }
+        if (_returnvalues == returnvalues::ALL_OLD && previous_item) {
+            rjson::value* item = rjson::find(*previous_item, "Item");
+            if (item) {
+                _return_attributes = std::move(*item);
+            }
         }
         if (!_condition_expression.empty()) {
             verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
@@ -1348,8 +1440,7 @@ future<executor::request_return_type> executor::delete_item(client_state& client
 
     auto op = make_shared<delete_item_operation>(_proxy, std::move(request));
     tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
-    const bool needs_read_before_write = op->request().HasMember("Expected") ||
-            check_needs_read_before_write(op->_condition_expression);
+    const bool needs_read_before_write = op->needs_read_before_write();
     if (auto shard = op->shard_for_execute(needs_read_before_write); shard) {
         _stats.api_operations.delete_item--; // uncount on this shard, will be counted in other shard
         _stats.shard_bounce_for_lwt++;
@@ -1678,9 +1769,11 @@ static rjson::value set_sum(const rjson::value& v1, const rjson::value& v2) {
     return ret;
 }
 
-// Take two JSON-encoded set values (e.g. {"SS": [...the actual list]}) and return the difference of s1 - s2,
-// again as a set value.
-static rjson::value set_diff(const rjson::value& v1, const rjson::value& v2) {
+// Take two JSON-encoded set values (e.g. {"SS": [...the actual list]}) and
+// return the difference of s1 - s2, again as a set value.
+// DynamoDB does not allow empty sets, so if resulting set is empty, return
+// an unset optional instead.
+static std::optional<rjson::value> set_diff(const rjson::value& v1, const rjson::value& v2) {
     auto [set1_type, set1] = unwrap_set(v1);
     auto [set2_type, set2] = unwrap_set(v2);
     if (set1_type != set2_type) {
@@ -1695,6 +1788,9 @@ static rjson::value set_diff(const rjson::value& v1, const rjson::value& v2) {
     }
     for (const auto& a : set2->GetArray()) {
         set1_raw.erase(a);
+    }
+    if (set1_raw.empty()) {
+        return std::nullopt;
     }
     rjson::value ret = rjson::empty_object();
     rjson::set_with_string_name(ret, set1_type, rjson::empty_array());
@@ -1802,6 +1898,7 @@ rjson::value calculate_value(const parsed::value& v,
                 throw api_error("ValidationException",
                         format("ExpressionAttributeValues missing entry '{}' required by {}", valref, caller));
             }
+            validate_value(value, "ExpressionAttributeValues");
             used_attribute_values.emplace(std::move(valref));
             return rjson::copy(value);
         },
@@ -2111,7 +2208,7 @@ static std::optional<rjson::value> describe_single_item(schema_ptr schema,
             std::string column_name = (*column_it)->name_as_text();
             if (cell && column_name != executor::ATTRS_COLUMN_NAME) {
                 if (attrs_to_get.empty() || attrs_to_get.count(column_name) > 0) {
-                    rjson::set_with_string_name(item, column_name.c_str(), rjson::empty_object());
+                    rjson::set_with_string_name(item, column_name, rjson::empty_object());
                     rjson::value& field = item[column_name.c_str()];
                     rjson::set_with_string_name(field, type_to_string((*column_it)->type), json_key_column_value(*cell, **column_it));
                 }
@@ -2215,18 +2312,13 @@ public:
 
     update_item_operation(service::storage_proxy& proxy, rjson::value&& request);
     virtual ~update_item_operation() = default;
-    virtual std::optional<mutation> apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) override;
+    virtual std::optional<mutation> apply(std::unique_ptr<rjson::value> previous_item, api::timestamp_type ts) override;
+    bool needs_read_before_write() const;
 };
 
 update_item_operation::update_item_operation(service::storage_proxy& proxy, rjson::value&& update_info)
     : rmw_operation(proxy, std::move(update_info))
 {
-    auto return_values = get_string_attribute(_request, "ReturnValues", "NONE");
-    if (return_values != "NONE") {
-        // FIXME: Need to support also ALL_OLD, UPDATED_OLD, ALL_NEW and UPDATED_NEW options. See issue #5053.
-        throw api_error("ValidationException",
-                format("Unsupported ReturnValues={} for UpdateItem operation", return_values));
-    }
     const rjson::value* key = rjson::find(_request, "Key");
     if (!key) {
         throw api_error("ValidationException", "UpdateItem requires a Key parameter");
@@ -2275,8 +2367,16 @@ update_item_operation::update_item_operation(service::storage_proxy& proxy, rjso
     }
 }
 
+bool
+update_item_operation::needs_read_before_write() const {
+    return check_needs_read_before_write(_update_expression) ||
+           check_needs_read_before_write(_condition_expression) ||
+           _request.HasMember("Expected") ||
+           (_returnvalues != returnvalues::NONE && _returnvalues != returnvalues::UPDATED_NEW);
+}
+
 std::optional<mutation>
-update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item, api::timestamp_type ts) {
+update_item_operation::apply(std::unique_ptr<rjson::value> previous_item, api::timestamp_type ts) {
     std::unordered_set<std::string> used_attribute_values;
     std::unordered_set<std::string> used_attribute_names;
     if (!verify_expected(_request, previous_item) ||
@@ -2289,10 +2389,32 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
         return {};
     }
 
+    // previous_item was created by describe_item() so has an "Item" member.
+    rjson::value* item = previous_item ? rjson::find(*previous_item, "Item") : nullptr;
+
     mutation m(_schema, _pk);
     auto& row = m.partition().clustered_row(*_schema, _ck);
     attribute_collector attrs_collector;
+    bool any_updates = false;
     auto do_update = [&] (bytes&& column_name, const rjson::value& json_value) {
+        any_updates = true;
+        if (_returnvalues == returnvalues::ALL_NEW ||
+            _returnvalues == returnvalues::UPDATED_NEW) {
+            rjson::set_with_string_name(_return_attributes,
+                    to_sstring_view(column_name), rjson::copy(json_value));
+        } else if (_returnvalues == returnvalues::UPDATED_OLD && item) {
+            // NOTE: Unfortunately, FindMember (rjson::find) here and
+            // RemoveMember below have a bug where although they can take a
+            // rjson::string_ref_type(data, len), they actually need this data
+            // to be null-terminated, and in "bytes" we don't have this null
+            // termination. So we need to copy column_name to a new string.
+            // Would be nice to avoid this eventually.
+            std::string cn = std::string(to_sstring_view(column_name));
+            rjson::value* col = rjson::find(*item, rjson::string_ref_type(cn.data(), cn.size()));
+            if (col) {
+                rjson::set_with_string_name(_return_attributes, cn, rjson::copy(*col));
+            }
+        }
         const column_definition* cdef = _schema->get_column_definition(column_name);
         if (cdef) {
             bytes column_value = get_key_from_typed_value(json_value, *cdef);
@@ -2301,7 +2423,22 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
             attrs_collector.put(std::move(column_name), serialize_item(json_value), ts);
         }
     };
+    bool any_deletes = false;
     auto do_delete = [&] (bytes&& column_name) {
+        any_deletes = true;
+        if (_returnvalues == returnvalues::ALL_NEW) {
+            // NOTE: see comment above about why we need this copy, because
+            // of the null termination problem.
+            _return_attributes.RemoveMember(rjson::from_string(to_sstring_view(column_name)));
+        } else if (_returnvalues == returnvalues::UPDATED_OLD && item) {
+            // NOTE: see comment above about why we need this copy, because
+            // of the null termination problem.
+            std::string cn = std::string(to_sstring_view(column_name));
+            rjson::value* col = rjson::find(*item, rjson::string_ref_type(cn.data(), cn.size()));
+            if (col) {
+                rjson::set_with_string_name(_return_attributes, cn, rjson::copy(*col));
+            }
+        }
         const column_definition* cdef = _schema->get_column_definition(column_name);
         if (cdef) {
             row.cells().apply(*cdef, atomic_cell::make_dead(ts, gc_clock::now()));
@@ -2309,6 +2446,29 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
             attrs_collector.del(std::move(column_name), ts);
         }
     };
+
+    // In the ReturnValues=ALL_NEW case, we make a copy of previous_item into
+    // _return_attributes and parts of it will be overwritten by the new
+    // updates (in do_update() and do_delete()). We need to make a copy and
+    // cannot overwrite previous_item directly because we still need its
+    // original content for update expressions. For example, the expression
+    // "REMOVE a SET b=a" is valid, and needs the original value of a to
+    // stick around.
+    // Note that for ReturnValues=ALL_OLD, we don't need to copy here, and
+    // can just move previous_item later, when we don't need it any more.
+    if (_returnvalues == returnvalues::ALL_NEW) {
+        if (item) {
+            _return_attributes = rjson::copy(*item);
+        } else {
+            // If there is no previous item, usually a new item is created
+            // and contains they given key. This may be cancelled at the end
+            // of this function if the update is just deletes.
+           _return_attributes = rjson::copy(rjson::get(_request, "Key"));
+        }
+    } else if (_returnvalues == returnvalues::UPDATED_OLD ||
+               _returnvalues == returnvalues::UPDATED_NEW) {
+        _return_attributes = rjson::empty_object();
+    }
 
     if (!_update_expression.empty()) {
         std::unordered_set<std::string> seen_column_names;
@@ -2364,11 +2524,20 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
                     subset.set_valref(a._valref);
                     rjson::value v1 = calculate_value(base, calculate_value_caller::UpdateExpression, attr_values, used_attribute_names, used_attribute_values, _request, _schema, previous_item);
                     rjson::value v2 = calculate_value(subset, calculate_value_caller::UpdateExpression, attr_values, used_attribute_names, used_attribute_values, _request, _schema, previous_item);
-                    rjson::value result  = set_diff(v1, v2);
-                    do_update(to_bytes(column_name), result);
+                    if (!v1.IsNull()) {
+                        std::optional<rjson::value> result  = set_diff(v1, v2);
+                        if (result) {
+                            do_update(to_bytes(column_name), *result);
+                        } else {
+                            do_delete(to_bytes(column_name));
+                        }
+                    }
                 }
             }, action._action);
         }
+    }
+    if (_returnvalues == returnvalues::ALL_OLD && item) {
+        _return_attributes = std::move(*item);
     }
     if (!_update_expression.empty() || !_condition_expression.empty()) {
         verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateExpression");
@@ -2396,10 +2565,7 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
                 do_delete(std::move(column_name));
             } else if (action == "PUT") {
                 const rjson::value& value = (it->value)["Value"];
-                if (value.MemberCount() != 1) {
-                    throw api_error("ValidationException",
-                            format("Value field in AttributeUpdates must have just one item", it->name.GetString()));
-                }
+                validate_value(value, "AttributeUpdates");
                 do_update(std::move(column_name), value);
             } else {
                 // FIXME: need to support "ADD" as well.
@@ -2414,8 +2580,23 @@ update_item_operation::apply(const std::unique_ptr<rjson::value>& previous_item,
     }
     // To allow creation of an item with no attributes, we need a row marker.
     // Note that unlike Scylla, even an "update" operation needs to add a row
-    // marker. TODO: a row marker isn't really needed for a DELETE operation.
-    row.apply(row_marker(ts));
+    // marker. An update with only DELETE operations must not add a row marker
+    // (this was issue #5862) but any other update, even an empty one, should.
+    if (any_updates || !any_deletes) {
+        row.apply(row_marker(ts));
+    } else if (_returnvalues == returnvalues::ALL_NEW && !item) {
+        // There was no pre-existing item, and we're not creating one, so
+        // don't report the new item in the returned Attributes.
+        _return_attributes = rjson::null_value();
+    }
+    // ReturnValues=UPDATED_OLD/NEW never return an empty Attributes field,
+    // even if a new item was created. Instead it should be missing entirely.
+    if (_returnvalues == returnvalues::UPDATED_OLD || _returnvalues == returnvalues::UPDATED_NEW) {
+        if (_return_attributes.MemberCount() == 0) {
+            _return_attributes = rjson::null_value();
+        }
+    }
+
     return m;
 }
 
@@ -2427,9 +2608,7 @@ future<executor::request_return_type> executor::update_item(client_state& client
 
     auto op = make_shared<update_item_operation>(_proxy, std::move(update_info));
     tracing::add_table_name(trace_state, op->schema()->ks_name(), op->schema()->cf_name());
-    const bool needs_read_before_write = check_needs_read_before_write(op->_update_expression) ||
-                    check_needs_read_before_write(op->_condition_expression) ||
-                    op->request().HasMember("Expected");
+    const bool needs_read_before_write = op->needs_read_before_write();
     if (auto shard = op->shard_for_execute(needs_read_before_write); shard) {
         _stats.api_operations.update_item--; // uncount on this shard, will be counted in other shard
         _stats.shard_bounce_for_lwt++;
@@ -2676,7 +2855,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
     std::vector<bytes> exploded_pk = paging_state.get_partition_key().explode();
     auto exploded_pk_it = exploded_pk.begin();
     for (const column_definition& cdef : schema.partition_key_columns()) {
-        rjson::set_with_string_name(last_evaluated_key, cdef.name_as_text(), rjson::empty_object());
+        rjson::set_with_string_name(last_evaluated_key, std::string_view(cdef.name_as_text()), rjson::empty_object());
         rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
         rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_pk_it)));
         ++exploded_pk_it;
@@ -2686,7 +2865,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
         auto exploded_ck = ck->explode();
         auto exploded_ck_it = exploded_ck.begin();
         for (const column_definition& cdef : schema.clustering_key_columns()) {
-            rjson::set_with_string_name(last_evaluated_key, cdef.name_as_text(), rjson::empty_object());
+            rjson::set_with_string_name(last_evaluated_key, std::string_view(cdef.name_as_text()), rjson::empty_object());
             rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
             rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_ck_it)));
             ++exploded_ck_it;
