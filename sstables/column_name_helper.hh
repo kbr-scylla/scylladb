@@ -29,7 +29,7 @@
 #pragma once
 
 #include <seastar/core/sstring.hh>
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include "compound_compat.hh"
 #include <cmath>
 #include <algorithm>

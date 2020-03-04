@@ -43,7 +43,7 @@
 #include "db/commitlog/replay_position.hh"
 #include <limits>
 #include <cstddef>
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include "db/schema_features.hh"
 #include "gms/feature.hh"
 #include "timestamp.hh"
@@ -378,6 +378,7 @@ public:
         db::timeout_semaphore* view_update_concurrency_semaphore;
         size_t view_update_concurrency_semaphore_limit;
         db::data_listeners* data_listeners = nullptr;
+        utils::updateable_value<uint64_t> max_memory_for_unlimited_query;
     };
     struct no_commitlog {};
 
@@ -775,7 +776,7 @@ public:
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
         uint64_t max_result_size,
-        db::timeout_clock::time_point timeout = db::no_timeout,
+        db::timeout_clock::time_point timeout,
         query::querier_cache_context cache_ctx = { });
 
     void start();
@@ -902,6 +903,10 @@ public:
 
     ::cf_stats* cf_stats() {
         return _config.cf_stats;
+    }
+
+    const config& get_config() const {
+        return _config;
     }
 
     compaction_manager& get_compaction_manager() const {
@@ -1076,20 +1081,20 @@ class keyspace_metadata final {
     bool _durable_writes;
     user_types_metadata _user_types;
 public:
-    keyspace_metadata(sstring name,
-                 sstring strategy_name,
+    keyspace_metadata(std::string_view name,
+                 std::string_view strategy_name,
                  std::map<sstring, sstring> strategy_options,
                  bool durable_writes,
                  std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
-    keyspace_metadata(sstring name,
-                 sstring strategy_name,
+    keyspace_metadata(std::string_view name,
+                 std::string_view strategy_name,
                  std::map<sstring, sstring> strategy_options,
                  bool durable_writes,
                  std::vector<schema_ptr> cf_defs,
                  user_types_metadata user_types);
     static lw_shared_ptr<keyspace_metadata>
-    new_keyspace(sstring name,
-                 sstring strategy_name,
+    new_keyspace(std::string_view name,
+                 std::string_view strategy_name,
                  std::map<sstring, sstring> options,
                  bool durables_writes,
                  std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
@@ -1216,7 +1221,7 @@ public:
 class no_such_column_family : public std::runtime_error {
 public:
     no_such_column_family(const utils::UUID& uuid);
-    no_such_column_family(const sstring& ks_name, const sstring& cf_name);
+    no_such_column_family(std::string_view ks_name, std::string_view cf_name);
 };
 
 
@@ -1458,14 +1463,14 @@ public:
     unsigned shard_of(const frozen_mutation& m);
     future<lw_shared_ptr<query::result>, cache_temperature> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
                                                                   const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
-                                                                  uint64_t max_result_size, db::timeout_clock::time_point timeout = db::no_timeout);
+                                                                  uint64_t max_result_size, db::timeout_clock::time_point timeout);
     future<reconcilable_result, cache_temperature> query_mutations(schema_ptr, const query::read_command& cmd, const dht::partition_range& range,
                                                 query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state,
-                                                db::timeout_clock::time_point timeout = db::no_timeout);
+                                                db::timeout_clock::time_point timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout = db::no_timeout);
-    future<> apply_hint(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout = db::no_timeout);
+    future<> apply(schema_ptr, const frozen_mutation&, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
+    future<> apply_hint(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout);
     future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);

@@ -85,10 +85,13 @@ static bool has_salted_hash(const cql3::untyped_result_set_row& row) {
     return !row.get_or<sstring>(SALTED_HASH, "").empty();
 }
 
-static const sstring update_row_query = format("UPDATE {} SET {} = ? WHERE {} = ?",
-        meta::roles_table::qualified_name(),
-        SALTED_HASH,
-        meta::roles_table::role_col_name);
+static const sstring& update_row_query() {
+    static const sstring update_row_query = format("UPDATE {} SET {} = ? WHERE {} = ?",
+            meta::roles_table::qualified_name(),
+            SALTED_HASH,
+            meta::roles_table::role_col_name);
+    return update_row_query;
+}
 
 static const sstring legacy_table_name{"credentials"};
 
@@ -109,7 +112,7 @@ future<> password_authenticator::migrate_legacy_metadata() const {
             auto salted_hash = row.get_as<sstring>(SALTED_HASH);
 
             return _qp.execute_internal(
-                    update_row_query,
+                    update_row_query(),
                     consistency_for_user(username),
                     internal_distributed_timeout_config(),
                     {std::move(salted_hash), username}).discard_result();
@@ -126,7 +129,7 @@ future<> password_authenticator::create_default_if_missing() const {
     return default_role_row_satisfies(_qp, &has_salted_hash).then([this](bool exists) {
         if (!exists) {
             return _qp.execute_internal(
-                    update_row_query,
+                    update_row_query(),
                     db::consistency_level::QUORUM,
                     internal_distributed_timeout_config(),
                     {passwords::hash(DEFAULT_USER_PASSWORD, rng_for_salt), DEFAULT_USER_NAME}).then([](auto&&) {
@@ -183,7 +186,7 @@ db::consistency_level password_authenticator::consistency_for_user(std::string_v
     return db::consistency_level::LOCAL_ONE;
 }
 
-const sstring& password_authenticator::qualified_java_name() const {
+std::string_view password_authenticator::qualified_java_name() const {
     return password_authenticator_name();
 }
 
@@ -257,7 +260,7 @@ future<> password_authenticator::create(std::string_view role_name, const authen
     }
 
     return _qp.execute_internal(
-            update_row_query,
+            update_row_query(),
             consistency_for_user(role_name),
             internal_distributed_timeout_config(),
             {passwords::hash(*options.password, rng_for_salt), sstring(role_name)}).discard_result();

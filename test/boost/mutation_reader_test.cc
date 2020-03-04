@@ -1083,7 +1083,7 @@ SEASTAR_TEST_CASE(reader_restriction_file_tracking) {
     return async([&] {
         reader_concurrency_semaphore semaphore(100, 4 * 1024, get_name());
         // Testing the tracker here, no need to have a base cost.
-        auto permit = semaphore.wait_admission(0).get0();
+        auto permit = semaphore.wait_admission(0, db::no_timeout).get0();
 
         {
             auto tracked_file = make_tracked_file(file(shared_ptr<file_impl>(make_shared<dummy_file_impl>())), permit);
@@ -2063,7 +2063,7 @@ public:
                  // Add a waiter, so that all registered inactive reads are
                  // immediately evicted.
                  // We don't care about the returned future.
-                (void)_contexts[shard].semaphore->wait_admission(1);
+                (void)_contexts[shard].semaphore->wait_admission(1, db::no_timeout);
             } else {
                 _contexts[shard].semaphore = make_foreign(std::make_unique<reader_concurrency_semaphore>(reader_concurrency_semaphore::no_limits{}));
             }
@@ -2689,12 +2689,10 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_streaming_reader) {
                 schema_ptr s,
                 const dht::partition_range& range,
                 const query::partition_slice& slice,
-                const io_priority_class&,
+                const io_priority_class& pc,
                 tracing::trace_state_ptr trace_state,
                 mutation_reader::forwarding fwd_mr) mutable {
             auto& table = db->local().find_column_family(s);
-            //TODO need a way to transport io_priority_calls across shards
-            auto& pc = service::get_local_sstable_query_read_priority();
             return table.as_mutation_source().make_reader(std::move(s), no_reader_permit(), range, slice, pc, std::move(trace_state),
                     streamed_mutation::forwarding::no, fwd_mr);
         };

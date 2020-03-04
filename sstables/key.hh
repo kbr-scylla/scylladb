@@ -10,7 +10,7 @@
 
 #pragma once
 #include "bytes.hh"
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include <seastar/core/future.hh>
 #include "database_fwd.hh"
 #include "keys.hh"

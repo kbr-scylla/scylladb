@@ -52,6 +52,12 @@
 #include "types/set.hh"
 #include "types/listlike_partial_deserializing_iterator.hh"
 
+static logging::logger tlogger("types");
+
+void on_types_internal_error(const sstring& reason) {
+    on_internal_error(tlogger, reason);
+}
+
 template<typename T>
 sstring time_point_to_string(const T& tp)
 {
@@ -1179,7 +1185,7 @@ set_type_impl::deserialize(bytes_view in, cql_serialization_format sf) const {
 
 bytes
 set_type_impl::serialize_partially_deserialized_form(
-        const std::vector<bytes_view>& v, cql_serialization_format sf) const {
+        const std::vector<bytes_view>& v, cql_serialization_format sf) {
     return pack(v.begin(), v.end(), v.size(), sf);
 }
 
@@ -2701,9 +2707,8 @@ bytes_opt data_value::serialize() const {
 }
 
 bytes data_value::serialize_nonnull() const {
-    static logging::logger logger("types");
     if (!_value) {
-        on_internal_error(logger, "serialize_nonnull called on null");
+        on_internal_error(tlogger, "serialize_nonnull called on null");
     }
     return std::move(*serialize());
 }
@@ -2985,10 +2990,19 @@ data_value::operator=(data_value&& x) {
 data_value::data_value(bytes v) : data_value(make_new(bytes_type, v)) {
 }
 
-data_value::data_value(sstring v) : data_value(make_new(utf8_type, v)) {
+data_value::data_value(sstring&& v) : data_value(make_new(utf8_type, std::move(v))) {
 }
 
-data_value::data_value(const char* v) : data_value(make_new(utf8_type, sstring(v))) {
+data_value::data_value(const char* v) : data_value(std::string_view(v)) {
+}
+
+data_value::data_value(std::string_view v) : data_value(sstring(v)) {
+}
+
+data_value::data_value(const std::string& v) : data_value(std::string_view(v)) {
+}
+
+data_value::data_value(const sstring& v) : data_value(std::string_view(v)) {
 }
 
 data_value::data_value(ascii_native_type v) : data_value(make_new(ascii_type, v.string)) {

@@ -213,7 +213,7 @@ public:
 
         auto querier = make_querier<Querier>(range);
         auto [dk, ck] = querier.consume_page(dummy_result_builder{}, row_limit, std::numeric_limits<uint32_t>::max(),
-                gc_clock::now(), db::no_timeout).get0();
+                gc_clock::now(), db::no_timeout, std::numeric_limits<uint64_t>::max()).get0();
         const auto memory_usage = querier.memory_usage();
         _cache.insert(cache_key, std::move(querier), nullptr);
 
@@ -685,7 +685,7 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
         const auto per_permit_memory  = resources.memory / resources.count;
 
         for (int i = 0; i < resources.count; ++i) {
-            permits.emplace_back(semaphore.wait_admission(per_permit_memory).get0());
+            permits.emplace_back(semaphore.wait_admission(per_permit_memory, db::no_timeout).get0());
         }
 
         BOOST_CHECK_EQUAL(semaphore.available_resources().count, 0);
@@ -752,7 +752,7 @@ SEASTAR_THREAD_TEST_CASE(test_immediate_evict_on_insert) {
 
     BOOST_CHECK_EQUAL(sem.available_resources().count, 0);
 
-    auto permit2_fut = sem.wait_admission(1);
+    auto permit2_fut = sem.wait_admission(1, db::no_timeout);
 
     BOOST_CHECK_EQUAL(sem.waiters(), 1);
 

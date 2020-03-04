@@ -30,9 +30,11 @@
 
 #pragma once
 
-#include "database_fwd.hh"
-#include "schema.hh"
 #include <seastar/core/sstring.hh>
+#include "database_fwd.hh"
+#include "schema_fwd.hh"
+
+using namespace seastar;
 
 namespace validation {
 
@@ -43,6 +45,5 @@ schema_ptr validate_column_family(database& db, const sstring& keyspace_name, co
 schema_ptr validate_column_family(const sstring& keyspace_name, const sstring& cf_name);
 
 void validate_keyspace(database& db, const sstring& keyspace_name);
-void validate_keyspace(const sstring& keyspace_name);
 
 }

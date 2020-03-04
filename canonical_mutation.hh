@@ -11,7 +11,7 @@
 #pragma once
 
 #include "bytes.hh"
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include "database_fwd.hh"
 #include "mutation_partition_visitor.hh"
 #include "mutation_partition_serializer.hh"

@@ -14,7 +14,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include "query-request.hh"
 #include "query-result.hh"
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include "mutation.hh"
 
 #include <optional>

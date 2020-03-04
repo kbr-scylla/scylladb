@@ -113,8 +113,8 @@ make_compaction_manager(const db::config& cfg, database_config& dbcfg) {
 }
 
 lw_shared_ptr<keyspace_metadata>
-keyspace_metadata::new_keyspace(sstring name,
-                                sstring strategy_name,
+keyspace_metadata::new_keyspace(std::string_view name,
+                                std::string_view strategy_name,
                                 std::map<sstring, sstring> options,
                                 bool durables_writes,
                                 std::vector<schema_ptr> cf_defs)
@@ -918,8 +918,10 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     // avoid self-reporting
     if (is_system_table(s)) {
         cfg.sstables_manager = &db.get_system_sstables_manager();
+        cfg.max_memory_for_unlimited_query = std::numeric_limits<uint64_t>::max();
     } else {
         cfg.sstables_manager = &db.get_user_sstables_manager();
+        cfg.max_memory_for_unlimited_query = db_config.max_memory_for_unlimited_query();
     }
 
     cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
@@ -966,7 +968,7 @@ no_such_column_family::no_such_column_family(const utils::UUID& uuid)
 {
 }
 
-no_such_column_family::no_such_column_family(const sstring& ks_name, const sstring& cf_name)
+no_such_column_family::no_such_column_family(std::string_view ks_name, std::string_view cf_name)
     : runtime_error{format("Can't find a column family {} in keyspace {}", cf_name, ks_name)}
 {
 }
@@ -986,25 +988,25 @@ using strategy_class_registry = class_registry<
     locator::snitch_ptr&,
     const std::map<sstring, sstring>&>;
 
-keyspace_metadata::keyspace_metadata(sstring name,
-             sstring strategy_name,
+keyspace_metadata::keyspace_metadata(std::string_view name,
+             std::string_view strategy_name,
              std::map<sstring, sstring> strategy_options,
              bool durable_writes,
              std::vector<schema_ptr> cf_defs)
-    : keyspace_metadata(std::move(name),
-                        std::move(strategy_name),
+    : keyspace_metadata(name,
+                        strategy_name,
                         std::move(strategy_options),
                         durable_writes,
                         std::move(cf_defs),
                         user_types_metadata{}) { }
 
-keyspace_metadata::keyspace_metadata(sstring name,
-             sstring strategy_name,
+keyspace_metadata::keyspace_metadata(std::string_view name,
+             std::string_view strategy_name,
              std::map<sstring, sstring> strategy_options,
              bool durable_writes,
              std::vector<schema_ptr> cf_defs,
              user_types_metadata user_types)
-    : _name{std::move(name)}
+    : _name{name}
     , _strategy_name{strategy_class_registry::to_qualified_class_name(strategy_name.empty() ? "NetworkTopologyStrategy" : strategy_name)}
     , _strategy_options{std::move(strategy_options)}
     , _durable_writes{durable_writes}
@@ -1195,9 +1197,10 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
             cmd.row_limit,
             cmd.partition_limit,
             cmd.timestamp,
+            timeout,
+            cf.get_config().max_memory_for_unlimited_query,
             std::move(accounter),
             std::move(trace_state),
-            timeout,
             std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate(), op = cf.read_in_progress()] (auto f) {
         if (f.failed()) {
             ++s->total_reads_failed;
@@ -1592,7 +1595,7 @@ future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, c
             auto uuid = m.column_family_id();
             auto& cf = find_column_family(uuid);
             cf.apply_streaming_mutation(s, plan_id, std::move(m), fragmented);
-        });
+        }, db::no_timeout);
     });
 }
 

@@ -22,6 +22,7 @@
 #include "rjson.hh"
 #include "error.hh"
 #include <seastar/core/print.hh>
+#include <seastar/core/thread.hh>
 
 namespace rjson {
 
@@ -38,15 +39,15 @@ static allocator the_allocator;
  * guarded_json_handler, which accepts an additional max_nested_level parameter.
  * After trying to exceed the max nested level, a proper rjson::error will be thrown.
  */
-template<typename Handler>
-struct guarded_json_handler : public Handler {
+template<typename Handler, bool EnableYield>
+struct guarded_yieldable_json_handler : public Handler {
     size_t _nested_level = 0;
     size_t _max_nested_level;
 public:
     using handler_base = Handler;
 
-    explicit guarded_json_handler(size_t max_nested_level) : _max_nested_level(max_nested_level) {}
-    explicit guarded_json_handler(string_buffer& buf, size_t max_nested_level)
+    explicit guarded_yieldable_json_handler(size_t max_nested_level) : _max_nested_level(max_nested_level) {}
+    guarded_yieldable_json_handler(string_buffer& buf, size_t max_nested_level)
             : handler_base(buf), _max_nested_level(max_nested_level) {}
 
     void Parse(const char* str, size_t length) {
@@ -54,6 +55,9 @@ public:
         rapidjson::EncodedInputStream<encoding, rapidjson::MemoryStream> is(ms);
         rapidjson::GenericReader<encoding, encoding, allocator> reader(&the_allocator);
         reader.Parse(is, *this);
+        if (reader.HasParseError()) {
+            throw rjson::error(format("Parsing JSON failed: {}", rapidjson::GetParseError_En(reader.GetParseErrorCode())));
+        }
         //NOTICE: The handler has parsed the string, but in case of rapidjson::GenericDocument
         // the data now resides in an internal stack_ variable, which is private instead of
         // protected... which means we cannot simply access its data. Fortunately, another
@@ -71,6 +75,7 @@ public:
     bool StartObject() {
         ++_nested_level;
         check_nested_level();
+        maybe_yield();
         return handler_base::StartObject();
     }
 
@@ -82,6 +87,7 @@ public:
     bool StartArray() {
         ++_nested_level;
         check_nested_level();
+        maybe_yield();
         return handler_base::StartArray();
     }
 
@@ -89,7 +95,25 @@ public:
         --_nested_level;
         return handler_base::EndArray(elements_count);
     }
+
+    bool Null()                 { maybe_yield(); return handler_base::Null(); }
+    bool Bool(bool b)           { maybe_yield(); return handler_base::Bool(b); }
+    bool Int(int i)             { maybe_yield(); return handler_base::Int(i); }
+    bool Uint(unsigned u)       { maybe_yield(); return handler_base::Uint(u); }
+    bool Int64(int64_t i64)     { maybe_yield(); return handler_base::Int64(i64); }
+    bool Uint64(uint64_t u64)   { maybe_yield(); return handler_base::Uint64(u64); }
+    bool Double(double d)       { maybe_yield(); return handler_base::Double(d); }
+    bool String(const value::Ch* str, size_t length, bool copy = false) { maybe_yield(); return handler_base::String(str, length, copy); }
+    bool Key(const value::Ch* str, size_t length, bool copy = false) { maybe_yield(); return handler_base::Key(str, length, copy); }
+
+
 protected:
+    static void maybe_yield() {
+        if constexpr (EnableYield) {
+            thread::maybe_yield();
+        }
+    }
+
     void check_nested_level() const {
         if (RAPIDJSON_UNLIKELY(_nested_level > _max_nested_level)) {
             throw rjson::error(format("Max nested level reached: {}", _max_nested_level));
@@ -99,7 +123,7 @@ protected:
 
 std::string print(const rjson::value& value) {
     string_buffer buffer;
-    guarded_json_handler<writer> writer(buffer, 39);
+    guarded_yieldable_json_handler<writer, false> writer(buffer, 39);
     value.Accept(writer);
     return std::string(buffer.GetString());
 }
@@ -108,13 +132,19 @@ rjson::value copy(const rjson::value& value) {
     return rjson::value(value, the_allocator);
 }
 
-rjson::value parse(const std::string& str) {
-    return parse_raw(str.c_str(), str.size());
+rjson::value parse(std::string_view str) {
+    guarded_yieldable_json_handler<document, false> d(39);
+    d.Parse(str.data(), str.size());
+    if (d.HasParseError()) {
+        throw rjson::error(format("Parsing JSON failed: {}", GetParseError_En(d.GetParseError())));
+    }
+    rjson::value& v = d;
+    return std::move(v);
 }
 
-rjson::value parse_raw(const char* c_str, size_t size) {
-    guarded_json_handler<document> d(39);
-    d.Parse(c_str, size);
+rjson::value parse_yieldable(std::string_view str) {
+    guarded_yieldable_json_handler<document, true> d(39);
+    d.Parse(str.data(), str.size());
     if (d.HasParseError()) {
         throw rjson::error(format("Parsing JSON failed: {}", GetParseError_En(d.GetParseError())));
     }
@@ -156,14 +186,26 @@ rjson::value from_string(std::string_view view) {
     return rjson::value(view.data(), view.size(), the_allocator);
 }
 
-const rjson::value* find(const rjson::value& value, string_ref_type name) {
-    auto member_it = value.FindMember(name);
+const rjson::value* find(const rjson::value& value, std::string_view name) {
+    // Although FindMember() has a variant taking a StringRef, it ignores the
+    // given length (see https://github.com/Tencent/rapidjson/issues/1649).
+    // Luckily, the variant taking a GenericValue doesn't share this bug,
+    // and we can create a string GenericValue without copying the string.
+    auto member_it = value.FindMember(rjson::value(name.data(), name.size()));
     return member_it != value.MemberEnd() ? &member_it->value : nullptr;
 }
 
-rjson::value* find(rjson::value& value, string_ref_type name) {
-    auto member_it = value.FindMember(name);
+rjson::value* find(rjson::value& value, std::string_view name) {
+    auto member_it = value.FindMember(rjson::value(name.data(), name.size()));
     return member_it != value.MemberEnd() ? &member_it->value : nullptr;
+}
+
+bool remove_member(rjson::value& value, std::string_view name) {
+    // Although RemoveMember() has a variant taking a StringRef, it ignores
+    // given length (see https://github.com/Tencent/rapidjson/issues/1649).
+    // Luckily, the variant taking a GenericValue doesn't share this bug,
+    // and we can create a string GenericValue without copying the string.
+    return value.RemoveMember(rjson::value(name.data(), name.size()));
 }
 
 void set_with_string_name(rjson::value& base, const std::string& name, rjson::value&& member) {

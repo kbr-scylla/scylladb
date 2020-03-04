@@ -12,7 +12,7 @@
 
 #pragma once
 
-#include "schema.hh"
+#include "schema_fwd.hh"
 #include "query-request.hh"
 
 namespace query {

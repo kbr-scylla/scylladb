@@ -39,6 +39,7 @@
 #include "hashing.hh"
 #include <boost/multiprecision/cpp_int.hpp>  // FIXME: remove somehow
 #include "utils/fragmented_temporary_buffer.hh"
+#include "utils/exceptions.hh"
 
 class tuple_type_impl;
 class big_decimal;
@@ -217,6 +218,8 @@ public:
     }
 };
 
+[[noreturn]] void on_types_internal_error(const sstring& reason);
+
 // Cassandra has a notion of empty values even for scalars (i.e. int).  This is
 // distinct from NULL which means deleted or never set.  It is serialized
 // as a zero-length byte array (whereas NULL is serialized as a negative-length
@@ -351,8 +354,16 @@ public:
     // common conversions from C++ types to database types
     // note: somewhat dangerous, consider a factory function instead
     explicit data_value(bytes);
-    data_value(sstring);
+
+    data_value(sstring&&);
+    data_value(std::string_view);
+    // We need the following overloads just to avoid ambiguity because
+    // seastar::net::inet_address is implicitly constructible from a
+    // const sstring&.
     data_value(const char*);
+    data_value(const std::string&);
+    data_value(const sstring&);
+
     data_value(ascii_native_type);
     data_value(bool);
     data_value(int8_t);
@@ -676,7 +687,11 @@ bool less_compare(data_type t, bytes_view e1, bytes_view e2) {
 
 static inline
 int tri_compare(data_type t, bytes_view e1, bytes_view e2) {
-    return t->compare(e1, e2);
+    try {
+        return t->compare(e1, e2);
+    } catch (const marshal_exception& e) {
+        on_types_internal_error(e.what());
+    }
 }
 
 inline

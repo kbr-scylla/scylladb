@@ -33,8 +33,8 @@
 #include <string_view>
 #include <unordered_map>
 
-#include <seastar/core/distributed.hh>
 #include <seastar/core/metrics_registration.hh>
+#include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
 
 #include "cql3/prepared_statements_cache.hh"
@@ -126,8 +126,8 @@ public:
     static const sstring CQL_VERSION;
 
     static prepared_cache_key_type compute_id(
-            const std::string_view& query_string,
-            const sstring& keyspace);
+            std::string_view query_string,
+            std::string_view keyspace);
 
     static prepared_cache_key_type compute_thrift_id(
             const std::string_view& query_string,
@@ -475,9 +475,9 @@ private:
             ::shared_ptr<cql_statement> statement);
 };
 
-extern distributed<query_processor> _the_query_processor;
+extern seastar::sharded<query_processor> _the_query_processor;
 
-inline distributed<query_processor>& get_query_processor() {
+inline seastar::sharded<query_processor>& get_query_processor() {
     return _the_query_processor;
 }
 

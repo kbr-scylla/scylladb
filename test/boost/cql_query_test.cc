@@ -458,7 +458,7 @@ SEASTAR_TEST_CASE(test_insert_statement) {
 
 SEASTAR_TEST_CASE(test_select_statement) {
    return do_with_cql_env([] (cql_test_env& e) {
-        return e.create_table([](sstring ks_name) {
+        return e.create_table([](std::string_view ks_name) {
             // CQL: create table cf (p1 varchar, c1 int, c2 int, r1 int, PRIMARY KEY (p1, c1, c2));
             return schema({}, ks_name, "cf",
                 {{"p1", utf8_type}},
@@ -551,7 +551,7 @@ SEASTAR_TEST_CASE(test_cassandra_stress_like_write_and_read) {
                 });
         };
 
-        return e.create_table([](sstring ks_name) {
+        return e.create_table([](std::string_view ks_name) {
             return schema({}, ks_name, "cf",
                           {{"KEY", bytes_type}},
                           {},
@@ -578,7 +578,7 @@ SEASTAR_TEST_CASE(test_cassandra_stress_like_write_and_read) {
 
 SEASTAR_TEST_CASE(test_range_queries) {
    return do_with_cql_env([] (cql_test_env& e) {
-        return e.create_table([](sstring ks_name) {
+        return e.create_table([](std::string_view ks_name) {
             return schema({}, ks_name, "cf",
                 {{"k", bytes_type}},
                 {{"c0", bytes_type}, {"c1", bytes_type}},
@@ -675,7 +675,7 @@ SEASTAR_TEST_CASE(test_range_queries) {
 
 SEASTAR_TEST_CASE(test_ordering_of_composites_with_variable_length_components) {
     return do_with_cql_env([] (cql_test_env& e) {
-        return e.create_table([](sstring ks) {
+        return e.create_table([](std::string_view ks) {
             return schema({}, ks, "cf",
                 {{"k", bytes_type}},
                 // We need more than one clustering column so that the single-element tuple format optimisation doesn't kick in
@@ -1022,7 +1022,7 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
 
 SEASTAR_TEST_CASE(test_deletion_scenarios) {
     return do_with_cql_env([] (cql_test_env& e) {
-        return e.create_table([](sstring ks) {
+        return e.create_table([](std::string_view ks) {
             // CQL: create table cf (k bytes, c bytes, v bytes, primary key (k, c));
             return schema({}, ks, "cf",
                 {{"k", bytes_type}}, {{"c", bytes_type}}, {{"v", bytes_type}}, {}, utf8_type);
@@ -1168,7 +1168,7 @@ SEASTAR_TEST_CASE(test_map_insert_update) {
     return do_with_cql_env([] (cql_test_env& e) {
         auto make_my_map_type = [] { return map_type_impl::get_instance(int32_type, int32_type, true); };
         auto my_map_type = make_my_map_type();
-        return e.create_table([make_my_map_type] (sstring ks_name) {
+        return e.create_table([make_my_map_type] (std::string_view ks_name) {
             // CQL: create table cf (p1 varchar primary key, map1 map<int, int>);
             return schema({}, ks_name, "cf",
                           {{"p1", utf8_type}}, {}, {{"map1", make_my_map_type()}}, {}, utf8_type);
@@ -1253,7 +1253,7 @@ SEASTAR_TEST_CASE(test_set_insert_update) {
     return do_with_cql_env([] (cql_test_env& e) {
         auto make_my_set_type = [] { return set_type_impl::get_instance(int32_type, true); };
         auto my_set_type = make_my_set_type();
-        return e.create_table([make_my_set_type](sstring ks_name) {
+        return e.create_table([make_my_set_type](std::string_view ks_name) {
             // CQL: create table cf (p1 varchar primary key, set1 set<int>);
             return schema({}, ks_name, "cf",
                           {{"p1", utf8_type}}, {}, {{"set1", make_my_set_type()}}, {}, utf8_type);
@@ -1382,7 +1382,7 @@ SEASTAR_TEST_CASE(test_list_insert_update) {
 
 SEASTAR_TEST_CASE(test_functions) {
     return do_with_cql_env([] (cql_test_env& e) {
-        return e.create_table([](sstring ks_name) {
+        return e.create_table([](std::string_view ks_name) {
             // CQL: create table cf (p1 varchar primary key, u uuid, tu timeuuid);
             return schema({}, ks_name, "cf",
                 {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"tu", timeuuid_type}}, {}, utf8_type);
@@ -1487,7 +1487,7 @@ public:
         : _e(e), _column_type(column_type), _sorted_values{data_value(sorted_values)...}
     {
         const auto cf_name = table_name();
-        _e.create_table([column_type, cf_name] (sstring ks_name) {
+        _e.create_table([column_type, cf_name] (std::string_view ks_name) {
             return schema({}, ks_name, cf_name,
                 {{"pk", utf8_type}}, {{"ck", int32_type}}, {{"value", column_type}}, {}, utf8_type);
         }).get();
@@ -1769,7 +1769,7 @@ SEASTAR_TEST_CASE(test_tuples) {
     auto make_tt = [] { return tuple_type_impl::get_instance({int32_type, long_type, utf8_type}); };
     auto tt = make_tt();
     return do_with_cql_env([tt, make_tt] (cql_test_env& e) {
-        return e.create_table([make_tt] (sstring ks_name) {
+        return e.create_table([make_tt] (std::string_view ks_name) {
             // this runs on all cores, so create a local tt for each core:
             auto tt = make_tt();
             // CQL: "create table cf (id int primary key, t tuple<int, bigint, text>);
@@ -2021,7 +2021,7 @@ SEASTAR_TEST_CASE(test_ttl) {
     return do_with_cql_env([] (cql_test_env& e) {
         auto make_my_list_type = [] { return list_type_impl::get_instance(utf8_type, true); };
         auto my_list_type = make_my_list_type();
-        return e.create_table([make_my_list_type] (sstring ks_name) {
+        return e.create_table([make_my_list_type] (std::string_view ks_name) {
             return schema({}, ks_name, "cf",
                 {{"p1", utf8_type}}, {}, {{"r1", utf8_type}, {"r2", utf8_type}, {"r3", make_my_list_type()}}, {}, utf8_type);
         }).then([&e] {
@@ -3204,7 +3204,7 @@ SEASTAR_TEST_CASE(test_insert_large_collection_values) {
             auto map_type = map_type_impl::get_instance(utf8_type, utf8_type, true);
             auto set_type = set_type_impl::get_instance(utf8_type, true);
             auto list_type = list_type_impl::get_instance(utf8_type, true);
-            e.create_table([map_type, set_type, list_type] (sstring ks_name) {
+            e.create_table([map_type, set_type, list_type] (std::string_view ks_name) {
                 // CQL: CREATE TABLE tbl (pk text PRIMARY KEY, m map<text, text>, s set<text>, l list<text>);
                 return schema({}, ks_name, "tbl",
                     {{"pk", utf8_type}},
@@ -4025,6 +4025,8 @@ void require_rows(cql_test_env& e,
                           e.what(), loc.file_name(), loc.line()));
     }
 }
+
+auto B(bool x) { return boolean_type->decompose(x); }
 
 auto I(int32_t x) { return int32_type->decompose(x); }
 
@@ -5140,5 +5142,68 @@ SEASTAR_TEST_CASE(test_null_value_tuple_floating_types_and_uuids) {
         test_for_single_type(float_type, 1.0f);
         test_for_single_type(uuid_type, utils::make_random_uuid());
         test_for_single_type(timeuuid_type, utils::UUID("00000000-0000-1000-0000-000000000000"));
+    });
+}
+
+static std::unique_ptr<cql3::query_options> q_serial_opts() {
+    const auto& so = cql3::query_options::specific_options::DEFAULT;
+    auto qo = std::make_unique<cql3::query_options>(
+            db::consistency_level::ONE,
+            infinite_timeout_config,
+            std::vector<cql3::raw_value>{},
+            // Ensure (optional) serial consistency is always specified.
+            cql3::query_options::specific_options{
+                so.page_size,
+                so.state,
+                db::consistency_level::SERIAL,
+                so.timestamp,
+            }
+    );
+    return qo;
+}
+
+// Run parametrized query on the appropriate shard
+static void prepared_on_shard(cql_test_env& e, const sstring& query,
+            std::vector<bytes> params,
+            std::vector<std::vector<bytes_opt>> expected_rows) {
+    auto execute = [&] () mutable {
+        return seastar::async([&] () mutable {
+            auto id = e.prepare(query).get0();
+
+            std::vector<cql3::raw_value> raw_values;
+            for (auto& param : params) {
+                raw_values.emplace_back(cql3::raw_value::make_value(param));
+            }
+
+            auto qo = q_serial_opts();
+            auto msg = e.execute_prepared(id, raw_values).get0();
+            if (!msg->move_to_shard()) {
+                assert_that(msg).is_rows().with_rows_ignore_order(expected_rows);
+            }
+            return make_foreign(msg);
+        });
+    };
+
+    auto msg = execute().get0();
+    if (msg->move_to_shard()) {
+        unsigned shard = *msg->move_to_shard();
+        smp::submit_to(shard, std::move(execute)).get();
+    }
+}
+
+SEASTAR_TEST_CASE(test_like_parameter_marker) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "CREATE TABLE t (pk int PRIMARY KEY, col text)").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (1, 'aaa')").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (2, 'bbb')").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (3, 'ccc')").get();
+
+        const sstring query("UPDATE t SET col = ? WHERE pk = ? IF col LIKE ?");
+        prepared_on_shard(e, query, {T("err"), I(9), T("e%")}, {{B(false), {}}});
+        prepared_on_shard(e, query, {T("err"), I(9), T("e%")}, {{B(false), {}}});
+        prepared_on_shard(e, query, {T("chg"), I(1), T("a%")}, {{B(true),  "aaa"}});
+        prepared_on_shard(e, query, {T("err"), I(1), T("a%")}, {{B(false), "chg"}});
+        prepared_on_shard(e, query, {T("chg"), I(2), T("b%")}, {{B(true),  "bbb"}});
+        prepared_on_shard(e, query, {T("err"), I(1), T("a%")}, {{B(false), "chg"}});
     });
 }

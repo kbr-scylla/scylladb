@@ -34,21 +34,40 @@ namespace alternator {
 
 class server {
     static constexpr size_t content_length_limit = 16*MB;
-    using alternator_callback = std::function<future<executor::request_return_type>(executor&, executor::client_state&, tracing::trace_state_ptr, std::unique_ptr<request>)>;
+    using alternator_callback = std::function<future<executor::request_return_type>(executor&, executor::client_state&, tracing::trace_state_ptr, rjson::value, std::unique_ptr<request>)>;
     using alternator_callbacks_map = std::unordered_map<std::string_view, alternator_callback>;
 
-    seastar::httpd::http_server_control _control;
-    seastar::httpd::http_server_control _https_control;
-    seastar::sharded<executor>& _executor;
+    http_server _http_server;
+    http_server _https_server;
+    executor& _executor;
+
     key_cache _key_cache;
     bool _enforce_authorization;
-    utils::small_vector<std::reference_wrapper<seastar::httpd::http_server_control>, 2> _enabled_servers;
-    seastar::sharded<seastar::gate> _pending_requests;
+    utils::small_vector<std::reference_wrapper<seastar::httpd::http_server>, 2> _enabled_servers;
+    gate _pending_requests;
     alternator_callbacks_map _callbacks;
-public:
-    server(seastar::sharded<executor>& executor);
 
-    seastar::future<> init(net::inet_address addr, std::optional<uint16_t> port, std::optional<uint16_t> https_port, std::optional<tls::credentials_builder> creds, bool enforce_authorization);
+    class json_parser {
+        static constexpr size_t yieldable_parsing_threshold = 16*KB;
+        std::string_view _raw_document;
+        rjson::value _parsed_document;
+        std::exception_ptr _current_exception;
+        semaphore _parsing_sem{1};
+        condition_variable _document_waiting;
+        condition_variable _document_parsed;
+        abort_source _as;
+        future<> _run_parse_json_thread;
+    public:
+        json_parser();
+        future<rjson::value> parse(std::string_view content);
+        future<> stop();
+    };
+    json_parser _json_parser;
+
+public:
+    server(executor& executor);
+
+    future<> init(net::inet_address addr, std::optional<uint16_t> port, std::optional<uint16_t> https_port, std::optional<tls::credentials_builder> creds, bool enforce_authorization);
     future<> stop();
 private:
     void set_routes(seastar::httpd::routes& r);

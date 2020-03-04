@@ -1971,7 +1971,7 @@ mutation_partition::upgrade(const schema& old_schema, const schema& new_schema) 
 class mutation_querier {
     const schema& _schema;
     query::result_memory_accounter& _memory_accounter;
-    query::result::partition_writer& _pw;
+    query::result::partition_writer _pw;
     ser::qr_partition__static_row__cells<bytes_ostream> _static_cells_wr;
     bool _live_data_in_static_row{};
     uint32_t _live_clustering_rows = 0;
@@ -1981,7 +1981,7 @@ private:
     void query_static_row(const row& r, tombstone current_tombstone);
     void prepare_writers();
 public:
-    mutation_querier(const schema& s, query::result::partition_writer& pw,
+    mutation_querier(const schema& s, query::result::partition_writer pw,
                      query::result_memory_accounter& memory_accounter);
     void consume(tombstone) { }
     // Requires that sr.has_any_live_data()
@@ -1992,11 +1992,11 @@ public:
     uint32_t consume_end_of_stream();
 };
 
-mutation_querier::mutation_querier(const schema& s, query::result::partition_writer& pw,
+mutation_querier::mutation_querier(const schema& s, query::result::partition_writer pw,
                                    query::result_memory_accounter& memory_accounter)
     : _schema(s)
     , _memory_accounter(memory_accounter)
-    , _pw(pw)
+    , _pw(std::move(pw))
     , _static_cells_wr(pw.start().start_static_row().start_cells())
     , _short_reads_allowed(pw.slice().options.contains<query::partition_slice::option::allow_short_read>())
 {
@@ -2113,7 +2113,6 @@ uint32_t mutation_querier::consume_end_of_stream() {
 class query_result_builder {
     const schema& _schema;
     query::result::builder& _rb;
-    std::optional<query::result::partition_writer> _pw;
     std::optional<mutation_querier> _mutation_consumer;
     stop_iteration _stop;
     stop_iteration _short_read_allowed;
@@ -2124,8 +2123,7 @@ public:
     { }
 
     void consume_new_partition(const dht::decorated_key& dk) {
-        _pw.emplace(_rb.add_partition(_schema, dk.key()));
-        _mutation_consumer.emplace(mutation_querier(_schema, *_pw, _rb.memory_accounter()));
+        _mutation_consumer.emplace(mutation_querier(_schema, _rb.add_partition(_schema, dk.key()), _rb.memory_accounter()));
     }
 
     void consume(tombstone t) {
@@ -2168,8 +2166,9 @@ future<> data_query(
         uint32_t partition_limit,
         gc_clock::time_point query_time,
         query::result::builder& builder,
-        tracing::trace_state_ptr trace_ptr,
         db::timeout_clock::time_point timeout,
+        uint64_t max_memory_reverse_query,
+        tracing::trace_state_ptr trace_ptr,
         query::querier_cache_context cache_ctx)
 {
     if (row_limit == 0 || slice.partition_row_limit() == 0 || partition_limit == 0) {
@@ -2181,9 +2180,10 @@ future<> data_query(
             ? std::move(*querier_opt)
             : query::data_querier(source, s, range, slice, service::get_local_sstable_query_read_priority(), trace_ptr);
 
-    return do_with(std::move(q), [=, &builder, trace_ptr = std::move(trace_ptr), cache_ctx = std::move(cache_ctx)] (query::data_querier& q) mutable {
+    return do_with(std::move(q), [=, &builder, trace_ptr = std::move(trace_ptr),
+            cache_ctx = std::move(cache_ctx)] (query::data_querier& q) mutable {
         auto qrb = query_result_builder(*s, builder);
-        return q.consume_page(std::move(qrb), row_limit, partition_limit, query_time, timeout).then(
+        return q.consume_page(std::move(qrb), row_limit, partition_limit, query_time, timeout, max_memory_reverse_query).then(
                 [=, &builder, &q, trace_ptr = std::move(trace_ptr), cache_ctx = std::move(cache_ctx)] () mutable {
             if (q.are_limits_reached() || builder.is_short_read()) {
                 cache_ctx.insert(std::move(q), std::move(trace_ptr));
@@ -2261,9 +2261,10 @@ static do_mutation_query(schema_ptr s,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
+               db::timeout_clock::time_point timeout,
+               uint64_t max_memory_reverse_query,
                query::result_memory_accounter&& accounter,
                tracing::trace_state_ptr trace_ptr,
-               db::timeout_clock::time_point timeout,
                query::querier_cache_context cache_ctx)
 {
     if (row_limit == 0 || slice.partition_row_limit() == 0 || partition_limit == 0) {
@@ -2278,7 +2279,7 @@ static do_mutation_query(schema_ptr s,
     return do_with(std::move(q), [=, &slice, accounter = std::move(accounter), trace_ptr = std::move(trace_ptr), cache_ctx = std::move(cache_ctx)] (
                 query::mutation_querier& q) mutable {
         auto rrb = reconcilable_result_builder(*s, slice, std::move(accounter));
-        return q.consume_page(std::move(rrb), row_limit, partition_limit, query_time, timeout).then(
+        return q.consume_page(std::move(rrb), row_limit, partition_limit, query_time, timeout, max_memory_reverse_query).then(
                 [=, &q, trace_ptr = std::move(trace_ptr), cache_ctx = std::move(cache_ctx)] (reconcilable_result r) mutable {
             if (q.are_limits_reached() || r.is_short_read()) {
                 cache_ctx.insert(std::move(q), std::move(trace_ptr));
@@ -2300,13 +2301,14 @@ mutation_query(schema_ptr s,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
+               db::timeout_clock::time_point timeout,
+               uint64_t max_memory_reverse_query,
                query::result_memory_accounter&& accounter,
                tracing::trace_state_ptr trace_ptr,
-               db::timeout_clock::time_point timeout,
                query::querier_cache_context cache_ctx)
 {
     return do_mutation_query(std::move(s), std::move(source), seastar::cref(range), seastar::cref(slice),
-            row_limit, partition_limit, query_time, std::move(accounter), std::move(trace_ptr), timeout, std::move(cache_ctx));
+            row_limit, partition_limit, query_time, timeout, max_memory_reverse_query, std::move(accounter), std::move(trace_ptr), std::move(cache_ctx));
 }
 
 deletable_row::deletable_row(clustering_row&& cr)
@@ -2528,7 +2530,7 @@ future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& so
     auto cwqrb = counter_write_query_result_builder(*s);
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::yes, counter_write_query_result_builder>>(
             *s, gc_clock::now(), slice, query::max_rows, query::max_rows, std::move(cwqrb));
-    auto f = r_a_r->reader.consume(std::move(cfq), db::no_timeout, flat_mutation_reader::consume_reversed_partitions::no);
+    auto f = r_a_r->reader.consume(std::move(cfq), db::no_timeout);
     return f.finally([r_a_r = std::move(r_a_r)] { });
 }
 

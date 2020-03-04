@@ -150,10 +150,12 @@ class std_variant:
     def index(self):
         return int(self.ref['_M_index'])
 
-    def _get_next(self, variadic_union, index):
+    def get(self):
+        index = self.index()
+        variadic_union = self.ref['_M_u']
         current_type = self.member_types[index].strip_typedefs()
-        if index > 0:
-            return self._get_next(variadic_union['_M_rest'], index - 1)
+        for i in range(index):
+            variadic_union = variadic_union['_M_rest']
 
         wrapper = variadic_union['_M_first']['_M_storage']
         # literal types are stored directly in `_M_storage`.
@@ -162,9 +164,6 @@ class std_variant:
 
         # non-literal types are stored via a __gnu_cxx::__aligned_membuf
         return wrapper['_M_storage'].reinterpret_cast(current_type.pointer()).dereference()
-
-    def get(self):
-        return self._get_next(self.ref['_M_u'], self.index())
 
 
 class std_map:
@@ -1026,6 +1025,10 @@ def has_enable_lw_shared_from_this(type):
             return True
     return False
 
+def remove_prefix(s, prefix):
+    if s.startswith(prefix):
+        return s[len(prefix):]
+    return s
 
 class seastar_lw_shared_ptr():
     def __init__(self, ref):
@@ -1036,7 +1039,7 @@ class seastar_lw_shared_ptr():
         if has_enable_lw_shared_from_this(self.elem_type):
             return self.ref['_p'].cast(self.elem_type.pointer())
         else:
-            type = gdb.lookup_type('seastar::shared_ptr_no_esft<%s>' % str(self.elem_type.unqualified())).pointer()
+            type = gdb.lookup_type('seastar::shared_ptr_no_esft<%s>' % remove_prefix(str(self.elem_type.unqualified()), 'class ')).pointer()
             return self.ref['_p'].cast(type)['_value'].address
 
 
@@ -2323,7 +2326,7 @@ def get_local_tasks(tq_id = None):
 
     for tq in tqs:
         for t in circular_buffer(tq['_q']):
-            yield std_unique_ptr(t).get()
+            yield t
 
 
 class scylla_task_stats(gdb.Command):
@@ -3166,15 +3169,23 @@ class scylla_smp_queues(gdb.Command):
         gdb.write('{}\n'.format(h))
 
 
-class scylla_gdb_func_dereference_lw_shared_ptr(gdb.Function):
-    """Dereference the pointer guarded by the `seastar::lw_shared_ptr` instance.
+class scylla_gdb_func_dereference_smart_ptr(gdb.Function):
+    """Dereference the pointer guarded by the smart pointer instance.
+
+    Supported smart pointers are:
+    * std::unique_ptr
+    * seastar::lw_shared_ptr
+    * seastar::foreign_ptr [1]
+
+    [1] Note that `seastar::foreign_ptr` wraps another smart pointer type which
+    is also dereferenced so its type has to be supported.
 
     Usage:
-    $dereference_lw_shared_ptr($ptr)
+    $dereference_smart_ptr($ptr)
 
     Where:
-    $lst - a convenience variable or any gdb expression that evaluates
-        to an `seastar::lw_shared_ptr` instance.
+    $ptr - a convenience variable or any gdb expression that evaluates
+        to a smart pointer instance of a supported type.
 
     Returns:
     The value pointed to by the guarded pointer.
@@ -3182,19 +3193,28 @@ class scylla_gdb_func_dereference_lw_shared_ptr(gdb.Function):
     Example:
     (gdb) p $1._read_context
     $2 = {_p = 0x60b00b068600}
-    (gdb) p $dereference_lw_shared_ptr($1._read_context)
+    (gdb) p $dereference_smart_ptr($1._read_context)
     $3 = {<seastar::enable_lw_shared_from_this<cache::read_context>> = {<seastar::lw_shared_ptr_counter_base> = {_count = 1}, ...
     """
 
     def __init__(self):
-        super(scylla_gdb_func_dereference_lw_shared_ptr, self).__init__('dereference_lw_shared_ptr')
+        super(scylla_gdb_func_dereference_smart_ptr, self).__init__('dereference_smart_ptr')
 
     def invoke(self, expr):
         if isinstance(expr, gdb.Value):
-            ptr = seastar_lw_shared_ptr(expr)
+            ptr = expr
         else:
-            ptr = seastar_lw_shared_ptr(gdb.parse_and_eval(expr))
-        return ptr.get().dereference()
+            ptr = gdb.parse_and_eval(expr)
+
+        typ = ptr.type.strip_typedefs()
+        if typ.name.startswith('seastar::lw_shared_ptr<'):
+            return seastar_lw_shared_ptr(ptr).get().dereference()
+        elif typ.name.startswith('seastar::foreign_ptr<'):
+            return self.invoke(ptr['_value'])
+        elif typ.name.startswith('std::unique_ptr<'):
+            return std_unique_ptr(ptr).get().dereference()
+
+        raise ValueError("Unsupported smart pointer type: {}".format(typ.name))
 
 
 class scylla_gdb_func_downcast_vptr(gdb.Function):
@@ -3242,6 +3262,87 @@ class scylla_gdb_func_downcast_vptr(gdb.Function):
         return ptr.reinterpret_cast(actual_type)
 
 
+class reference_wrapper:
+    def __init__(self, ref):
+        self.ref = ref
+
+    def get(self):
+        return self.ref['_M_data']
+
+
+class scylla_features(gdb.Command):
+    """Prints state of Scylla gossiper features on current shard.
+
+    Example:
+    (gdb) scylla features
+    "LWT": false
+    "HINTED_HANDOFF_SEPARATE_CONNECTION": true
+    "NONFROZEN_UDTS": true
+    "XXHASH": true
+    "CORRECT_COUNTER_ORDER": true
+    "WRITE_FAILURE_REPLY": true
+    "CDC": false
+    "CORRECT_NON_COMPOUND_RANGE_TOMBSTONES": true
+    "RANGE_TOMBSTONES": true
+    "VIEW_VIRTUAL_COLUMNS": true
+    "SCHEMA_TABLES_V3": true
+    "LARGE_PARTITIONS": true
+    "UDF": false
+    "INDEXES": true
+    "MATERIALIZED_VIEWS": true
+    "DIGEST_MULTIPARTITION_READ": true
+    "COUNTERS": true
+    "UNBOUNDED_RANGE_TOMBSTONES": true
+    "ROLES": true
+    "LA_SSTABLE_FORMAT": true
+    "MC_SSTABLE_FORMAT": true
+    "STREAM_WITH_RPC_STREAM": true
+    "ROW_LEVEL_REPAIR": true
+    "TRUNCATION_TABLE": true
+    "CORRECT_STATIC_COMPACT_IN_MC": true
+    "DIGEST_INSENSITIVE_TO_EXPIRY": true
+    "COMPUTED_COLUMNS": true
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla features', gdb.COMMAND_USER, gdb.COMPLETE_NONE, True)
+
+    def invoke(self, arg, for_tty):
+        gossiper = sharded(gdb.parse_and_eval('gms::_the_gossiper')).local()
+        for (name, f) in list_unordered_map(gossiper['_feature_service']['_registered_features']):
+            f = reference_wrapper(f).get()
+            gdb.write('%s: %s\n' % (f['_name'], f['_enabled']))
+
+
+class scylla_gdb_func_collection_element(gdb.Function):
+    """Return the element at the specified index/key from the container.
+
+    Usage:
+    $collection_element($col, $key)
+
+    Where:
+    $col - a variable, or an expression that evaluates to a value of any
+    supported container type.
+    $key - a literal, or an expression that evaluates to an index/key type
+    appropriate for the container.
+
+    Supported container types are:
+    * std::vector<> - key must be integer
+    * std::list<> - key must be integer
+    """
+    def __init__(self):
+        super(scylla_gdb_func_collection_element, self).__init__('collection_element')
+
+    def invoke(self, collection, key):
+        typ = collection.type.strip_typedefs()
+        if typ.name.startswith('std::vector<'):
+            return std_vector(collection)[int(key)]
+        elif typ.name.startswith('std::__cxx11::list<'):
+            return std_list(collection)[int(key)]
+
+        raise ValueError("Unsupported container type: {}".format(typ.name))
+
+
 # Commands
 scylla()
 scylla_databases()
@@ -3275,6 +3376,7 @@ scylla_sstables()
 scylla_memtables()
 scylla_generate_object_graph()
 scylla_smp_queues()
+scylla_features()
 
 
 # Convenience functions
@@ -3284,5 +3386,6 @@ scylla_smp_queues()
 #
 # To get the usage of an individual function:
 #   (gdb) help function $function_name
-scylla_gdb_func_dereference_lw_shared_ptr()
+scylla_gdb_func_dereference_smart_ptr()
 scylla_gdb_func_downcast_vptr()
+scylla_gdb_func_collection_element()

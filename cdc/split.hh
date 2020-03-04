@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2020 ScyllaDB
  */
 
 /*
@@ -21,19 +21,14 @@
 
 #pragma once
 
+#include <vector>
 #include "schema_fwd.hh"
-#include "flat_mutation_reader.hh"
-#include "dht/i_partitioner.hh"
-#include "utils/phased_barrier.hh"
 
-namespace mutation_writer {
+class mutation;
 
-// Helper to use multishard_writer to distribute mutation_fragments from the
-// producer to the correct shard and consume with the consumer.
-// It returns number of partitions consumed.
-future<uint64_t> distribute_reader_and_consume_on_shards(schema_ptr s,
-    flat_mutation_reader producer,
-    std::function<future<> (flat_mutation_reader)> consumer,
-    utils::phased_barrier::operation&& op = {});
+namespace cdc {
 
-} // namespace mutation_writer
+bool should_split(const mutation& base_mutation, const schema& base_schema);
+std::vector<mutation> split(const mutation& base_mutation, const schema_ptr& base_schema);
+
+}

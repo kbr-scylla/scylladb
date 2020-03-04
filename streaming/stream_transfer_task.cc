@@ -99,15 +99,18 @@ struct send_info {
         , reader(cf.make_streaming_reader(cf.schema(), prs)) {
     }
     future<bool> has_relevant_range_on_this_shard() {
-        return do_with(false, [this] (bool& found_relevant_range) {
-            return do_for_each(ranges, [this, &found_relevant_range] (dht::token_range range) {
+        return do_with(false, ranges.begin(), [this] (bool& found_relevant_range, dht::token_range_vector::iterator& ranges_it) {
+            auto stop_cond = [this, &found_relevant_range, &ranges_it] { return ranges_it == ranges.end() || found_relevant_range; };
+            return do_until(std::move(stop_cond), [this, &found_relevant_range, &ranges_it] {
+                dht::token_range range = *ranges_it++;
                 if (!found_relevant_range) {
-                    auto sharder = dht::selective_token_range_sharder(cf.schema()->get_partitioner(), range, engine().cpu_id());
+                    auto sharder = dht::selective_token_range_sharder(cf.schema()->get_partitioner(), std::move(range), engine().cpu_id());
                     auto range_shard = sharder.next();
                     if (range_shard) {
                         found_relevant_range = true;
                     }
                 }
+                return make_ready_future<>();
             }).then([&found_relevant_range] {
                 return found_relevant_range;
             });
@@ -284,13 +287,13 @@ void stream_transfer_task::sort_and_merge_ranges() {
     for (auto& range : ranges) {
         // TODO: We should convert range_to_interval and interval_to_range to
         // take nonwrapping_range ranges.
-        myset += locator::token_metadata::range_to_interval(range);
+        myset += locator::token_metadata::range_to_interval(std::move(range));
     }
     ranges.clear();
     ranges.shrink_to_fit();
     for (auto& i : myset) {
         auto r = locator::token_metadata::interval_to_range(i);
-        _ranges.push_back(dht::token_range(r));
+        _ranges.push_back(dht::token_range(std::move(r)));
     }
     sslog.debug("cf_id = {}, after  ranges = {}, size={}", cf_id, _ranges, _ranges.size());
 }

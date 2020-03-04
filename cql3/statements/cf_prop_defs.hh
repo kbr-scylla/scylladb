@@ -32,7 +32,6 @@
 
 #include "cql3/statements/property_definitions.hh"
  
-#include "schema.hh"
 #include "schema_builder.hh"
 #include "compaction_strategy.hh"
 #include "utils/UUID.hh"

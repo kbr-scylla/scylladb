@@ -116,10 +116,11 @@ rjson::value copy(const rjson::value& value);
 
 // Parses a JSON value from given string or raw character array.
 // The string/char array liveness does not need to be persisted,
-// as both parse() and parse_raw() will allocate member names and values.
+// as parse() will allocate member names and values.
 // Throws rjson::error if parsing failed.
-rjson::value parse(const std::string& str);
-rjson::value parse_raw(const char* c_str, size_t size);
+rjson::value parse(std::string_view str);
+// Needs to be run in thread context
+rjson::value parse_yieldable(std::string_view str);
 
 // Creates a JSON value (of JSON string type) out of internal string representations.
 // The string value is copied, so str's liveness does not need to be persisted.
@@ -129,8 +130,8 @@ rjson::value from_string(const char* str, size_t size);
 rjson::value from_string(std::string_view view);
 
 // Returns a pointer to JSON member if it exists, nullptr otherwise
-rjson::value* find(rjson::value& value, rjson::string_ref_type name);
-const rjson::value* find(const rjson::value& value, rjson::string_ref_type name);
+rjson::value* find(rjson::value& value, std::string_view name);
+const rjson::value* find(const rjson::value& value, std::string_view name);
 
 // Returns a reference to JSON member if it exists, throws otherwise
 rjson::value& get(rjson::value& value, rjson::string_ref_type name);
@@ -161,6 +162,9 @@ void set(rjson::value& base, rjson::string_ref_type name, rjson::string_ref_type
 // Adds a value to a JSON list by moving the item to its end.
 // Throws if base_array is not a JSON array.
 void push_back(rjson::value& base_array, rjson::value&& item);
+
+// Remove a member from a JSON object. Throws if value isn't an object.
+bool remove_member(rjson::value& value, std::string_view name);
 
 struct single_value_comp {
     bool operator()(const rjson::value& r1, const rjson::value& r2) const;
