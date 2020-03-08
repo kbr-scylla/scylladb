@@ -22,13 +22,13 @@
 #include "repair/repair.hh"
 #include "message/messaging_service.hh"
 #include "sstables/sstables.hh"
+#include "sstables/sstables_manager.hh"
 #include "mutation_fragment.hh"
 #include "mutation_writer/multishard_writer.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/sharder.hh"
 #include "to_string.hh"
 #include "xx_hasher.hh"
-#include "dht/i_partitioner.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "service/priority_manager.hh"
@@ -382,8 +382,8 @@ public:
             column_family& cf,
             schema_ptr s,
             dht::token_range range,
-            dht::i_partitioner& local_partitioner,
-            dht::i_partitioner& remote_partitioner,
+            const dht::i_partitioner& local_partitioner,
+            const dht::i_partitioner& remote_partitioner,
             unsigned remote_shard,
             uint64_t seed,
             is_local_reader local_reader)
@@ -399,7 +399,7 @@ private:
     flat_mutation_reader
     make_reader(seastar::sharded<database>& db,
             column_family& cf,
-            dht::i_partitioner& local_partitioner,
+            const dht::i_partitioner& local_partitioner,
             is_local_reader local_reader) {
         if (local_reader) {
             return cf.make_streaming_reader(_schema, _range);
@@ -485,7 +485,7 @@ public:
         _partition_opened.resize(_nr_peer_nodes, false);
     }
 
-    void create_writer(database& db, unsigned node_idx) {
+    void create_writer(sharded<database>& db, unsigned node_idx) {
         if (_writer_done[node_idx]) {
             return;
         }
@@ -493,11 +493,11 @@ public:
         auto get_next_mutation_fragment = [this, node_idx] () mutable {
             return _mq[node_idx]->pop_eventually();
         };
-        table& t = db.find_column_family(_schema->id());
+        table& t = db.local().find_column_family(_schema->id());
         _writer_done[node_idx] = mutation_writer::distribute_reader_and_consume_on_shards(_schema,
                 make_generating_reader(_schema, std::move(get_next_mutation_fragment)),
                 [&db, estimated_partitions = this->_estimated_partitions] (flat_mutation_reader reader) {
-            auto& t = db.find_column_family(reader.schema());
+            auto& t = db.local().find_column_family(reader.schema());
             return db::view::check_needs_view_update_path(_sys_dist_ks->local(), t, streaming::stream_reason::repair).then([t = t.shared_from_this(), estimated_partitions, reader = std::move(reader)] (bool use_view_update_path) mutable {
                 //FIXME: for better estimations this should be transmitted from remote
                 auto metadata = mutation_source_metadata{};
@@ -509,7 +509,8 @@ public:
                     schema_ptr s = reader.schema();
                     auto& pc = service::get_local_streaming_write_priority();
                     return sst->write_components(std::move(reader), std::max(1ul, adjusted_estimated_partitions), s,
-                                                 sstables::sstable_writer_config{}, encoding_stats{}, pc).then([sst] {
+                                                 t->get_sstables_manager().configure_writer(),
+                                                 encoding_stats{}, pc).then([sst] {
                         return sst->open_data();
                     }).then([t, sst] {
                         return t->add_sstable_and_update_cache(sst);
@@ -1191,7 +1192,7 @@ private:
             _peer_row_hash_sets[node_idx] = boost::copy_range<std::unordered_set<repair_hash>>(row_diff |
                     boost::adaptors::transformed([] (repair_row& r) { thread::maybe_yield(); return r.hash(); }));
         }
-        _repair_writer.create_writer(_db.local(), node_idx);
+        _repair_writer.create_writer(_db, node_idx);
         for (auto& r : row_diff) {
             if (update_buf) {
                 _working_row_buf_combined_hash.add(r.hash());
@@ -1213,7 +1214,7 @@ private:
         return to_repair_rows_list(rows).then([this] (std::list<repair_row> row_diff) {
             return do_with(std::move(row_diff), [this] (std::list<repair_row>& row_diff) {
                 unsigned node_idx = 0;
-                _repair_writer.create_writer(_db.local(), node_idx);
+                _repair_writer.create_writer(_db, node_idx);
                 return do_for_each(row_diff, [this, node_idx] (repair_row& r) {
                     // The repair_row here is supposed to have
                     // mutation_fragment attached because we have stored it in

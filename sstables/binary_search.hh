@@ -38,7 +38,7 @@ namespace sstables {
  * a key view via get_key().
  */
 template <typename T>
-int binary_search(dht::i_partitioner& partitioner, const T& entries, const key& sk, const dht::token& token) {
+int binary_search(const dht::i_partitioner& partitioner, const T& entries, const key& sk, const dht::token& token) {
     int low = 0, mid = entries.size(), high = mid - 1, result = -1;
 
     while (low <= high) {
@@ -69,7 +69,7 @@ int binary_search(dht::i_partitioner& partitioner, const T& entries, const key& 
 }
 
 template <typename T>
-int binary_search(dht::i_partitioner& partitioner, const T& entries, const key& sk) {
+int binary_search(const dht::i_partitioner& partitioner, const T& entries, const key& sk) {
     return binary_search(partitioner, entries, sk, partitioner.get_token(key_view(sk)));
 }
 

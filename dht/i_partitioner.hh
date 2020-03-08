@@ -151,7 +151,7 @@ public:
      * @param key the raw, client-facing key
      * @return decorated version of key
      */
-    decorated_key decorate_key(const schema& s, const partition_key& key) {
+    decorated_key decorate_key(const schema& s, const partition_key& key) const {
         return { get_token(s, key), key };
     }
 
@@ -161,7 +161,7 @@ public:
      * @param key the raw, client-facing key
      * @return decorated version of key
      */
-    decorated_key decorate_key(const schema& s, partition_key&& key) {
+    decorated_key decorate_key(const schema& s, partition_key&& key) const {
         auto token = get_token(s, key);
         return { std::move(token), std::move(key) };
     }
@@ -181,7 +181,7 @@ public:
      * @return True if the implementing class preserves key order in the tokens
      * it generates.
      */
-    virtual bool preserves_order() = 0;
+    virtual bool preserves_order() const = 0;
 
     /**
      * @return name of partitioner.

@@ -40,7 +40,7 @@ void service_level_statement::validate(
         const service::client_state &state) const {
 }
 
-future<> service_level_statement::check_access(const service::client_state &state) const {
+future<> service_level_statement::check_access(service::storage_proxy& sp, const service::client_state &state) const {
     return make_ready_future<>();
 }
 

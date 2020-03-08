@@ -22,6 +22,7 @@
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
+#include "test/lib/log.hh"
 
 #include <seastar/core/future-util.hh>
 #include <seastar/core/sleep.hh>
@@ -1552,12 +1553,12 @@ SEASTAR_TEST_CASE(test_aggregate_functions) {
             .test_avg(int64_t(2));
 
         aggregate_function_test(e, varint_type,
-            boost::multiprecision::cpp_int(1),
-            boost::multiprecision::cpp_int(2),
-            boost::multiprecision::cpp_int(3)
+            utils::multiprecision_int(1),
+            utils::multiprecision_int(2),
+            utils::multiprecision_int(3)
         ).test_min_max_count()
-            .test_sum(boost::multiprecision::cpp_int(6))
-            .test_avg(boost::multiprecision::cpp_int(2));
+            .test_sum(utils::multiprecision_int(6))
+            .test_avg(utils::multiprecision_int(2));
 
         aggregate_function_test(e, decimal_type,
             big_decimal("1.0"),
@@ -2202,8 +2203,8 @@ SEASTAR_TEST_CASE(test_types) {
                     timestamp_type->decompose(tp),
                     timeuuid_type->decompose(utils::UUID(sstring("d2177dd0-eaa2-11de-a572-001b779c76e3"))),
                     uuid_type->decompose(utils::UUID(sstring("d2177dd0-eaa2-11de-a572-001b779c76e3"))),
-                    utf8_type->decompose(sstring("varchar")), varint_type->decompose(boost::multiprecision::cpp_int(123)),
-                    decimal_type->decompose(big_decimal { 2, boost::multiprecision::cpp_int(123) }),
+                    utf8_type->decompose(sstring("varchar")), varint_type->decompose(utils::multiprecision_int(123)),
+                    decimal_type->decompose(big_decimal { 2, utils::multiprecision_int(123) }),
                     byte_type->decompose(int8_t(3)),
                     short_type->decompose(int16_t(3)),
                     serialized(simple_date_native_type{0x80000001}),
@@ -2256,7 +2257,7 @@ SEASTAR_TEST_CASE(test_types) {
                     timestamp_type->decompose(tp),
                     timeuuid_type->decompose(utils::UUID(sstring("d2177dd0-eaa2-11de-a572-001b779c76e3"))),
                     uuid_type->decompose(utils::UUID(sstring("d2177dd0-eaa2-11de-a572-001b779c76e3"))),
-                    utf8_type->decompose(sstring("varchar")), varint_type->decompose(boost::multiprecision::cpp_int(123)),
+                    utf8_type->decompose(sstring("varchar")), varint_type->decompose(utils::multiprecision_int(123)),
                     decimal_type->decompose(big_decimal { 2, boost::multiprecision::cpp_int(123) }),
                     byte_type->decompose(int8_t(3)),
                     short_type->decompose(int16_t(3)),
@@ -4217,10 +4218,15 @@ SEASTAR_TEST_CASE(test_like_operator_conjunction) {
         cquery_nofail(e, "insert into t (s1, s2) values ('a', 'A')");
         require_rows(e, "select * from t where s1 like 'a%' and s2 like '__C' allow filtering",
                      {{T("abc"), T("ABC")}});
+        require_rows(e, "select * from t where s1 like 'a%' and s1 like '__C' allow filtering", {});
+        require_rows(e, "select s1 from t where s1 like 'a%' and s1 like '_' allow filtering", {{T("a")}});
+        require_rows(e, "select s1 from t where s1 like 'a%' and s1 like '%' allow filtering", {{T("a")}, {T("abc")}});
+        require_rows(e, "select s1 from t where s1 like 'a%' and s1 like '_b_' and s1 like '%c' allow filtering",
+                     {{T("abc")}});
         BOOST_REQUIRE_EXCEPTION(
                 e.execute_cql("select * from t where s1 like 'a%' and s1 = 'abc' allow filtering").get(),
                 exceptions::invalid_request_exception,
-                exception_predicate::message_contains("more than one relation"));
+                exception_predicate::message_contains("LIKE and non-LIKE"));
     });
 }
 
@@ -4495,28 +4501,28 @@ SEASTAR_TEST_CASE(test_int_sum_with_cast) {
 SEASTAR_TEST_CASE(test_float_sum_overflow) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         cquery_nofail(e, "create table cf (pk text, val float, primary key(pk));");
-        BOOST_TEST_MESSAGE("make sure we can sum close to the max value");
+        testlog.info("make sure we can sum close to the max value");
         cquery_nofail(e, "insert into cf (pk, val) values ('a', 3.4028234e+38);");
         auto result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(3.4028234e+38f)});
-        BOOST_TEST_MESSAGE("cause overflow");
+        testlog.info("cause overflow");
         cquery_nofail(e, "insert into cf (pk, val) values ('b', 1e+38);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(std::numeric_limits<float>::infinity())});
-        BOOST_TEST_MESSAGE("test maximum negative value");
+        testlog.info("test maximum negative value");
         cquery_nofail(e, "insert into cf (pk, val) values ('a', -3.4028234e+38);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(-2.4028234e+38f)});
-        BOOST_TEST_MESSAGE("cause negative overflow");
+        testlog.info("cause negative overflow");
         cquery_nofail(e, "insert into cf (pk, val) values ('c', -2e+38);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
@@ -4529,28 +4535,28 @@ SEASTAR_TEST_CASE(test_float_sum_overflow) {
 SEASTAR_TEST_CASE(test_double_sum_overflow) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         cquery_nofail(e, "create table cf (pk text, val double, primary key(pk));");
-        BOOST_TEST_MESSAGE("make sure we can sum close to the max value");
+        testlog.info("make sure we can sum close to the max value");
         cquery_nofail(e, "insert into cf (pk, val) values ('a', 1.79769313486231570814527423732e+308);");
         auto result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(1.79769313486231570814527423732E308)});
-        BOOST_TEST_MESSAGE("cause overflow");
+        testlog.info("cause overflow");
         cquery_nofail(e, "insert into cf (pk, val) values ('b', 0.5e+308);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(std::numeric_limits<double>::infinity())});
-        BOOST_TEST_MESSAGE("test maximum negative value");
+        testlog.info("test maximum negative value");
         cquery_nofail(e, "insert into cf (pk, val) values ('a', -1.79769313486231570814527423732e+308);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
             .is_rows()
             .with_size(1)
             .with_row({serialized(-1.29769313486231570814527423732e+308)});
-        BOOST_TEST_MESSAGE("cause negative overflow");
+        testlog.info("cause negative overflow");
         cquery_nofail(e, "insert into cf (pk, val) values ('c', -1e+308);");
         result = e.execute_cql("select sum(val) from cf;").get0();
         assert_that(result)
@@ -4864,7 +4870,7 @@ shared_ptr<cql_transport::messages::result_message> cql_func_require_nofail(
         } else {
             res = env.execute_cql(query).get0();
         }
-        BOOST_TEST_MESSAGE(format("Query '{}' succeeded as expected", query));
+        testlog.info("Query '{}' succeeded as expected", query);
     } catch (...) {
         BOOST_ERROR(format("query '{}' failed unexpectedly with error: {}\n{}:{}: originally from here",
                 query, std::current_exception(),
@@ -4891,7 +4897,7 @@ void cql_func_require_throw(
         BOOST_ERROR(format("query '{}' succeeded unexpectedly\n{}:{}: originally from here", query,
                 loc.file_name(), loc.line()));
     } catch (Exception& e) {
-        BOOST_TEST_MESSAGE(format("Query '{}' failed as expected with error: {}", query, e));
+        testlog.info("Query '{}' failed as expected with error: {}", query, e);
     } catch (...) {
         BOOST_ERROR(format("query '{}' failed with unexpected error: {}\n{}:{}: originally from here",
                 query, std::current_exception(),
@@ -5205,5 +5211,17 @@ SEASTAR_TEST_CASE(test_like_parameter_marker) {
         prepared_on_shard(e, query, {T("err"), I(1), T("a%")}, {{B(false), "chg"}});
         prepared_on_shard(e, query, {T("chg"), I(2), T("b%")}, {{B(true),  "bbb"}});
         prepared_on_shard(e, query, {T("err"), I(1), T("a%")}, {{B(false), "chg"}});
+    });
+}
+
+SEASTAR_TEST_CASE(test_range_deletions_for_specific_column) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "CREATE TABLE t (pk int, ck int, col text, PRIMARY KEY(pk, ck))").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 1, 'aaa')").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 2, 'bbb')").get();
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 3, 'ccc')").get();
+
+        BOOST_REQUIRE_THROW(e.execute_cql("DELETE col FROM t WHERE pk = 0 AND ck > 1 AND ck <= 3").get(),
+                exceptions::invalid_request_exception);
     });
 }

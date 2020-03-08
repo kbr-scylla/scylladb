@@ -1951,7 +1951,7 @@ SEASTAR_TEST_CASE(test_trim_clustering_row_ranges_to) {
 
 // Shards tokens such that tokens are owned by shards in a round-robin manner.
 class dummy_partitioner : public dht::i_partitioner {
-    dht::i_partitioner& _partitioner;
+    const dht::i_partitioner& _partitioner;
     std::vector<dht::token> _tokens;
 
 public:
@@ -1961,7 +1961,7 @@ public:
     // ordered associative container (std::map) that has dht::token as keys.
     // Values will be ignored.
     template <typename T>
-    dummy_partitioner(dht::i_partitioner& partitioner, const std::map<dht::token, T>& something_by_token)
+    dummy_partitioner(const dht::i_partitioner& partitioner, const std::map<dht::token, T>& something_by_token)
         : i_partitioner(smp::count)
         , _partitioner(partitioner)
         , _tokens(boost::copy_range<std::vector<dht::token>>(something_by_token | boost::adaptors::map_keys)) {
@@ -1969,7 +1969,7 @@ public:
 
     virtual dht::token get_token(const schema& s, partition_key_view key) const override { return _partitioner.get_token(s, key); }
     virtual dht::token get_token(const sstables::key_view& key) const override { return _partitioner.get_token(key); }
-    virtual bool preserves_order() override { return _partitioner.preserves_order(); }
+    virtual bool preserves_order() const override { return _partitioner.preserves_order(); }
     virtual const sstring name() const override { return _partitioner.name(); }
     virtual unsigned shard_of(const dht::token& t) const override;
     virtual dht::token token_for_next_shard(const dht::token& t, shard_id shard, unsigned spans = 1) const override;
@@ -2143,13 +2143,13 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_as_mutation_source) {
             };
         };
 
-        BOOST_TEST_MESSAGE("run_mutation_source_tests(evict_readers=false, single_fragment_buffer=false)");
+        testlog.info("run_mutation_source_tests(evict_readers=false, single_fragment_buffer=false)");
         run_mutation_source_tests(make_populate(false, false));
 
-        BOOST_TEST_MESSAGE("run_mutation_source_tests(evict_readers=true, single_fragment_buffer=false)");
+        testlog.info("run_mutation_source_tests(evict_readers=true, single_fragment_buffer=false)");
         run_mutation_source_tests(make_populate(true, false));
 
-        BOOST_TEST_MESSAGE("run_mutation_source_tests(evict_readers=true, single_fragment_buffer=true)");
+        testlog.info("run_mutation_source_tests(evict_readers=true, single_fragment_buffer=true)");
         run_mutation_source_tests(make_populate(true, true));
 
         return make_ready_future<>();
@@ -2516,7 +2516,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
             return dht::ring_position_tri_compare(*schema, a, b) < 0;
         });
 
-        BOOST_TEST_MESSAGE("Start test");
+        testlog.info("Start test");
 
         auto assertions = assert_that(std::move(reader));
         for (int i = 0; i < partition_count; ++i) {
@@ -2717,7 +2717,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_streaming_reader) {
 
         const auto min_size = std::min(reference_muts.size(), tested_muts.size());
         for (size_t i = 0; i < min_size; ++i) {
-            BOOST_TEST_MESSAGE(format("Comparing mutation {:d}/{:d}", i, min_size - 1));
+            testlog.trace("Comparing mutation {:d}/{:d}", i, min_size - 1);
             assert_that(tested_muts[i]).is_equal_to(reference_muts[i]);
         }
 

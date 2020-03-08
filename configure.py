@@ -497,6 +497,7 @@ scylla_core = (['database.cc',
                 'mutation_partition.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
+                'converting_mutation_partition_applier.cc',
                 'mutation_reader.cc',
                 'flat_mutation_reader.cc',
                 'mutation_query.cc',
@@ -669,6 +670,7 @@ scylla_core = (['database.cc',
                 'utils/managed_bytes.cc',
                 'utils/exceptions.cc',
                 'utils/config_file.cc',
+                'utils/multiprecision_int.cc',
                 'utils/memory.cc',
                 'utils/gz/crc_combine.cc',
                 'gms/version_generator.cc',
@@ -891,6 +893,7 @@ headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
 scylla_tests_generic_dependencies = [
     'test/lib/cql_test_env.cc',
     'test/lib/test_services.cc',
+    'test/lib/log.cc',
 ]
 
 scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependencies + [
@@ -982,9 +985,16 @@ deps['test/boost/sstable_test'] += ['test/lib/sstable_utils.cc', 'test/lib/norma
 deps['test/boost/sstable_datafile_test'] += ['test/lib/sstable_utils.cc', 'test/lib/normalizing_reader.cc']
 deps['test/boost/mutation_reader_test'] += ['test/lib/sstable_utils.cc']
 
+deps['test/boost/bytes_ostream_test'] = [
+    "test/boost/bytes_ostream_test.cc",
+    "utils/managed_bytes.cc",
+    "utils/logalloc.cc",
+    "utils/dynamic_bitset.cc",
+    "test/lib/log.cc",
+]
+
 deps['test/boost/incremental_compaction_test'] += ['test/lib/sstable_utils.cc']
 
-deps['test/boost/bytes_ostream_test'] = ['test/boost/bytes_ostream_test.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
 deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
 deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test/boost/murmur_hash_test.cc']
@@ -995,12 +1005,18 @@ deps['test/perf/perf_fast_forward'] += ['release.cc']
 deps['test/perf/perf_simple_query'] += ['release.cc']
 deps['test/boost/meta_test'] = ['test/boost/meta_test.cc']
 deps['test/manual/imr_test'] = ['test/manual/imr_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
-deps['test/boost/reusable_buffer_test'] = ['test/boost/reusable_buffer_test.cc']
+deps['test/boost/reusable_buffer_test'] = [
+    "test/boost/reusable_buffer_test.cc",
+    "test/lib/log.cc",
+]
 deps['test/boost/utf8_test'] = ['utils/utf8.cc', 'test/boost/utf8_test.cc']
 deps['test/boost/small_vector_test'] = ['test/boost/small_vector_test.cc']
 deps['test/boost/multishard_mutation_query_test'] += ['test/boost/test_table.cc']
 deps['test/boost/vint_serialization_test'] = ['test/boost/vint_serialization_test.cc', 'vint-serialization.cc', 'bytes.cc']
-deps['test/boost/linearizing_input_stream_test'] = ['test/boost/linearizing_input_stream_test.cc']
+deps['test/boost/linearizing_input_stream_test'] = [
+    "test/boost/linearizing_input_stream_test.cc",
+    "test/lib/log.cc",
+]
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 
@@ -1164,6 +1180,21 @@ extra_cxxflags["release.cc"] = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\
 
 for m in ['debug', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
+
+get_dynamic_linker_output = subprocess.check_output(['./reloc/get-dynamic-linker.sh'], shell=True)
+dynamic_linker = get_dynamic_linker_output.decode('utf-8').strip()
+
+forced_ldflags = '-Wl,'
+
+# The default build-id used by lld is xxhash, which is 8 bytes long, but RPM
+# requires build-ids to be at least 16 bytes long
+# (https://github.com/rpm-software-management/rpm/issues/950), so let's
+# explicitly ask for SHA1 build-ids.
+forced_ldflags += '--build-id=sha1,'
+
+forced_ldflags += f'--dynamic-linker={dynamic_linker}'
+
+args.user_ldflags = forced_ldflags + ' ' + args.user_ldflags
 
 seastar_cflags = args.user_cflags
 if args.target != '':

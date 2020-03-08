@@ -22,7 +22,7 @@ alter_service_level_statement::alter_service_level_statement(sstring service_lev
 void alter_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 
-future<> alter_service_level_statement::check_access(const service::client_state &state) const {
+future<> alter_service_level_statement::check_access(service::storage_proxy& sp, const service::client_state &state) const {
     return state.ensure_has_permission(auth::permission::ALTER, auth::root_service_level_resource());
 }
 

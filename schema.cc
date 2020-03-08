@@ -26,6 +26,7 @@
 #include "database.hh"
 #include "service/storage_service.hh"
 #include "dht/i_partitioner.hh"
+#include "cdc/cdc_extension.hh"
 
 constexpr int32_t schema::NAME_LENGTH;
 
@@ -90,7 +91,7 @@ std::ostream& operator<<(std::ostream& os, ordinal_column_id id)
     return os << static_cast<column_count_type>(id);
 }
 
-dht::i_partitioner& schema::get_partitioner() const {
+const dht::i_partitioner& schema::get_partitioner() const {
     return dht::global_partitioner();
 }
 
@@ -437,7 +438,7 @@ bool operator==(const schema& x, const schema& y)
         && x._raw._compaction_strategy == y._raw._compaction_strategy
         && x._raw._compaction_strategy_options == y._raw._compaction_strategy_options
         && x._raw._compaction_enabled == y._raw._compaction_enabled
-        && x._raw._cdc_options == y._raw._cdc_options
+        && x.cdc_options() == y.cdc_options()
         && x._raw._caching_options == y._raw._caching_options
         && x._raw._dropped_columns == y._raw._dropped_columns
         && x._raw._collections == y._raw._collections
@@ -593,7 +594,7 @@ std::ostream& operator<<(std::ostream& os, const schema& s) {
     os << ",bloomFilterFpChance=" << s._raw._bloom_filter_fp_chance;
     os << ",memtableFlushPeriod=" << s._raw._memtable_flush_period;
     os << ",caching=" << s._raw._caching_options.to_sstring();
-    os << ",cdc=" << s._raw._cdc_options.to_sstring();
+    os << ",cdc=" << s.cdc_options().to_sstring();
     os << ",defaultTimeToLive=" << s._raw._default_time_to_live.count();
     os << ",minIndexInterval=" << s._raw._min_index_interval;
     os << ",maxIndexInterval=" << s._raw._max_index_interval;
@@ -1102,6 +1103,16 @@ schema_ptr schema_builder::build() {
 
     prepare_dense_schema(new_raw);
     return make_lw_shared<schema>(schema(new_raw, _view_info));
+}
+
+const cdc::options& schema::cdc_options() const {
+    static const cdc::options default_cdc_options;
+    const auto& schema_extensions = _raw._extensions;
+
+    if (auto it = schema_extensions.find(cdc::cdc_extension::NAME); it != schema_extensions.end()) {
+        return dynamic_pointer_cast<cdc::cdc_extension>(it->second)->get_options();
+    }
+    return default_cdc_options;
 }
 
 schema_ptr schema_builder::build(compact_storage cp) {

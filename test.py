@@ -300,6 +300,13 @@ class Test:
 Returns (fn, txt) where fn is a cleanup function to call unconditionally after the test stops running, and txt is failure-injection description."""
         return (lambda: 0, None)
 
+    def check_log(self, trim):
+        """Check and trim logs and xml output for tests which have it"""
+        if trim:
+            pathlib.Path(self.log_filename).unlink()
+        pass
+
+
 class UnitTest(Test):
     standard_args = shlex.split("--overprovisioned --unsafe-bypass-fsync 1 --blocked-reactor-notify-ms 2000000 --collectd 0")
 
@@ -324,11 +331,16 @@ class BoostTest(UnitTest):
     def __init__(self, test_no, shortname, args, suite, mode, options):
         super().__init__(test_no, shortname, args, suite, mode, options)
         boost_args = []
-        xmlout = os.path.join(options.tmpdir, self.mode, "xml", self.uname + ".xunit.xml")
-        boost_args += ['--report_level=no', '--logger=HRF,test_suite:XML,test_suite,' + xmlout]
+        self.xmlout = os.path.join(options.tmpdir, self.mode, "xml", self.uname + ".xunit.xml")
+        boost_args += ['--report_level=no',
+                       '--logger=HRF,test_suite:XML,test_suite,' + self.xmlout]
         boost_args += ['--catch_system_errors=no']  # causes undebuggable cores
         boost_args += ['--']
         self.args = boost_args + self.args
+
+    def check_log(self, trim):
+        ET.parse(self.xmlout)
+        super().check_log(trim)
 
 class LdapTest(BoostTest):
     """A unit test which can produce its own XML output, and needs an ldap server"""
@@ -521,7 +533,14 @@ async def run_test(test, options):
             stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
             if process.returncode != 0:
                 report_error('Test exited with code {code}\n'.format(code=process.returncode))
-            return process.returncode == 0
+                return False
+            try:
+                test.check_log(not options.save_log_on_success)
+            except Exception as e:
+                print("")
+                print(test.name + ": " + palette.crit("failed to parse XML output: {}".format(e)))
+                # return False
+            return True
         except (asyncio.TimeoutError, asyncio.CancelledError) as e:
             if process is not None:
                 process.kill()
@@ -593,6 +612,9 @@ def parse_cmd_line():
                         help='Verbose reporting')
     parser.add_argument('--jobs', '-j', action="store", default=default_num_jobs, type=int,
                         help="Number of jobs to use for running the tests")
+    parser.add_argument('--save-log-on-success', "-s", default=False,
+                        dest="save_log_on_success", action="store_true",
+                        help="Save test log output on success.")
     parser.add_argument('--manual-execution', action='store_true', default=False,
                         help='Let me manually run the test executable at the moment this script would run it')
     parser.add_argument('--byte-limit', action="store", default=None, type=int,
@@ -746,8 +768,10 @@ def write_junit_report(tmpdir, mode):
                 continue
             failed += 1
             xml_fail = ET.SubElement(xml_res, 'failure')
-            xml_fail.text = "Test {} {} failed:\n".format(test.path, " ".join(test.args))
-            xml_fail.text += read_log(test.log_filename)
+            xml_fail.text = "Test {} {} failed, check the log at {}".format(
+                test.path,
+                " ".join(test.args),
+                test.log_filename)
     if total == 0:
         return
     xml_results.set("tests", str(total))

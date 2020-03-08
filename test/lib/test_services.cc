@@ -88,14 +88,14 @@ storage_service_for_tests::storage_service_for_tests() : _impl(std::make_unique<
 
 storage_service_for_tests::~storage_service_for_tests() = default;
 
-dht::token create_token_from_key(dht::i_partitioner& partitioner, sstring key) {
+dht::token create_token_from_key(const dht::i_partitioner& partitioner, sstring key) {
     sstables::key_view key_view = sstables::key_view(bytes_view(reinterpret_cast<const signed char*>(key.c_str()), key.size()));
     dht::token token = partitioner.get_token(key_view);
     assert(token == partitioner.get_token(key_view));
     return token;
 }
 
-range<dht::token> create_token_range_from_keys(dht::i_partitioner& partitioner, sstring start_key, sstring end_key) {
+range<dht::token> create_token_range_from_keys(const dht::i_partitioner& partitioner, sstring start_key, sstring end_key) {
     dht::token start = create_token_from_key(partitioner, start_key);
     assert(engine().cpu_id() == partitioner.shard_of(start));
     dht::token end = create_token_from_key(partitioner, end_key);
@@ -108,7 +108,9 @@ static const sstring some_keyspace("ks");
 static const sstring some_column_family("cf");
 
 db::nop_large_data_handler nop_lp_handler;
-thread_local sstables::sstables_manager test_sstables_manager(nop_lp_handler);
+db::config test_db_config;
+gms::feature_service test_feature_service;
+thread_local sstables::sstables_manager test_sstables_manager(nop_lp_handler, test_db_config, test_feature_service);
 
 column_family::config column_family_test_config() {
     column_family::config cfg;

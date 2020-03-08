@@ -86,8 +86,6 @@ static future<result_message_ptr> void_result_message() {
 }
 
 void validate_cluster_support(service::storage_proxy& proxy) {
-    // TODO(jhaberku): All other feature-checking CQL statements also grab the `storage_service` globally. I'm not sure
-    // if it's accessible through some other object, but for now I'm sticking with convention.
     if (!proxy.features().cluster_supports_roles()) {
         throw exceptions::invalid_request_exception(
                 "You cannot modify access-control information until the cluster has fully upgraded.");
@@ -113,7 +111,7 @@ void create_role_statement::validate(service::storage_proxy& p, const service::c
     validate_cluster_support(p);
 }
 
-future<> create_role_statement::check_access(const service::client_state& state) const {
+future<> create_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return async([this, &state] {
@@ -219,7 +217,7 @@ void alter_role_statement::validate(service::storage_proxy& p, const service::cl
     validate_cluster_support(p);
 }
 
-future<> alter_role_statement::check_access(const service::client_state& state) const {
+future<> alter_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return async([this, &state] {
@@ -310,7 +308,7 @@ void drop_role_statement::validate(service::storage_proxy& p, const service::cli
     }
 }
 
-future<> drop_role_statement::check_access(const service::client_state& state) const {
+future<> drop_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return async([this, &state] {
@@ -354,7 +352,7 @@ drop_role_statement::execute(service::storage_proxy&, service::query_state& stat
 // `list_roles_statement`
 //
 
-future<> list_roles_statement::check_access(const service::client_state& state) const {
+future<> list_roles_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return async([this, &state] {
@@ -484,7 +482,7 @@ list_roles_statement::execute(service::storage_proxy&, service::query_state& sta
 // `grant_role_statement`
 //
 
-future<> grant_role_statement::check_access(const service::client_state& state) const {
+future<> grant_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return do_with(auth::make_role_resource(_role), [this, &state](const auto& r) {
@@ -507,7 +505,7 @@ grant_role_statement::execute(service::storage_proxy&, service::query_state& sta
 // `revoke_role_statement`
 //
 
-future<> revoke_role_statement::check_access(const service::client_state& state) const {
+future<> revoke_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
     return do_with(auth::make_role_resource(_role), [this, &state](const auto& r) {

@@ -1177,10 +1177,47 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
 future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool allow_hints) {
     tracing::trace(tr_state, "learn_decision: committing {} with cl={}", decision, _cl_for_learn);
     paxos::paxos_state::logger.trace("CAS[{}] learn_decision: committing {} with cl={}", _id, decision, _cl_for_learn);
-    std::array<std::tuple<paxos::proposal, schema_ptr, dht::token>, 1> m{std::make_tuple(std::move(decision), _schema, _key.token())};
     // FIXME: allow_hints is ignored. Consider if we should follow it and remove if not.
     // Right now we do not store hints for when committing decisions.
-    return _proxy->mutate_internal(std::move(m), _cl_for_learn, false, tr_state, _permit, _timeout);
+
+    // `mutate_internal` behaves differently when its template parameter is a range of mutations and when it's
+    // a range of (decision, schema, token)-tuples. Both code paths diverge on `create_write_response_handler`.
+    // We use the first path for CDC mutations (if present) and the latter for "paxos mutations".
+    // Attempts to send both kinds of mutations in one shot caused an infinite loop.
+    future<> f_cdc = make_ready_future<>();
+    if (_schema->cdc_options().enabled()) {
+        auto update_mut = decision.update.unfreeze(_schema);
+        const auto base_tbl_id = update_mut.column_family_id();
+        std::vector<mutation> update_mut_vec{std::move(update_mut)};
+
+        if (_proxy->get_cdc_service()->needs_cdc_augmentation(update_mut_vec)) {
+            f_cdc = _proxy->get_cdc_service()->augment_mutation_call(_timeout, std::move(update_mut_vec))
+                    .then([this, base_tbl_id] (std::tuple<std::vector<mutation>, cdc::result_callback>&& t) {
+                auto mutations = std::move(std::get<0>(t));
+                auto end_func = std::move(std::get<1>(t));
+
+                // Pick only the CDC ("augmenting") mutations
+                mutations.erase(std::remove_if(mutations.begin(), mutations.end(), [base_tbl_id = std::move(base_tbl_id)] (const mutation& v) {
+                    return v.schema()->id() == base_tbl_id;
+                }), mutations.end());
+                if (mutations.empty()) {
+                    return make_ready_future<>();
+                }
+
+                auto f = _proxy->mutate_internal(std::move(mutations), _cl_for_learn, false, tr_state, _permit, _timeout);
+                if (end_func) {
+                    f = f.then(std::move(end_func));
+                }
+                return f;
+            });
+        }
+    }
+
+    // Path for the "base" mutations
+    std::array<std::tuple<paxos::proposal, schema_ptr, dht::token>, 1> m{std::make_tuple(std::move(decision), _schema, _key.token())};
+    future<> f_lwt = _proxy->mutate_internal(std::move(m), _cl_for_learn, false, tr_state, _permit, _timeout);
+
+    return when_all_succeed(std::move(f_cdc), std::move(f_lwt));
 }
 
 static std::vector<gms::inet_address>
@@ -1516,6 +1553,10 @@ void storage_proxy_stats::stats::register_stats() {
 
         sm::make_total_operations("cas_write_timeout_due_to_uncertainty", cas_write_timeout_due_to_uncertainty,
                        sm::description("how many times write timeout was reported because of uncertainty in the result"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
+
+        sm::make_total_operations("cas_failed_read_round_optimization", cas_failed_read_round_optimization,
+                       sm::description("CAS read rounds issued only if previous value is missing on some replica"),
                        {storage_proxy_stats::current_scheduling_group_label()}),
 
         sm::make_histogram("cas_read_contention", sm::description("how many contended reads were encountered"),
@@ -4288,12 +4329,24 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
                         .then([this, handler, schema, cmd, request, partition_ranges, query_options, cl, &contentions]
                                (paxos_response_handler::ballot_and_data v) mutable {
                     // Read the current values and check they validate the conditions.
-                    paxos::paxos_state::logger.debug("CAS[{}]: Reading existing values for CAS precondition", handler->id());
-                    tracing::trace(handler->tr_state, "Reading existing values for CAS precondition");
-                    auto f = v.data ? make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(std::move(v.data)) :
-                            query(schema, cmd, std::move(partition_ranges), cl, query_options).then([] (coordinator_query_result&& qr) {
-                        return make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(std::move(qr.query_result));
-                    });
+                    auto f = [&]() {
+                        if (v.data) {
+                            paxos::paxos_state::logger.debug("CAS[{}]: Using prefetched values for CAS precondition",
+                                    handler->id());
+                            tracing::trace(handler->tr_state, "Using prefetched values for CAS precondition");
+
+                            return make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(std::move(v.data));
+                        } else {
+                            paxos::paxos_state::logger.debug("CAS[{}]: Reading existing values for CAS precondition",
+                                    handler->id());
+                            tracing::trace(handler->tr_state, "Reading existing values for CAS precondition");
+                            ++get_stats().cas_failed_read_round_optimization;
+                            return query(schema, cmd, std::move(partition_ranges), cl, query_options).then([](coordinator_query_result&& qr) {
+
+                                return make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(std::move(qr.query_result));
+                            });
+                        }
+                    }();
                     return f.then([this, handler, schema, cmd, request, ballot = v.ballot, &contentions] (auto&& qr) {
                         auto mutation = request->apply(*qr, cmd->slice, utils::UUID_gen::micros_timestamp(ballot));
                         if (!mutation) {
