@@ -36,7 +36,6 @@ class feature final {
     feature_service* _service = nullptr;
     sstring _name;
     bool _enabled = false;
-    mutable shared_promise<> _pr;
     mutable signal_type _s;
     friend class gossiper;
 public:
@@ -78,7 +77,6 @@ public:
     friend inline std::ostream& operator<<(std::ostream& os, const feature& f) {
         return os << "{ gossip feature = " << f._name << " }";
     }
-    future<> when_enabled() const { return _pr.get_shared_future(); }
     void when_enabled(listener& callback) const {
         callback.set_connection(_s.connect(callback.get_slot()));
         if (_enabled) {

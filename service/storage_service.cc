@@ -78,8 +78,6 @@ using token = dht::token;
 using UUID = utils::UUID;
 using inet_address = gms::inet_address;
 
-using namespace std::chrono_literals;
-
 extern logging::logger cdc_log;
 
 namespace service {
@@ -91,18 +89,6 @@ static const sstring SSTABLE_FORMAT_PARAM_NAME = "sstable_format";
 distributed<storage_service> _the_storage_service;
 
 
-timeout_config make_timeout_config(const db::config& cfg) {
-    timeout_config tc;
-    tc.read_timeout = cfg.read_request_timeout_in_ms() * 1ms;
-    tc.write_timeout = cfg.write_request_timeout_in_ms() * 1ms;
-    tc.range_read_timeout = cfg.range_request_timeout_in_ms() * 1ms;
-    tc.counter_write_timeout = cfg.counter_write_request_timeout_in_ms() * 1ms;
-    tc.truncate_timeout = cfg.truncate_request_timeout_in_ms() * 1ms;
-    tc.cas_timeout = cfg.cas_contention_timeout_in_ms() * 1ms;
-    tc.other_timeout = cfg.request_timeout_in_ms() * 1ms;
-    return tc;
-}
-
 int get_generation_number() {
     using namespace std::chrono;
     auto now = high_resolution_clock::now().time_since_epoch();
@@ -110,14 +96,13 @@ int get_generation_number() {
     return generation_number;
 }
 
-storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>& auth_service, sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
+storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>& auth_service, sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::token_metadata& tm, sharded<qos::service_level_controller>& sl_controller, bool for_testing)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
         , _db(db)
         , _gossiper(gossiper)
         , _auth_service(auth_service)
-        , _cql_config(cql_config)
         , _mnotifier(mn)
         , _sl_controller(sl_controller)
         , _service_memory_total(config.available_memory / 10)
@@ -2215,7 +2200,7 @@ future<> storage_service::start_rpc_server() {
             return make_ready_future<>();
         }
 
-        ss._thrift_server = distributed<thrift_server>();
+        ss._thrift_server = std::make_unique<distributed<thrift_server>>();
         auto tserver = &*ss._thrift_server;
 
         auto& cfg = ss._db.local().get_config();
@@ -2228,7 +2213,7 @@ future<> storage_service::start_rpc_server() {
         tsc.timeout_config = make_timeout_config(cfg);
         tsc.max_request_size = cfg.thrift_max_message_length_in_mb() * (uint64_t(1) << 20);
         return gms::inet_address::lookup(addr, family, preferred).then([&ss, tserver, addr, port, keepalive, tsc] (gms::inet_address ip) {
-            return tserver->start(std::ref(ss._db), std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), tsc).then([tserver, port, addr, ip, keepalive] {
+            return tserver->start(std::ref(ss._db), std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), tsc).then([tserver, port, addr, ip, keepalive] {
                 // #293 - do not stop anything
                 //engine().at_exit([tserver] {
                 //    return tserver->stop();
@@ -2242,8 +2227,7 @@ future<> storage_service::start_rpc_server() {
 }
 
 future<> storage_service::do_stop_rpc_server() {
-    return do_with(std::move(_thrift_server), [this] (std::optional<distributed<thrift_server>>& tserver) {
-        _thrift_server = std::nullopt;
+    return do_with(std::move(_thrift_server), [this] (std::unique_ptr<distributed<thrift_server>>& tserver) {
         if (tserver) {
             return tserver->stop().then([] {
                 slogger.info("Thrift server stopped");
@@ -2271,7 +2255,7 @@ future<> storage_service::start_native_transport() {
             return make_ready_future<>();
         }
         return seastar::async([&ss] {
-            ss._cql_server = distributed<cql_transport::cql_server>();
+            ss._cql_server = std::make_unique<distributed<cql_transport::cql_server>>();
             auto cserver = &*ss._cql_server;
 
             auto& cfg = ss._db.local().get_config();
@@ -2291,7 +2275,7 @@ future<> storage_service::start_native_transport() {
             cql_server_smp_service_group_config.max_nonlocal_requests = 5000;
             cql_server_config.bounce_request_smp_service_group = create_smp_service_group(cql_server_smp_service_group_config).get0();
             seastar::net::inet_address ip = gms::inet_address::lookup(addr, family, preferred).get0();
-            cserver->start(std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._cql_config), std::ref(ss._mnotifier), cql_server_config, std::ref(ss._sl_controller)).get();
+            cserver->start(std::ref(cql3::get_query_processor()), std::ref(ss._auth_service), std::ref(ss._mnotifier), cql_server_config, std::ref(ss._sl_controller)).get();
             struct listen_cfg {
                 socket_address addr;
                 std::shared_ptr<seastar::tls::credentials_builder> cred;
@@ -2342,8 +2326,7 @@ future<> storage_service::start_native_transport() {
 }
 
 future<> storage_service::do_stop_native_transport() {
-    return do_with(std::move(_cql_server), [this] (std::optional<distributed<cql_transport::cql_server>>& cserver) {
-        _cql_server = std::nullopt;
+    return do_with(std::move(_cql_server), [this] (std::unique_ptr<distributed<cql_transport::cql_server>>& cserver) {
         if (cserver) {
             // FIXME: cql_server::stop() doesn't kill existing connections and wait for them
             return set_cql_ready(false).then([&cserver] {
@@ -3395,10 +3378,10 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
 }
 
 future<> init_storage_service(sharded<abort_source>& abort_source, distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
-        sharded<cql3::cql_config>& cql_config, sharded<db::system_distributed_keyspace>& sys_dist_ks,
+        sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
         storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::token_metadata>& tm, sharded<qos::service_level_controller>& sl_controller) {
-    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(auth_service), std::ref(cql_config), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(tm), std::ref(sl_controller));
+    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(tm), std::ref(sl_controller));
 }
 
 future<> deinit_storage_service() {

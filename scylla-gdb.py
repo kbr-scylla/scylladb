@@ -382,7 +382,13 @@ class std_list:
         self._dereference_node = std_list._make_dereference_func(self.ref.type.strip_typedefs().template_argument(0))
 
     def __len__(self):
-        return int(self.ref['_M_impl']['_M_node']['_M_size'])
+        try:
+            return int(self.ref['_M_impl']['_M_node']['_M_size'])
+        except gdb.error:
+            i = 0
+            for _ in self:
+                i += 1
+            return i
 
     def __nonzero__(self):
         return self.__len__() > 0
@@ -634,7 +640,12 @@ def list_unordered_set(map, cache=True):
 def get_text_range():
     try:
         vptr_type = gdb.lookup_type('uintptr_t').pointer()
-        reactor_backend = gdb.parse_and_eval('&seastar::local_engine->_backend')
+        reactor_backend = gdb.parse_and_eval('seastar::local_engine->_backend')
+        # 2019.1 has value member, >=3.0 has std::unique_ptr<>
+        if reactor_backend.type.strip_typedefs().name.startswith('std::unique_ptr<'):
+            reactor_backend = std_unique_ptr(reactor_backend).get()
+        else:
+            reactor_backend = gdb.parse_and_eval('&seastar::local_engine->_backend')
         known_vptr = int(reactor_backend.reinterpret_cast(vptr_type).dereference())
     except Exception as e:
         gdb.write("get_text_range(): Falling back to locating .rodata section because lookup to reactor backend to use as known vptr failed: {}\n".format(e))
@@ -1870,9 +1881,9 @@ def resolve(addr, cache=True, startswith=None):
 
     infosym = gdb.execute('info symbol 0x%x' % (addr), False, True)
     if infosym.startswith('No symbol'):
-        name = None
-    else:
-        name = infosym[:infosym.find('in section')]
+        return None
+
+    name = infosym[:infosym.find('in section')]
     if startswith and not name.startswith(startswith):
         return None
     if cache:
@@ -2843,7 +2854,7 @@ class scylla_sstables(gdb.Command):
             )
 
     def invoke(self, arg, from_tty):
-        parser = argparse.ArgumentParser(description="scylla generate-object-graph")
+        parser = argparse.ArgumentParser(description="scylla sstables")
         parser.add_argument("-t", "--tables", action="store_true", help="Only consider sstables attached to tables")
         try:
             args = parser.parse_args(arg.split())

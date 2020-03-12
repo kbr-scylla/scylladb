@@ -517,6 +517,16 @@ async def run_test(test, options):
         process = None
         stdout = None
         logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
+        UBSAN_OPTIONS = [
+            "halt_on_error=1",
+            "abort_on_error=1",
+            os.getenv("UBSAN_OPTIONS"),
+        ]
+        ASAN_OPTIONS = [
+            "disable_coredump=0",
+            "abort_on_error=1",
+            os.getenv("ASAN_OPTIONS"),
+        ]
         try:
             process = await asyncio.create_subprocess_exec(
                 test.path,
@@ -525,8 +535,8 @@ async def run_test(test, options):
                 stdout=log,
                 env=dict(os.environ,
                          SEASTAR_LDAP_PORT=str(ldap_port),
-                         UBSAN_OPTIONS='halt_on_error=1:abort_on_error=1',
-                         ASAN_OPTIONS='disable_coredump=0:abort_on_error=1',
+                         UBSAN_OPTIONS=":".join(filter(None, UBSAN_OPTIONS)),
+                         ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
                          ),
                 preexec_fn=os.setsid,
             )

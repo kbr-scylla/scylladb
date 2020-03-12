@@ -541,7 +541,10 @@ int main(int ac, char** av) {
             gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg);
 
             feature_service.start(fcfg).get();
-            // FIXME: feature_service.stop(), when we fix up shutdown
+            auto stop_feature_service = defer_verbose_shutdown("feature service", [&feature_service] {
+                feature_service.stop().get();
+            });
+
             dht::set_global_partitioner(cfg->partitioner(), cfg->murmur3_partitioner_ignore_msb_bits());
             auto make_sched_group = [&] (sstring name, unsigned shares) {
                 if (cfg->cpu_scheduler()) {
@@ -717,7 +720,7 @@ int main(int ac, char** av) {
             supervisor::notify("initializing storage service");
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            service::init_storage_service(stop_signal.as_sharded_abort_source(), db, gossiper, auth_service, cql_config, sys_dist_ks, view_update_generator, feature_service, sscfg, mm_notifier, token_metadata, sl_controller).get();
+            service::init_storage_service(stop_signal.as_sharded_abort_source(), db, gossiper, auth_service, sys_dist_ks, view_update_generator, feature_service, sscfg, mm_notifier, token_metadata, sl_controller).get();
             supervisor::notify("starting per-shard database core");
 
             // Note: changed from using a move here, because we want the config object intact.
@@ -834,7 +837,7 @@ int main(int ac, char** av) {
             });
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), qp_mcfg, std::ref(sl_controller)).get();
+            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
             supervisor::notify("initializing batchlog manager");
@@ -1196,7 +1199,7 @@ int main(int ac, char** av) {
             startlog.info("Signal received; shutting down");
 	    // At this point, all objects destructors and all shutdown hooks registered with defer() are executed
           } catch (...) {
-            startlog.info("Startup failed: {}", std::current_exception());
+            startlog.error("Startup failed: {}", std::current_exception());
             // We should be returning 1 here, but the system is not yet prepared for orderly rollback of main() objects
             // and thread_local variables.
             _exit(1);
