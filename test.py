@@ -507,13 +507,13 @@ async def run_test(test, options):
         finject_desc = None
         cleanup_fn, finject_desc = await test.setup(ldap_port, options)
 
-        def report_error(error):
+        def report_error(error, failure_injection_desc = None):
             msg = "=== TEST.PY SUMMARY START ===\n"
             msg += "{}\n".format(error)
             msg += "=== TEST.PY SUMMARY END ===\n"
-            log.write(msg.encode(encoding="UTF-8"))
             if failure_injection_desc is not None:
-                print('failure injection: {}'.format(failure_injection_desc), file=file)
+                msg += 'failure injection: {}'.format(failure_injection_desc)
+            log.write(msg.encode(encoding="UTF-8"))
         process = None
         stdout = None
         logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
@@ -561,7 +561,7 @@ async def run_test(test, options):
                 print(test.name, end=" ")
                 report_error("Test was cancelled")
         except Exception as e:
-            report_error("Failed to run the test:\n{e}".format(e=e))
+            report_error("Failed to run the test:\n{e}".format(e=e), finject_desc)
         finally:
             if cleanup_fn is not None:
                 cleanup_fn()
