@@ -39,10 +39,6 @@ static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
 
 }
 
-namespace dht {
-    extern std::unique_ptr<i_partitioner> default_partitioner;
-}
-
 static std::vector<std::pair<sstring, dht::token>> token_generation_for_shard(unsigned tokens_to_generate, unsigned shard,
         unsigned ignore_msb = 0, unsigned smp_count = smp::count) {
     unsigned tokens = 0;
@@ -50,12 +46,12 @@ static std::vector<std::pair<sstring, dht::token>> token_generation_for_shard(un
     std::vector<std::pair<sstring, dht::token>> key_and_token_pair;
 
     key_and_token_pair.reserve(tokens_to_generate);
-    dht::default_partitioner = std::make_unique<dht::murmur3_partitioner>(smp_count, ignore_msb);
+    auto partitioner = std::make_unique<dht::murmur3_partitioner>(smp_count, ignore_msb);
 
     while (tokens < tokens_to_generate) {
         sstring key = to_sstring(key_id++);
-        dht::token token = create_token_from_key(*dht::default_partitioner, key);
-        if (shard != dht::global_partitioner().shard_of(token)) {
+        dht::token token = create_token_from_key(*partitioner, key);
+        if (shard != partitioner->shard_of(token)) {
             continue;
         }
         tokens++;
@@ -81,7 +77,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto builder = schema_builder("tests", "incremental_compaction_test")
                 .with_column("id", utf8_type, column_kind::partition_key)
-                .with_column("value", int32_type);
+                .with_column("value", int32_type)
+                .with_partitioner("org.apache.cassandra.dht.Murmur3Partitioner", smp::count, 0);
         auto s = builder.build();
 
         auto tmp = make_lw_shared<tmpdir>();

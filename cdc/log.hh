@@ -40,6 +40,7 @@
 
 #include "exceptions/exceptions.hh"
 #include "timestamp.hh"
+#include "tracing/trace_state.hh"
 #include "cdc_options.hh"
 #include "utils/UUID.hh"
 
@@ -93,7 +94,8 @@ public:
     // returned to be invoked post the mutation query.
     future<std::tuple<std::vector<mutation>, result_callback>> augment_mutation_call(
         lowres_clock::time_point timeout,
-        std::vector<mutation>&& mutations
+        std::vector<mutation>&& mutations,
+        tracing::trace_state_ptr tr_state
         );
     bool needs_cdc_augmentation(const std::vector<mutation>&) const;
 };
@@ -126,6 +128,7 @@ enum class operation : int8_t {
     // enum decl, so don't change the constant values (or the datatype).
     pre_image = 0, update = 1, insert = 2, row_delete = 3, partition_delete = 4,
     range_delete_start_inclusive = 5, range_delete_start_exclusive = 6, range_delete_end_inclusive = 7, range_delete_end_exclusive = 8,
+    post_image = 9,
 };
 
 bool is_log_for_some_table(const sstring& ks_name, const std::string_view& table_name);

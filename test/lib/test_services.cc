@@ -25,7 +25,6 @@
 #include "db/system_distributed_keyspace.hh"
 #include "db/view/view_update_generator.hh"
 #include "dht/i_partitioner.hh"
-#include "dht/murmur3_partitioner.hh"
 #include "gms/feature_service.hh"
 #include "gms/gossiper.hh"
 #include "message/messaging_service.hh"
@@ -55,7 +54,7 @@ public:
         _abort_source.start().get();
         _token_metadata.start().get();
         _mnotif.start().get();
-        _feature_service.start().get();
+        _feature_service.start(gms::feature_config_from_db_config(_cfg)).get();
         _gossiper.start(std::ref(_abort_source), std::ref(_feature_service), std::ref(_token_metadata), std::ref(_cfg)).get();
         _sl_controller.start(qos::service_level_options{1000}).get();
         netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000, false).get();
@@ -105,7 +104,7 @@ static const sstring some_column_family("cf");
 
 db::nop_large_data_handler nop_lp_handler;
 db::config test_db_config;
-gms::feature_service test_feature_service;
+gms::feature_service test_feature_service(gms::feature_config_from_db_config(test_db_config));
 thread_local sstables::sstables_manager test_sstables_manager(nop_lp_handler, test_db_config, test_feature_service);
 
 column_family::config column_family_test_config() {

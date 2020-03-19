@@ -89,6 +89,7 @@ void migration_manager::init_messaging_service()
         _feature_listeners.push_back(_feat.cluster_supports_view_virtual_columns().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_digest_insensitive_to_expiry().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_cdc().when_enabled(update_schema));
+        _feature_listeners.push_back(_feat.cluster_supports_per_table_partitioners().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_in_memory_tables().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_xxhash_digest_algorithm().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_range_tombstones().when_enabled(update_schema));
@@ -104,11 +105,11 @@ void migration_manager::init_messaging_service()
         auto f = make_ready_future<>();
         if (cm) {
             f = do_with(std::move(*cm), get_local_shared_storage_proxy(), [src] (const std::vector<canonical_mutation>& mutations, shared_ptr<storage_proxy>& p) {
-                return service::get_local_migration_manager().merge_schema_from(src, mutations);
+                return service::get_local_migration_manager().merge_schema_in_background(src, mutations);
             });
         } else {
             f = do_with(std::move(fm), get_local_shared_storage_proxy(), [src] (const std::vector<frozen_mutation>& mutations, shared_ptr<storage_proxy>& p) {
-                return service::get_local_migration_manager().merge_schema_from(src, mutations);
+                return service::get_local_migration_manager().merge_schema_in_background(src, mutations);
             });
         }
         // Start a new fiber.

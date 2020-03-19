@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <boost/range/iterator_range.hpp>
@@ -628,6 +629,9 @@ private:
         // The flag is not stored in the schema mutation and does not affects schema digest.
         // It is set locally on a system tables that should be extra durable
         bool _wait_for_sync = false; // true if all writes using this schema have to be synced immediately by commitlog
+        // Partitioner is not stored in the schema mutation and does not affect
+        // schema digest. It is also not set locally on a schema tables.
+        std::reference_wrapper<const dht::i_partitioner> _partitioner;
         bool _in_memory = false;
     };
     raw_schema _raw;
@@ -807,7 +811,9 @@ public:
         return _raw._caching_options;
     }
 
+    static void set_default_partitioner(const sstring& class_name, unsigned ignore_msb = 0);
     const dht::i_partitioner& get_partitioner() const;
+    bool has_custom_partitioner() const;
 
     bool is_in_memory() const {
         return _raw._in_memory;
@@ -846,6 +852,8 @@ public:
     const_iterator_range_type static_columns() const;
     // Returns a range of column definitions
     const_iterator_range_type regular_columns() const;
+    // Returns a range of column definitions
+    const_iterator_range_type columns(column_kind) const;
     // Returns a range of column definitions
 
     typedef boost::range::joined_range<const_iterator_range_type, const_iterator_range_type>

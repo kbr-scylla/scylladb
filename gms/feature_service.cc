@@ -53,6 +53,7 @@ constexpr std::string_view features::CDC = "CDC";
 constexpr std::string_view features::NONFROZEN_UDTS = "NONFROZEN_UDTS";
 constexpr std::string_view features::HINTED_HANDOFF_SEPARATE_CONNECTION = "HINTED_HANDOFF_SEPARATE_CONNECTION";
 constexpr std::string_view features::LWT = "LWT";
+constexpr std::string_view features::PER_TABLE_PARTITIONERS = "PER_TABLE_PARTITIONERS";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 
 static logging::logger logger("features");
@@ -85,11 +86,12 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _nonfrozen_udts(*this, features::NONFROZEN_UDTS)
         , _hinted_handoff_separate_connection(*this, features::HINTED_HANDOFF_SEPARATE_CONNECTION)
         , _lwt_feature(*this, features::LWT)
+        , _per_table_partitioners_feature(*this, features::PER_TABLE_PARTITIONERS)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES) {
 }
 
 feature_config feature_config_from_db_config(db::config& cfg) {
-    feature_config fcfg;
+    feature_config fcfg = {};
 
     if (cfg.enable_sstables_mc_format()) {
         fcfg.enable_sstables_mc_format = true;
@@ -163,6 +165,7 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::NONFROZEN_UDTS,
         gms::features::UNBOUNDED_RANGE_TOMBSTONES,
         gms::features::HINTED_HANDOFF_SEPARATE_CONNECTION,
+        gms::features::PER_TABLE_PARTITIONERS,
         gms::features::IN_MEMORY_TABLES,
     };
 
@@ -224,6 +227,7 @@ db::schema_features feature_service::cluster_schema_features() const {
     f.set_if<db::schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY>(bool(_digest_insensitive_to_expiry));
     f.set_if<db::schema_feature::COMPUTED_COLUMNS>(bool(_computed_columns));
     f.set_if<db::schema_feature::CDC_OPTIONS>(bool(_cdc_feature));
+    f.set_if<db::schema_feature::PER_TABLE_PARTITIONERS>(bool(_per_table_partitioners_feature));
     // We wish to be able to migrate from 2.3 and 3.0, as well as enterprise-2018.1.
     // So we set the IN_MEMORY_TABLES feature if either the cluster feature IN_MEMORY_TABLES is present
     // (indicating 2019.1 or later) or if the cluster XXHASH feature is not present (indicating enterprise-2018.1).
@@ -269,6 +273,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_nonfrozen_udts),
         std::ref(_hinted_handoff_separate_connection),
         std::ref(_lwt_feature),
+        std::ref(_per_table_partitioners_feature),
         std::ref(_in_memory_tables),
     })
     {

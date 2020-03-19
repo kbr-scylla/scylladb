@@ -328,6 +328,10 @@ select_statement::do_execute(service::storage_proxy& proxy,
     auto key_ranges = _restrictions->get_partition_key_ranges(options);
 
     if (db::is_serial_consistency(options.get_consistency())) {
+        if (key_ranges.size() != 1 || !query::is_single_partition(key_ranges.front())) {
+             throw exceptions::invalid_request_exception(
+                     "SERIAL/LOCAL_SERIAL consistency may only be requested for one partition at a time");
+        }
         unsigned shard = dht::shard_of(*_schema, key_ranges[0].start()->value().as_decorated_key().token());
         if (engine().cpu_id() != shard) {
             proxy.get_stats().replica_cross_shard_ops++;
@@ -1243,7 +1247,7 @@ void select_statement::maybe_jsonize_select_clause(database& db, schema_ptr sche
             _select_clause.reserve(schema->all_columns().size());
             for (const column_definition& column_def : schema->all_columns_in_select_order()) {
                 _select_clause.push_back(make_shared<selection::raw_selector>(
-                        make_shared<column_identifier::raw>(column_def.name_as_text(), true), nullptr));
+                        ::make_shared<column_identifier::raw>(column_def.name_as_text(), true), nullptr));
             }
         }
 

@@ -545,7 +545,7 @@ int main(int ac, char** av) {
                 feature_service.stop().get();
             });
 
-            dht::set_global_partitioner(cfg->partitioner(), cfg->murmur3_partitioner_ignore_msb_bits());
+            schema::set_default_partitioner(cfg->partitioner(), cfg->murmur3_partitioner_ignore_msb_bits());
             auto make_sched_group = [&] (sstring name, unsigned shares) {
                 if (cfg->cpu_scheduler()) {
                     return seastar::create_scheduling_group(name, shares).get0();
@@ -1067,10 +1067,12 @@ int main(int ac, char** av) {
 
             audit::audit::start_audit(*cfg).get();
 
-            supervisor::notify("starting native transport");
-            with_scheduling_group(dbcfg.statement_scheduling_group, [] {
-                return service::get_local_storage_service().start_native_transport();
-            }).get();
+            if (cfg->start_native_transport()) {
+                supervisor::notify("starting native transport");
+                with_scheduling_group(dbcfg.statement_scheduling_group, [] {
+                    return service::get_local_storage_service().start_native_transport();
+                }).get();
+            }
             if (cfg->start_rpc()) {
                 with_scheduling_group(dbcfg.statement_scheduling_group, [] {
                     return service::get_local_storage_service().start_rpc_server();

@@ -55,7 +55,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         abort_sources.start().get();
         auto stop_abort_sources = defer([&] { abort_sources.stop().get(); });
 
-        feature_service.start().get();
+        feature_service.start(gms::feature_config_from_db_config(cfg)).get();
         sharded<qos::service_level_controller> sl_controller;
         sl_controller.start(qos::service_level_options{1000}).get();
         auto stop_sl_controller = defer([&] { sl_controller.stop().get(); });

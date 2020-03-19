@@ -13,6 +13,7 @@
 #include "schema.hh"
 #include "database_fwd.hh"
 #include "cdc/log.hh"
+#include "dht/i_partitioner.hh"
 
 struct schema_builder {
 public:
@@ -182,6 +183,9 @@ public:
         _raw._extensions = std::move(exts);
         return *this;
     }
+    const schema::extensions_map& get_extensions() const {
+        return _raw._extensions;
+    }
     schema_builder& set_compaction_strategy(sstables::compaction_strategy_type type) {
         _raw._compaction_strategy = type;
         return *this;
@@ -216,6 +220,10 @@ public:
         _raw._wait_for_sync = sync;
         return *this;
     }
+
+    schema_builder& with_partitioner(sstring name, unsigned shard_count, unsigned sharding_ignore_msb_bits);
+    // Use only for tests!!!
+    schema_builder& with_partitioner_for_tests_only(const dht::i_partitioner&);
 
     schema_builder& set_in_memory(bool in_memory) {
         _raw._in_memory = in_memory;

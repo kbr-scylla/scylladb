@@ -34,6 +34,7 @@ enum class schema_feature {
     DIGEST_INSENSITIVE_TO_EXPIRY,
     COMPUTED_COLUMNS,
     CDC_OPTIONS,
+    PER_TABLE_PARTITIONERS,
     IN_MEMORY_TABLES,
 };
 
@@ -42,6 +43,7 @@ using schema_features = enum_set<super_enum<schema_feature,
     schema_feature::DIGEST_INSENSITIVE_TO_EXPIRY,
     schema_feature::COMPUTED_COLUMNS,
     schema_feature::CDC_OPTIONS,
+    schema_feature::PER_TABLE_PARTITIONERS,
     schema_feature::IN_MEMORY_TABLES
     >>;
 
