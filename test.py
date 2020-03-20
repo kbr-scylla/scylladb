@@ -386,12 +386,28 @@ class LdapTest(BoostTest):
             cmd, input='\n\n'.join(DEFAULT_ENTRIES).encode('ascii'), stderr=subprocess.STDOUT)
         # Set up the server.
         SLAPD_URLS='ldap://:{}/ ldaps://:{}/'.format(port, port + 1)
+        def can_connect(port):
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.connect(('127.0.0.1', port))
+                return True
+            except:
+                return False
+        def can_connect_to_slapd():
+            return can_connect(port) and can_connect(port + 1) and can_connect(port + 2)
         process = subprocess.Popen(['slapd', '-F', os.path.abspath(instance_path), '-h', SLAPD_URLS, '-d', '0'])
-        time.sleep(0.25) # On some systems, slapd needs a second to become available.
         def finalize():
             process.terminate()
             shutil.rmtree(instance_path)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
+        sleep_time = 0.05
+        while not can_connect_to_slapd():
+            if sleep_time > 3:
+                finalize()
+                raise Exception('Unable to connect to slapd')
+            time.sleep(sleep_time)
+            sleep_time *= 2
         return finalize, '--byte-limit={}'.format(byte_limit)
 
 class CqlTest(Test):
