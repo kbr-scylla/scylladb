@@ -53,6 +53,7 @@
 #include "db/extensions.hh"
 #include "database.hh"
 #include "gms/feature_service.hh"
+#include "db/view/view.hh"
 
 namespace cql3 {
 

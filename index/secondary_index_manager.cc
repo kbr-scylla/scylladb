@@ -36,6 +36,7 @@
 #include "db/query_context.hh"
 #include "schema_builder.hh"
 #include "database.hh"
+#include "db/view/view.hh"
 
 #include <boost/range/adaptor/map.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>

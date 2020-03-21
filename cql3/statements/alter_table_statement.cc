@@ -39,6 +39,7 @@
 #include "cql3/util.hh"
 #include "view_info.hh"
 #include "database.hh"
+#include "db/view/view.hh"
 
 namespace cql3 {
 

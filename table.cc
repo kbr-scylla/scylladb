@@ -39,6 +39,7 @@
 #include "db/system_keyspace.hh"
 #include "db/query_context.hh"
 #include "query-result-writer.hh"
+#include "db/view/view.hh"
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/range/adaptor/transformed.hpp>
@@ -2107,7 +2108,8 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
             flat_mutation_reader_from_mutations({std::move(m)}),
             std::move(existings)).then([this, base_token = std::move(base_token)] (std::vector<frozen_mutation_and_schema>&& updates) mutable {
         auto units = seastar::consume_units(*_config.view_update_concurrency_semaphore, memory_usage_of(updates));
-        return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats, *_config.cf_stats, std::move(units), service::allow_hints::yes).handle_exception([] (auto ignored) { });
+        return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats, *_config.cf_stats,
+                std::move(units), service::allow_hints::yes, db::view::wait_for_all_updates::no).handle_exception([] (auto ignored) { });
     });
 }
 
@@ -2221,7 +2223,8 @@ future<> table::populate_views(
                  units_to_consume = update_size - units_to_wait_for,
                  this] (db::timeout_semaphore_units&& units) mutable {
             units.adopt(seastar::consume_units(*_config.view_update_concurrency_semaphore, units_to_consume));
-            return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats, *_config.cf_stats, std::move(units), service::allow_hints::no);
+            return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats,
+                    *_config.cf_stats, std::move(units), service::allow_hints::no, db::view::wait_for_all_updates::yes);
         });
     });
 }
