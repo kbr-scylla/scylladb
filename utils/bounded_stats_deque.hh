@@ -27,9 +27,9 @@
 
 #pragma once
 
-namespace utils {
-
 #include <deque>
+
+namespace utils {
 
 /**
  * bounded threadsafe deque

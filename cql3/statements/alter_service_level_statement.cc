@@ -19,6 +19,12 @@ alter_service_level_statement::alter_service_level_statement(sstring service_lev
     _slo.shares = attrs->get_shares();
 }
 
+std::unique_ptr<cql3::statements::prepared_statement>
+cql3::statements::alter_service_level_statement::prepare(
+        database &db, cql_stats &stats) {
+    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<alter_service_level_statement>(*this));
+}
+
 void alter_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 

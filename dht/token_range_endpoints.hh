@@ -10,6 +10,9 @@
 
 #pragma once
 #include <vector>
+#include <seastar/core/sstring.hh>
+
+#include "seastarx.hh"
 
 namespace dht {
 struct endpoint_details {

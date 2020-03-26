@@ -11,6 +11,9 @@
 
 #pragma once
 
+#include <vector>
+#include <sys/types.h>
+
 // Single-pass range over cartesian product of vectors.
 
 // Note:

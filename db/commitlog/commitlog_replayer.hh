@@ -34,6 +34,8 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/sharded.hh>
 
+#include "seastarx.hh"
+
 class database;
 
 namespace db {

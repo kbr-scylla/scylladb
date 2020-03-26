@@ -46,6 +46,8 @@ using schema_ptr = seastar::lw_shared_ptr<const schema>;
 
 #include "timestamp.hh"
 
+#include "seastarx.hh"
+
 class mutation;
 class schema;
 

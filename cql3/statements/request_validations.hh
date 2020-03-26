@@ -34,6 +34,8 @@
 
 #include <boost/range/algorithm/count_if.hpp>
 
+#include <set>
+
 namespace cql3 {
 namespace statements {
 

@@ -35,11 +35,6 @@ uint32_t cql3::statements::authorization_statement::get_bound_terms() const {
     return 0;
 }
 
-std::unique_ptr<cql3::statements::prepared_statement> cql3::statements::authorization_statement::prepare(
-                database& db, cql_stats& stats) {
-    return std::make_unique<prepared_statement>(audit_info(), this->shared_from_this());
-}
-
 bool cql3::statements::authorization_statement::uses_function(
                 const sstring& ks_name, const sstring& function_name) const {
     return parsed_statement::uses_function(ks_name, function_name);

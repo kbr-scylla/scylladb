@@ -14,6 +14,9 @@
 #include <optional>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/reactor.hh>
+
+#include "seastarx.hh"
 
 /**
  * Joinpoint:
@@ -81,7 +84,7 @@ private:
 template<typename Func, typename T = std::result_of_t<Func()>>
 joinpoint<T> make_joinpoint(Func && f) {
     return joinpoint<T>([f = std::forward<Func>(f)] {
-        return futurize<T>::apply(f);
+        return futurize<T>::invoke(f);
     });
 }
 

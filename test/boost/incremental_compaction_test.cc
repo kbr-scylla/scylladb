@@ -39,37 +39,6 @@ static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
 
 }
 
-static std::vector<std::pair<sstring, dht::token>> token_generation_for_shard(unsigned tokens_to_generate, unsigned shard,
-        unsigned ignore_msb = 0, unsigned smp_count = smp::count) {
-    unsigned tokens = 0;
-    unsigned key_id = 0;
-    std::vector<std::pair<sstring, dht::token>> key_and_token_pair;
-
-    key_and_token_pair.reserve(tokens_to_generate);
-    auto partitioner = std::make_unique<dht::murmur3_partitioner>(smp_count, ignore_msb);
-
-    while (tokens < tokens_to_generate) {
-        sstring key = to_sstring(key_id++);
-        dht::token token = create_token_from_key(*partitioner, key);
-        if (shard != partitioner->shard_of(token)) {
-            continue;
-        }
-        tokens++;
-        key_and_token_pair.emplace_back(key, token);
-    }
-    assert(key_and_token_pair.size() == tokens_to_generate);
-
-    std::sort(key_and_token_pair.begin(),key_and_token_pair.end(), [] (auto& i, auto& j) {
-        return i.second < j.second;
-    });
-
-    return key_and_token_pair;
-}
-
-static std::vector<std::pair<sstring, dht::token>> token_generation_for_current_shard(unsigned tokens_to_generate) {
-    return token_generation_for_shard(tokens_to_generate, engine().cpu_id());
-}
-
 SEASTAR_TEST_CASE(incremental_compaction_test) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
         storage_service_for_tests ssft;

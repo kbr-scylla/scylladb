@@ -35,7 +35,11 @@
 
 #include "types.hh"
 
+#include "seastarx.hh"
+
 class user_types_metadata;
+class types_metadata;
+class keyspace_metadata;
 
 namespace db {
 namespace cql_type_parser {

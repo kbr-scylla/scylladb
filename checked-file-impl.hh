@@ -11,7 +11,10 @@
 #pragma once
 
 #include "seastar/core/file.hh"
+#include "seastar/core/reactor.hh"
 #include "utils/disk-error-handler.hh"
+
+#include "seastarx.hh"
 
 class checked_file_impl : public file_impl {
 public:

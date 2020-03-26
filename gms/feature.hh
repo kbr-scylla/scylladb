@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <any>
+
 #include <boost/signals2.hpp>
 #include <boost/signals2/dummy_mutex.hpp>
 

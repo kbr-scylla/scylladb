@@ -36,13 +36,11 @@ public:
 
 
 
-class service_level_statement : public raw::parsed_statement, public cql_statement_no_metadata, public ::enable_shared_from_this<service_level_statement> {
+class service_level_statement : public raw::parsed_statement, public cql_statement_no_metadata {
 public:
     service_level_statement() : cql_statement_no_metadata(&timeout_config::other_timeout) {}
 
     uint32_t get_bound_terms() const override;
-
-    std::unique_ptr<prepared_statement> prepare(database& db, cql_stats& stats) override;
 
     bool uses_function(const sstring& ks_name, const sstring& function_name) const override;
 

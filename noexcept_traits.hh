@@ -12,6 +12,8 @@
 #include <memory>
 #include <seastar/core/future.hh>
 
+#include "seastarx.hh"
+
 #pragma once
 
 //

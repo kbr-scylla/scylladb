@@ -31,6 +31,7 @@
 #pragma once
 
 #include "bytes.hh"
+#include "function.hh"
 #include <vector>
 
 namespace cql3 {

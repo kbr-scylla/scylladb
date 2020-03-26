@@ -230,19 +230,19 @@ def find_headers(repodir, excluded_dirs):
 
 modes = {
     'debug': {
-        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION',
-        'cxx_ld_flags': '-Wstack-usage=%s' % (1024*43),
+        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
+        'cxx_ld_flags': '-Wstack-usage=%s' % (1024*40),
     },
     'release': {
         'cxxflags': '',
-        'cxx_ld_flags': '-O3 -Wstack-usage=%s' % (1024*32),
+        'cxx_ld_flags': '-O3 -Wstack-usage=%s' % (1024*29),
     },
     'dev': {
-        'cxxflags': '-DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION',
-        'cxx_ld_flags': '-O1 -Wstack-usage=%s' % (1024*32),
+        'cxxflags': '-DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
+        'cxx_ld_flags': '-O1 -Wstack-usage=%s' % (1024*29),
     },
     'sanitize': {
-        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER',
+        'cxxflags': '-DDEBUG -DDEBUG_LSA_SANITIZER -DSCYLLA_ENABLE_ERROR_INJECTION',
         'cxx_ld_flags': '-Os -Wstack-usage=%s' % (1024*50),
     }
 }
@@ -295,6 +295,7 @@ scylla_tests = set([
     'test/boost/enum_option_test',
     'test/boost/enum_set_test',
     'test/boost/extensions_test',
+    'test/boost/error_injection_test',
     'test/boost/filtering_test',
     'test/boost/flat_mutation_reader_test',
     'test/boost/flush_queue_test',
@@ -802,6 +803,7 @@ scylla_core = (['database.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
+                'utils/error_injection.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
                 'lua.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
@@ -841,6 +843,8 @@ api = ['api/api.cc',
        'api/system.cc',
        'api/config.cc',
        'api/api-doc/config.json',
+        'api/error_injection.cc',
+        'api/api-doc/error_injection.json',
        ]
 
 alternator = [
@@ -869,6 +873,7 @@ redis = [
         'redis/abstract_command.cc',
         'redis/command_factory.cc',
         'redis/commands.cc',
+        'redis/lolwut.cc',
         ]
 
 idls = ['idl/gossip_digest.idl.hh',
@@ -994,6 +999,7 @@ for t in perf_tests:
 
 deps['test/boost/sstable_test'] += ['test/lib/sstable_utils.cc', 'test/lib/normalizing_reader.cc']
 deps['test/boost/sstable_datafile_test'] += ['test/lib/sstable_utils.cc', 'test/lib/normalizing_reader.cc']
+deps['test/boost/sstable_resharding_test'] += ['test/lib/sstable_utils.cc' ]
 deps['test/boost/mutation_reader_test'] += ['test/lib/sstable_utils.cc', 'test/lib/dummy_partitioner.cc' ]
 deps['test/boost/multishard_combining_reader_as_mutation_source_test'] += ['test/lib/sstable_utils.cc', 'test/lib/dummy_partitioner.cc' ]
 deps['test/boost/sstable_mutation_test'] += ['test/lib/sstable_utils.cc']
@@ -1578,6 +1584,12 @@ with open(buildfile_tmp, 'w') as f:
             'build {mode}-objects: phony {objs}\n'.format(
                 mode=mode,
                 objs=' '.join(compiles)
+            )
+        )
+        f.write(
+            'build {mode}-headers: phony {header_objs}\n'.format(
+                mode=mode,
+                header_objs=' '.join(["$builddir/{mode}/{hh}.o".format(mode=mode, hh=hh) for hh in headers])
             )
         )
 

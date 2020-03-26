@@ -17,6 +17,12 @@ list_service_level_statement::list_service_level_statement(sstring service_level
     _service_level(service_level), _describe_all(describe_all) {
 }
 
+std::unique_ptr<cql3::statements::prepared_statement>
+cql3::statements::list_service_level_statement::prepare(
+        database &db, cql_stats &stats) {
+    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<list_service_level_statement>(*this));
+}
+
 void list_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 

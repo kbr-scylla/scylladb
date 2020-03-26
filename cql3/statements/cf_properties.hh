@@ -29,6 +29,7 @@
 #pragma once
 
 #include "cql3/statements/cf_prop_defs.hh"
+#include "cql3/column_identifier.hh"
 
 namespace cql3 {
 

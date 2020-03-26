@@ -15,6 +15,7 @@
 #include <seastar/core/seastar.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/align.hh>
 
 #include <seastar/testing/test_case.hh>
 

@@ -96,6 +96,11 @@ void validate_cluster_support(service::storage_proxy& proxy) {
 // `create_role_statement`
 //
 
+std::unique_ptr<prepared_statement> create_role_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<create_role_statement>(*this));
+}
+
 future<> create_role_statement::grant_permissions_to_creator(const service::client_state& cs) const {
     return do_with(auth::make_role_resource(_role), [&cs](const auth::resource& r) {
         return auth::grant_applicable_permissions(
@@ -213,6 +218,11 @@ void create_role_statement::sanitize_audit_info() {
 // `alter_role_statement`
 //
 
+std::unique_ptr<prepared_statement> alter_role_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<alter_role_statement>(*this));
+}
+
 void alter_role_statement::validate(service::storage_proxy& p, const service::client_state&) const {
     validate_cluster_support(p);
 }
@@ -300,6 +310,11 @@ void alter_role_statement::sanitize_audit_info() {
 // `drop_role_statement`
 //
 
+std::unique_ptr<prepared_statement> drop_role_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<drop_role_statement>(*this));
+}
+
 void drop_role_statement::validate(service::storage_proxy& p, const service::client_state& state) const {
     validate_cluster_support(p);
 
@@ -351,6 +366,11 @@ drop_role_statement::execute(service::storage_proxy&, service::query_state& stat
 //
 // `list_roles_statement`
 //
+
+std::unique_ptr<prepared_statement> list_roles_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<list_roles_statement>(*this));
+}
 
 future<> list_roles_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
@@ -482,6 +502,11 @@ list_roles_statement::execute(service::storage_proxy&, service::query_state& sta
 // `grant_role_statement`
 //
 
+std::unique_ptr<prepared_statement> grant_role_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<grant_role_statement>(*this));
+}
+
 future<> grant_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();
 
@@ -504,6 +529,11 @@ grant_role_statement::execute(service::storage_proxy&, service::query_state& sta
 //
 // `revoke_role_statement`
 //
+
+std::unique_ptr<prepared_statement> revoke_role_statement::prepare(
+                database& db, cql_stats& stats) {
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<revoke_role_statement>(*this));
+}
 
 future<> revoke_role_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     state.ensure_not_anonymous();

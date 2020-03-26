@@ -21,6 +21,12 @@ list_service_level_attachments_statement::list_service_level_attachments_stateme
     _role_name(), _describe_all(true) {
 }
 
+std::unique_ptr<cql3::statements::prepared_statement>
+cql3::statements::list_service_level_attachments_statement::prepare(
+        database &db, cql_stats &stats) {
+    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<list_service_level_attachments_statement>(*this));
+}
+
 void list_service_level_attachments_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 

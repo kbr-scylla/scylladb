@@ -28,6 +28,7 @@
 #include <variant>
 
 #include <boost/range/algorithm/for_each.hpp>
+#include <boost/type.hpp>
 
 namespace ser {
 

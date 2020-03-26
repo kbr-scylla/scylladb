@@ -17,6 +17,12 @@ detach_service_level_statement::detach_service_level_statement(sstring role_name
     _role_name(role_name) {
 }
 
+std::unique_ptr<cql3::statements::prepared_statement>
+cql3::statements::detach_service_level_statement::prepare(
+        database &db, cql_stats &stats) {
+    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<detach_service_level_statement>(*this));
+}
+
 void detach_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {
 }
 

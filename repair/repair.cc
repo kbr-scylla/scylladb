@@ -648,6 +648,10 @@ get_partitioner_for_tables(seastar::sharded<database>& db, const sstring& keyspa
         }
         last_s = std::move(s);
     }
+    if (!last_s) {
+        throw std::runtime_error(format("Failed to find partitioner for keyspace={}, tables={}, no table in this keyspace",
+                keyspace, names));
+    }
     return last_s->get_partitioner();
 }
 
@@ -1518,6 +1522,10 @@ future<> sync_data_using_repair(seastar::sharded<database>& db,
         rlogger.info("repair id {} to sync data for keyspace={}, status=started", id, keyspace);
         return repair_tracker().run(id, [id, &db, keyspace, ranges = std::move(ranges), neighbors = std::move(neighbors)] () mutable {
             auto cfs = list_column_families(db.local(), keyspace);
+            if (cfs.empty()) {
+                rlogger.warn("repair id {} to sync data for keyspace={}, no table in this keyspace", id, keyspace);
+                return make_ready_future<>();
+            }
             std::vector<future<>> repair_results;
             repair_results.reserve(smp::count);
             for (auto shard : boost::irange(unsigned(0), smp::count)) {
@@ -1548,7 +1556,11 @@ future<> sync_data_using_repair(seastar::sharded<database>& db,
             });
         }).then([id, keyspace] {
             rlogger.info("repair id {} to sync data for keyspace={}, status=succeeded", id, keyspace);
-        }).handle_exception([id, keyspace] (std::exception_ptr ep) {
+        }).handle_exception([&db, id, keyspace] (std::exception_ptr ep) {
+            if (!db.local().has_keyspace(keyspace)) {
+                rlogger.warn("repair id {} to sync data for keyspace={}, status=failed: keyspace does not exist any more, ignoring it, {}", id, keyspace, ep);
+                return make_ready_future<>();
+            }
             rlogger.info("repair id {} to sync data for keyspace={}, status=failed: {}", id, keyspace,  ep);
             return make_exception_future<>(ep);
         });
