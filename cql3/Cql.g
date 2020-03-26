@@ -646,7 +646,7 @@ batchStatement returns [shared_ptr<cql3::statements::raw::batch_statement> expr]
     : K_BEGIN
       ( K_UNLOGGED { type = btype::UNLOGGED; } | K_COUNTER { type = btype::COUNTER; } )?
       K_BATCH ( usingClause[attrs] )?
-          ( s=batchStatementObjective ';'? { $s.statement->add_raw(sstring{$s.text}); statements.push_back(std::move($s.statement)); } )*
+          ( s=batchStatementObjective ';'? { statements.push_back(std::move(s)); } )*
       K_APPLY K_BATCH
       {
           $expr = ::make_shared<cql3::statements::raw::batch_statement>(type, std::move(attrs), std::move(statements));
