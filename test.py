@@ -356,7 +356,7 @@ def can_connect(port):
 def try_something_backoff(something):
     sleep_time = 0.05
     while not something():
-        if sleep_time > 3:
+        if sleep_time > 30:
             return False
         time.sleep(sleep_time)
         sleep_time *= 2
