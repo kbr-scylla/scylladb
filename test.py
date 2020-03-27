@@ -844,6 +844,11 @@ async def main():
     try:
         if [t for t in TestSuite.tests() if isinstance(t, LdapTest)]:
             tp_server = subprocess.Popen('toxiproxy-server', stderr=subprocess.DEVNULL)
+            def can_connect_to_toxiproxy():
+                return can_connect(8474)
+            if not try_something_backoff(can_connect_to_toxiproxy):
+                raise Exception('Could not connect to toxiproxy')
+
         await run_all_tests(signaled, options)
     finally:
         if tp_server is not None:
