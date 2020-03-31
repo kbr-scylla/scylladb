@@ -52,6 +52,7 @@ class ldap_connection {
     seastar::future<> _outstanding_write; ///< Captures Seastar write continuation.
     /// When LDAP yields a result for one of these msgids, forward it to the corresponding promise:
     std::unordered_map<int, seastar::promise<ldap_msg_ptr>> _msgid_to_promise;
+    bool _currently_polling; ///< True iff poll_results() is in progress.
 
     /// Deallocates an LDAP structure.
     struct ldap_deleter {

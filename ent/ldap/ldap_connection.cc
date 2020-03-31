@@ -76,7 +76,8 @@ ldap_connection::ldap_connection(seastar::connected_socket&& socket) :
     , _status(status::up)
     , _read_consumer(now())
     , _read_in_progress(false)
-    , _outstanding_write(now()) {
+    , _outstanding_write(now())
+    , _currently_polling(false) {
     // Proactively initiate Seastar read, before ldap_connection::read() is first called.
     read_ahead();
 
@@ -392,6 +393,20 @@ void ldap_connection::poll_results() {
         mylog.debug("poll_results: _ldap is null, punting");
         return;
     }
+    if (_currently_polling) {
+        // This happens when ldap_result() calls read_ahead() and runs its inner continuation immediately.
+        mylog.debug("poll_results: _currently_polling somewhere up the call-stack, punting");
+        return;
+    }
+
+    // Ensure that _currently_polling is true until we return.
+    class flag_guard {
+        bool& _flag;
+      public:
+        flag_guard(bool& flag) : _flag(flag) { flag = true; }
+        ~flag_guard() { _flag = false; }
+    } guard(_currently_polling);
+
     LDAPMessage *result;
     while (!_read_buffer.empty() && _status == status::up) {
         static timeval zero_duration{};
