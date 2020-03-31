@@ -551,6 +551,14 @@ async def run_test(test, options):
             "abort_on_error=1",
             os.getenv("ASAN_OPTIONS"),
         ]
+        if options.manual_execution:
+            print('Please run the following shell command, then press <enter>:')
+            print('SEASTAR_LDAP_PORT={} {}'.format(
+                ldap_port, ' '.join([shlex.quote(e) for e in [test.path, *test.args]])))
+            input('-- press <enter> to continue --')
+            if cleanup_fn is not None:
+                cleanup_fn()
+            return True
         try:
             process = await asyncio.create_subprocess_exec(
                 test.path,
@@ -832,9 +840,10 @@ async def main():
 
     open_log(options.tmpdir)
     find_tests(options)
-    if options.manual_execution:
-        print('--manual-execution is not functional')
-        sys.exit(1)
+    if options.manual_execution and TestSuite.test_count() > 1:
+        print('--manual-execution only supports running a single test, but multiple selected: {}'.format(
+            [t.path for t in TestSuite.tests()][:3])) # Print whole t.path; same shortname may be in different dirs.
+        return 1
 
     signaled = asyncio.Event()
 
