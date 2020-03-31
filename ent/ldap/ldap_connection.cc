@@ -410,7 +410,7 @@ void ldap_connection::poll_results() {
                 _msgid_to_promise.erase(found);
             }
         } else if (status < 0) {
-            mylog.error("poll_results: ldap_result returned status {}", status);
+            mylog.error("poll_results: ldap_result returned status {}, error: {}", status, get_error());
             set_status(status::err);
         }
     }
