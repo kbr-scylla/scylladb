@@ -171,6 +171,7 @@ public:
     const schema_ptr& schema() {
         return _schema;
     }
+    // called only when all replicas replied
     virtual void release_mutation() = 0;
 };
 
@@ -216,7 +217,7 @@ public:
         if (m) {
             tracing::trace(tr_state, "Sending a mutation to /{}", ep);
             return ms.send_mutation(netw::messaging_service::msg_addr{ep, 0}, timeout, *m,
-                                    std::move(forward), utils::fb_utilities::get_broadcast_address(), engine().cpu_id(),
+                                    std::move(forward), utils::fb_utilities::get_broadcast_address(), this_shard_id(),
                                     response_id, tracing::make_trace_info(tr_state));
         }
         sp.got_response(response_id, ep, std::nullopt);
@@ -263,7 +264,7 @@ public:
         tracing::trace(tr_state, "Sending a mutation to /{}", ep);
         auto& ms = netw::get_local_messaging_service();
         return ms.send_mutation(netw::messaging_service::msg_addr{ep, 0}, timeout, *_mutation,
-                std::move(forward), utils::fb_utilities::get_broadcast_address(), engine().cpu_id(),
+                std::move(forward), utils::fb_utilities::get_broadcast_address(), this_shard_id(),
                 response_id, tracing::make_trace_info(tr_state));
     }
     virtual bool is_shared() override {
@@ -293,16 +294,17 @@ public:
         tracing::trace(tr_state, "Sending a hint to /{}", ep);
         auto& ms = netw::get_local_messaging_service();
         return ms.send_hint_mutation(netw::messaging_service::msg_addr{ep, 0}, timeout, *_mutation,
-                std::move(forward), utils::fb_utilities::get_broadcast_address(), engine().cpu_id(),
+                std::move(forward), utils::fb_utilities::get_broadcast_address(), this_shard_id(),
                 response_id, tracing::make_trace_info(tr_state));
     }
 };
 
 class cas_mutation : public mutation_holder {
     lw_shared_ptr<paxos::proposal> _proposal;
+    shared_ptr<paxos_response_handler> _handler;
 public:
-    explicit cas_mutation(paxos::proposal proposal , schema_ptr s)
-            : _proposal(make_lw_shared<paxos::proposal>(std::move(proposal))) {
+    explicit cas_mutation(paxos::proposal proposal, schema_ptr s, shared_ptr<paxos_response_handler> handler)
+            : _proposal(make_lw_shared<paxos::proposal>(std::move(proposal))), _handler(std::move(handler)) {
         _size = _proposal->update.representation().size();
         _schema = std::move(s);
     }
@@ -321,13 +323,17 @@ public:
         auto& ms = netw::get_local_messaging_service();
         return ms.send_paxos_learn(netw::messaging_service::msg_addr{ep, 0}, timeout,
                                 *_proposal, std::move(forward), utils::fb_utilities::get_broadcast_address(),
-                                engine().cpu_id(), response_id, tracing::make_trace_info(tr_state));
+                                this_shard_id(), response_id, tracing::make_trace_info(tr_state));
     }
     virtual bool is_shared() override {
         return true;
     }
     virtual void release_mutation() override {
-        _proposal.release();
+        // The handler will be set for "learn", but not for PAXOS repair
+        // since repair may not include all replicas
+        if (_handler) {
+            _handler->prune(_proposal->ballot);
+        }
     }
 };
 
@@ -1184,6 +1190,12 @@ future<bool> paxos_response_handler::accept_proposal(const paxos::proposal& prop
     return f;
 }
 
+// debug output in mutate_internal needs this
+std::ostream& operator<<(std::ostream& os, const paxos_response_handler& h) {
+    os << "paxos_response_handler{" << h.id() << "}";
+    return os;
+}
+
 // This function implements learning stage of Paxos protocol
 future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool allow_hints) {
     tracing::trace(tr_state, "learn_decision: committing {} with cl={}", decision, _cl_for_learn);
@@ -1219,10 +1231,39 @@ future<> paxos_response_handler::learn_decision(paxos::proposal decision, bool a
     }
 
     // Path for the "base" mutations
-    std::array<std::tuple<paxos::proposal, schema_ptr, dht::token>, 1> m{std::make_tuple(std::move(decision), _schema, _key.token())};
+    std::array<std::tuple<paxos::proposal, schema_ptr, shared_ptr<paxos_response_handler>, dht::token>, 1> m{std::make_tuple(std::move(decision), _schema, shared_from_this(), _key.token())};
     future<> f_lwt = _proxy->mutate_internal(std::move(m), _cl_for_learn, false, tr_state, _permit, _timeout);
 
     return when_all_succeed(std::move(f_cdc), std::move(f_lwt));
+}
+
+void paxos_response_handler::prune(utils::UUID ballot) {
+    if (_has_dead_endpoints) {
+        return;
+    }
+    if ( _proxy->get_stats().cas_now_pruning >= pruning_limit) {
+        _proxy->get_stats().cas_coordinator_dropped_prune++;
+        return;
+    }
+     _proxy->get_stats().cas_now_pruning++;
+    _proxy->get_stats().cas_prune++;
+    // running in the background, but the amount of the bg job is limited by pruning_limit
+    // it is waited by holding shared pointer to storage_proxy which guaranties
+    // that storage_proxy::stop() will wait for this to complete
+    (void)parallel_for_each(_live_endpoints, [this, ballot] (gms::inet_address peer) mutable {
+        return futurize_apply([&] {
+            if (fbu::is_me(peer)) {
+                tracing::trace(tr_state, "prune: prune {} locally", ballot);
+                return paxos::paxos_state::prune(_schema, _key.key(), ballot, _timeout, tr_state);
+            } else {
+                tracing::trace(tr_state, "prune: send prune of {} to {}", ballot, peer);
+                netw::messaging_service& ms = netw::get_local_messaging_service();
+                return ms.send_paxos_prune(peer, _timeout, _schema->version(), _key.key(), ballot, tracing::make_trace_info(tr_state));
+            }
+        });
+    }).finally([h = shared_from_this()] {
+        h->_proxy->get_stats().cas_now_pruning++;
+    });
 }
 
 static std::vector<gms::inet_address>
@@ -1320,7 +1361,7 @@ void storage_proxy::maybe_update_view_backlog_of(gms::inet_address replica, std:
 }
 
 db::view::update_backlog storage_proxy::get_view_update_backlog() const {
-    return _max_view_update_backlog.add_fetch(engine().cpu_id(), get_db().local().get_view_update_backlog());
+    return _max_view_update_backlog.add_fetch(this_shard_id(), get_db().local().get_view_update_backlog());
 }
 
 db::view::update_backlog storage_proxy::get_backlog_of(gms::inet_address ep) const {
@@ -1571,6 +1612,14 @@ void storage_proxy_stats::stats::register_stats() {
         sm::make_histogram("cas_write_contention", sm::description("how many contended writes were encountered"),
                        {storage_proxy_stats::current_scheduling_group_label()},
                        [this]{ return cas_write_contention.get_histogram(1, 8);}),
+
+        sm::make_total_operations("cas_prune", cas_prune,
+                       sm::description("how many times paxos prune was done after successful cas operation"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
+
+        sm::make_total_operations("cas_dropped_prune", cas_coordinator_dropped_prune,
+                       sm::description("how many times a coordinator did not perfom prune after cas"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
     });
 
     _metrics.add_group(REPLICA_STATS_CATEGORY, {
@@ -1606,6 +1655,9 @@ void storage_proxy_stats::stats::register_stats() {
                        sm::description("number of operations that crossed a shard boundary"),
                        {storage_proxy_stats::current_scheduling_group_label()}),
 
+        sm::make_total_operations("cas_dropped_prune", cas_replica_dropped_prune,
+                       sm::description("how many times a coordinator did not perfom prune after cas"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
     });
 }
 
@@ -1716,7 +1768,7 @@ storage_proxy::response_id_type storage_proxy::unique_response_handler::release(
 future<>
 storage_proxy::mutate_locally(const mutation& m, clock_type::time_point timeout) {
     auto shard = _db.local().shard_of(m);
-    get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+    get_stats().replica_cross_shard_ops += shard != this_shard_id();
     return _db.invoke_on(shard, {_write_smp_service_group, timeout}, [s = global_schema_ptr(m.schema()), m = freeze(m), timeout] (database& db) -> future<> {
         return db.apply(s, m, db::commitlog::force_sync::no, timeout);
     });
@@ -1725,7 +1777,7 @@ storage_proxy::mutate_locally(const mutation& m, clock_type::time_point timeout)
 future<>
 storage_proxy::mutate_locally(const schema_ptr& s, const frozen_mutation& m, db::commitlog::force_sync sync, clock_type::time_point timeout) {
     auto shard = _db.local().shard_of(m);
-    get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+    get_stats().replica_cross_shard_ops += shard != this_shard_id();
     return _db.invoke_on(shard, {_write_smp_service_group, timeout}, [&m, gs = global_schema_ptr(s), timeout, sync] (database& db) -> future<> {
         return db.apply(gs, m, sync, timeout);
     });
@@ -1743,7 +1795,7 @@ storage_proxy::mutate_locally(std::vector<mutation> mutations, clock_type::time_
 future<>
 storage_proxy::mutate_hint(const schema_ptr& s, const frozen_mutation& m, clock_type::time_point timeout) {
     auto shard = _db.local().shard_of(m);
-    get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+    get_stats().replica_cross_shard_ops += shard != this_shard_id();
     return _db.invoke_on(shard, {_write_smp_service_group, timeout}, [&m, gs = global_schema_ptr(s), timeout] (database& db) -> future<> {
         return db.apply_hint(gs, m, timeout);
     });
@@ -1764,7 +1816,7 @@ future<>
 storage_proxy::mutate_counter_on_leader_and_replicate(const schema_ptr& s, frozen_mutation fm, db::consistency_level cl, clock_type::time_point timeout,
                                                       tracing::trace_state_ptr trace_state, service_permit permit) {
     auto shard = _db.local().shard_of(fm);
-    bool local = shard == engine().cpu_id();
+    bool local = shard == this_shard_id();
     get_stats().replica_cross_shard_ops += !local;
     return _db.invoke_on(shard, {_write_smp_service_group, timeout}, [gs = global_schema_ptr(s), fm = std::move(fm), cl, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state)), permit = std::move(permit), local] (database& db) {
         auto trace_state = gt.get();
@@ -1778,7 +1830,7 @@ storage_proxy::mutate_counter_on_leader_and_replicate(const schema_ptr& s, froze
 future<>
 storage_proxy::mutate_streaming_mutation(const schema_ptr& s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
     auto shard = _db.local().shard_of(m);
-    get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+    get_stats().replica_cross_shard_ops += shard != this_shard_id();
     // In theory streaming writes should have their own smp_service_group, but this is only used during upgrades from old versions; new
     // versions use rpc streaming.
     return _db.invoke_on(shard, _write_smp_service_group, [&m, plan_id, fragmented, gs = global_schema_ptr(s)] (database& db) mutable -> future<> {
@@ -1879,11 +1931,11 @@ storage_proxy::create_write_response_handler(const std::unordered_map<gms::inet_
 }
 
 storage_proxy::response_id_type
-storage_proxy::create_write_response_handler(const std::tuple<paxos::proposal, schema_ptr, dht::token>& meta,
+storage_proxy::create_write_response_handler(const std::tuple<paxos::proposal, schema_ptr, shared_ptr<paxos_response_handler>, dht::token>& meta,
         db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
-    auto& [commit, s, t] = meta;
+    auto& [commit, s, h, t] = meta;
 
-    return create_write_response_handler_helper(s, t, std::make_unique<cas_mutation>(std::move(commit), s), cl,
+    return create_write_response_handler_helper(s, t, std::make_unique<cas_mutation>(std::move(commit), s, std::move(h)), cl,
             db::write_type::CAS, tr_state, std::move(permit));
 }
 
@@ -1898,7 +1950,7 @@ storage_proxy::create_write_response_handler(const std::tuple<paxos::proposal, s
     auto keyspace_name = s->ks_name();
     keyspace& ks = _db.local().find_keyspace(keyspace_name);
 
-    return create_write_response_handler(ks, cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s), std::move(endpoints),
+    return create_write_response_handler(ks, cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s, nullptr), std::move(endpoints),
                     std::vector<gms::inet_address>(), std::vector<gms::inet_address>(), std::move(tr_state), get_stats(), std::move(permit));
 }
 
@@ -2146,6 +2198,8 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
                 cl_for_paxos, participants + 1, live_endpoints.size());
     }
 
+    bool dead = participants != live_endpoints.size();
+
     // Apart from the ballot, paxos_state::prepare() also sends the current value of the requested key.
     // If the values received from different replicas match, we skip a separate query stage thus saving
     // one network round trip. To generate less traffic, only closest replicas send data, others send
@@ -2153,7 +2207,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     // list of participants by proximity to this instance.
     sort_endpoints_by_proximity(live_endpoints);
 
-    return paxos_participants{std::move(live_endpoints), required_participants};
+    return paxos_participants{std::move(live_endpoints), required_participants, dead};
 }
 
 
@@ -3755,7 +3809,7 @@ storage_proxy::query_result_local(schema_ptr s, lw_shared_ptr<query::read_comman
     cmd->slice.options.set_if<query::partition_slice::option::with_digest>(opts.request != query::result_request::only_result);
     if (pr.is_singular()) {
         unsigned shard = dht::shard_of(*s, pr.start()->value().token());
-        get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return _db.invoke_on(shard, _read_smp_service_group, [max_size, gs = global_schema_ptr(s), prv = dht::partition_range_vector({pr}) /* FIXME: pr is copied */, cmd, opts, timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state))] (database& db) mutable {
             auto trace_state = gt.get();
             tracing::trace(trace_state, "Start querying the token range that starts with {}", seastar::value_of([&prv] { return prv.begin()->start()->value().token(); }));
@@ -4187,7 +4241,7 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
     auto cl_for_learn = cl == db::consistency_level::LOCAL_SERIAL ? db::consistency_level::LOCAL_QUORUM :
             db::consistency_level::QUORUM;
 
-    if (cas_shard(*s, partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
+    if (cas_shard(*s, partition_ranges[0].start()->value().as_decorated_key().token()) != this_shard_id()) {
         throw std::logic_error("storage_proxy::do_query_with_paxos called on a wrong shard");
     }
     // All cas networking operations run with query provided timeout
@@ -4307,7 +4361,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
     db::validate_for_cas(cl_for_paxos);
     db::validate_for_cas_commit(cl_for_commit, schema->ks_name());
 
-    if (cas_shard(*schema, partition_ranges[0].start()->value().as_decorated_key().token()) != engine().cpu_id()) {
+    if (cas_shard(*schema, partition_ranges[0].start()->value().as_decorated_key().token()) != this_shard_id()) {
         throw std::logic_error("storage_proxy::cas called on a wrong shard");
     }
 
@@ -4765,7 +4819,7 @@ void storage_proxy::init_messaging_service() {
     });
     ms.register_mutation_done([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
-        get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
             sp.got_response(response_id, from, std::move(backlog));
             return netw::messaging_service::no_wait();
@@ -4773,7 +4827,7 @@ void storage_proxy::init_messaging_service() {
     });
     ms.register_mutation_failed([this] (const rpc::client_info& cinfo, unsigned shard, storage_proxy::response_id_type response_id, size_t num_failed, rpc::optional<db::view::update_backlog> backlog) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
-        get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, num_failed, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
             sp.got_failure_response(response_id, from, num_failed, std::move(backlog));
             return netw::messaging_service::no_wait();
@@ -4873,7 +4927,7 @@ void storage_proxy::init_messaging_service() {
     });
 
     ms.register_get_schema_version([this] (unsigned shard, table_schema_version v) {
-        get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
         // FIXME: should this get an smp_service_group? Probably one separate from reads and writes.
         return container().invoke_on(shard, [v] (auto&& sp) {
             slogger.debug("Schema version request for {}", v);
@@ -4898,7 +4952,7 @@ void storage_proxy::init_messaging_service() {
                          only_digest, da, timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
             dht::token token = dht::get_token(*schema, key);
             unsigned shard = dht::shard_of(*schema, token);
-            bool local = shard == engine().cpu_id();
+            bool local = shard == this_shard_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
                                      local, cmd = make_lw_shared<query::read_command>(std::move(cmd)), key = std::move(key),
@@ -4926,7 +4980,7 @@ void storage_proxy::init_messaging_service() {
                                                               proposal = std::move(proposal), timeout] (schema_ptr schema) mutable {
             dht::token token = proposal.update.decorated_key(*schema).token();
             unsigned shard = dht::shard_of(*schema, token);
-            bool local = shard == engine().cpu_id();
+            bool local = shard == this_shard_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
                                      local, proposal = std::move(proposal), timeout, token] () {
@@ -4942,6 +4996,42 @@ void storage_proxy::init_messaging_service() {
 
         return f;
     });
+    ms.register_paxos_prune([this] (const rpc::client_info& cinfo, rpc::opt_time_point timeout,
+                utils::UUID schema_id, partition_key key, utils::UUID ballot, std::optional<tracing::trace_info> trace_info) {
+        static thread_local uint16_t pruning = 0;
+        static constexpr uint16_t pruning_limit = 1000; // since PRUNE verb is one way replica side has its own queue limit
+        auto src_addr = netw::messaging_service::get_source(cinfo);
+        auto src_ip = src_addr.addr;
+        tracing::trace_state_ptr tr_state;
+        if (trace_info) {
+            tr_state = tracing::tracing::get_local_tracing_instance().create_session(*trace_info);
+            tracing::begin(tr_state);
+            tracing::trace(tr_state, "paxos_prune: message received from /{} ballot {}", src_ip, ballot);
+        }
+
+        if (pruning >= pruning_limit) {
+            get_stats().cas_replica_dropped_prune++;
+            tracing::trace(tr_state, "paxos_prune: do not prune due to overload", src_ip);
+            return make_ready_future<seastar::rpc::no_wait_type>(netw::messaging_service::no_wait());
+        }
+
+        pruning++;
+        return get_schema_for_read(schema_id, src_addr).then([this, key = std::move(key), ballot,
+                         timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
+            dht::token token = dht::get_token(*schema, key);
+            unsigned shard = dht::shard_of(*schema, token);
+            bool local = shard == engine().cpu_id();
+            get_stats().replica_cross_shard_ops += !local;
+            return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
+                                     local,  key = std::move(key), ballot, timeout, src_ip, d = defer([] { pruning--; })] () {
+                tracing::trace_state_ptr tr_state = gt;
+                return paxos::paxos_state::prune(gs, key, ballot,  *timeout, tr_state).then([src_ip, tr_state] () {
+                    tracing::trace(tr_state, "paxos_prune: handling is done, sending a response to /{}", src_ip);
+                    return netw::messaging_service::no_wait();
+                });
+            });
+        });
+    });
 }
 
 future<> storage_proxy::uninit_messaging_service() {
@@ -4956,7 +5046,8 @@ future<> storage_proxy::uninit_messaging_service() {
         ms.unregister_truncate(),
         ms.unregister_paxos_prepare(),
         ms.unregister_paxos_accept(),
-        ms.unregister_paxos_learn()
+        ms.unregister_paxos_learn(),
+        ms.unregister_paxos_prune()
     );
 }
 
@@ -4966,7 +5057,7 @@ storage_proxy::query_mutations_locally(schema_ptr s, lw_shared_ptr<query::read_c
                                        tracing::trace_state_ptr trace_state, uint64_t max_size) {
     if (pr.is_singular()) {
         unsigned shard = dht::shard_of(*s, pr.start()->value().token());
-        get_stats().replica_cross_shard_ops += shard != engine().cpu_id();
+        get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return _db.invoke_on(shard, _read_smp_service_group, [max_size, cmd, &pr, gs=global_schema_ptr(s), timeout, gt = tracing::global_trace_state_ptr(std::move(trace_state))] (database& db) mutable {
           return db.get_result_memory_limiter().new_mutation_read(max_size).then([&] (query::result_memory_accounter ma) {
             return db.query_mutations(gs, *cmd, pr, std::move(ma), gt, timeout).then([] (reconcilable_result&& result, cache_temperature ht) {

@@ -176,7 +176,7 @@ schema_ptr batchlog() {
         {{"cf_id", uuid_type}},
         // regular columns
         {
-            {"in_progress_ballot", timeuuid_type},
+            {"promise", timeuuid_type},
             {"most_recent_commit", bytes_type}, // serialization format is defined by frozen_mutation idl
             {"most_recent_commit_at", timeuuid_type},
             {"proposal", bytes_type}, // serialization format is defined by frozen_mutation idl
@@ -2100,7 +2100,7 @@ future<> register_view_for_building(sstring ks_name, sstring view_name, const dh
             std::move(ks_name),
             std::move(view_name),
             0,
-            int32_t(engine().cpu_id()),
+            int32_t(this_shard_id()),
             token.to_sstring()).discard_result();
 }
 
@@ -2112,7 +2112,7 @@ future<> update_view_build_progress(sstring ks_name, sstring view_name, const dh
             std::move(ks_name),
             std::move(view_name),
             token.to_sstring(),
-            int32_t(engine().cpu_id())).discard_result();
+            int32_t(this_shard_id())).discard_result();
 }
 
 future<> remove_view_build_progress_across_all_shards(sstring ks_name, sstring view_name) {
@@ -2127,7 +2127,7 @@ future<> remove_view_build_progress(sstring ks_name, sstring view_name) {
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ? AND cpu_id = ?", v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS),
             std::move(ks_name),
             std::move(view_name),
-            int32_t(engine().cpu_id())).discard_result();
+            int32_t(this_shard_id())).discard_result();
 }
 
 future<> mark_view_as_built(sstring ks_name, sstring view_name) {
@@ -2190,8 +2190,8 @@ future<service::paxos::paxos_state> load_paxos_state(const partition_key& key, s
             return service::paxos::paxos_state();
         }
         auto& row = results->one();
-        auto promised = row.has("in_progress_ballot")
-                        ? row.get_as<utils::UUID>("in_progress_ballot") : utils::UUID_gen::min_time_UUID(0);
+        auto promised = row.has("promise")
+                        ? row.get_as<utils::UUID>("promise") : utils::UUID_gen::min_time_UUID(0);
 
         std::optional<service::paxos::proposal> accepted;
         if (row.has("proposal")) {
@@ -2217,7 +2217,7 @@ static int32_t paxos_ttl_sec(const schema& s) {
 }
 
 future<> save_paxos_promise(const schema& s, const partition_key& key, const utils::UUID& ballot, db::timeout_clock::time_point timeout) {
-    static auto cql = format("UPDATE system.{} USING TIMESTAMP ? AND TTL ? SET in_progress_ballot = ? WHERE row_key = ? AND cf_id = ?", PAXOS);
+    static auto cql = format("UPDATE system.{} USING TIMESTAMP ? AND TTL ? SET promise = ? WHERE row_key = ? AND cf_id = ?", PAXOS);
     return execute_cql_with_timeout(cql,
             timeout,
             utils::UUID_gen::micros_timestamp(ballot),
@@ -2258,6 +2258,20 @@ future<> save_paxos_decision(const schema& s, const service::paxos::proposal& de
             paxos_ttl_sec(s),
             decision.ballot,
             ser::serialize_to_buffer<bytes>(decision.update),
+            to_legacy(*key.get_compound_type(s), key.representation()),
+            s.id()
+        ).discard_result();
+}
+
+future<> delete_paxos_decision(const schema& s, const partition_key& key, const utils::UUID& ballot, db::timeout_clock::time_point timeout) {
+    // This should be called only if a learn stage succeeded on all replicas.
+    // In this case we can remove the paxos row using ballot's timestamp which
+    // guarantees that if there is more recent round it will not be affected.
+    static auto cql = format("DELETE FROM system.{} USING TIMESTAMP ?  WHERE row_key = ? AND cf_id = ?", PAXOS);
+
+    return execute_cql_with_timeout(cql,
+            timeout,
+            utils::UUID_gen::micros_timestamp(ballot),
             to_legacy(*key.get_compound_type(s), key.representation()),
             s.id()
         ).discard_result();

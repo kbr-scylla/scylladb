@@ -96,12 +96,12 @@ SEASTAR_THREAD_TEST_CASE(test_abandoned_read) {
 }
 
 static std::vector<mutation> read_all_partitions_one_by_one(distributed<database>& db, schema_ptr s, std::vector<dht::decorated_key> pkeys) {
-    const auto& partitioner = s->get_partitioner();
+    const auto& sharder = s->get_sharder();
     std::vector<mutation> results;
     results.reserve(pkeys.size());
 
     for (const auto& pkey : pkeys) {
-        const auto res = db.invoke_on(partitioner.shard_of(pkey.token()), [gs = global_schema_ptr(s), &pkey] (database& db) {
+        const auto res = db.invoke_on(sharder.shard_of(pkey.token()), [gs = global_schema_ptr(s), &pkey] (database& db) {
             return async([s = gs.get(), &pkey, &db] () mutable {
                 auto accounter = db.get_result_memory_limiter().new_mutation_read(std::numeric_limits<size_t>::max()).get0();
                 const auto cmd = query::read_command(s->id(), s->version(), s->full_slice(), query::max_rows);
@@ -869,7 +869,7 @@ struct fuzzy_test_config {
 static void
 run_fuzzy_test_scan(size_t i, fuzzy_test_config cfg, distributed<database>& db, schema_ptr schema,
         const std::vector<test::partition_description>& part_descs) {
-    const auto seed = cfg.seed + (i + 1) * engine().cpu_id();
+    const auto seed = cfg.seed + (i + 1) * this_shard_id();
     auto rnd_engine = std::mt19937(seed);
 
     auto partition_index_range = generate_range(rnd_engine, 0, part_descs.size() - 1);

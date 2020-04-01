@@ -136,7 +136,7 @@ system_distributed_keyspace::system_distributed_keyspace(cql3::query_processor& 
 }
 
 future<> system_distributed_keyspace::start() {
-    if (engine().cpu_id() != 0) {
+    if (this_shard_id() != 0) {
         return make_ready_future<>();
     }
 

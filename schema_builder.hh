@@ -221,9 +221,8 @@ public:
         return *this;
     }
 
-    schema_builder& with_partitioner(sstring name, unsigned shard_count, unsigned sharding_ignore_msb_bits);
-    // Use only for tests!!!
-    schema_builder& with_partitioner_for_tests_only(const dht::i_partitioner&);
+    schema_builder& with_partitioner(sstring name);
+    schema_builder& with_sharder(unsigned shard_count, unsigned sharding_ignore_msb_bits);
 
     schema_builder& set_in_memory(bool in_memory) {
         _raw._in_memory = in_memory;

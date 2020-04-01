@@ -109,7 +109,6 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
         , _service_memory_limiter(_service_memory_total)
         , _for_testing(for_testing)
         , _token_metadata(tm)
-        , _la_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::la)
         , _mc_feature_listener(*this, _feature_listeners_sem, sstables::sstable_version_types::mc)
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
         , _update_pending_ranges_action([this] { return do_update_pending_ranges(); })
@@ -122,8 +121,7 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
     commit_error.connect([this] { isolate_on_commit_error(); });
 
     if (!for_testing) {
-        if (engine().cpu_id() == 0) {
-            _feature_service.cluster_supports_la_sstable().when_enabled(_la_feature_listener);
+        if (this_shard_id() == 0) {
             _feature_service.cluster_supports_mc_sstable().when_enabled(_mc_feature_listener);
         }
     } else {
@@ -163,7 +161,7 @@ static node_external_status map_operation_mode(storage_service::mode m) {
 }
 
 void storage_service::register_metrics() {
-    if (engine().cpu_id() != 0) {
+    if (this_shard_id() != 0) {
         // the relevant data is distributed between the shards,
         // We only need to register it once.
         return;
@@ -404,7 +402,7 @@ void storage_service::prepare_to_join(std::vector<inet_address> loaded_endpoints
     gossip_snitch_info().get();
 
     // gossip local partitioner information (shard count and ignore_msb_bits)
-    gossip_sharding_info().get();
+    gossip_sharder().get();
 
     // gossip Schema.emptyVersion forcing immediate check for schema updates (see MigrationManager#maybeScheduleSchemaPull)
 
@@ -1638,7 +1636,7 @@ future<> storage_service::replicate_tm_only() {
 
     return do_with(std::move(tm), [] (token_metadata& tm) {
         return get_storage_service().invoke_on_all([&tm] (storage_service& local_ss){
-            if (engine().cpu_id() != 0) {
+            if (this_shard_id() != 0) {
                 local_ss._token_metadata = tm;
             }
         });
@@ -1648,7 +1646,7 @@ future<> storage_service::replicate_tm_only() {
 future<> storage_service::replicate_to_all_cores() {
     // sanity checks: this function is supposed to be run on shard 0 only and
     // when gossiper has already been initialized.
-    if (engine().cpu_id() != 0) {
+    if (this_shard_id() != 0) {
         auto err = format("replicate_to_all_cores is not ran on cpu zero");
         slogger.warn("{}", err);
         throw std::runtime_error(err);
@@ -1674,7 +1672,7 @@ future<> storage_service::gossip_snitch_info() {
     });
 }
 
-future<> storage_service::gossip_sharding_info() {
+future<> storage_service::gossip_sharder() {
     return _gossiper.add_local_application_state({
         { gms::application_state::SHARD_COUNT, value_factory.shard_count(smp::count) },
         { gms::application_state::IGNORE_MSB_BITS, value_factory.ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()) },
@@ -2990,7 +2988,7 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name) {
         return _db.invoke_on_all([ks_name, cf_name, new_gen] (database& db) {
             auto& cf = db.find_column_family(ks_name, cf_name);
             auto disabled = std::chrono::duration_cast<std::chrono::microseconds>(cf.enable_sstable_write(new_gen)).count();
-            slogger.info("CF {}.{} at shard {} had SSTables writes disabled for {} usec", ks_name, cf_name, engine().cpu_id(), disabled);
+            slogger.info("CF {}.{} at shard {} had SSTables writes disabled for {} usec", ks_name, cf_name, this_shard_id(), disabled);
             return make_ready_future<>();
         }).then([new_tables = std::move(new_tables), eptr = std::move(eptr)] {
             if (eptr) {
@@ -3149,7 +3147,7 @@ std::chrono::milliseconds storage_service::get_ring_delay() {
 }
 
 future<> storage_service::do_update_pending_ranges() {
-    if (engine().cpu_id() != 0) {
+    if (this_shard_id() != 0) {
         return make_exception_future<>(std::runtime_error("do_update_pending_ranges should be called on cpu zero"));
     }
     // long start = System.currentTimeMillis();
@@ -3414,10 +3412,13 @@ void feature_enabled_listener::on_enabled() {
 
 future<> read_sstables_format(distributed<storage_service>& ss) {
     return db::system_keyspace::get_scylla_local_param(SSTABLE_FORMAT_PARAM_NAME).then([&ss] (std::optional<sstring> format_opt) {
-        sstables::sstable_version_types format = sstables::from_string(format_opt.value_or("ka"));
-        return ss.invoke_on_all([format] (storage_service& s) {
-            s._sstables_format = format;
-        });
+        if (format_opt) {
+            sstables::sstable_version_types format = sstables::from_string(*format_opt);
+            return ss.invoke_on_all([format] (storage_service& s) {
+                s._sstables_format = format;
+            });
+        }
+        return make_ready_future<>();
     });
 }
 

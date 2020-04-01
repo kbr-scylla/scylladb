@@ -2253,7 +2253,7 @@ private:
     void finish_file_writer();
 public:
     sstable_writer_k_l(sstable& sst, const schema& s, uint64_t estimated_partitions,
-            const sstable_writer_config&, const io_priority_class& pc, shard_id shard = engine().cpu_id());
+            const sstable_writer_config&, const io_priority_class& pc, shard_id shard = this_shard_id());
     ~sstable_writer_k_l();
     sstable_writer_k_l(sstable_writer_k_l&& o) : writer_impl(o._sst, o._schema, o._pc, o._cfg), _backup(o._backup),
             _leave_unsealed(o._leave_unsealed), _compression_enabled(o._compression_enabled), _writer(std::move(o._writer)),
@@ -3211,7 +3211,7 @@ sstable::compute_shards_for_this_sstable() const {
                 sm->token_ranges.elements
                 | boost::adaptors::transformed(disk_token_range_to_ring_position_range));
     }
-    auto sharder = dht::ring_position_range_vector_sharder(_schema->get_partitioner(), std::move(token_ranges));
+    auto sharder = dht::ring_position_range_vector_sharder(_schema->get_sharder(), std::move(token_ranges));
     auto rpras = sharder.next(*_schema);
     while (rpras) {
         shards.insert(rpras->shard);
