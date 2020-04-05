@@ -81,10 +81,16 @@ extern logging::logger errinj_logger;
  * 1. inject(name, duration in milliseconds, future)
  *    Sleeps for a given amount of milliseconds. This is seastar::sleep,
  *    not a reactor stall. Requires future<> reference passed to be modified.
- *    Expected use case: slowing down the process so it hits external timeouts,
+ *    Expected use case: slowing down the process.
  *    e.g. making view update generation process extremely slow.
  *
- * 2. inject(name, exception_factory_lambda, future)
+ * 2. inject(name, deadline as time_point in the future, future)
+ *    Sleeps until given deadline. This is seastar::sleep,
+ *    not a reactor stall. Requires future<> reference passed to be modified.
+ *    Expected use case: slowing down the process so it hits external timeouts.
+ *    e.g. making view update generation process extremely slow.
+ *
+ * 3. inject(name, future, exception_factory_lambda)
  *    Inserts code to raise a given exception type (if enabled).
  *    Requires future<> reference passed and an exception factory returning an
  *    exception pointer, for example:
@@ -98,7 +104,6 @@ extern logging::logger errinj_logger;
 template <bool injection_enabled>
 class error_injection {
     using handler_fun = std::function<void()>;
-    using time_point = std::chrono::time_point<std::chrono::steady_clock>;
 
     // String cross-type comparator
     class str_less
@@ -128,20 +133,6 @@ class error_injection {
         return it->second;
     }
 
-    bool run_check(const std::string_view& name,
-            std::optional<time_point> deadline) {
-        if (!is_enabled(name)) {
-            return false;
-        }
-        if (deadline) {
-            auto now = std::chrono::steady_clock::now();
-            if (now > *deadline) {
-                return false;
-            }
-        }
-        return true;
-    }
-
 public:
     void enable(const std::string_view& injection_name, bool one_shot = false) {
         _enabled.emplace(injection_name, one_shot);
@@ -166,13 +157,11 @@ public:
         return boost::copy_range<std::vector<sstring>>(_enabled | boost::adaptors::map_keys);
     }
 
-    // @brief Inject a lambda call
-    // @param deadline If provided, sleep no more than up to the deadline.
-    //            If current time is beyond deadline, future is skipped.
+    // \brief Inject a lambda call
+    // \param f lambda to be run
     [[gnu::always_inline]]
-    void inject(const std::string_view& name, handler_fun f,
-            std::optional<time_point> deadline = std::nullopt) {
-        if (!run_check(name, deadline)) {
+    void inject(const std::string_view& name, handler_fun f) {
+        if (!is_enabled(name)) {
             return;
         }
         if (is_one_shot(name)) {
@@ -182,78 +171,75 @@ public:
         f();
     }
 
-    // @brief Inject a sleep in an existing future
-    // @param deadline If provided, sleep no more than up to the deadline.
-    //            If current time is beyond deadline, sleep injection
-    //            is skipped.
-    template<typename... T>
+    // \brief Inject a sleep for milliseconds
     [[gnu::always_inline]]
-    void inject(const std::string_view& name, const std::chrono::milliseconds dur, future<T...>& intercepted_future,
-            std::optional<time_point> deadline = std::nullopt) {
+    future<> inject(const std::string_view& name,
+            const std::chrono::milliseconds duration) {
 
-        static_assert(sizeof...(T) <= 1,
-            "future<> with more than one template parameter are not supported. Consider replacing with future<std::tuple<...>>");
-
-        if (!run_check(name, deadline)) {
-            return;
+        if (!is_enabled(name)) {
+            return make_ready_future<>();
         }
         if (is_one_shot(name)) {
             disable(name);
         }
-        errinj_logger.debug("Triggering sleep injection \"{}\" ({}ms)", name, dur.count());
+        errinj_logger.debug("Triggering sleep injection \"{}\" ({}ms)", name, duration.count());
+        return seastar::sleep(duration);
+    }
+
+    template <typename Clock, typename Duration>
+    // \brief Inject a sleep to deadline (timeout)
+    [[gnu::always_inline]]
+    future<> inject(const std::string_view& name, std::chrono::time_point<Clock, Duration> deadline) {
+
+        if (!is_enabled(name)) {
+            return make_ready_future<>();
+        }
+        if (is_one_shot(name)) {
+            disable(name);
+        }
+
         // Time left until deadline
-        std::chrono::milliseconds actual_dur = dur;
-        if (deadline) {
-            auto deadline_left = std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now());
-            actual_dur = std::min(dur, deadline_left);
-        }
-        intercepted_future = seastar::sleep(actual_dur)
-                .then([f = std::move(intercepted_future)] () mutable {
-            return std::move(f);
-        });
+        std::chrono::milliseconds duration = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
+        errinj_logger.debug("Triggering sleep injection \"{}\" ({}ms)", name, duration.count());
+        return seastar::sleep(duration);
     }
 
-    // @brief Inject exception in existing future
-    // @param deadline If provided, sleep no more than up to the deadline.
-    //            If current time is beyond deadline, sleep injection
-    //            is skipped altogether.
-    template<typename... T>
+    // \brief Inject exception
+    // \param exception_factory function returning an exception pointer
+    template <typename Func>
     [[gnu::always_inline]]
-    void inject(const std::string_view& name,
-            std::function<std::exception_ptr()> exception_factory,
-            future<T...>& intercepted_future,
-            std::optional<time_point> deadline = std::nullopt) {
-        static_assert(sizeof...(T) <= 1,
-            "future<> with more than one template parameter are not supported. Consider replacing with future<std::tuple<...>>");
+    std::enable_if_t<
+        std::is_invocable_r<std::exception_ptr, std::decay_t<Func>>::value, future<>
+    >
+    inject(const std::string_view& name,
+            Func&& exception_factory) {
 
-        // Check is done at injection time
-        if (!run_check(name, deadline)) {
-            return;
+        if (!is_enabled(name)) {
+            return make_ready_future<>();
         }
         if (is_one_shot(name)) {
             disable(name);
         }
-        auto f = make_ready_future<>();
         errinj_logger.debug("Triggering exception injection \"{}\"", name);
-        intercepted_future = make_exception_future<T...>(exception_factory());
+        return make_exception_future<>(exception_factory());
     }
 
-    static void enable_on_all(const std::string_view& injection_name, bool one_shot = false) {
-        (void) smp::invoke_on_all([injection_name = sstring(injection_name), one_shot] {
+    future<> enable_on_all(const std::string_view& injection_name, bool one_shot = false) {
+        return smp::invoke_on_all([injection_name = sstring(injection_name), one_shot] {
             auto& errinj = utils::get_local_injector();
             errinj.enable(injection_name, one_shot);
         });
     }
 
-    static void disable_on_all(const std::string_view& injection_name) {
-        (void) smp::invoke_on_all([injection_name = sstring(injection_name)] {
+    static future<> disable_on_all(const std::string_view& injection_name) {
+        return smp::invoke_on_all([injection_name = sstring(injection_name)] {
             auto& errinj = utils::get_local_injector();
             errinj.disable(injection_name);
         });
     }
 
-    static void disable_on_all() {
-        (void) smp::invoke_on_all([] {
+    static future<> disable_on_all() {
+        return smp::invoke_on_all([] {
             auto& errinj = utils::get_local_injector();
             errinj.disable_all();
         });
@@ -275,7 +261,6 @@ public:
 template <>
 class error_injection<false> {
     using handler_fun = std::function<void()>;
-    using time_point = std::chrono::time_point<std::chrono::steady_clock>;
 public:
     [[gnu::always_inline]]
     void enable(const std::string_view& injection_name, const bool one_shot = false) {}
@@ -291,37 +276,47 @@ public:
 
     // Inject a lambda call
     [[gnu::always_inline]]
-    void inject(const std::string_view& name, handler_fun f,
-            std::optional<time_point> deadline = std::nullopt) { }
+    void inject(const std::string_view& name, handler_fun f) { }
 
-    // Inject sleep in existing future
-    template<typename... T>
+    // Inject sleep
     [[gnu::always_inline]]
-    void inject(const std::string_view& name, std::chrono::milliseconds dur, future<T...>& intercepted_future,
-            std::optional<time_point> deadline = std::nullopt) {
-        static_assert(sizeof...(T) <= 1,
-            "future<> with more than one template parameter are not supported. Consider replacing with future<std::tuple<...>>");
+    future<> inject(const std::string_view& name,
+            const std::chrono::milliseconds duration) {
+        return make_ready_future<>();
     }
 
-    // Inject exception in existing future
-    template<typename... T>
+    // Inject a sleep to deadline (timeout)
+    template<class TimePoint>
     [[gnu::always_inline]]
-    void inject(const std::string_view& name,
-            std::function<std::exception_ptr()> exception_factory,
-            future<T...>& intercepted_future,
-            std::optional<time_point> deadline = std::nullopt) {
-        static_assert(sizeof...(T) <= 1,
-            "future<> with more than one template parameter are not supported. Consider replacing with future<std::tuple<...>>");
+    future<> inject(const std::string_view& name, TimePoint deadline) {
+        return make_ready_future<>();
+    }
+
+    // Inject exception
+    template <typename Func>
+    [[gnu::always_inline]]
+    std::enable_if_t<
+        std::is_invocable_r<std::exception_ptr, std::decay_t<Func>>::value, future<>
+    >
+    inject(const std::string_view& name,
+            std::function<std::exception_ptr()> exception_factory) {
+        return make_ready_future<>();
     }
 
     [[gnu::always_inline]]
-    static void enable_on_all(const std::string_view& injection_name, const bool one_shot = false) { }
+    static future<> enable_on_all(const std::string_view& injection_name, const bool one_shot = false) {
+        return make_ready_future<>();
+    }
 
     [[gnu::always_inline]]
-    static void disable_on_all(const std::string_view& injection_name) { }
+    static future<> disable_on_all(const std::string_view& injection_name) {
+        return make_ready_future<>();
+    }
 
     [[gnu::always_inline]]
-    static void disable_on_all() { }
+    static future<> disable_on_all() {
+        return make_ready_future<>();
+    }
 
     [[gnu::always_inline]]
     static std::vector<sstring> enabled_injections_on_all() { return {}; }

@@ -391,9 +391,6 @@ public:
             cfg->view_hints_directory.set(data_dir_path + "/view_hints.dir");
             cfg->num_tokens.set(256);
             cfg->ring_delay_ms.set(500);
-            auto features = cfg->experimental_features();
-            features.emplace_back(db::experimental_features_t::LWT);
-            cfg->experimental_features(features);
             cfg->shutdown_announce_in_ms.set(0);
             cfg->broadcast_to_all_shards().get();
             create_directories((data_dir_path + "/system").c_str());
@@ -442,13 +439,7 @@ public:
 
             auto stop_sys_dist_ks = defer([&sys_dist_ks] { sys_dist_ks.stop().get(); });
 
-            gms::feature_config fcfg;
-            fcfg.enable_cdc = true;
-            fcfg.enable_lwt = true;
-            fcfg.enable_sstables_mc_format = true;
-            if (cfg->enable_user_defined_functions()) {
-                fcfg.enable_user_defined_functions = true;
-            }
+            gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg);
             fcfg.disabled_features = cfg_in.disabled_features;
             sharded<gms::feature_service> feature_service;
             feature_service.start(fcfg).get();

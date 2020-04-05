@@ -70,6 +70,7 @@
 #include <seastar/core/metrics.hh>
 #include "cdc/generation.hh"
 #include "repair/repair.hh"
+#include "service/priority_manager.hh"
 #include "audit/audit.hh"
 #include "service/qos/service_level_controller.hh"
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
@@ -935,6 +936,12 @@ void storage_service::bootstrap() {
 
     _gossiper.check_seen_seeds();
 
+    _db.invoke_on_all([this] (database& db) {
+        for (auto& cf : db.get_non_system_column_families()) {
+            cf->notify_bootstrap_or_replace_start();
+        }
+    }).get();
+
     set_mode(mode::JOINING, "Starting to bootstrap...", true);
     if (is_repair_based_node_ops_enabled()) {
         if (db().local().is_replacing()) {
@@ -947,6 +954,13 @@ void storage_service::bootstrap() {
         // Does the actual streaming of newly replicated token ranges.
         bs.bootstrap().get();
     }
+    _db.invoke_on_all([this] (database& db) {
+        for (auto& cf : db.get_non_system_column_families()) {
+            cf->notify_bootstrap_or_replace_end();
+        }
+    }).get();
+
+
     slogger.info("Bootstrap completed! for the tokens {}", _bootstrap_tokens);
 }
 

@@ -96,4 +96,4 @@ struct appending_hash<tombstone> {
 // Determines whether tombstone may be GC-ed.
 using can_gc_fn = std::function<bool(tombstone)>;
 
-static can_gc_fn always_gc = [] (tombstone) { return true; };
+extern can_gc_fn always_gc;

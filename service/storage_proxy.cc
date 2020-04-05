@@ -1262,7 +1262,7 @@ void paxos_response_handler::prune(utils::UUID ballot) {
             }
         });
     }).finally([h = shared_from_this()] {
-        h->_proxy->get_stats().cas_now_pruning++;
+        h->_proxy->get_stats().cas_now_pruning--;
     });
 }
 
@@ -1982,7 +1982,7 @@ storage_proxy::hint_to_dead_endpoints(response_id_type id, db::consistency_level
 template<typename Range, typename CreateWriteHandler>
 future<std::vector<storage_proxy::unique_response_handler>> storage_proxy::mutate_prepare(Range&& mutations, db::consistency_level cl, db::write_type type, service_permit permit, CreateWriteHandler create_handler) {
     // apply is used to convert exceptions to exceptional future
-    return futurize<std::vector<storage_proxy::unique_response_handler>>::invoke([this] (Range&& mutations, db::consistency_level cl, db::write_type type, service_permit permit, CreateWriteHandler create_handler) {
+    return futurize_invoke([this] (Range&& mutations, db::consistency_level cl, db::write_type type, service_permit permit, CreateWriteHandler create_handler) {
         std::vector<unique_response_handler> ids;
         ids.reserve(std::distance(std::begin(mutations), std::end(mutations)));
         for (auto& m : mutations) {
@@ -3156,8 +3156,8 @@ public:
             } else if (rh.result->partitions().size() == 0) {
                 return true;
             } else {
-                auto lhk = lh.result->partitions().back().mut().key(s);
-                auto rhk = rh.result->partitions().back().mut().key(s);
+                auto lhk = lh.result->partitions().back().mut().key();
+                auto rhk = rh.result->partitions().back().mut().key();
                 return lhk.ring_order_tri_compare(s, rhk) > 0;
             }
         };
@@ -3182,13 +3182,13 @@ public:
             if (_data_results.front().result->partitions().empty()) {
                 break; // if top of the heap is empty all others are empty too
             }
-            const auto& max_key = _data_results.front().result->partitions().back().mut().key(s);
+            const auto& max_key = _data_results.front().result->partitions().back().mut().key();
             versions.emplace_back();
             std::vector<version>& v = versions.back();
             v.reserve(_targets_count);
             for (reply& r : _data_results) {
                 auto pit = r.result->partitions().rbegin();
-                if (pit != r.result->partitions().rend() && pit->mut().key(s).legacy_equal(s, max_key)) {
+                if (pit != r.result->partitions().rend() && pit->mut().key().legacy_equal(s, max_key)) {
                     bool reached_partition_end = pit->row_count() < cmd.slice.partition_row_limit();
                     v.emplace_back(r.from, std::move(*pit), r.reached_end, reached_partition_end);
                     r.result->partitions().pop_back();
@@ -3212,7 +3212,7 @@ public:
             auto it = boost::range::find_if(v, [] (auto&& ver) {
                     return bool(ver.par);
             });
-            auto m = boost::accumulate(v, mutation(schema, it->par->mut().key(*schema)), [this, schema] (mutation& m, const version& ver) {
+            auto m = boost::accumulate(v, mutation(schema, it->par->mut().key()), [this, schema] (mutation& m, const version& ver) {
                 if (ver.par) {
                     mutation_application_stats app_stats;
                     m.partition().apply(*schema, ver.par->mut().partition(), *schema, app_stats);
@@ -3466,7 +3466,9 @@ protected:
     uint32_t original_partition_limit() const {
         return _cmd->partition_limit;
     }
+    virtual void adjust_targets_for_reconciliation() {}
     void reconcile(db::consistency_level cl, storage_proxy::clock_type::time_point timeout, lw_shared_ptr<query::read_command> cmd) {
+        adjust_targets_for_reconciliation();
         data_resolver_ptr data_resolver = ::make_shared<data_read_resolver>(_schema, cl, _targets.size(), timeout);
         auto exec = shared_from_this();
 
@@ -3692,6 +3694,9 @@ public:
     }
     virtual void got_cl() override {
         _speculate_timer.cancel();
+    }
+    virtual void adjust_targets_for_reconciliation() override {
+        _targets = used_targets();
     }
 };
 
@@ -5020,7 +5025,7 @@ void storage_proxy::init_messaging_service() {
                          timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
             dht::token token = dht::get_token(*schema, key);
             unsigned shard = dht::shard_of(*schema, token);
-            bool local = shard == engine().cpu_id();
+            bool local = shard == this_shard_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
                                      local,  key = std::move(key), ballot, timeout, src_ip, d = defer([] { pruning--; })] () {

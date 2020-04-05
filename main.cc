@@ -657,9 +657,17 @@ int main(int ac, char** av) {
 
             supervisor::notify("starting tokens manager");
             token_metadata.start().get();
-            auto stop_token_metadata = defer_verbose_shutdown("token metadata", [ &token_metadata ] {
-                token_metadata.stop().get();
-            });
+            // storage_proxy holds a reference on it and is not yet stopped.
+            // what's worse is that the calltrace
+            //   storage_proxy::do_query 
+            //                ::query_partition_key_range
+            //                ::query_partition_key_range_concurrent
+            // leaves unwaited futures on the reactor and once it gets there
+            // the token_metadata instance is accessed and ...
+            //
+            //auto stop_token_metadata = defer_verbose_shutdown("token metadata", [ &token_metadata ] {
+            //    token_metadata.stop().get();
+            //});
 
             supervisor::notify("starting migration manager notifier");
             mm_notifier.start().get();
@@ -1083,9 +1091,6 @@ int main(int ac, char** av) {
                 static sharded<alternator::executor> alternator_executor;
                 static sharded<alternator::server> alternator_server;
 
-                if (!cfg->check_experimental(db::experimental_features_t::LWT)) {
-                    throw std::runtime_error("Alternator enabled, but needs experimental LWT feature which wasn't enabled");
-                }
                 net::inet_address addr;
                 try {
                     addr = net::dns::get_host_by_name(cfg->alternator_address(), family).get0().addr_list.front();
