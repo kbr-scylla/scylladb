@@ -11,6 +11,7 @@
 #include "build_id.hh"
 #include "supervisor.hh"
 #include "database.hh"
+#include <seastar/core/reactor.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/distributed.hh>
 #include "transport/server.hh"

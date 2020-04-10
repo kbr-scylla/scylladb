@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2020 ScyllaDB
  */
 
 /*
@@ -21,28 +21,16 @@
 
 #pragma once
 
-#include <seastar/core/timer.hh>
-#include <seastar/core/semaphore.hh>
-#include <seastar/core/seastar.hh>
-#include "seastarx.hh"
+#include <seastar/util/noncopyable_function.hh>
 
-namespace utils {
+#include "feed_writers.hh"
 
-/**
- * 100% naive rate limiter. Consider it a placeholder
- * Will let you process X "units" per second, then reset this every s.
- * Obviously, accuracy is virtually non-existant and steady rate will fluctuate.
- */
-class rate_limiter {
-private:
-    timer<lowres_clock> _timer;
-    size_t _units_per_s;
-    semaphore _sem {0};
+namespace mutation_writer {
 
-    void on_timer();
-public:
-    rate_limiter(size_t rate);
-    future<> reserve(size_t u);
-};
+// Given a producer that may contain data for all shards, consume it in a per-shard
+// manner. This is useful, for instance, in the resharding process where a user changes
+// the amount of CPU assigned to Scylla and we have to rewrite the SSTables to their new
+// owners.
+future<> segregate_by_shard(flat_mutation_reader producer, reader_consumer consumer);
 
-}
+} // namespace mutation_writer

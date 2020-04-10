@@ -13,6 +13,7 @@
 #include "locator/gossiping_property_file_snitch.hh"
 #include <seastar/testing/test_case.hh>
 #include <seastar/util/std-compat.hh>
+#include <seastar/core/reactor.hh>
 #include <vector>
 #include <string>
 #include <tuple>

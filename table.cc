@@ -40,6 +40,7 @@
 #include "db/query_context.hh"
 #include "query-result-writer.hh"
 #include "db/view/view.hh"
+#include <seastar/core/seastar.hh>
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/range/adaptor/transformed.hpp>
@@ -1326,30 +1327,6 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
     });
 }
 
-future<> table::rewrite_sstables(sstables::compaction_descriptor descriptor) {
-    return do_with(std::move(descriptor.sstables), std::move(descriptor.release_exhausted),
-            [this, options = descriptor.options] (auto& sstables, auto& release_fn) {
-        return do_for_each(sstables, [this, &release_fn, options] (auto& sst) {
-            // this semaphore ensures that only one rewrite will run per shard.
-            // That's to prevent node from running out of space when almost all sstables
-            // need rewrite, so if sstables are rewritten in parallel, we may need almost
-            // twice the disk space used by those sstables.
-            static thread_local named_semaphore sem(1, named_semaphore_exception_factory{"rewrite sstables"});
-
-            return with_semaphore(sem, 1, [this, &sst, &release_fn, options] {
-                // release reference to sstables cleaned up, otherwise space usage from their data and index
-                // components cannot be reclaimed until all of them are cleaned.
-                auto sstable_level = sst->get_sstable_level();
-                auto run_identifier = sst->run_identifier();
-                auto descriptor = sstables::compaction_descriptor({ std::move(sst) }, sstable_level,
-                    sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, options);
-                descriptor.release_exhausted = release_fn;
-                return this->compact_sstables(std::move(descriptor));
-            });
-        });
-    });
-}
-
 // Note: We assume that the column_family does not get destroyed during compaction.
 future<>
 table::compact_all_sstables() {
@@ -1804,7 +1781,7 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
         std::unordered_map<sstring, snapshot_details> all_snapshots;
         for (auto& datadir : _config.all_datadirs) {
             fs::path snapshots_dir = fs::path(datadir) / "snapshots";
-            auto file_exists = io_check([&snapshots_dir] { return engine().file_exists(snapshots_dir.native()); }).get0();
+            auto file_exists = io_check([&snapshots_dir] { return seastar::file_exists(snapshots_dir.native()); }).get0();
             if (!file_exists) {
                 continue;
             }
@@ -2455,6 +2432,44 @@ table::run_with_compaction_disabled(std::function<future<> ()> func) {
             do_trigger_compaction();
         }
     });
+}
+
+void
+table::enable_auto_compaction() {
+    // XXX: unmute backlog. turn table backlog back on.
+    //      see table::disable_auto_compaction() notes.
+    _compaction_disabled_by_user = false;
+}
+
+void
+table::disable_auto_compaction() {
+    // XXX: mute backlog. When we disable background compactions
+    // for the table, we must also disable current backlog of the
+    // table compaction strategy that contributes to the scheduling
+    // group resources prioritization.
+    //
+    // There are 2 possibilities possible:
+    // - there are no ongoing background compaction, and we can freely
+    //   mute table backlog.
+    // - there are compactions happening. than we must decide either
+    //   we want to allow them to finish not allowing submitting new
+    //   compactions tasks, or we may "suspend" them until the bg
+    //   compactions will be enabled back. This is not a worst option
+    //   because it will allow bg compactions to finish if there are
+    //   unused resourced, it will not lose any writers/readers stats.
+    //
+    // Besides that:
+    // - there are major compactions that additionally uses constant
+    //   size backlog of shares,
+    // - sstables rewrites tasks that do the same.
+    // 
+    // Setting NullCompactionStrategy is not an option due to the
+    // following reasons:
+    // - it will 0 backlog if suspending current compactions is not an
+    //   option
+    // - it will break computation of major compaction descriptor
+    //   for new submissions
+    _compaction_disabled_by_user = true;
 }
 
 flat_mutation_reader

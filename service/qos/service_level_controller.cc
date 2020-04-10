@@ -10,6 +10,7 @@
 #include "service/priority_manager.hh"
 #include "message/messaging_service.hh"
 #include "db/system_distributed_keyspace.hh"
+#include <seastar/core/reactor.hh>
 
 namespace qos {
 logging::logger sl_logger("workload prioritization");

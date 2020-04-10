@@ -12,6 +12,7 @@
 #include "auth/authenticated_user.hh"
 #include <seastar/core/sstring.hh>
 #include <seastar/core/distributed.hh>
+#include <seastar/core/file.hh>
 #include "auth/service.hh"
 #include "service/storage_service.hh"
 #include <map>

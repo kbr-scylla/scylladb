@@ -334,6 +334,7 @@ public:
         if (_handler) {
             _handler->prune(_proposal->ballot);
         }
+        _proposal.release();
     }
 };
 
@@ -1251,16 +1252,14 @@ void paxos_response_handler::prune(utils::UUID ballot) {
     // it is waited by holding shared pointer to storage_proxy which guaranties
     // that storage_proxy::stop() will wait for this to complete
     (void)parallel_for_each(_live_endpoints, [this, ballot] (gms::inet_address peer) mutable {
-        return futurize_apply([&] {
-            if (fbu::is_me(peer)) {
-                tracing::trace(tr_state, "prune: prune {} locally", ballot);
-                return paxos::paxos_state::prune(_schema, _key.key(), ballot, _timeout, tr_state);
-            } else {
-                tracing::trace(tr_state, "prune: send prune of {} to {}", ballot, peer);
-                netw::messaging_service& ms = netw::get_local_messaging_service();
-                return ms.send_paxos_prune(peer, _timeout, _schema->version(), _key.key(), ballot, tracing::make_trace_info(tr_state));
-            }
-        });
+        if (fbu::is_me(peer)) {
+            tracing::trace(tr_state, "prune: prune {} locally", ballot);
+            return paxos::paxos_state::prune(_schema, _key.key(), ballot, _timeout, tr_state);
+        } else {
+            tracing::trace(tr_state, "prune: send prune of {} to {}", ballot, peer);
+            netw::messaging_service& ms = netw::get_local_messaging_service();
+            return ms.send_paxos_prune(peer, _timeout, _schema->version(), _key.key(), ballot, tracing::make_trace_info(tr_state));
+        }
     }).finally([h = shared_from_this()] {
         h->_proxy->get_stats().cas_now_pruning--;
     });
@@ -5021,14 +5020,15 @@ void storage_proxy::init_messaging_service() {
         }
 
         pruning++;
+        auto d = defer([] { pruning--; });
         return get_schema_for_read(schema_id, src_addr).then([this, key = std::move(key), ballot,
-                         timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
+                         timeout, tr_state = std::move(tr_state), src_ip, d = std::move(d)] (schema_ptr schema) mutable {
             dht::token token = dht::get_token(*schema, key);
             unsigned shard = dht::shard_of(*schema, token);
             bool local = shard == this_shard_id();
             get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, _write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
-                                     local,  key = std::move(key), ballot, timeout, src_ip, d = defer([] { pruning--; })] () {
+                                     local,  key = std::move(key), ballot, timeout, src_ip, d = std::move(d)] () {
                 tracing::trace_state_ptr tr_state = gt;
                 return paxos::paxos_state::prune(gs, key, ballot,  *timeout, tr_state).then([src_ip, tr_state] () {
                     tracing::trace(tr_state, "paxos_prune: handling is done, sending a response to /{}", src_ip);

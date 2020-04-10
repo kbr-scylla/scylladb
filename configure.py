@@ -803,6 +803,7 @@ scylla_core = (['database.cc',
                 'utils/like_matcher.cc',
                 'utils/error_injection.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
+                'mutation_writer/shard_based_splitting_writer.cc',
                 'lua.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
@@ -914,6 +915,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'test/lib/cql_assertions.cc',
     'test/lib/result_set_assertions.cc',
     'test/lib/mutation_source_test.cc',
+    'test/lib/sstable_utils.cc',
     'test/lib/data_model.cc',
     'test/lib/exception_utils.cc',
     'test/lib/random_schema.cc',
@@ -969,11 +971,9 @@ tests_not_using_seastar_test_framework = set([
     'test/perf/perf_hash',
     'test/perf/perf_mutation',
     'test/perf/perf_row_cache_update',
-    'test/perf/perf_sstable',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
     'test/unit/row_cache_alloc_stress_test',
-    'test/unit/row_cache_stress_test',
     'test/manual/sstable_scan_footprint_test',
 ]) | pure_boost_tests
 
@@ -995,13 +995,10 @@ perf_tests_seastar_deps = [
 for t in perf_tests:
     deps[t] = [t + '.cc'] + scylla_tests_dependencies + perf_tests_seastar_deps
 
-deps['test/boost/sstable_test'] += ['test/lib/sstable_utils.cc', 'test/lib/normalizing_reader.cc']
-deps['test/boost/sstable_datafile_test'] += ['test/lib/sstable_utils.cc', 'test/lib/normalizing_reader.cc']
-deps['test/boost/sstable_resharding_test'] += ['test/lib/sstable_utils.cc' ]
-deps['test/boost/mutation_reader_test'] += ['test/lib/sstable_utils.cc', 'test/lib/dummy_sharder.cc' ]
-deps['test/boost/multishard_combining_reader_as_mutation_source_test'] += ['test/lib/sstable_utils.cc', 'test/lib/dummy_sharder.cc' ]
-deps['test/boost/sstable_mutation_test'] += ['test/lib/sstable_utils.cc']
-deps['test/boost/sstable_conforms_to_mutation_source_test'] += ['test/lib/sstable_utils.cc']
+deps['test/boost/sstable_test'] += ['test/lib/normalizing_reader.cc']
+deps['test/boost/sstable_datafile_test'] += ['test/lib/normalizing_reader.cc']
+deps['test/boost/mutation_reader_test'] += ['test/lib/dummy_sharder.cc' ]
+deps['test/boost/multishard_combining_reader_as_mutation_source_test'] += ['test/lib/dummy_sharder.cc' ]
 
 deps['test/boost/bytes_ostream_test'] = [
     "test/boost/bytes_ostream_test.cc",
@@ -1010,8 +1007,6 @@ deps['test/boost/bytes_ostream_test'] = [
     "utils/dynamic_bitset.cc",
     "test/lib/log.cc",
 ]
-
-deps['test/boost/incremental_compaction_test'] += ['test/lib/sstable_utils.cc']
 
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
 deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/managed_bytes.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
@@ -1492,6 +1487,9 @@ with open(buildfile_tmp, 'w') as f:
               command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags --include $in -c -o $out build/{mode}/gen/empty.cc
               description = CHECKHH $in
               depfile = $out.d
+            rule test.{mode}
+              command = ./test.py --mode={mode}
+              description = TEST {mode}
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))
         f.write(
             'build {mode}: phony {artifacts}\n'.format(
@@ -1591,6 +1589,17 @@ with open(buildfile_tmp, 'w') as f:
             )
         )
 
+        f.write(
+            'build {mode}-test: test.{mode} {test_executables} $builddir/{mode}/test/tools/cql_repl\n'.format(
+                mode=mode,
+                test_executables=' '.join(['$builddir/{}/{}'.format(mode, binary) for binary in tests]),
+            )
+        )
+        f.write(
+            'build {mode}-check: phony {mode}-headers {mode}-test\n'.format(
+                mode=mode,
+            )
+        )
 
         gen_headers = []
         for th in thrifts:
@@ -1672,6 +1681,13 @@ with open(buildfile_tmp, 'w') as f:
 
     mode = 'dev' if 'dev' in modes else modes[0]
     f.write('build checkheaders: phony || {}\n'.format(' '.join(['$builddir/{}/{}.o'.format(mode, hh) for hh in headers])))
+
+    f.write(
+            'build test: phony {}\n'.format(' '.join(['{mode}-test'.format(mode=mode) for mode in modes]))
+    )
+    f.write(
+            'build check: phony {}\n'.format(' '.join(['{mode}-check'.format(mode=mode) for mode in modes]))
+    )
 
     f.write(textwrap.dedent('''\
         rule configure

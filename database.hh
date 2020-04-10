@@ -493,6 +493,7 @@ private:
     compaction_manager& _compaction_manager;
     secondary_index::secondary_index_manager _index_manager;
     int _compaction_disabled = 0;
+    bool _compaction_disabled_by_user = false;
     utils::phased_barrier _flush_barrier;
     seastar::gate _streaming_flush_gate;
     std::vector<view_ptr> _views;
@@ -828,11 +829,6 @@ public:
     future<> compact_all_sstables();
     // Compact all sstables provided in the vector.
     future<> compact_sstables(sstables::compaction_descriptor descriptor);
-    // Compact all sstables provided in the descriptor one-by-one.
-    //
-    // Will call `compact_sstables()` for each sstable. Use by compaction
-    // types such as cleanup or upgrade.
-    future<> rewrite_sstables(sstables::compaction_descriptor descriptor);
 
     future<bool> snapshot_exists(sstring name);
 
@@ -948,6 +944,12 @@ public:
     void drop_hit_rate(gms::inet_address addr);
 
     future<> run_with_compaction_disabled(std::function<future<> ()> func);
+
+    void enable_auto_compaction();
+    void disable_auto_compaction();
+    bool is_auto_compaction_disabled_by_user() const {
+      return _compaction_disabled_by_user;
+    }
 
     utils::phased_barrier::operation write_in_progress() {
         return _pending_writes_phaser.start();

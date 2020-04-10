@@ -11,6 +11,7 @@
 #include "api/api-doc/system.json.hh"
 #include "api/api.hh"
 
+#include <seastar/core/reactor.hh>
 #include <seastar/http/exception.hh>
 #include "log.hh"
 

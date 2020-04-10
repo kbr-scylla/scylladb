@@ -18,6 +18,7 @@
 #include <seastar/net/tls.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/sleep.hh>
+#include <seastar/core/reactor.hh>
 
 // workaround cryptsoft sdk issue:
 #define strcasestr  kmip_strcasestr
