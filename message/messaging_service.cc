@@ -378,9 +378,7 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     , _scheduling_config(scfg)
     , _sl_controller(sl_controller)
 {
-    _rpc->set_logger([] (const sstring& log) {
-            rpc_logger.info("{}", log);
-    });
+    _rpc->set_logger(&rpc_logger);
     register_handler(this, messaging_verb::CLIENT_ID, [] (rpc::client_info& ci, gms::inet_address broadcast_address, uint32_t src_cpu_id, rpc::optional<uint64_t> max_result_size) {
         ci.attach_auxiliary("baddr", broadcast_address);
         ci.attach_auxiliary("src_cpu_id", src_cpu_id);

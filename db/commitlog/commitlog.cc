@@ -2128,8 +2128,9 @@ db::commitlog::read_log_file(const sstring& filename, const sstring& pfx, seasta
         }).handle_exception([w](auto ep) {
             w->s.set_exception(ep);
         });
-
-        return ret.done();
+        // #6265 - must keep subscription alive.
+        auto res = ret.done();
+        return res.finally([ret = std::move(ret)] {});
     });
 }
 

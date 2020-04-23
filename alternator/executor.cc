@@ -187,6 +187,25 @@ static schema_ptr get_table(service::storage_proxy& proxy, const rjson::value& r
     }
 }
 
+static std::tuple<bool, std::string_view, std::string_view> try_get_internal_table(std::string_view table_name) {
+    size_t it = table_name.find(executor::INTERNAL_TABLE_PREFIX);
+    if (it != 0) {
+        return {false, "", ""};
+    }
+    table_name.remove_prefix(executor::INTERNAL_TABLE_PREFIX.size());
+    size_t delim = table_name.find_first_of('.');
+    if (delim == std::string_view::npos) {
+        return {false, "", ""};
+    }
+    std::string_view ks_name = table_name.substr(0, delim);
+    table_name.remove_prefix(ks_name.size() + 1);
+    // Only internal keyspaces can be accessed to avoid leakage
+    if (!is_internal_keyspace(sstring(ks_name))) {
+        return {false, "", ""};
+    }
+    return {true, ks_name, table_name};
+}
+
 // get_table_or_view() is similar to to get_table(), except it returns either
 // a table or a materialized view from which to read, based on the TableName
 // and optional IndexName in the request. Only requests like Query and Scan
@@ -196,6 +215,17 @@ static std::pair<schema_ptr, table_or_view_type>
 get_table_or_view(service::storage_proxy& proxy, const rjson::value& request) {
     table_or_view_type type = table_or_view_type::base;
     std::string table_name = get_table_name(request);
+
+    auto [is_internal_table, internal_ks_name, internal_table_name] = try_get_internal_table(table_name);
+    if (is_internal_table) {
+        try {
+            return { proxy.get_db().local().find_schema(sstring(internal_ks_name), sstring(internal_table_name)), type };
+        } catch (no_such_column_family&) {
+            throw api_error("ResourceNotFoundException",
+                format("Requested resource not found: Internal table: {}.{} not found", internal_ks_name, internal_table_name));
+        }
+    }
+
     std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     const rjson::value* index_name = rjson::find(request, "IndexName");
     std::string orig_table_name;
@@ -684,6 +714,10 @@ future<executor::request_return_type> executor::create_table(client_state& clien
     _stats.api_operations.create_table++;
     elogger.trace("Creating table {}", request);
     std::string table_name = get_table_name(request);
+    if (table_name.find(INTERNAL_TABLE_PREFIX) == 0) {
+        return make_ready_future<request_return_type>(api_error("ValidationException",
+                format("Prefix {} is reserved for accessing internal tables", INTERNAL_TABLE_PREFIX)));
+    }
     std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     const rjson::value& attribute_definitions = request["AttributeDefinitions"];
 
@@ -2920,8 +2954,10 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
 
     auto regular_columns = boost::copy_range<query::column_id_vector>(
             schema->regular_columns() | boost::adaptors::transformed([] (const column_definition& cdef) { return cdef.id; }));
+    auto static_columns = boost::copy_range<query::column_id_vector>(
+            schema->static_columns() | boost::adaptors::transformed([] (const column_definition& cdef) { return cdef.id; }));
     auto selection = cql3::selection::selection::wildcard(schema);
-    auto partition_slice = query::partition_slice(std::move(ck_bounds), {}, std::move(regular_columns), selection->get_query_options());
+    auto partition_slice = query::partition_slice(std::move(ck_bounds), std::move(static_columns), std::move(regular_columns), selection->get_query_options());
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, query::max_partitions);
 
     auto query_state_ptr = std::make_unique<service::query_state>(client_state, trace_state, std::move(permit));
@@ -2951,11 +2987,38 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
     });
 }
 
+static dht::token token_for_segment(int segment, int total_segments) {
+    assert(total_segments > 1 && segment >= 0 && segment < total_segments);
+    int64_t delta = std::numeric_limits<int64_t>::max() / total_segments * 2;
+    return dht::token::from_int64(std::numeric_limits<int64_t>::min() + delta * segment);
+}
+
+static dht::partition_range get_range_for_segment(int segment, int total_segments) {
+    if (total_segments == 1) {
+        return dht::partition_range::make_open_ended_both_sides();
+    }
+    if (segment == 0) {
+        dht::token ending_token = token_for_segment(1, total_segments);
+        return dht::partition_range::make_ending_with(
+                dht::partition_range::bound(dht::ring_position::ending_at(ending_token), false));
+    } else if (segment == total_segments - 1) {
+        dht::token starting_token = token_for_segment(segment, total_segments);
+        return dht::partition_range::make_starting_with(
+                dht::partition_range::bound(dht::ring_position::starting_at(starting_token)));
+    } else {
+        dht::token starting_token = token_for_segment(segment, total_segments);
+        dht::token ending_token = token_for_segment(segment + 1, total_segments);
+        return dht::partition_range::make(
+            dht::partition_range::bound(dht::ring_position::starting_at(starting_token)),
+            dht::partition_range::bound(dht::ring_position::ending_at(ending_token), false)
+        );
+    }
+}
+
 // TODO(sarna):
 // 1. Paging must have 1MB boundary according to the docs. IIRC we do have a replica-side reply size limit though - verify.
 // 2. Filtering - by passing appropriately created restrictions to pager as a last parameter
 // 3. Proper timeouts instead of gc_clock::now() and db::no_timeout
-// 4. Implement parallel scanning via Segments
 future<executor::request_return_type> executor::scan(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     _stats.api_operations.scan++;
     elogger.trace("Scanning {}", request);
@@ -2966,10 +3029,21 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
         return make_ready_future<request_return_type>(api_error("ValidationException",
                 "FilterExpression is not yet implemented in alternator"));
     }
-    if (get_int_attribute(request, "Segment") || get_int_attribute(request, "TotalSegments")) {
-        // FIXME: need to support parallel scan. See issue #5059.
-        return make_ready_future<request_return_type>(api_error("ValidationException",
-                "Scan Segment/TotalSegments is not yet implemented in alternator"));
+    auto segment = get_int_attribute(request, "Segment");
+    auto total_segments = get_int_attribute(request, "TotalSegments");
+    if (segment || total_segments) {
+        if (!segment || !total_segments) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "Both Segment and TotalSegments attributes need to be present for a parallel scan"));
+        }
+        if (*segment < 0 || *segment >= *total_segments) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "Segment must be non-negative and less than TotalSegments"));
+        }
+        if (*total_segments < 0 || *total_segments > 1000000) {
+            return make_ready_future<request_return_type>(api_error("ValidationException",
+                    "TotalSegments must be non-negative and less or equal to 1000000"));
+        }
     }
 
     rjson::value* exclusive_start_key = rjson::find(request, "ExclusiveStartKey");
@@ -2988,7 +3062,12 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
 
     auto attrs_to_get = calculate_attrs_to_get(request);
 
-    dht::partition_range_vector partition_ranges{dht::partition_range::make_open_ended_both_sides()};
+    dht::partition_range_vector partition_ranges;
+    if (segment) {
+        partition_ranges.push_back(get_range_for_segment(*segment, *total_segments));
+    } else {
+        partition_ranges.push_back(dht::partition_range::make_open_ended_both_sides());
+    }
     std::vector<query::clustering_range> ck_bounds{query::clustering_range::make_open_ended_both_sides()};
 
     ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions;
