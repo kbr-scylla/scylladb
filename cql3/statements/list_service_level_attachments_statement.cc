@@ -40,14 +40,14 @@ list_service_level_attachments_statement::execute(service::storage_proxy &sp,
         const query_options &) const {
 
     static auto make_column = [] (sstring name, const shared_ptr<const abstract_type> type) {
-        return ::make_shared<column_specification>(
+        return make_lw_shared<column_specification>(
                 "QOS",
                 "service_levels_attachments",
                 ::make_shared<column_identifier>(std::move(name), true),
                 type);
     };
 
-    static thread_local const std::vector<::shared_ptr<column_specification>> metadata({
+    static thread_local const std::vector<lw_shared_ptr<column_specification>> metadata({
         make_column("role", utf8_type), make_column("service_level", utf8_type)
     });
 

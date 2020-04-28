@@ -91,6 +91,7 @@ fedora_packages=(
     hwloc
     glibc-langpack-en
     lld
+    xxhash-devel
     openldap-servers
     openldap-devel
     toxiproxy

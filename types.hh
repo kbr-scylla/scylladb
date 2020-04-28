@@ -53,7 +53,6 @@ class multiprecision_int;
 namespace cql3 {
 
 class cql3_type;
-class column_specification;
 
 }
 
@@ -475,6 +474,7 @@ public:
         utf8,
         uuid,
         varint,
+        last = varint,
     };
 private:
     kind _kind;
