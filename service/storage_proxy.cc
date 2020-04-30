@@ -1215,7 +1215,7 @@ future<> paxos_response_handler::learn_decision(lw_shared_ptr<paxos::proposal> d
         std::vector<mutation> update_mut_vec{std::move(update_mut)};
 
         if (_proxy->get_cdc_service()->needs_cdc_augmentation(update_mut_vec)) {
-            f_cdc = _proxy->get_cdc_service()->augment_mutation_call(_timeout, std::move(update_mut_vec), tr_state)
+            f_cdc = _proxy->get_cdc_service()->augment_mutation_call(_timeout, std::move(update_mut_vec), tr_state, _cl_for_learn)
                     .then([this, base_tbl_id] (std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) {
                 auto mutations = std::move(std::get<0>(t));
                 auto tracker = std::move(std::get<1>(t));
@@ -2222,7 +2222,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
  */
 future<> storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit, bool raw_counters) {
     if (_cdc && _cdc->needs_cdc_augmentation(mutations)) {
-        return _cdc->augment_mutation_call(timeout, std::move(mutations), tr_state).then([this, cl, timeout, tr_state, permit = std::move(permit), raw_counters](std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) mutable {
+        return _cdc->augment_mutation_call(timeout, std::move(mutations), tr_state, cl).then([this, cl, timeout, tr_state, permit = std::move(permit), raw_counters](std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) mutable {
             auto mutations = std::move(std::get<0>(t));
             auto tracker = std::move(std::get<1>(t));
             return _mutate_stage(this, std::move(mutations), cl, timeout, std::move(tr_state), std::move(permit), raw_counters, std::move(tracker));
@@ -2402,7 +2402,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
     };
 
     if (_cdc && _cdc->needs_cdc_augmentation(mutations)) {
-        return _cdc->augment_mutation_call(timeout, std::move(mutations), std::move(tr_state)).then([this, mk_ctxt = std::move(mk_ctxt), cleanup = std::move(cleanup)](std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) mutable {
+        return _cdc->augment_mutation_call(timeout, std::move(mutations), std::move(tr_state), cl).then([this, mk_ctxt = std::move(mk_ctxt), cleanup = std::move(cleanup)](std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) mutable {
             auto mutations = std::move(std::get<0>(t));
             auto tracker = std::move(std::get<1>(t));
             return std::move(mk_ctxt)(std::move(mutations), std::move(tracker)).then([this] (lw_shared_ptr<context> ctxt) {
@@ -4321,6 +4321,13 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
     });
 }
 
+static lw_shared_ptr<query::read_command> read_nothing_read_command(schema_ptr schema) {
+    // Note that because this read-nothing command has an empty slice,
+    // storage_proxy::query() returns immediately - without any networking.
+    auto partition_slice = query::partition_slice({}, {}, {}, query::partition_slice::option_set());
+    return ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, query::max_partitions);
+}
+
 /**
  * Apply mutations if and only if the current values in the row for the given key
  * match the provided conditions. The algorithm is "raw" Paxos: that is, Paxos
@@ -4352,6 +4359,9 @@ storage_proxy::do_query_with_paxos(schema_ptr s,
  * values) between the prepare and accept phases. This gives us a slightly longer window for another
  * coordinator to come along and trump our own promise with a newer one but is otherwise safe.
  *
+ * NOTE: `cmd` argument can be nullptr, in which case it's guaranteed that this function would not perform
+ * any reads of commited values (in case user of the function is not interested in them).
+ *
  * WARNING: the function should be called on a shard that owns the key cas() operates on
  */
 future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> request, lw_shared_ptr<query::read_command> cmd,
@@ -4367,6 +4377,14 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
 
     if (cas_shard(*schema, partition_ranges[0].start()->value().as_decorated_key().token()) != this_shard_id()) {
         throw std::logic_error("storage_proxy::cas called on a wrong shard");
+    }
+
+    // In case a nullptr is passed to this function (i.e. the caller isn't interested in
+    // existing value) we fabricate an "empty"  read_command that does nothing,
+    // i.e. appropriate calls to storage_proxy::query immediately return an
+    // empty query::result object without accessing any data.
+    if (!cmd) {
+        cmd = read_nothing_read_command(schema);
     }
 
     shared_ptr<paxos_response_handler> handler;
