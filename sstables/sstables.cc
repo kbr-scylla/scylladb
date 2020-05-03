@@ -2289,6 +2289,7 @@ void sstable_writer_k_l::finish_file_writer()
 
 sstable_writer_k_l::~sstable_writer_k_l() {
     if (_writer) {
+        _monitor->write_failed();
         try {
             _writer->close();
         } catch (...) {
@@ -2726,7 +2727,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
         } else {
             throw malformed_sstable_exception(seastar::format("invalid version for file {} with path {}. Path doesn't match known pattern.", fname, sstdir));
         }
-        version = (match[1].str() == "la") ? sstable::version_types::la : sstable::version_types::mc;
+        version = from_string(match[1].str());
         generation = match[2].str();
         format = sstring(match[3].str());
         component = sstring(match[4].str());
