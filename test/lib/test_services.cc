@@ -57,7 +57,7 @@ public:
         _feature_service.start(gms::feature_config_from_db_config(_cfg)).get();
         _gossiper.start(std::ref(_abort_source), std::ref(_feature_service), std::ref(_token_metadata), std::ref(_cfg)).get();
         _sl_controller.start(qos::service_level_options{1000}).get();
-        netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000, false).get();
+        netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
         service::storage_service_config sscfg;
         sscfg.available_memory = memory::stats().total_memory();
         service::get_storage_service().start(std::ref(_abort_source), std::ref(_db), std::ref(_gossiper), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), sscfg, std::ref(_mnotif), std::ref(_token_metadata), std::ref(_sl_controller), true).get();

@@ -27,6 +27,7 @@
 #include "db/system_distributed_keyspace.hh"
 #include "service/qos/service_level_controller.hh"
 #include "db/config.hh"
+#include "sstables/compaction_manager.hh"
 
 namespace db::view {
 class view_update_generator;
@@ -65,7 +66,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         locator::i_endpoint_snitch::create_snitch("SimpleSnitch").get();
         auto stop_snitch = defer([&] { locator::i_endpoint_snitch::stop_snitch().get(); });
 
-        netw::get_messaging_service().start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000, false /* don't bind */).get();
+        netw::get_messaging_service().start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
         auto stop_messaging_service = defer([&] { netw::get_messaging_service().stop().get(); });
 
         gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(*cfg)).get();
@@ -78,6 +79,10 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata)).get();
+        db.invoke_on_all([] (database& db) {
+            db.get_compaction_manager().start();
+        }).get();
+
         auto stop_db = defer([&] { db.stop().get(); });
         auto stop_database_d = defer([&db] {
             stop_database(db).get();

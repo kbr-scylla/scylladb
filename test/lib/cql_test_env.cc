@@ -425,7 +425,7 @@ public:
                 return service.set_distributed_data_accessor(std::move(service_level_data_accessor));
             }).get();
             // don't start listening so tests can be run in parallel
-            ms.start(std::ref(sl_controller), listen, std::move(7000), false).get();
+            ms.start(std::ref(sl_controller), listen, std::move(7000)).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
 
             sharded<auth::service> auth_service;

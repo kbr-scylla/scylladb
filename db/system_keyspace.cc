@@ -192,6 +192,7 @@ schema_ptr batchlog() {
         // operations on resulting CFMetaData:
         //    .compactionStrategyClass(LeveledCompactionStrategy.class);
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        builder.set_wait_for_sync_to_commitlog(true);
        return builder.build(schema_builder::compact_storage::no);
@@ -215,6 +216,7 @@ schema_ptr built_indexes() {
         // comment
         "built column indexes"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::yes);
     }();
@@ -261,6 +263,7 @@ schema_ptr built_indexes() {
         // comment
         "information about the local node"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        builder.remove_column("scylla_cpu_sharding_algorithm");
        builder.remove_column("scylla_nr_shards");
@@ -296,6 +299,7 @@ schema_ptr built_indexes() {
         // comment
         "information about known peers in the cluster"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -320,6 +324,7 @@ schema_ptr built_indexes() {
         // comment
         "events related to peers"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -342,6 +347,7 @@ schema_ptr built_indexes() {
         // comment
         "ranges requested for transfer"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -479,6 +485,7 @@ schema_ptr size_estimates() {
         // comment
         "partitions larger than specified threshold"
         )));
+        builder.set_gc_grace_seconds(0);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build(schema_builder::compact_storage::no);
     }();
@@ -499,6 +506,7 @@ static schema_ptr large_rows() {
                 .with_column("compaction_time", timestamp_type)
                 .set_comment("rows larger than specified threshold")
                 .with_version(generate_schema_version(id))
+                .set_gc_grace_seconds(0)
                 .build();
     }();
     return large_rows;
@@ -519,6 +527,7 @@ static schema_ptr large_cells() {
                 .with_column("compaction_time", timestamp_type)
                 .set_comment("cells larger than specified threshold")
                 .with_version(generate_schema_version(id))
+                .set_gc_grace_seconds(0)
                 .build();
     }();
     return large_cells;
@@ -542,6 +551,7 @@ static schema_ptr large_cells() {
         // comment
         "Scylla specific information about the local node"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -655,6 +665,7 @@ schema_ptr local() {
         // comment
         "information about the local node"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -682,6 +693,7 @@ schema_ptr truncated() {
         // comment
         "information about table truncation"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -744,6 +756,7 @@ schema_ptr available_ranges() {
         // comment
         "available keyspace/ranges during bootstrap/replace that are ready to be served"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
     }();
@@ -766,6 +779,7 @@ schema_ptr views_builds_in_progress() {
         // comment
         "views builds current progress"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
     }();
@@ -788,6 +802,7 @@ schema_ptr built_views() {
         // comment
         "built views"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
     }();
@@ -831,6 +846,7 @@ schema_ptr scylla_views_builds_in_progress() {
         // comment
         "CDC-specific information that the local node stores"
        )));
+       builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
