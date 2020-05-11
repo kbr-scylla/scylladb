@@ -493,6 +493,7 @@ private:
     compaction_manager& _compaction_manager;
     secondary_index::secondary_index_manager _index_manager;
     int _compaction_disabled = 0;
+    bool _compaction_disabled_by_user = false;
     utils::phased_barrier _flush_barrier;
     seastar::gate _streaming_flush_gate;
     std::vector<view_ptr> _views;
@@ -943,6 +944,12 @@ public:
     void drop_hit_rate(gms::inet_address addr);
 
     future<> run_with_compaction_disabled(std::function<future<> ()> func);
+
+    void enable_auto_compaction();
+    void disable_auto_compaction();
+    bool is_auto_compaction_disabled_by_user() const {
+      return _compaction_disabled_by_user;
+    }
 
     utils::phased_barrier::operation write_in_progress() {
         return _pending_writes_phaser.start();
@@ -1409,7 +1416,7 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm, abort_source& as);
     database(database&&) = delete;
     ~database();
 

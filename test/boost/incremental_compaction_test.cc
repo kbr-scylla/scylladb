@@ -137,9 +137,9 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             auto replacer = [&] (compaction_completion_desc ccd) {
                 BOOST_REQUIRE(expected_sst != sstable_run.end());
                 if (incremental_enabled) {
-                    do_incremental_replace(std::move(ccd.input_sstables), std::move(ccd.output_sstables), expected_sst, closed_sstables_tracker);
+                    do_incremental_replace(std::move(ccd.old_sstables), std::move(ccd.new_sstables), expected_sst, closed_sstables_tracker);
                 } else {
-                    do_replace(std::move(ccd.input_sstables), std::move(ccd.output_sstables));
+                    do_replace(std::move(ccd.old_sstables), std::move(ccd.new_sstables));
                     expected_sst = sstable_run.end();
                 }
             };

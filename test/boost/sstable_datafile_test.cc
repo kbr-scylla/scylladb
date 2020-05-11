@@ -5041,8 +5041,8 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
             auto expected_sst = sstable_run.begin();
             auto closed_sstables_tracker = sstable_run.begin();
             auto replacer = [&] (sstables::compaction_completion_desc desc) {
-                auto old_sstables = std::move(desc.input_sstables);
-                auto new_sstables = std::move(desc.output_sstables);
+                auto old_sstables = std::move(desc.old_sstables);
+                auto new_sstables = std::move(desc.new_sstables);
                 BOOST_REQUIRE(expected_sst != sstable_run.end());
                 if (incremental_enabled) {
                     do_incremental_replace(std::move(old_sstables), std::move(new_sstables), expected_sst, closed_sstables_tracker);
@@ -5556,9 +5556,10 @@ SEASTAR_TEST_CASE(incremental_compaction_data_resurrection_test) {
             return m;
         };
 
+        auto deletion_time = gc_clock::now();
         auto make_delete = [&] (partition_key key) {
             mutation m(s, key);
-            tombstone tomb(next_timestamp(), gc_clock::now());
+            tombstone tomb(next_timestamp(), deletion_time);
             m.partition().apply(tomb);
             return m;
         };
@@ -5616,15 +5617,20 @@ SEASTAR_TEST_CASE(incremental_compaction_data_resurrection_test) {
         BOOST_REQUIRE(is_partition_dead(alpha));
 
         auto replacer = [&] (sstables::compaction_completion_desc desc) {
-            auto old_sstables = std::move(desc.input_sstables);
-            auto new_sstables = std::move(desc.output_sstables);
+            auto old_sstables = std::move(desc.old_sstables);
+            auto new_sstables = std::move(desc.new_sstables);
             // expired_sst is exhausted, and new sstable is written with mut 2.
             BOOST_REQUIRE(old_sstables.size() == 1);
             BOOST_REQUIRE(old_sstables.front() == expired_sst);
-            BOOST_REQUIRE(new_sstables.size() == 1);
-            assert_that(sstable_reader(new_sstables.front(), s))
+            BOOST_REQUIRE(new_sstables.size() == 2);
+            for (auto& new_sstable : new_sstables) {
+                if (new_sstable->get_max_local_deletion_time() == deletion_time) { // Skipping GC SSTable.
+                    continue;
+                }
+                assert_that(sstable_reader(new_sstable, s))
                     .produces(mut2)
                     .produces_end_of_stream();
+            }
             column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
             // force compaction failure after sstable containing expired tombstone is removed from set.
             throw std::runtime_error("forcing compaction failure on early replacement");
@@ -5718,5 +5724,80 @@ SEASTAR_TEST_CASE(twcs_major_compaction_test) {
         auto original_apart = make_sstable_containing(sst_gen, {mut1, mut2});
         ret = compact_sstables(sstables::compaction_descriptor({original_apart}), *cf, sst_gen, replacer_fn_no_op()).get0();
         BOOST_REQUIRE(ret.new_sstables.size() == 2);
+    });
+}
+
+SEASTAR_TEST_CASE(autocompaction_control_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        storage_service_for_tests ssft;
+        cell_locker_stats cl_stats;
+        cache_tracker tracker;
+
+        compaction_manager cm; cm.start();
+
+        auto s = schema_builder(some_keyspace, some_column_family)
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("value", int32_type)
+                .build();
+
+        auto tmp = tmpdir();
+        column_family::config cfg = column_family_test_config();
+        cfg.datadir = tmp.path().string();
+        cfg.enable_commitlog = false;
+        cfg.enable_disk_writes = true;
+
+        auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), cm, cl_stats, tracker);
+        cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+        cf->mark_ready_for_writes();
+
+        // no compactions done yet
+        auto& ss = cm.get_stats();
+        BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0 && ss.completed_tasks == 0);
+        // auto compaction is enabled by default
+        BOOST_REQUIRE(!cf->is_auto_compaction_disabled_by_user());
+        // disable auto compaction by user
+        cf->disable_auto_compaction();
+        // check it is disabled
+        BOOST_REQUIRE(cf->is_auto_compaction_disabled_by_user());
+
+        // generate a few sstables
+        auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
+            return env.make_sstable(s, tmp.path().string(), (*gen)++, la, big);
+        };
+        auto make_insert = [&] (partition_key key) {
+            mutation m(s, key);
+            m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), 1 /* ts */);
+            return m;
+        };
+        auto min_threshold = cf->schema()->min_compaction_threshold();
+        auto tokens = token_generation_for_current_shard(1);
+        for (auto i = 0; i < 2 * min_threshold; ++i) {
+            auto key = partition_key::from_exploded(*s, {to_bytes(tokens[0].first)});
+            auto mut = make_insert(key);
+            auto sst = make_sstable_containing(sst_gen, {mut});
+            cf->add_sstable_and_update_cache(sst).wait();
+        }
+
+        // check compaction manager does not receive background compaction submissions
+        cf->start();
+        cf->trigger_compaction();
+        cf->get_compaction_manager().submit(cf.get());
+        BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0 && ss.completed_tasks == 0);
+        // enable auto compaction
+        cf->enable_auto_compaction();
+        // check enabled
+        BOOST_REQUIRE(!cf->is_auto_compaction_disabled_by_user());
+        // trigger background compaction
+        cf->trigger_compaction();
+        // wait until compaction finished
+        do_until([&ss] { return ss.pending_tasks == 0 && ss.active_tasks == 0; }, [] {
+            return sleep(std::chrono::milliseconds(100));
+        }).wait();
+        // test compaction successfully finished
+        BOOST_REQUIRE(ss.errors == 0);
+        BOOST_REQUIRE(ss.completed_tasks == 1);
+
+        cf->stop().wait();
+        cm.stop().wait();
     });
 }
