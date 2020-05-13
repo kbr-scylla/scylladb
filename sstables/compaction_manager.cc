@@ -346,7 +346,7 @@ future<> compaction_manager::task_stop(lw_shared_ptr<compaction_manager::task> t
     });
 }
 
-compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, abort_source& as)
+compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory)
     : _compaction_controller(sg, iop, 250ms, [this, available_memory] () -> float {
         auto b = backlog() / available_memory;
         // This means we are using an unimplemented strategy
@@ -361,26 +361,17 @@ compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_
     , _backlog_manager(_compaction_controller)
     , _scheduling_group(_compaction_controller.sg())
     , _available_memory(available_memory)
-    , _early_abort_subscription(as.subscribe([this] {
-        do_stop();
-    }))
 {}
 
-compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares, abort_source& as)
+compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares)
     : _compaction_controller(sg, iop, shares)
     , _backlog_manager(_compaction_controller)
     , _scheduling_group(_compaction_controller.sg())
-    , _available_memory(available_memory)
-    , _early_abort_subscription(as.subscribe([this] {
-        do_stop();
-    }))
+, _available_memory(available_memory)
 {}
 
 compaction_manager::compaction_manager()
-    : _compaction_controller(seastar::default_scheduling_group(), default_priority_class(), 1)
-    , _backlog_manager(_compaction_controller)
-    , _scheduling_group(_compaction_controller.sg())
-    , _available_memory(1)
+    : compaction_manager(seastar::default_scheduling_group(), default_priority_class(), 1)
 {}
 
 compaction_manager::~compaction_manager() {
@@ -444,17 +435,11 @@ void compaction_manager::postpone_compaction_for_column_family(column_family* cf
 }
 
 future<> compaction_manager::stop() {
-    do_stop();
-    return std::move(*_stop_future);
-}
-
-void compaction_manager::do_stop() {
     if (_stopped) {
-        return;
+        return make_ready_future<>();
     }
-
-    _stopped = true;
     cmlog.info("Asked to stop");
+    _stopped = true;
     // Reset the metrics registry
     _metrics.clear();
     // Stop all ongoing compaction.
@@ -464,10 +449,7 @@ void compaction_manager::do_stop() {
     // Wait for each task handler to stop. Copy list because task remove itself
     // from the list when done.
     auto tasks = _tasks;
-
-    // fine to ignore here, since it is used to set up the shared promise in
-    // the finally block. Waiters will wait on the shared_future through stop().
-    _stop_future.emplace(do_with(std::move(tasks), [this] (std::list<lw_shared_ptr<task>>& tasks) {
+    return do_with(std::move(tasks), [this] (std::list<lw_shared_ptr<task>>& tasks) {
         return parallel_for_each(tasks, [this] (auto& task) {
             return this->task_stop(task);
         });
@@ -479,7 +461,7 @@ void compaction_manager::do_stop() {
         _compaction_submission_timer.cancel();
         cmlog.info("Stopped");
         return _compaction_controller.shutdown();
-    }));
+    });
 }
 
 inline bool compaction_manager::can_proceed(const lw_shared_ptr<task>& task) {
@@ -512,7 +494,8 @@ inline bool compaction_manager::maybe_stop_on_error(future<> f, stop_iteration w
     } catch (storage_io_error& e) {
         cmlog.error("compaction failed due to storage io error: {}: stopping", e.what());
         retry = false;
-        do_stop();
+        // FIXME discarded future.
+        (void)stop();
     } catch (...) {
         cmlog.error("compaction failed: {}: {}", std::current_exception(), decision_msg);
         retry = true;
@@ -625,7 +608,8 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
             column_family& cf = *task->compacting_cf;
             auto sstable_level = sst->get_sstable_level();
             auto run_identifier = sst->run_identifier();
-            auto descriptor = sstables::compaction_descriptor({ sst }, sstable_level,
+            // FIXME: this compaction should run with maintenance priority.
+            auto descriptor = sstables::compaction_descriptor({ sst }, service::get_local_compaction_priority(), sstable_level,
                         sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, options);
 
             auto compacting = make_lw_shared<compacting_sstable_registration>(this, descriptor.sstables);

@@ -129,6 +129,10 @@ extern const std::string_view NONFROZEN_UDTS;
 extern const std::string_view HINTED_HANDOFF_SEPARATE_CONNECTION;
 extern const std::string_view LWT;
 extern const std::string_view PER_TABLE_PARTITIONERS;
+extern const std::string_view PER_TABLE_CACHING;
+
+
+// enterprise
 extern const std::string_view IN_MEMORY_TABLES;
 
 }

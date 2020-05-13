@@ -710,6 +710,17 @@ future<executor::request_return_type> executor::list_tags_of_resource(client_sta
     return make_ready_future<executor::request_return_type>(make_jsonable(std::move(ret)));
 }
 
+static future<> wait_for_schema_agreement(db::timeout_clock::time_point deadline) {
+    return do_until([deadline] {
+        if (db::timeout_clock::now() > deadline) {
+            throw std::runtime_error("Unable to reach schema agreement");
+        }
+        return service::get_local_migration_manager().have_schema_agreement();
+    }, [] {
+        return seastar::sleep(500ms);
+    });
+}
+
 future<executor::request_return_type> executor::create_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     _stats.api_operations.create_table++;
     elogger.trace("Creating table {}", request);
@@ -896,7 +907,9 @@ future<executor::request_return_type> executor::create_table(client_state& clien
         ++where_clause_it;
     }
 
-    return create_keyspace(keyspace_name).then([this, table_name, request = std::move(request), schema, view_builders = std::move(view_builders)] () mutable {
+    return create_keyspace(keyspace_name).handle_exception_type([] (exceptions::already_exists_exception&) {
+            // Ignore the fact that the keyspace may already exist. See discussion in #6340
+        }).then([this, table_name, request = std::move(request), schema, view_builders = std::move(view_builders)] () mutable {
         return futurize_invoke([&] { return _mm.announce_new_column_family(schema, false); }).then([this, table_info = std::move(request), schema, view_builders = std::move(view_builders)] () mutable {
             return parallel_for_each(std::move(view_builders), [schema] (schema_builder builder) {
                 return service::get_local_migration_manager().announce_new_view(view_ptr(builder.build()));
@@ -905,7 +918,9 @@ future<executor::request_return_type> executor::create_table(client_state& clien
                 if (rjson::find(table_info, "Tags")) {
                     f = add_tags(_proxy, schema, table_info);
                 }
-                return f.then([table_info = std::move(table_info), schema] () mutable {
+                return f.then([] {
+                    return wait_for_schema_agreement(db::timeout_clock::now() + 10s);
+                }).then([table_info = std::move(table_info), schema] () mutable {
                     rjson::value status = rjson::empty_object();
                     supplement_table_info(table_info, *schema);
                     rjson::set(status, "TableDescription", std::move(table_info));
@@ -917,10 +932,6 @@ future<executor::request_return_type> executor::create_table(client_state& clien
                     api_error("ResourceInUseException",
                             format("Table {} already exists", table_name)));
         });
-    }).handle_exception_type([table_name = std::move(table_name)] (exceptions::already_exists_exception&) {
-        return make_exception_future<executor::request_return_type>(
-                api_error("ResourceInUseException",
-                        format("Keyspace for table {} already exists", table_name)));
     });
 }
 

@@ -469,7 +469,7 @@ table::make_reader(schema_ptr s,
         readers.emplace_back(mt->make_flat_reader(s, range, slice, pc, trace_state, fwd, fwd_mr));
     }
 
-    if (_config.enable_cache && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
+    if (cache_enabled() && !slice.options.contains(query::partition_slice::option::bypass_cache)) {
         readers.emplace_back(_cache.make_reader(s, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
         readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
@@ -720,11 +720,10 @@ table::update_cache(lw_shared_ptr<memtable> m, sstables::shared_sstable sst) {
         m->mark_flushed(std::move(newtab_ms));
         try_trigger_compaction();
     };
-    if (_config.enable_cache) {
+    if (cache_enabled()) {
         return _cache.update(adder, *m);
     } else {
-        adder();
-        return m->clear_gently();
+        return _cache.invalidate(adder).then([m] { return m->clear_gently(); });
     }
 }
 
@@ -854,11 +853,10 @@ table::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
                           try_trigger_compaction();
                           tlogger.debug("Flushing to {} done", newtab->get_filename());
                       };
-                      if (_config.enable_cache) {
+                      if (cache_enabled()) {
                         return _cache.update_invalidating(adder, *old);
                       } else {
-                        adder();
-                        return old->clear_gently();
+                        return _cache.invalidate(adder).then([old] { return old->clear_gently(); });
                       }
                     });
                 }).handle_exception([old, permit = std::move(permit), newtab] (auto ep) {
@@ -1158,6 +1156,33 @@ table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sst
     _sstables = make_lw_shared(std::move(new_sstable_list));
 }
 
+future<>
+table::rebuild_sstable_list_with_deletion_sem(std::vector<sstables::shared_sstable> new_ssts, std::vector<sstables::shared_sstable> old_ssts) {
+    // Resharding deletes shared sstables in the coordinator, so it's important to only remove its
+    // input SSTables from the SSTable set after acquiring deletion semaphore to synchronize with
+    // other processes that also acquire that semaphore and only then iterate through the SSTable
+    // set, expecting that all SSTables will still do exist throughout the operation.
+    //
+    // FIXME: with_gate() returns a non-futurized exception if gate is closed, so let's futurize it.
+    // This should be removed when with_gate() is made noexcept in newer API version of seastar.
+    try {
+        return seastar::with_gate(_sstable_deletion_gate, [this, new_ssts = std::move(new_ssts), old_ssts = std::move(old_ssts)] () mutable {
+            return with_semaphore(_sstable_deletion_sem, 1, [this, new_ssts = std::move(new_ssts), old_ssts = std::move(old_ssts)] () mutable {
+                rebuild_sstable_list(std::move(new_ssts), std::move(old_ssts));
+                rebuild_statistics();
+                trigger_compaction();
+            });
+        }).handle_exception([this] (std::exception_ptr eptr) {
+            tlogger.error("Failed to update SSTable set on behalf of resharding for {}.{}: {}", _schema->ks_name(), _schema->cf_name(), eptr);
+            return make_exception_future<>(std::move(eptr));
+        });
+    } catch (...) {
+        auto eptr = std::current_exception();
+        tlogger.error("Failed to update SSTable set on behalf of resharding for {}.{}: {}", _schema->ks_name(), _schema->cf_name(), eptr);
+        return make_exception_future<>(std::move(eptr));
+    }
+}
+
 // Note: must run in a seastar thread
 void
 table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
@@ -1231,39 +1256,28 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
 // For replace/remove_ancestors_needed_write, note that we need to update the compaction backlog
 // manually. The new tables will be coming from a remote shard and thus unaccounted for in our
 // list so far, and the removed ones will no longer be needed by us.
-void table::replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables) {
+future<> table::replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables) {
     std::vector<sstables::shared_sstable> old_sstables;
-
-    for (auto& sst : new_sstables) {
-        _compaction_strategy.get_backlog_tracker().add_sstable(sst);
-    }
 
     for (auto& ancestor : ancestors) {
         auto it = _sstables_need_rewrite.find(ancestor);
         if (it != _sstables_need_rewrite.end()) {
             old_sstables.push_back(it->second);
-            _compaction_strategy.get_backlog_tracker().remove_sstable(it->second);
-            _sstables_need_rewrite.erase(it);
         }
     }
-    rebuild_sstable_list(new_sstables, old_sstables);
-    rebuild_statistics();
-    trigger_compaction();
+    return rebuild_sstable_list_with_deletion_sem(new_sstables, old_sstables).then([this, new_sstables, old_sstables] {
+        for (auto& sst : new_sstables) {
+            _compaction_strategy.get_backlog_tracker().add_sstable(sst);
+        }
+        for (auto& sst : old_sstables) {
+            _compaction_strategy.get_backlog_tracker().remove_sstable(sst);
+            _sstables_need_rewrite.erase(sst->generation());
+        }
+    });
 }
 
-void table::remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors) {
-    std::vector<sstables::shared_sstable> old_sstables;
-    for (auto& ancestor : ancestors) {
-        auto it = _sstables_need_rewrite.find(ancestor);
-        if (it != _sstables_need_rewrite.end()) {
-            old_sstables.push_back(it->second);
-            _compaction_strategy.get_backlog_tracker().remove_sstable(it->second);
-            _sstables_need_rewrite.erase(it);
-        }
-    }
-    rebuild_sstable_list({}, old_sstables);
-    rebuild_statistics();
-    trigger_compaction();
+future<> table::remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors) {
+    return replace_ancestors_needed_rewrite(std::move(ancestors), {});
 }
 
 future<>

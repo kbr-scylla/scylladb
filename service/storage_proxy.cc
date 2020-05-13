@@ -1619,6 +1619,18 @@ void storage_proxy_stats::stats::register_stats() {
         sm::make_total_operations("cas_dropped_prune", cas_coordinator_dropped_prune,
                        sm::description("how many times a coordinator did not perfom prune after cas"),
                        {storage_proxy_stats::current_scheduling_group_label()}),
+
+        sm::make_total_operations("cas_total_operations", cas_total_operations,
+                       sm::description("number of total paxos operations executed (reads and writes)"),
+                       {storage_proxy_stats::current_scheduling_group_label()}),
+
+        sm::make_gauge("cas_foreground", cas_foreground,
+                        sm::description("how many paxos operations that did not yet produce a result are running"),
+                        {storage_proxy_stats::current_scheduling_group_label()}),
+
+        sm::make_gauge("cas_background", [this] { return cas_total_running - cas_foreground; },
+                        sm::description("how many paxos operations are still running after a result was alredy returned"),
+                        {storage_proxy_stats::current_scheduling_group_label()}),
     });
 
     _metrics.add_group(REPLICA_STATS_CATEGORY, {
@@ -2167,9 +2179,9 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, ks_name);
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
-        auto itend = boost::range::remove_if(natural_endpoints, std::not1(std::cref(db::is_local)));
+        auto itend = boost::range::remove_if(natural_endpoints, std::not_fn(std::cref(db::is_local)));
         natural_endpoints.erase(itend, natural_endpoints.end());
-        itend = boost::range::remove_if(pending_endpoints, std::not1(std::cref(db::is_local)));
+        itend = boost::range::remove_if(pending_endpoints, std::not_fn(std::cref(db::is_local)));
         pending_endpoints.erase(itend, pending_endpoints.end());
     }
 
@@ -3217,7 +3229,12 @@ public:
             auto it = boost::range::find_if(v, [] (auto&& ver) {
                     return bool(ver.par);
             });
-            auto m = boost::accumulate(v, mutation(schema, it->par->mut().key()), [this, schema] (mutation& m, const version& ver) {
+#if __cplusplus <= 201703L
+            using mutation_ref = mutation&;
+#else
+            using mutation_ref = mutation&&;
+#endif
+            auto m = boost::accumulate(v, mutation(schema, it->par->mut().key()), [this, schema] (mutation_ref m, const version& ver) {
                 if (ver.par) {
                     mutation_application_stats app_stats;
                     m.partition().apply(*schema, ver.par->mut().partition(), *schema, app_stats);
@@ -3593,7 +3610,7 @@ public:
                         if (std::abs(delta) <= write_timeout) {
                             exec->_proxy->get_stats().global_read_repairs_canceled_due_to_concurrent_write++;
                             // if CL is local and non matching data is modified less then write_timeout ms ago do only local repair
-                            auto i = boost::range::remove_if(exec->_targets, std::not1(std::cref(db::is_local)));
+                            auto i = boost::range::remove_if(exec->_targets, std::not_fn(std::cref(db::is_local)));
                             exec->_targets.erase(i, exec->_targets.end());
                         }
                     }
@@ -4452,6 +4469,7 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
                 });
             });
         }).then_wrapped([this, lc, &contentions, handler, schema, cl_for_paxos, write] (future<bool> f) mutable {
+            get_stats().cas_foreground--;
             write ? get_stats().cas_write.mark(lc.stop().latency()) : get_stats().cas_read.mark(lc.stop().latency());
             if (lc.is_start()) {
                 write ? get_stats().estimated_cas_write.add(lc.latency(), get_stats().cas_write.hist.count) :

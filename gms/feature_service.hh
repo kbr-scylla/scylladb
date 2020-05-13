@@ -96,6 +96,7 @@ private:
     gms::feature _hinted_handoff_separate_connection;
     gms::feature _lwt_feature;
     gms::feature _per_table_partitioners_feature;
+    gms::feature _per_table_caching_feature;
     gms::feature _in_memory_tables;
 
 public:
@@ -165,6 +166,10 @@ public:
 
     const feature& cluster_supports_per_table_partitioners() const {
         return _per_table_partitioners_feature;
+    }
+
+    const feature& cluster_supports_per_table_caching() const {
+        return _per_table_caching_feature;
     }
 
     bool cluster_supports_row_level_repair() const {

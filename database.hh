@@ -564,6 +564,9 @@ public:
         _is_bootstrap_or_replace = false;
     }
 private:
+    bool cache_enabled() const {
+        return _config.enable_cache && _schema->caching_options().enabled();
+    }
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, const std::vector<unsigned>& shards_for_the_sstable) noexcept;
     // Adds new sstable to the set of sstables
     // Doesn't update the cache. The cache must be synchronized in order for reads to see
@@ -608,6 +611,9 @@ private:
     // Rebuilds existing sstable set with new sstables added to it and old sstables removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
         const std::vector<sstables::shared_sstable>& old_sstables);
+    // Rebuild sstable list with the deletion semaphore acquired.
+    future<>
+    rebuild_sstable_list_with_deletion_sem(std::vector<sstables::shared_sstable> new_ssts, std::vector<sstables::shared_sstable> old_ssts);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
     void on_compaction_completion(sstables::compaction_completion_desc& desc);
@@ -615,8 +621,8 @@ private:
     void rebuild_statistics();
 
     // This function replaces new sstables by their ancestors, which are sstables that needed resharding.
-    void replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables);
-    void remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors);
+    future<> replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables);
+    future<> remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors);
 private:
     mutation_source_opt _virtual_reader;
     // Creates a mutation reader which covers given sstables.
@@ -1416,7 +1422,7 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm, abort_source& as);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm);
     database(database&&) = delete;
     ~database();
 

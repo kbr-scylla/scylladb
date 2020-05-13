@@ -61,12 +61,16 @@ public:
             if (runs.size() < size_t(cf.schema()->min_compaction_threshold())) {
                 continue;
             }
-
-            auto all = boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>& v, const sstable_run& run) {
+#if __cplusplus <= 201703L
+            using vector_shared_sstable_ref = std::vector<shared_sstable>&;
+#else
+            using vector_shared_sstable_ref = std::vector<shared_sstable>&&;
+#endif
+            auto all = boost::accumulate(runs, std::vector<shared_sstable>(), [&] (vector_shared_sstable_ref v, const sstable_run& run) {
                 v.insert(v.end(), run.all().begin(), run.all().end());
                 return std::move(v);
             });
-            return sstables::compaction_descriptor(std::move(all), 0, static_fragment_size_for_run);
+            return sstables::compaction_descriptor(std::move(all), default_priority_class(), 0, static_fragment_size_for_run);
         }
         return sstables::compaction_descriptor();
     }

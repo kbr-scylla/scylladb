@@ -703,6 +703,7 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                 // Files are aggregated for at most manager::hints_timer_period therefore the oldest hint there is
                 // (last_modification - manager::hints_timer_period) old.
                 if (gc_clock::now().time_since_epoch() - secs_since_file_mod > gc_grace_sec - manager::hints_flush_period) {
+                    ctx_ptr->rps_set.erase(rp);
                     return make_ready_future<>();
                 }
 
@@ -725,6 +726,7 @@ future<> manager::end_point_hints_manager::sender::send_one_hint(lw_shared_ptr<s
                 manager_logger.debug("send_hints(): {} at {}: {}", fname, rp, e.what());
                 ++this->shard_stats().discarded;
             }
+            ctx_ptr->rps_set.erase(rp);
             return make_ready_future<>();
         }).finally([units = std::move(units), ctx_ptr] {});
     }).handle_exception([this, ctx_ptr] (auto eptr) {

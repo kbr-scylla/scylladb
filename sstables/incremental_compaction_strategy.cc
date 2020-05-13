@@ -145,12 +145,12 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
-        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), 0, _fragment_size);
+        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), service::get_local_compaction_priority(), 0, _fragment_size);
     }
     // If we are not enforcing min_threshold explicitly, try any pair of sstable runs in the same tier.
     if (!cf.compaction_enforce_min_threshold() && is_any_bucket_interesting(buckets, 2)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), 2, max_threshold);
-        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), 0, _fragment_size);
+        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), service::get_local_compaction_priority(), 0, _fragment_size);
     }
 
     return sstables::compaction_descriptor();
@@ -161,7 +161,7 @@ incremental_compaction_strategy::get_major_compaction_job(column_family& cf, std
     if (candidates.empty()) {
         return compaction_descriptor();
     }
-    return compaction_descriptor(std::move(candidates), 0, _fragment_size);
+    return compaction_descriptor(std::move(candidates), service::get_local_compaction_priority(), 0, _fragment_size);
 }
 
 int64_t incremental_compaction_strategy::estimated_pending_compactions(column_family& cf) const {

@@ -29,6 +29,14 @@ auto matcher(const char* s) { return like_matcher(bytes(s)); }
 
 bool matches(const like_matcher& m, const char* txt) { return m(bytes(txt)); }
 
+#if __cplusplus > 201703L
+
+auto matcher(const char8_t* s) { return matcher(reinterpret_cast<const char*>(s)); }
+
+bool matches(const like_matcher& m, const char8_t* txt) { return m(bytes(reinterpret_cast<const char*>(txt))); }
+
+#endif
+
 BOOST_AUTO_TEST_CASE(test_literal) {
     auto m = matcher(u8"abc");
     BOOST_TEST(matches(m, u8"abc"));
@@ -438,13 +446,13 @@ BOOST_AUTO_TEST_CASE(test_dollar) {
 BOOST_AUTO_TEST_CASE(test_reset) {
     auto m = matcher(u8"alpha");
     BOOST_TEST(matches(m, u8"alpha"));
-    m.reset(bytes(u8"omega"));
+    m.reset(bytes(reinterpret_cast<const char*>(u8"omega")));
     BOOST_TEST(!matches(m, u8"alpha"));
     BOOST_TEST(matches(m, u8"omega"));
-    m.reset(bytes(u8"omega"));
+    m.reset(bytes(reinterpret_cast<const char*>(u8"omega")));
     BOOST_TEST(!matches(m, u8"alpha"));
     BOOST_TEST(matches(m, u8"omega"));
-    m.reset(bytes(u8"alpha"));
+    m.reset(bytes(reinterpret_cast<const char*>(u8"alpha")));
     BOOST_TEST(matches(m, u8"alpha"));
     BOOST_TEST(!matches(m, u8"omega"));
 }

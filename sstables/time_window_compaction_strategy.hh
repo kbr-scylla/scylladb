@@ -36,6 +36,7 @@
 #include "timestamp.hh"
 #include "exceptions/exceptions.hh"
 #include "sstables/sstables.hh"
+#include "service/priority_manager.hh"
 #include <boost/range/algorithm/partial_sort.hpp>
 #include <boost/range/adaptors.hpp>
 
@@ -166,7 +167,7 @@ public:
         if (!expired.empty()) {
             compaction_candidates.insert(compaction_candidates.end(), expired.begin(), expired.end());
         }
-        return compaction_descriptor(std::move(compaction_candidates));
+        return compaction_descriptor(std::move(compaction_candidates), service::get_local_compaction_priority());
     }
 private:
     static timestamp_type

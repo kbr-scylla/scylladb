@@ -1,14 +1,14 @@
-Name:           {{product}}
-Version:        {{version}}
-Release:        {{release}}
+Name:           %{product}
+Version:        %{version}
+Release:        %{release}
 Summary:        Scylla is a highly scalable, eventually consistent, distributed, partitioned row DB.
 Group:          Applications/Databases
 
 License:        Proprietary
 URL:            http://www.scylladb.com/
-Provides:       scylla {{product}}
-Source0:        {{reloc_pkg}}
-Requires:       {{product}}-server = {{version}} {{product}}-conf = {{version}} {{product}}-kernel-conf = {{version}} {{product}}-jmx = {{version}} {{product}}-tools = {{version}} {{product}}-tools-core = {{version}}
+Provides:       scylla %{product}
+Source0:        %{reloc_pkg}
+Requires:       %{product}-server = %{version} %{product}-conf = %{version} %{product}-kernel-conf = %{version} %{product}-jmx = %{version} %{product}-tools = %{version} %{product}-tools-core = %{version}
 Obsoletes:	scylla-server < 1.1
 
 %global _debugsource_template %{nil}
@@ -26,7 +26,7 @@ Obsoletes:	scylla-server < 1.1
 Scylla is a highly scalable, eventually consistent, distributed,
 partitioned row DB.
 This package installs all required packages for ScyllaDB,  including
-{{product}}-server, {{product}}-jmx, {{product}}-tools, {{product}}-tools-core.
+%{product}-server, %{product}-jmx, %{product}-tools, %{product}-tools-core.
 
 # this is needed to prevent python compilation error on CentOS (#2235)
 %if 0%{?rhel}
@@ -52,9 +52,8 @@ Group:          Applications/Databases
 Summary:        The Scylla database server
 License:        Proprietary
 URL:            http://www.scylladb.com/
-BuildRequires: pystache
 Requires: kernel >= 3.10.0-514
-Requires:       {{product}}-conf {{product}}-python3
+Requires:       %{product}-conf %{product}-python3
 Conflicts:      abrt
 AutoReqProv:    no
 
@@ -66,9 +65,9 @@ This package contains ScyllaDB server.
 defines=()
 
 %install
-{{#housekeeping}}
+%if 0%{housekeeping}
 install_arg="--housekeeping"
-{{/housekeeping}}
+%endif
 ./install.sh --packaging --root "$RPM_BUILD_ROOT" $install_arg
 
 %pre server
@@ -157,8 +156,8 @@ if [ -n "$ver" ]; then
         # for <scylla-1.2
         if [ ! -f /opt/scylladb/lib/scylla/scylla_config_get.py ]; then
             echo
-            echo "Error: Upgrading from scylla-$ver to scylla-{{version}} is not supported."
-            echo "Please upgrade to scylla-1.7.3 or later, before upgrade to {{version}}."
+            echo "Error: Upgrading from scylla-$ver to scylla-%{version} is not supported."
+            echo "Please upgrade to scylla-1.7.3 or later, before upgrade to %{version}."
             echo
             exit 1
         fi
@@ -166,8 +165,8 @@ if [ -n "$ver" ]; then
         commitlog_files=$(ls $commitlog_directory | wc -l)
         if [ $commitlog_files -ne 0 ]; then
             echo
-            echo "Error: Upgrading from scylla-$ver to scylla-{{version}} is not supported when commitlog is not clean."
-            echo "Please upgrade to scylla-1.7.3 or later, before upgrade to {{version}}."
+            echo "Error: Upgrading from scylla-$ver to scylla-%{version} is not supported when commitlog is not clean."
+            echo "Please upgrade to scylla-1.7.3 or later, before upgrade to %{version}."
             echo "Also make sure $commitlog_directory is empty."
             echo
             exit 1
@@ -180,9 +179,9 @@ fi
 %attr(0755,root,root) %dir %{_sysconfdir}/scylla
 %config(noreplace) %{_sysconfdir}/scylla/scylla.yaml
 %config(noreplace) %{_sysconfdir}/scylla/cassandra-rackdc.properties
-{{#housekeeping}}
+%if 0%{housekeeping}
 %config(noreplace) %{_sysconfdir}/scylla.d/housekeeping.cfg
-{{/housekeeping}}
+%endif
 
 
 %package kernel-conf

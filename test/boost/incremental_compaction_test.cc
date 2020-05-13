@@ -65,7 +65,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
         auto compact = [&, s] (std::vector<shared_sstable> all, auto replacer) -> std::vector<shared_sstable> {
-            auto desc = sstables::compaction_descriptor(std::move(all), 1, 0);
+            auto desc = sstables::compaction_descriptor(std::move(all), service::get_local_compaction_priority(), 1, 0);
             desc.replacer = replacer;
             desc.creator = [sst_gen] (shard_id ignore) mutable { return sst_gen(); };
             return sstables::compact_sstables(std::move(desc), *cf).get0().new_sstables;

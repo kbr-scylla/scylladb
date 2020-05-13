@@ -413,7 +413,8 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                 dblog.debug("{} resharding jobs for {}.{}", jobs.size(), cf->schema()->ks_name(), cf->schema()->cf_name());
 
                 return invoke_all_resharding_jobs(cf, directory, std::move(jobs), [directory, &cf] (auto sstables, auto level, auto max_sstable_bytes) {
-                    sstables::compaction_descriptor descriptor(sstables, level, max_sstable_bytes);
+                    // FIXME: run it in maintenance priority.
+                    sstables::compaction_descriptor descriptor(sstables, service::get_local_compaction_priority(), level, max_sstable_bytes);
                     descriptor.options = sstables::compaction_options::make_reshard();
                     descriptor.creator = [&cf, directory] (shard_id shard) mutable {
                         // we need generation calculated by instance of cf at requested shard,
@@ -462,12 +463,11 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                                 // handles case where sstable needing rewrite doesn't produce any sstable
                                 // for a shard it belongs to when resharded (the reason is explained above).
                                 return smp::submit_to(shard, [cf, ancestors = std::move(ancestors)] () mutable {
-                                    cf->remove_ancestors_needed_rewrite(ancestors);
+                                    return cf->remove_ancestors_needed_rewrite(ancestors);
                                 });
                             } else {
-                                return forward_sstables_to(shard, directory, new_sstables_for_shard, cf, [cf, ancestors = std::move(ancestors)] (std::vector<sstables::shared_sstable> sstables) {
-                                    cf->replace_ancestors_needed_rewrite(std::move(ancestors), std::move(sstables));
-                                    return make_ready_future<>();
+                                return forward_sstables_to(shard, directory, new_sstables_for_shard, cf, [cf, ancestors = std::move(ancestors)] (std::vector<sstables::shared_sstable> sstables) mutable {
+                                    return cf->replace_ancestors_needed_rewrite(std::move(ancestors), std::move(sstables));
                                 });
                             }
                         }).then([&cf, sstables] {
