@@ -24,9 +24,6 @@
 #include <random>
 #include <experimental/source_location>
 
-#include <boost/range/irange.hpp>
-#include <boost/range/adaptor/uniqued.hpp>
-
 #include <seastar/core/sleep.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/thread.hh>
@@ -44,6 +41,7 @@
 #include "test/lib/make_random_string.hh"
 #include "test/lib/dummy_sharder.hh"
 #include "test/lib/reader_lifecycle_policy.hh"
+#include "test/lib/reader_permit.hh"
 
 #include "dht/sharder.hh"
 #include "mutation_reader.hh"
@@ -54,6 +52,7 @@
 #include "partition_slice_builder.hh"
 #include "schema_registry.hh"
 #include "service/priority_manager.hh"
+#include "utils/ranges.hh"
 
 static schema_ptr make_schema() {
     return schema_builder("ks", "cf")
@@ -155,10 +154,10 @@ SEASTAR_THREAD_TEST_CASE(combined_reader_galloping_within_partition_test) {
     };
 
     std::vector<flat_mutation_reader> v;
-    v.push_back(flat_mutation_reader_from_mutations({make_partition(boost::irange(0, 5))}));
-    v.push_back(flat_mutation_reader_from_mutations({make_partition(boost::irange(5, 10))}));
+    v.push_back(flat_mutation_reader_from_mutations({make_partition(std::views::iota(0, 5))}));
+    v.push_back(flat_mutation_reader_from_mutations({make_partition(std::views::iota(5, 10))}));
     assert_that(make_combined_reader(s.schema(), std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
-        .produces(make_partition(boost::irange(0, 10)))
+        .produces(make_partition(std::views::iota(0, 10)))
         .produces_end_of_stream();
 }
 
@@ -178,16 +177,16 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_galloping_over_multiple_partit
 
     std::vector<flat_mutation_reader> v;
     v.push_back(flat_mutation_reader_from_mutations({
-        make_partition_with_clustering_rows(s, k[0], boost::irange(5, 10)),
-        make_partition_with_clustering_rows(s, k[1], boost::irange(0, 5))
+        make_partition_with_clustering_rows(s, k[0], std::views::iota(5, 10)),
+        make_partition_with_clustering_rows(s, k[1], std::views::iota(0, 5))
     }));
     v.push_back(flat_mutation_reader_from_mutations({
-        make_partition_with_clustering_rows(s, k[0], boost::irange(0, 5)),
-        make_partition_with_clustering_rows(s, k[1], boost::irange(5, 10))
+        make_partition_with_clustering_rows(s, k[0], std::views::iota(0, 5)),
+        make_partition_with_clustering_rows(s, k[1], std::views::iota(5, 10))
     }));
     assert_that(make_combined_reader(s.schema(), std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
-        .produces(make_partition_with_clustering_rows(s, k[0], boost::irange(0, 10)))
-        .produces(make_partition_with_clustering_rows(s, k[1], boost::irange(0, 10)))
+        .produces(make_partition_with_clustering_rows(s, k[0], std::views::iota(0, 10)))
+        .produces(make_partition_with_clustering_rows(s, k[1], std::views::iota(0, 10)))
         .produces_end_of_stream();
 }
 
@@ -198,16 +197,16 @@ SEASTAR_THREAD_TEST_CASE(combined_reader_galloping_changing_multiple_partitions_
 
     std::vector<flat_mutation_reader> v;
     v.push_back(flat_mutation_reader_from_mutations({
-        make_partition_with_clustering_rows(s, k[0], boost::irange(0, 5)),
-        make_partition_with_clustering_rows(s, k[1], boost::irange(0, 5))
+        make_partition_with_clustering_rows(s, k[0], std::views::iota(0, 5)),
+        make_partition_with_clustering_rows(s, k[1], std::views::iota(0, 5))
     }));
     v.push_back(flat_mutation_reader_from_mutations({
-        make_partition_with_clustering_rows(s, k[0], boost::irange(5, 10)),
-        make_partition_with_clustering_rows(s, k[1], boost::irange(5, 10)),
+        make_partition_with_clustering_rows(s, k[0], std::views::iota(5, 10)),
+        make_partition_with_clustering_rows(s, k[1], std::views::iota(5, 10)),
     }));
     assert_that(make_combined_reader(s.schema(), std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
-        .produces(make_partition_with_clustering_rows(s, k[0], boost::irange(0, 10)))
-        .produces(make_partition_with_clustering_rows(s, k[1], boost::irange(0, 10)))
+        .produces(make_partition_with_clustering_rows(s, k[0], std::views::iota(0, 10)))
+        .produces(make_partition_with_clustering_rows(s, k[1], std::views::iota(0, 10)))
         .produces_end_of_stream();
 }
 
@@ -319,16 +318,17 @@ SEASTAR_TEST_CASE(test_combining_one_empty_reader) {
 }
 
 std::vector<dht::decorated_key> generate_keys(schema_ptr s, int count) {
-    auto keys = boost::copy_range<std::vector<dht::decorated_key>>(
-        boost::irange(0, count) | boost::adaptors::transformed([s] (int key) {
+    auto keys = ranges::to<std::vector<dht::decorated_key>>(
+        std::views::iota(0, count) | std::views::transform([s] (int key) {
             auto pk = partition_key::from_single_value(*s, int32_type->decompose(data_value(key)));
             return dht::decorate_key(*s, std::move(pk));
         }));
-    return std::move(boost::range::sort(keys, dht::decorated_key::less_comparator(s)));
+    std::ranges::sort(keys, dht::decorated_key::less_comparator(s));
+    return keys;
 }
 
 std::vector<dht::ring_position> to_ring_positions(const std::vector<dht::decorated_key>& keys) {
-    return boost::copy_range<std::vector<dht::ring_position>>(keys | boost::adaptors::transformed([] (const dht::decorated_key& key) {
+    return ranges::to<std::vector<dht::ring_position>>(keys | std::views::transform([] (const dht::decorated_key& key) {
         return dht::ring_position(key);
     }));
 }
@@ -364,11 +364,9 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combining_reader) {
         };
 
         auto make_reader = [&] (const dht::partition_range& pr) {
-            std::vector<flat_mutation_reader> readers;
-            boost::range::transform(mutations, std::back_inserter(readers), [&pr] (auto& ms) {
+            return make_combined_reader(s, ranges::to<std::vector<flat_mutation_reader>>(mutations | std::views::transform([&pr] (auto& ms) {
                 return flat_mutation_reader_from_mutations({ms}, pr);
-            });
-            return make_combined_reader(s, std::move(readers));
+            })));
         };
 
         auto pr = dht::partition_range::make_open_ended_both_sides();
@@ -417,22 +415,22 @@ SEASTAR_THREAD_TEST_CASE(test_fast_forwarding_combining_reader_with_galloping) {
 
     auto pr = dht::partition_range::make(ring[0], ring[0]);
     std::vector<flat_mutation_reader> v;
-    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(boost::irange(0, 5), 7), pr));
-    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(boost::irange(5, 10), 7), pr));
+    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(std::views::iota(0, 5), 7), pr));
+    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(std::views::iota(5, 10), 7), pr));
 
     assert_that(make_combined_reader(s.schema(), std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::yes))
-            .produces(make_partition_with_clustering_rows(s, pkeys[0], boost::irange(0, 10)))
+            .produces(make_partition_with_clustering_rows(s, pkeys[0], std::views::iota(0, 10)))
             .produces_end_of_stream()
             .fast_forward_to(dht::partition_range::make(ring[1], ring[1]))
-            .produces(make_partition_with_clustering_rows(s, pkeys[1], boost::irange(0, 10)))
+            .produces(make_partition_with_clustering_rows(s, pkeys[1], std::views::iota(0, 10)))
             .produces_end_of_stream()
             .fast_forward_to(dht::partition_range::make(ring[3], ring[4]))
-            .produces(make_partition_with_clustering_rows(s, pkeys[3], boost::irange(0, 10)))
+            .produces(make_partition_with_clustering_rows(s, pkeys[3], std::views::iota(0, 10)))
     .fast_forward_to(dht::partition_range::make({ ring[4], false }, ring[5]))
-            .produces(make_partition_with_clustering_rows(s, pkeys[5], boost::irange(0, 10)))
+            .produces(make_partition_with_clustering_rows(s, pkeys[5], std::views::iota(0, 10)))
             .produces_end_of_stream()
     .fast_forward_to(dht::partition_range::make_starting_with(ring[6]))
-            .produces(make_partition_with_clustering_rows(s, pkeys[6], boost::irange(0, 10)))
+            .produces(make_partition_with_clustering_rows(s, pkeys[6], std::views::iota(0, 10)))
             .produces_end_of_stream();
 }
 
@@ -512,8 +510,8 @@ SEASTAR_THREAD_TEST_CASE(test_sm_fast_forwarding_combining_reader_with_galloping
 
     auto pr = dht::partition_range::make(ring[0], ring[0]);
     std::vector<flat_mutation_reader> v;
-    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(boost::irange(0, 5), 3), streamed_mutation::forwarding::yes));
-    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(boost::irange(5, 10), 3), streamed_mutation::forwarding::yes));
+    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(std::views::iota(0, 5), 3), streamed_mutation::forwarding::yes));
+    v.push_back(flat_mutation_reader_from_mutations(make_n_mutations(std::views::iota(5, 10), 3), streamed_mutation::forwarding::yes));
 
     auto reader = make_combined_reader(s.schema(), std::move(v), streamed_mutation::forwarding::yes, mutation_reader::forwarding::no);
     auto assertions = assert_that(std::move(reader));
@@ -580,7 +578,7 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
     auto pkeys = s.make_pkeys(6);
     const auto ckeys = s.make_ckeys(4);
 
-    boost::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
+    std::ranges::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
         return a.less_compare(*s.schema(), b);
     });
 
@@ -635,7 +633,7 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
         sstable_mutation_readers.emplace_back(
             sst->as_mutation_source().make_reader(
                 s.schema(),
-                no_reader_permit(),
+                tests::make_permit(),
                 query::full_partition_range,
                 s.schema()->full_slice(),
                 seastar::default_priority_class(),
@@ -649,7 +647,7 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
 
     auto incremental_reader = make_local_shard_sstable_reader(
             s.schema(),
-            no_reader_permit(),
+            tests::make_permit(),
             sstable_set,
             query::full_partition_range,
             s.schema()->full_slice(),
@@ -714,7 +712,7 @@ public:
         , _fwd(fwd)
         , _pr(std::move(pr)) {
         // So we can pop the next reader off the back
-        boost::reverse(_readers_mutations);
+        std::ranges::reverse(_readers_mutations);
     }
     virtual std::vector<flat_mutation_reader> create_new_readers(const std::optional<dht::ring_position_view>& pos) override {
         if (_readers_mutations.empty()) {
@@ -746,7 +744,7 @@ SEASTAR_TEST_CASE(reader_selector_gap_between_readers_test) {
         simple_schema s;
         auto pkeys = s.make_pkeys(3);
 
-        boost::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
+        std::ranges::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
             return a.less_compare(*s.schema(), b);
         });
 
@@ -781,7 +779,7 @@ SEASTAR_TEST_CASE(reader_selector_overlapping_readers_test) {
         simple_schema s;
         auto pkeys = s.make_pkeys(4);
 
-        boost::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
+        std::ranges::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
             return a.less_compare(*s.schema(), b);
         });
 
@@ -835,7 +833,7 @@ SEASTAR_TEST_CASE(reader_selector_fast_forwarding_test) {
         simple_schema s;
         auto pkeys = s.make_pkeys(5);
 
-        boost::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
+        std::ranges::sort(pkeys, [&s] (const dht::decorated_key& a, const dht::decorated_key& b) {
             return a.less_compare(*s.schema(), b);
         });
 
@@ -988,7 +986,7 @@ public:
             return flat_mutation_reader(std::move(tracker_ptr));
         });
 
-        _reader = make_restricted_flat_reader(semaphore, std::move(ms), schema);
+        _reader = make_restricted_flat_reader(std::move(ms), schema, semaphore.make_permit());
     }
 
     reader_wrapper(
@@ -1084,8 +1082,7 @@ class dummy_file_impl : public file_impl {
 SEASTAR_TEST_CASE(reader_restriction_file_tracking) {
     return async([&] {
         reader_concurrency_semaphore semaphore(100, 4 * 1024, get_name());
-        // Testing the tracker here, no need to have a base cost.
-        auto permit = semaphore.wait_admission(0, db::no_timeout).get0();
+        auto permit = semaphore.make_permit();
 
         {
             auto tracked_file = make_tracked_file(file(shared_ptr<file_impl>(make_shared<dummy_file_impl>())), permit);
@@ -1327,16 +1324,14 @@ SEASTAR_TEST_CASE(restricted_reader_create_reader) {
 
 SEASTAR_TEST_CASE(test_restricted_reader_as_mutation_source) {
     return seastar::async([test_name = get_name()] {
-        reader_concurrency_semaphore semaphore(100, 10 * new_reader_base_cost, test_name);
-
-        auto make_restricted_populator = [&semaphore](schema_ptr s, const std::vector<mutation> &muts) {
+        auto make_restricted_populator = [] (schema_ptr s, const std::vector<mutation> &muts) {
             auto mt = make_lw_shared<memtable>(s);
             for (auto &&mut : muts) {
                 mt->apply(mut);
             }
 
             auto ms = mt->as_data_source();
-            return mutation_source([&semaphore, ms = std::move(ms)](schema_ptr schema,
+            return mutation_source([ms = std::move(ms)](schema_ptr schema,
                     reader_permit permit,
                     const dht::partition_range& range,
                     const query::partition_slice& slice,
@@ -1344,7 +1339,7 @@ SEASTAR_TEST_CASE(test_restricted_reader_as_mutation_source) {
                     tracing::trace_state_ptr tr,
                     streamed_mutation::forwarding fwd,
                     mutation_reader::forwarding fwd_mr) {
-                return make_restricted_flat_reader(semaphore, std::move(ms), std::move(schema), range, slice, pc, tr,
+                return make_restricted_flat_reader(std::move(ms), std::move(schema), std::move(permit), range, slice, pc, tr,
                         fwd, fwd_mr);
             });
         };
@@ -1384,7 +1379,7 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
             }
             mutation_source ds = create_sstable(env, s, muts)->as_mutation_source();
             readers.push_back(ds.make_reader(s,
-                no_reader_permit(),
+                tests::make_permit(),
                 dht::partition_range::make({keys[0]}, {keys[0]}),
                 s->full_slice(), default_priority_class(), nullptr,
                 streamed_mutation::forwarding::yes,
@@ -1459,8 +1454,8 @@ SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones
 
         {
             auto slice = partition_slice_builder(*s).with_range(range).build();
-            readers.push_back(ds1.make_reader(s, no_reader_permit(), query::full_partition_range, slice));
-            readers.push_back(ds2.make_reader(s, no_reader_permit(), query::full_partition_range, slice));
+            readers.push_back(ds1.make_reader(s, tests::make_permit(), query::full_partition_range, slice));
+            readers.push_back(ds2.make_reader(s, tests::make_permit(), query::full_partition_range, slice));
 
             auto rd = make_combined_reader(s, std::move(readers),
                 streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
@@ -1482,9 +1477,9 @@ SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones
         // Check fast_forward_to()
         {
 
-            readers.push_back(ds1.make_reader(s, no_reader_permit(), query::full_partition_range, s->full_slice(), default_priority_class(),
+            readers.push_back(ds1.make_reader(s, tests::make_permit(), query::full_partition_range, s->full_slice(), default_priority_class(),
                 nullptr, streamed_mutation::forwarding::yes));
-            readers.push_back(ds2.make_reader(s, no_reader_permit(), query::full_partition_range, s->full_slice(), default_priority_class(),
+            readers.push_back(ds2.make_reader(s, tests::make_permit(), query::full_partition_range, s->full_slice(), default_priority_class(),
                 nullptr, streamed_mutation::forwarding::yes));
 
             auto rd = make_combined_reader(s, std::move(readers),
@@ -1565,10 +1560,9 @@ SEASTAR_THREAD_TEST_CASE(test_foreign_reader_as_mutation_source) {
     do_with_cql_env([] (cql_test_env& env) -> future<> {
         auto populate = [] (schema_ptr s, const std::vector<mutation>& mutations) {
             const auto remote_shard = (this_shard_id() + 1) % smp::count;
-            auto frozen_mutations = boost::copy_range<std::vector<frozen_mutation>>(
+            auto frozen_mutations = ranges::to<std::vector<frozen_mutation>>(
                 mutations
-                | boost::adaptors::transformed([] (const mutation& m) { return freeze(m); })
-            );
+                | std::views::transform([] (const mutation& m) { return freeze(m); }));
             auto remote_mt = smp::submit_to(remote_shard, [s = global_schema_ptr(s), &frozen_mutations] {
                 auto mt = make_lw_shared<memtable>(s.get());
 
@@ -1589,6 +1583,7 @@ SEASTAR_THREAD_TEST_CASE(test_foreign_reader_as_mutation_source) {
                 auto remote_reader = smp::submit_to(remote_shard,
                         [&, s = global_schema_ptr(s), fwd_sm, fwd_mr, trace_state = tracing::global_trace_state_ptr(trace_state)] {
                     return make_foreign(std::make_unique<flat_mutation_reader>(remote_mt->make_flat_reader(s.get(),
+                            tests::make_permit(),
                             range,
                             slice,
                             pc,
@@ -1694,12 +1689,12 @@ SEASTAR_TEST_CASE(test_trim_clustering_row_ranges_to) {
 
     const auto check = [&schema] (std::vector<range> ranges, key key, std::vector<range> output_ranges, bool reversed = false,
             std::experimental::source_location sl = std::experimental::source_location::current()) {
-        auto actual_ranges = boost::copy_range<query::clustering_row_ranges>(ranges | boost::adaptors::transformed(
+        auto actual_ranges = ranges::to<query::clustering_row_ranges>(ranges | std::views::transform(
                     [&] (const range& r) { return r.to_clustering_range(*schema); }));
 
         query::trim_clustering_row_ranges_to(*schema, actual_ranges, key.to_clustering_key(*schema), reversed);
 
-        const auto expected_ranges = boost::copy_range<query::clustering_row_ranges>(output_ranges | boost::adaptors::transformed(
+        const auto expected_ranges = ranges::to<query::clustering_row_ranges>(output_ranges | std::views::transform(
                     [&] (const range& r) { return r.to_clustering_range(*schema); }));
 
         if (!std::equal(actual_ranges.begin(), actual_ranges.end(), expected_ranges.begin(), expected_ranges.end(),
@@ -1958,7 +1953,9 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_reading_empty_table) {
         return;
     }
 
-    do_with_cql_env([] (cql_test_env& env) -> future<> {
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([&] (cql_test_env& env) -> future<> {
         std::vector<std::atomic<bool>> shards_touched(smp::count);
         simple_schema s;
         auto factory = [&shards_touched] (
@@ -1973,7 +1970,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_reading_empty_table) {
         };
 
         assert_that(make_multishard_combining_reader(
-                    seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory)),
+                    seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), operations_gate),
                     s.schema(),
                     query::full_partition_range,
                     s.schema()->full_slice(),
@@ -1984,7 +1981,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_reading_empty_table) {
             BOOST_REQUIRE(shards_touched.at(i));
         }
 
-        return make_ready_future<>();
+        return operations_gate.close();
     }).get();
 }
 
@@ -2179,14 +2176,16 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_destroyed_with_pending
         return;
     }
 
-    do_with_cql_env([] (cql_test_env& env) -> future<> {
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([&] (cql_test_env& env) -> future<> {
         auto remote_controls = std::vector<foreign_ptr<std::unique_ptr<puppet_reader::control>>>();
         remote_controls.reserve(smp::count);
         for (unsigned i = 0; i < smp::count; ++i) {
             remote_controls.emplace_back(nullptr);
         }
 
-        parallel_for_each(boost::irange(0u, smp::count), [&remote_controls] (unsigned shard) mutable {
+        parallel_for_each(std::views::iota(0u, smp::count), [&remote_controls] (unsigned shard) mutable {
             return smp::submit_to(shard, [] {
                 return make_foreign(std::make_unique<puppet_reader::control>());
             }).then([shard, &remote_controls] (foreign_ptr<std::unique_ptr<puppet_reader::control>>&& ctr) mutable {
@@ -2204,7 +2203,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_destroyed_with_pending
 
         auto shard_pkeys = std::vector<std::vector<uint32_t>>(smp::count, std::vector<uint32_t>{});
         auto i = unsigned(0);
-        for (auto pkey : pkeys_by_tokens | boost::adaptors::map_values) {
+        for (auto pkey : pkeys_by_tokens | std::views::values) {
             shard_pkeys[i++ % smp::count].push_back(pkey);
         }
 
@@ -2222,20 +2221,20 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_destroyed_with_pending
 
         {
             dummy_sharder sharder(s.schema()->get_sharder(), std::move(pkeys_by_tokens));
-            auto reader = make_multishard_combining_reader_for_tests(sharder, seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory)),
+            auto reader = make_multishard_combining_reader_for_tests(sharder, seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), operations_gate),
                     s.schema(), query::full_partition_range, s.schema()->full_slice(), service::get_local_sstable_query_read_priority());
             reader.fill_buffer(db::no_timeout).get();
             BOOST_REQUIRE(reader.is_buffer_full());
         }
 
-        parallel_for_each(boost::irange(0u, smp::count), [&remote_controls] (unsigned shard) mutable {
+        parallel_for_each(std::views::iota(0u, smp::count), [&remote_controls] (unsigned shard) mutable {
             return smp::submit_to(shard, [control = remote_controls.at(shard).get()] {
                 control->buffer_filled.set_value();
             });
         }).get();
 
         BOOST_REQUIRE(eventually_true([&] {
-            return map_reduce(boost::irange(0u, smp::count), [&] (unsigned shard) {
+            return map_reduce(std::views::iota(0u, smp::count), [&] (unsigned shard) {
                     return smp::submit_to(shard, [&remote_controls, shard] {
                         return remote_controls.at(shard)->destroyed;
                     });
@@ -2244,12 +2243,14 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_destroyed_with_pending
                 std::logical_and<bool>()).get0();
         }));
 
-        return make_ready_future<>();
+        return operations_gate.close();
     }).get();
 }
 
 SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
-    do_with_cql_env([] (cql_test_env& env) -> future<> {
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([&] (cql_test_env& env) -> future<> {
         env.execute_cql("CREATE KEYSPACE multishard_combining_reader_next_partition_ks"
                 " WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1};").get();
         env.execute_cql("CREATE TABLE multishard_combining_reader_next_partition_ks.test (pk int, v int, PRIMARY KEY(pk));").get();
@@ -2267,9 +2268,9 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
         auto schema = env.local_db().find_column_family("multishard_combining_reader_next_partition_ks", "test").schema();
         auto& partitioner = schema->get_partitioner();
 
-        auto pkeys = boost::copy_range<std::vector<dht::decorated_key>>(
-                boost::irange(0, partition_count) |
-                boost::adaptors::transformed([schema, &partitioner] (int i) {
+        auto pkeys = ranges::to<std::vector<dht::decorated_key>>(
+                std::views::iota(0, partition_count) |
+                std::views::transform([schema, &partitioner] (int i) {
                     return partitioner.decorate_key(*schema, partition_key::from_singular(*schema, i));
                 }));
 
@@ -2289,7 +2290,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
             auto& table = db->local().find_column_family(schema);
             auto reader = table.as_mutation_source().make_reader(
                     schema,
-                    no_reader_permit(),
+                    tests::make_permit(),
                     range,
                     slice,
                     service::get_local_sstable_query_read_priority(),
@@ -2300,7 +2301,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
             return reader;
         };
         auto reader = make_multishard_combining_reader(
-                seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory)),
+                seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), operations_gate),
                 schema,
                 query::full_partition_range,
                 schema->full_slice(),
@@ -2308,7 +2309,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
 
         reader.set_max_buffer_size(max_buffer_size);
 
-        boost::sort(pkeys, [schema] (const dht::decorated_key& a, const dht::decorated_key& b) {
+        std::ranges::sort(pkeys, [schema] (const dht::decorated_key& a, const dht::decorated_key& b) {
             return dht::ring_position_tri_compare(*schema, a, b) < 0;
         });
 
@@ -2320,7 +2321,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
         }
         assertions.produces_end_of_stream();
 
-        return make_ready_future<>();
+        return operations_gate.close();
     }).get();
 }
 
@@ -2402,7 +2403,9 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_non_strictly_monotonic
         BOOST_REQUIRE(mf.as_clustering_row().key().equal(*s.schema(), ckey));
     }
 
-    do_with_cql_env([=, s = std::move(s)] (cql_test_env& env) mutable -> future<> {
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([=, &operations_gate, s = std::move(s)] (cql_test_env& env) mutable -> future<> {
         auto factory = [=, gs = global_simple_schema(s)] (
                 schema_ptr,
                 const dht::partition_range& range,
@@ -2427,14 +2430,14 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_non_strictly_monotonic
         BOOST_REQUIRE(mut_opt);
 
         assert_that(make_multishard_combining_reader(
-                    seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), true),
+                    seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), operations_gate, true),
                     s.schema(),
                     query::full_partition_range,
                     s.schema()->full_slice(),
                     service::get_local_sstable_query_read_priority()))
                 .produces_partition(*mut_opt);
 
-        return make_ready_future<>();
+        return operations_gate.close();
     }).get();
 }
 
@@ -2448,7 +2451,9 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_streaming_reader) {
         return;
     }
 
-    do_with_cql_env([] (cql_test_env& env) -> future<> {
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([&] (cql_test_env& env) -> future<> {
         env.execute_cql("CREATE KEYSPACE multishard_streaming_reader_ks WITH REPLICATION = {'class' : 'SimpleStrategy', 'replication_factor' : 1};").get();
         env.execute_cql("CREATE TABLE multishard_streaming_reader_ks.test (pk int, v int, PRIMARY KEY(pk));").get();
 
@@ -2486,11 +2491,11 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_streaming_reader) {
                 tracing::trace_state_ptr trace_state,
                 mutation_reader::forwarding fwd_mr) mutable {
             auto& table = db->local().find_column_family(s);
-            return table.as_mutation_source().make_reader(std::move(s), no_reader_permit(), range, slice, pc, std::move(trace_state),
+            return table.as_mutation_source().make_reader(std::move(s), tests::make_permit(), range, slice, pc, std::move(trace_state),
                     streamed_mutation::forwarding::no, fwd_mr);
         };
         auto reference_reader = make_filtering_reader(
-                make_multishard_combining_reader(seastar::make_shared<test_reader_lifecycle_policy>(std::move(reader_factory)),
+                make_multishard_combining_reader(seastar::make_shared<test_reader_lifecycle_policy>(std::move(reader_factory), operations_gate),
                     schema, partition_range, schema->full_slice(), service::get_local_sstable_query_read_priority()),
                 [&remote_partitioner] (const dht::decorated_key& pkey) {
                     return remote_partitioner.shard_of(pkey.token()) == 0;
@@ -2514,7 +2519,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_streaming_reader) {
             assert_that(tested_muts[i]).is_equal_to(reference_muts[i]);
         }
 
-        return make_ready_future<>();
+        return operations_gate.close();
     }).get();
 }
 
@@ -2669,7 +2674,7 @@ SEASTAR_THREAD_TEST_CASE(test_compacting_reader_as_mutation_source) {
                     tracing::trace_state_ptr trace_state,
                     streamed_mutation::forwarding fwd_sm,
                     mutation_reader::forwarding fwd_mr) mutable {
-                auto source = mt->make_flat_reader(s, range, slice, pc, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr);
+                auto source = mt->make_flat_reader(s, tests::make_permit(), range, slice, pc, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr);
                 auto mr = make_compacting_reader(std::move(source), query_time, [] (const dht::decorated_key&) { return api::min_timestamp; });
                 if (single_fragment_buffer) {
                     mr.set_max_buffer_size(1);

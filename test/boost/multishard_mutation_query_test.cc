@@ -30,6 +30,7 @@
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/test_table.hh"
 #include "test/lib/log.hh"
+#include "test/lib/test_utils.hh"
 
 #include <seastar/testing/thread_test_case.hh>
 
@@ -53,7 +54,7 @@ static void check_cache_population(distributed<database>& db, size_t queriers,
     parallel_for_each(boost::irange(0u, smp::count), [queriers, &db] (unsigned shard) {
         return db.invoke_on(shard, [queriers] (database& local_db) {
             auto& stats = local_db.get_querier_cache_stats();
-            BOOST_REQUIRE_EQUAL(stats.population, queriers);
+            tests::require_equal(stats.population, queriers);
         });
     }).get0();
 }
@@ -107,7 +108,7 @@ static std::vector<mutation> read_all_partitions_one_by_one(distributed<database
                 const auto cmd = query::read_command(s->id(), s->version(), s->full_slice(), query::max_rows);
                 const auto range = dht::partition_range::make_singular(pkey);
                 return make_foreign(std::make_unique<reconcilable_result>(
-                    db.query_mutations(std::move(s), cmd, range, std::move(accounter), nullptr, db::no_timeout).get0()));
+                    std::get<0>(db.query_mutations(std::move(s), cmd, range, std::move(accounter), nullptr, db::no_timeout).get0())));
             });
         }).get0();
 
@@ -715,20 +716,20 @@ validate_result_size(size_t i, schema_ptr schema, const std::vector<mutation>& r
         std::set_difference(actual.cbegin(), actual.cend(), expected.cbegin(), expected.cend(), std::back_inserter(diff),
                 dht::decorated_key::less_comparator(schema));
         testlog.error("[scan#{}]: got {} more partitions than expected, extra partitions: {}", i, diff.size(), diff);
-        BOOST_FAIL(format("Got {} more partitions than expected", diff.size()));
+        tests::fail(format("Got {} more partitions than expected", diff.size()));
     } else if (results.size() < expected_partitions.size()) {
         std::vector<dht::decorated_key> diff;
         std::set_difference(expected.cbegin(), expected.cend(), actual.cbegin(), actual.cend(), std::back_inserter(diff),
                 dht::decorated_key::less_comparator(schema));
         testlog.error("[scan#{}]: got {} less partitions than expected, missing partitions: {}", i, diff.size(), diff);
-        BOOST_FAIL(format("Got {} less partitions than expected", diff.size()));
+        tests::fail(format("Got {} less partitions than expected", diff.size()));
     }
 }
 
 static void validate_row(const schema& s, const partition_key& pk, const clustering_key* const ck, column_kind kind, const row& r) {
     const auto& cdef = s.column_at(kind, 0);
     if (auto* cell = r.find_cell(0)) {
-        BOOST_CHECK(validate_payload(s, cell->as_atomic_cell(cdef).value(), pk, ck));
+        tests::check(validate_payload(s, cell->as_atomic_cell(cdef).value(), pk, ck));
     }
 }
 
@@ -784,7 +785,7 @@ static void validate_result(size_t i, const mutation& result_mut, const expected
     auto& schema = *result_mut.schema();
     const auto wrapper = with_schema_wrapper{schema};
 
-    BOOST_REQUIRE_EQUAL(result_mut.partition().static_row().empty(), !expected_part.has_static_row);
+    tests::require_equal(result_mut.partition().static_row().empty(), !expected_part.has_static_row);
     validate_static_row(schema, expected_part.dkey.key(), result_mut.partition().static_row().get());
 
     const auto& res_rows = result_mut.partition().clustered_rows();
@@ -802,15 +803,15 @@ static void validate_result(size_t i, const mutation& result_mut, const expected
 
         // Check that we have remaining expected rows of the respective liveness.
         if (is_live) {
-            BOOST_REQUIRE(exp_live_it != exp_live_end);
+            tests::require(exp_live_it != exp_live_end);
         } else {
-            BOOST_REQUIRE(exp_dead_it != exp_dead_end);
+            tests::require(exp_dead_it != exp_dead_end);
         }
 
         testlog.trace("[scan#{}]: validating {}/{}: is_live={}", i, expected_part.dkey, res_it->key(), is_live);
 
         if (is_live) {
-            BOOST_CHECK_EQUAL(wrapper(res_it->key()), wrapper(*exp_live_it++));
+            tests::check_equal(wrapper(res_it->key()), wrapper(*exp_live_it++));
         } else {
             // FIXME: Only a fraction of the dead rows is present in the result.
             if (!res_it->key().equal(schema, *exp_dead_it)) {
@@ -824,7 +825,7 @@ static void validate_result(size_t i, const mutation& result_mut, const expected
                 auto it = std::find_if(exp_dead_it, exp_dead_end, [&] (const clustering_key& key) {
                     return key.equal(schema, res_it->key());
                 });
-                BOOST_CHECK(it != exp_dead_it);
+                tests::check(it != exp_dead_it);
 
                 testlog.trace("[scan#{}]: validating {}/{}: skipped over {} expected dead rows", i, expected_part.dkey,
                         res_it->key(), std::distance(exp_dead_it, it));
@@ -838,7 +839,7 @@ static void validate_result(size_t i, const mutation& result_mut, const expected
     // We don't want to call res_rows.calculate_size() as it has linear complexity.
     // Instead, check that after iterating through the results and expected
     // results in lock-step, both have reached the end.
-    BOOST_CHECK(res_it == res_end);
+    tests::check(res_it == res_end);
     if (res_it != res_end) {
         testlog.error("[scan#{}]: validating {} failed: result contains unexpected trailing rows: {}", i, expected_part.dkey,
                 boost::copy_range<std::vector<clustering_key>>(
@@ -846,7 +847,7 @@ static void validate_result(size_t i, const mutation& result_mut, const expected
                         | boost::adaptors::transformed([] (const rows_entry& e) { return e.key(); })));
     }
 
-    BOOST_CHECK(exp_live_it == exp_live_end);
+    tests::check(exp_live_it == exp_live_end);
     if (exp_live_it != exp_live_end) {
         testlog.error("[scan#{}]: validating {} failed: {} expected live rows missing from result", i, expected_part.dkey,
                 std::distance(exp_live_it, exp_live_end));
@@ -896,12 +897,12 @@ run_fuzzy_test_scan(size_t i, fuzzy_test_config cfg, distributed<database>& db, 
     auto exp_it = expected_partitions.cbegin();
     auto res_it = results.cbegin();
     while (res_it != results.cend() && exp_it != expected_partitions.cend()) {
-        BOOST_REQUIRE_EQUAL(wrapper(res_it->decorated_key()), wrapper(exp_it->dkey));
+        tests::require_equal(wrapper(res_it->decorated_key()), wrapper(exp_it->dkey));
         validate_result(i, *res_it++, *exp_it++);
     }
 
     testlog.trace("[scan#{}]: validated all partitions, both the expected and actual partition list should be exhausted now", i);
-    BOOST_REQUIRE(res_it == results.cend() && exp_it == expected_partitions.cend());
+    tests::require(res_it == results.cend() && exp_it == expected_partitions.cend());
 }
 
 future<> run_concurrently(size_t count, size_t concurrency, noncopyable_function<future<>(size_t)> func) {
@@ -971,13 +972,13 @@ SEASTAR_THREAD_TEST_CASE(fuzzy_test) {
 
         const auto& partitions = pop_desc.partitions;
         smp::invoke_on_all([cfg, db = &env.db(), gs = global_schema_ptr(pop_desc.schema), &partitions] {
-            auto& sem = db->local().find_column_family(gs.get()).read_concurrency_semaphore();
+            auto& sem = db->local().make_query_class_config().semaphore;
 
             auto resources = sem.available_resources();
             resources -= reader_concurrency_semaphore::resources{1, 0};
-            auto permit = sem.consume_resources(resources);
+            auto permit = sem.make_permit();
 
-            return run_fuzzy_test_workload(cfg, *db, gs.get(), partitions).finally([permit = std::move(permit)] {});
+            return run_fuzzy_test_workload(cfg, *db, gs.get(), partitions).finally([units = permit.consume_resources(resources)] {});
         }).handle_exception([seed] (std::exception_ptr e) {
             testlog.error("Test workload failed with exception {}."
                     " To repeat this particular run, replace the random seed of the test, with that of this run ({})."

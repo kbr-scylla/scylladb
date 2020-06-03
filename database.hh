@@ -82,6 +82,7 @@
 #include "utils/disk-error-handler.hh"
 #include "utils/updateable_value.hh"
 #include "user_types_metadata.hh"
+#include "query_class_config.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -364,8 +365,8 @@ public:
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
-        reader_concurrency_semaphore* read_concurrency_semaphore;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
+        reader_concurrency_semaphore* compaction_concurrency_semaphore;
         ::cf_stats* cf_stats = nullptr;
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
@@ -378,7 +379,6 @@ public:
         db::timeout_semaphore* view_update_concurrency_semaphore;
         size_t view_update_concurrency_semaphore_limit;
         db::data_listeners* data_listeners = nullptr;
-        utils::updateable_value<uint64_t> max_memory_for_unlimited_query;
     };
     struct no_commitlog {};
 
@@ -630,6 +630,7 @@ private:
     // The 'range' parameter must be live as long as the reader is used.
     // Mutations returned by the reader will all have given schema.
     flat_mutation_reader make_sstable_reader(schema_ptr schema,
+                                        reader_permit permit,
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
@@ -696,6 +697,7 @@ public:
     // If I/O needs to be issued to read anything in the specified range, the operations
     // will be scheduled under the priority class given by pc.
     flat_mutation_reader make_reader(schema_ptr schema,
+            reader_permit permit,
             const dht::partition_range& range,
             const query::partition_slice& slice,
             const io_priority_class& pc = default_priority_class(),
@@ -703,6 +705,7 @@ public:
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
     flat_mutation_reader make_reader_excluding_sstables(schema_ptr schema,
+            reader_permit permit,
             std::vector<sstables::shared_sstable>& sst,
             const dht::partition_range& range,
             const query::partition_slice& slice,
@@ -711,9 +714,9 @@ public:
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
 
-    flat_mutation_reader make_reader(schema_ptr schema, const dht::partition_range& range = query::full_partition_range) const {
+    flat_mutation_reader make_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range = query::full_partition_range) const {
         auto& full_slice = schema->full_slice();
-        return make_reader(std::move(schema), range, full_slice);
+        return make_reader(std::move(schema), std::move(permit), range, full_slice);
     }
 
     // The streaming mutation reader differs from the regular mutation reader in that:
@@ -775,9 +778,9 @@ public:
     const schema_ptr& schema() const { return _schema; }
     void set_schema(schema_ptr);
     db::commitlog* commitlog() { return _commitlog; }
-    future<const_mutation_partition_ptr> find_partition(schema_ptr, const dht::decorated_key& key) const;
-    future<const_mutation_partition_ptr> find_partition_slow(schema_ptr, const partition_key& key) const;
-    future<const_row_ptr> find_row(schema_ptr, const dht::decorated_key& partition_key, clustering_key clustering_key) const;
+    future<const_mutation_partition_ptr> find_partition(schema_ptr, reader_permit permit, const dht::decorated_key& key) const;
+    future<const_mutation_partition_ptr> find_partition_slow(schema_ptr, reader_permit permit, const partition_key& key) const;
+    future<const_row_ptr> find_row(schema_ptr, reader_permit permit, const dht::decorated_key& partition_key, clustering_key clustering_key) const;
     // Applies given mutation to this column family
     // The mutation is always upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
@@ -787,6 +790,7 @@ public:
     // Returns at most "cmd.limit" rows
     future<lw_shared_ptr<query::result>> query(schema_ptr,
         const query::read_command& cmd,
+        query_class_config class_config,
         query::result_options opts,
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
@@ -985,8 +989,10 @@ public:
     void remove_view(view_ptr v);
     void clear_views();
     const std::vector<view_ptr>& views() const;
-    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout) const;
-    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout) const;
+    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout,
+            tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem) const;
+    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
+            tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem) const;
     future<row_locker::lock_holder>
     stream_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
             std::vector<sstables::shared_sstable>& excluded_sstables) const;
@@ -1006,24 +1012,27 @@ public:
     future<> populate_views(
             std::vector<view_ptr>,
             dht::token base_token,
-            flat_mutation_reader&&);
-
-    reader_concurrency_semaphore& read_concurrency_semaphore() {
-        return *_config.read_concurrency_semaphore;
-    }
+            flat_mutation_reader&&,
+            gc_clock::time_point);
 
     reader_concurrency_semaphore& streaming_read_concurrency_semaphore() {
         return *_config.streaming_read_concurrency_semaphore;
     }
 
+    reader_concurrency_semaphore& compaction_concurrency_semaphore() {
+        return *_config.compaction_concurrency_semaphore;
+    }
+
 private:
     future<row_locker::lock_holder> do_push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout, mutation_source&& source,
-            const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
-    std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update) const;
+            tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
+    std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update, gc_clock::time_point now) const;
     future<> generate_and_propagate_view_updates(const schema_ptr& base,
             std::vector<view_ptr>&& views,
             mutation&& m,
-            flat_mutation_reader_opt existings) const;
+            flat_mutation_reader_opt existings,
+            tracing::trace_state_ptr tr_state,
+            gc_clock::time_point now) const;
 
     mutable row_locker _row_locker;
     future<row_locker::lock_holder> local_base_lock(
@@ -1071,7 +1080,7 @@ private:
 public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
-    future<bool> for_all_partitions_slow(schema_ptr, std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
+    future<bool> for_all_partitions_slow(schema_ptr, reader_permit permit, std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
     // Testing purposes.
@@ -1181,8 +1190,8 @@ public:
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
-        reader_concurrency_semaphore* read_concurrency_semaphore;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
+        reader_concurrency_semaphore* compaction_concurrency_semaphore;
         ::cf_stats* cf_stats = nullptr;
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
@@ -1326,6 +1335,7 @@ private:
 
     reader_concurrency_semaphore _read_concurrency_sem;
     reader_concurrency_semaphore _streaming_concurrency_sem;
+    reader_concurrency_semaphore _compaction_concurrency_sem;
     reader_concurrency_semaphore _system_read_concurrency_sem;
 
     named_semaphore _sstable_load_concurrency_sem{max_concurrent_sstable_loads(), named_semaphore_exception_factory{"sstable load concurrency"}};
@@ -1338,6 +1348,7 @@ private:
         column_family*,
         schema_ptr,
         const query::read_command&,
+        query_class_config,
         query::result_options,
         const dht::partition_range_vector&,
         tracing::trace_state_ptr,
@@ -1353,6 +1364,7 @@ private:
             database*,
             schema_ptr,
             const frozen_mutation&,
+            tracing::trace_state_ptr,
             db::timeout_clock::time_point,
             db::commitlog::force_sync> _apply_stage;
 
@@ -1401,7 +1413,7 @@ private:
     void setup_metrics();
 
     friend class db_apply_executor;
-    future<> do_apply(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
+    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
     future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
@@ -1422,7 +1434,7 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm, abort_source& as);
     database(database&&) = delete;
     ~database();
 
@@ -1489,22 +1501,28 @@ public:
     sstring get_available_index_name(const sstring& ks_name, const sstring& cf_name,
                                      std::optional<sstring> index_name_root) const;
     schema_ptr find_indexed_table(const sstring& ks_name, const sstring& index_name) const;
+    /// Revert the system read concurrency to the normal value.
+    ///
+    /// When started the database uses a higher initial concurrency for system
+    /// reads, to speed up startup. After startup this should be reverted to
+    /// the normal concurrency.
+    void revert_initial_system_read_concurrency_boost();
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
     future<> stop_large_data_handler();
     unsigned shard_of(const mutation& m);
     unsigned shard_of(const frozen_mutation& m);
-    future<lw_shared_ptr<query::result>, cache_temperature> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
+    future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
                                                                   const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
                                                                   uint64_t max_result_size, db::timeout_clock::time_point timeout);
-    future<reconcilable_result, cache_temperature> query_mutations(schema_ptr, const query::read_command& cmd, const dht::partition_range& range,
+    future<std::tuple<reconcilable_result, cache_temperature>> query_mutations(schema_ptr, const query::read_command& cmd, const dht::partition_range& range,
                                                 query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state,
                                                 db::timeout_clock::time_point timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
-    future<> apply_hint(schema_ptr, const frozen_mutation&, db::timeout_clock::time_point timeout);
+    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
+    future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
     future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
@@ -1570,6 +1588,8 @@ public:
         return *_system_sstables_manager;
     }
 
+    void set_format(sstables::sstable_version_types format);
+
     future<> flush_all_memtables();
 
     // See #937. Truncation now requires a callback to get a time stamp
@@ -1626,6 +1646,8 @@ public:
     bool supports_infinite_bound_range_deletions() {
         return _supports_infinite_bound_range_deletions;
     }
+
+    query_class_config make_query_class_config();
 };
 
 future<> start_large_data_handler(sharded<database>& db);

@@ -58,6 +58,7 @@ namespace cql3 {
 
 namespace gms {
     class feature;
+    class feature_service;
 }
 
 bool is_system_keyspace(const sstring& ks_name);
@@ -160,7 +161,7 @@ future<> init_local_cache();
 future<> deinit_local_cache();
 future<> setup(distributed<database>& db,
                distributed<cql3::query_processor>& qp,
-               distributed<service::storage_service>& ss);
+               distributed<gms::feature_service>& feat);
 future<> update_schema_version(utils::UUID version);
 
 /*

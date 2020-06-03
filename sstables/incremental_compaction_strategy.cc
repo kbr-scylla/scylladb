@@ -12,6 +12,7 @@
 #include "compaction.hh"
 #include "incremental_compaction_strategy.hh"
 #include "incremental_backlog_tracker.hh"
+#include <boost/range/numeric.hpp>
 
 namespace sstables {
 
@@ -137,7 +138,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
     auto buckets = get_buckets(cf.get_sstable_set().select(candidates));
 
     auto get_all = [](std::vector<sstables::sstable_run> runs) mutable {
-        return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>& v, const sstable_run& run) {
+        return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>&& v, const sstable_run& run) {
             v.insert(v.end(), run.all().begin(), run.all().end());
             return std::move(v);
         });

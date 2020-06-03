@@ -34,7 +34,6 @@
 
 #include "system_keyspace.hh"
 #include "types.hh"
-#include "service/storage_service.hh"
 #include "service/storage_proxy.hh"
 #include "service/client_state.hh"
 #include "service/query_state.hh"
@@ -69,6 +68,7 @@
 #include "db/view/build_progress_virtual_reader.hh"
 #include "db/schema_tables.hh"
 #include "index/built_indexes_virtual_reader.hh"
+#include "utils/generation-number.hh"
 
 #include "idl/frozen_mutation.dist.hh"
 #include "serializer_impl.hh"
@@ -1146,8 +1146,8 @@ schema_ptr aggregates() {
 
 } //</legacy>
 
-static future<> setup_version() {
-    return gms::inet_address::lookup(qctx->db().get_config().rpc_address()).then([](gms::inet_address a) {
+static future<> setup_version(distributed<gms::feature_service>& feat) {
+    return gms::inet_address::lookup(qctx->db().get_config().rpc_address()).then([&feat](gms::inet_address a) {
         sstring req = sprint("INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner, rpc_address, broadcast_address, listen_address, supported_features) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                         , db::system_keyspace::LOCAL);
         auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
@@ -1163,7 +1163,7 @@ static future<> setup_version() {
                              a.addr(),
                              utils::fb_utilities::get_broadcast_address().addr(),
                              netw::get_local_messaging_service().listen_address().addr(),
-                             service::get_local_storage_service().get_config_supported_features()
+                             ::join(",", feat.local().supported_feature_set())
         ).discard_result();
     });
 }
@@ -1252,9 +1252,9 @@ static future<> cache_truncation_record(distributed<database>& db);
 
 future<> setup(distributed<database>& db,
                distributed<cql3::query_processor>& qp,
-               distributed<service::storage_service>& ss) {
+               distributed<gms::feature_service>& feat) {
     minimal_setup(db, qp);
-    return setup_version().then([&db] {
+    return setup_version(feat).then([&db] {
         return update_schema_version(db.local().get_version());
     }).then([] {
         return init_local_cache();
@@ -1899,8 +1899,7 @@ void make(database& db, bool durable, bool volatile_testing_only) {
             kscfg.enable_disk_writes = !volatile_testing_only;
             kscfg.enable_commitlog = !volatile_testing_only;
             kscfg.enable_cache = true;
-            // don't make system keyspace reads wait for user reads
-            kscfg.read_concurrency_semaphore = &db._system_read_concurrency_sem;
+            kscfg.compaction_concurrency_semaphore = &db._compaction_concurrency_sem;
             // don't make system keyspace writes wait for user writes (if under pressure)
             kscfg.dirty_memory_manager = &db._system_dirty_memory_manager;
             keyspace _ks{ksm, std::move(kscfg)};
@@ -2070,11 +2069,11 @@ future<int> increment_and_get_generation() {
             // seconds-since-epoch isn't a foolproof new generation
             // (where foolproof is "guaranteed to be larger than the last one seen at this ip address"),
             // but it's as close as sanely possible
-            generation = service::get_generation_number();
+            generation = utils::get_generation_number();
         } else {
             // Other nodes will ignore gossip messages about a node that have a lower generation than previously seen.
             int stored_generation = rs->one().template get_as<int>("gossip_generation") + 1;
-            int now = service::get_generation_number();
+            int now = utils::get_generation_number();
             if (stored_generation >= now) {
                 slogger.warn("Using stored Gossip Generation {} as it is greater than current system time {}."
                             "See CASSANDRA-3654 if you experience problems", stored_generation, now);

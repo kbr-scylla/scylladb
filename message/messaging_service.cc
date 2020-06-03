@@ -280,7 +280,7 @@ future<> messaging_service::unregister_handler(messaging_verb verb) {
 
 messaging_service::messaging_service(qos::service_level_controller& sl_controller, gms::inet_address ip, uint16_t port)
     : messaging_service(sl_controller, std::move(ip), port, encrypt_what::none, compress_what::none, tcp_nodelay_what::all, 0, nullptr, memory_config{1'000'000},
-            scheduling_config{}, false)
+            scheduling_config{{{{}, "$default"}}, {}, {}}, false)
 {}
 
 static
@@ -324,7 +324,7 @@ void messaging_service::do_start_listen() {
     auto limits = rpc_resource_limits(_mcfg.rpc_memory_limit);
     limits.isolate_connection = [this] (sstring isolation_cookie) {
         rpc::isolation_config cfg;
-        cfg.sched_group = _sl_controller.get_scheduling_group(isolation_cookie);
+        cfg.sched_group = scheduling_group_for_isolation_cookie(isolation_cookie);
         return cfg;
     };
     if (!_server[0]) {
@@ -393,8 +393,10 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     , _should_listen_to_broadcast_address(sltba)
     , _rpc(new rpc_protocol_wrapper(serializer { }))
     , _credentials_builder(credentials ? std::make_unique<seastar::tls::credentials_builder>(*credentials) : nullptr)
+    , _clients(2 + scfg.statement_tenants.size() * 2)
     , _mcfg(mcfg)
     , _scheduling_config(scfg)
+    , _scheduling_info_for_connection_index(initial_scheduling_info())
     , _sl_controller(sl_controller)
 {
     _rpc->set_logger(&rpc_logger);
@@ -404,6 +406,11 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
         ci.attach_auxiliary("max_result_size", max_result_size.value_or(query::result_memory_limiter::maximum_result_size));
         return rpc::no_wait;
     });
+
+    _connection_index_for_tenant.reserve(_scheduling_config.statement_tenants.size());
+    for (unsigned i = 0; i <  _scheduling_config.statement_tenants.size(); ++i) {
+        _connection_index_for_tenant.push_back({_scheduling_config.statement_tenants[i].sched_group, i});
+    }
 }
 
 msg_addr messaging_service::get_source(const rpc::client_info& cinfo) {
@@ -457,24 +464,6 @@ rpc::no_wait_type messaging_service::no_wait() {
 
 static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     switch (verb) {
-    case messaging_verb::CLIENT_ID:
-    case messaging_verb::MUTATION:
-    case messaging_verb::READ_DATA:
-    case messaging_verb::READ_MUTATION_DATA:
-    case messaging_verb::READ_DIGEST:
-    case messaging_verb::GOSSIP_DIGEST_ACK:
-    case messaging_verb::DEFINITIONS_UPDATE:
-    case messaging_verb::TRUNCATE:
-    case messaging_verb::MIGRATION_REQUEST:
-    case messaging_verb::SCHEMA_CHECK:
-    case messaging_verb::COUNTER_MUTATION:
-    // Use the same RPC client for light weight transaction
-    // protocol steps as for standard mutations and read requests.
-    case messaging_verb::PAXOS_PREPARE:
-    case messaging_verb::PAXOS_ACCEPT:
-    case messaging_verb::PAXOS_LEARN:
-    case messaging_verb::PAXOS_PRUNE:
-        return 0;
     // GET_SCHEMA_VERSION is sent from read/mutate verbs so should be
     // sent on a different connection to avoid potential deadlocks
     // as well as reduce latency as there are potentially many requests
@@ -484,7 +473,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::GOSSIP_SHUTDOWN:
     case messaging_verb::GOSSIP_ECHO:
     case messaging_verb::GET_SCHEMA_VERSION:
-        return 1;
+        return 0;
     case messaging_verb::PREPARE_MESSAGE:
     case messaging_verb::PREPARE_DONE_MESSAGE:
     case messaging_verb::STREAM_MUTATION:
@@ -507,6 +496,24 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::REPAIR_PUT_ROW_DIFF_WITH_RPC_STREAM:
     case messaging_verb::REPAIR_GET_FULL_ROW_HASHES_WITH_RPC_STREAM:
     case messaging_verb::HINT_MUTATION:
+        return 1;
+    case messaging_verb::CLIENT_ID:
+    case messaging_verb::MUTATION:
+    case messaging_verb::READ_DATA:
+    case messaging_verb::READ_MUTATION_DATA:
+    case messaging_verb::READ_DIGEST:
+    case messaging_verb::GOSSIP_DIGEST_ACK:
+    case messaging_verb::DEFINITIONS_UPDATE:
+    case messaging_verb::TRUNCATE:
+    case messaging_verb::MIGRATION_REQUEST:
+    case messaging_verb::SCHEMA_CHECK:
+    case messaging_verb::COUNTER_MUTATION:
+    // Use the same RPC client for light weight transaction
+    // protocol steps as for standard mutations and read requests.
+    case messaging_verb::PAXOS_PREPARE:
+    case messaging_verb::PAXOS_ACCEPT:
+    case messaging_verb::PAXOS_LEARN:
+    case messaging_verb::PAXOS_PRUNE:
         return 2;
     case messaging_verb::MUTATION_DONE:
     case messaging_verb::MUTATION_FAILED:
@@ -526,32 +533,128 @@ static constexpr std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> 
 
 static std::array<uint8_t, static_cast<size_t>(messaging_verb::LAST)> s_rpc_client_idx_table = make_rpc_client_idx_table();
 
-unsigned messaging_service::get_rpc_client_idx(messaging_verb verb) {
+unsigned
+messaging_service::get_rpc_client_idx(messaging_verb verb) {
     auto idx = s_rpc_client_idx_table[static_cast<size_t>(verb)];
-    std::optional<sstring> service_level = _sl_controller.get_active_service_level();
-    if (service_level) {
-        auto it = _service_level_to_client_idx.find(*service_level);
-        unsigned new_idx;
-        if (it != _service_level_to_client_idx.end()) {
-            new_idx = it->second;
-        } else {
-            new_idx = add_service_level_config(*service_level);
-        }
-        return new_idx + (idx != 0);
+
+    if (idx < 2) {
+        return idx;
     }
-    return idx;
+
+    // this is just a workaround for a wrong initialization order in messaging_service's
+    // constructor that causes _connection_index_for_tenant to be queried before it is
+    // initialized. This WA makes the behaviour match OSS in this case and it should be
+    // removed once it is fixed in OSS. If it isn't removed the behaviour will still be
+    // correct but we will lose cycles on an unnecesairy check.
+    if (_connection_index_for_tenant.size() == 0) {
+        return idx;
+    }
+    // A statement or statement-ack verb
+    const auto curr_sched_group = current_scheduling_group();
+    for (unsigned i = 0; i < _connection_index_for_tenant.size(); ++i) {
+        if (_connection_index_for_tenant[i].sched_group == curr_sched_group) {
+            // i == 0: the default tenant maps to the default client indexes of 2 and 3.
+            idx += i * 2;
+            return idx;
+        }
+
+    }
+
+    // if we got here - it means that two conditions are met:
+    // 1. We are trying to get a client for a statement/statement_ack verb.
+    // 2. We are running in a scheduling group that is not assigned to one of the
+    // static tenants (e.g $system)
+    // If this scheduling group is of one of the system's static statement tenants we
+    // whould have caught it in the loop above.
+    // The other posibility is that we are running in a scheduling group belongs to
+    // a service level, maybe a deleted one, this is why it is possible that we will
+    // not find the service level name.
+
+    std::optional<sstring> service_level = _sl_controller.get_active_service_level();
+    scheduling_group sg_for_tenant = curr_sched_group;
+    if (!service_level) {
+        service_level = qos::service_level_controller::default_service_level_name;
+        sg_for_tenant = _sl_controller.get_default_scheduling_group();
+    }
+    auto it = _dynamic_tenants_to_client_idx.find(*service_level);
+    // the second part of this condition checks that the service level didn't "suddenly"
+    // changed scheduling group. If it did, it means probably that it was dropped and
+    // added again, if it happens we will update it's connection indexes since it is
+    // basically a new tenant with the same name.
+    if (it == _dynamic_tenants_to_client_idx.end() ||
+            _scheduling_info_for_connection_index[it->second].sched_group != sg_for_tenant) {
+        return add_statement_tenant(*service_level,sg_for_tenant) + (idx - 2);
+    }
+    return it->second;
+}
+
+std::vector<messaging_service::scheduling_info_for_connection_index>
+messaging_service::initial_scheduling_info() const {
+    if (_scheduling_config.statement_tenants.empty()) {
+        throw std::runtime_error("messaging_service::initial_scheduling_info(): must have at least one tenant configured");
+    }
+    auto sched_infos = std::vector<scheduling_info_for_connection_index>({
+        { _scheduling_config.gossip, "gossip" },
+        { _scheduling_config.streaming, "streaming", },
+    });
+    sched_infos.reserve(sched_infos.size() + _scheduling_config.statement_tenants.size() * 2);
+    for (const auto& tenant : _scheduling_config.statement_tenants) {
+        sched_infos.push_back({ tenant.sched_group, "statement:" + tenant.name });
+        sched_infos.push_back({ tenant.sched_group, "statement-ack:" + tenant.name });
+    }
+    return sched_infos;
+};
+
+scheduling_group
+messaging_service::scheduling_group_for_verb(messaging_verb verb) {
+    return _scheduling_info_for_connection_index[get_rpc_client_idx(verb)].sched_group;
 }
 
 scheduling_group
-messaging_service::scheduling_group_for_verb(messaging_verb verb) const {
-    static const scheduling_group scheduling_config::*idx_to_group[] = {
-        &scheduling_config::statement,
-        &scheduling_config::gossip,
-        &scheduling_config::streaming,
-        &scheduling_config::statement,
-    };
-    return _scheduling_config.*(idx_to_group[s_rpc_client_idx_table[(size_t)verb]]);
+messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const {
+    scheduling_group ret;
+
+    // Once per connection, so a loop is fine.
+    for (auto&& info : _scheduling_info_for_connection_index) {
+        if (info.isolation_cookie == isolation_cookie) {
+            ret =  info.sched_group;
+            break;
+        }
+    }
+
+    // We first check if this is a statement isolation cookie - it it is we will search for the
+    // appropriate service level in the service_level_controlle since in can be that
+    // _scheduling_info_for_connection_index is not yet updated (drop readd case for example)
+    // in the future we will only fall back here for new service levels that havn't been referenced
+    // before.
+    if (isolation_cookie.find("statement:") == 0 || isolation_cookie.find("statement-ack:") == 0) {
+        // if the statement cookie is not present, the service level controller will return the default service
+        // level scheduling group.
+        std::string service_level_name = isolation_cookie.substr(std::string(isolation_cookie).find_first_of(':') + 1);
+        ret = _sl_controller.get_scheduling_group(service_level_name);
+    } else if (_sl_controller.has_service_level(isolation_cookie)) {
+        // Backward Compatibility Code - This entire "else if" block should be removed
+        // in the major version that follows the one that contains this code.
+        // When upgrading from an older enterprise version the isolation cookie is not
+        // prefixed with "statement:", so an isolation cookie that comes from an older node
+        // will simply contain the service level name.
+        // we do an extra step to be also future proof and make sure it is indeed a service
+        // level's name, since if this is the older version and we upgrade to a new one
+        // we could have more connection classes (eg: streaming,gossip etc...) and we wouldn't
+        // want it to overload the default statement's scheduling group.
+        // it is not bulet proof in the sense that if a new tenant class happens to have the exact
+        // name as one of the service levels it will be diverted to the default statement scheduling
+        // group but it has a small chance of happening.
+        ret =  _sl_controller.get_scheduling_group(isolation_cookie);
+    } else {
+        // Client is using a new connection class that the server doesn't recognize yet.
+        // Assume it's important, after server upgrade we'll recognize it.
+        ret = default_scheduling_group();
+    }
+
+    return ret;
 }
+
 
 /**
  * Get an IP for a given endpoint to connect to
@@ -662,16 +765,11 @@ shared_ptr<messaging_service::rpc_protocol_client_wrapper> messaging_service::ge
     }
     opts.tcp_nodelay = must_tcp_nodelay;
     opts.reuseaddr = true;
-
-    // isolate connections meant for statements
+    // We send cookies only for non-default statement tenant clients.
     if (idx > 3) {
-        std::optional<sstring> service_level = _sl_controller.get_active_service_level();
-        // this check is redundant since if we have an index greater than 3 it means that we are in an active service level for sure,
-        // but i put it here for compeleteness - it doesn't happen a lot anyway (only on new rpc creation).
-        if (service_level) {
-            opts.isolation_cookie = *service_level;
-        }
+        opts.isolation_cookie = _scheduling_info_for_connection_index[idx].isolation_cookie;
     }
+
     auto client = must_encrypt ?
                     ::make_shared<rpc_protocol_client_wrapper>(*_rpc, std::move(opts),
                                     remote_addr, socket_address(), _credentials) :
@@ -1177,15 +1275,28 @@ future<std::unordered_set<repair_hash>> messaging_service::send_repair_get_full_
     return send_message<future<std::unordered_set<repair_hash>>>(this, messaging_verb::REPAIR_GET_FULL_ROW_HASHES, std::move(id), repair_meta_id);
 }
 
-unsigned messaging_service::add_service_level_config(sstring service_level_name) {
+unsigned messaging_service::add_statement_tenant(sstring tenant_name, scheduling_group sg) {
     auto idx = _clients.size();
+    auto scheduling_info_for_connection_index_size = _scheduling_info_for_connection_index.size();
     auto undo = defer([&] {
         _clients.resize(idx);
-        _service_level_to_client_idx.erase(service_level_name);
+        _scheduling_info_for_connection_index.resize(scheduling_info_for_connection_index_size);
     });
-    _clients.emplace_back();
-    _clients.emplace_back();
-    _service_level_to_client_idx[service_level_name] = idx;
+    sstring statement_cookie = sstring("statement:") + tenant_name;
+    sstring statement_ack_cookie = sstring("statement-ack:") + tenant_name;
+    _clients.resize(_clients.size() + 2);
+    // this functions as a way to delete an obsolete tenant with the same name but keeping _clients
+    // indexing and _scheduling_info_for_connection_index indexing in sync.
+    for (unsigned i = 0; i < _scheduling_info_for_connection_index.size(); i++) {
+        if (_scheduling_info_for_connection_index[i].isolation_cookie == statement_cookie) {
+            _scheduling_info_for_connection_index[i].isolation_cookie = "";
+            _scheduling_info_for_connection_index[i+1].isolation_cookie = "";
+            break;
+        }
+    }
+    _scheduling_info_for_connection_index.emplace_back(sg, statement_cookie);
+    _scheduling_info_for_connection_index.emplace_back(sg, statement_ack_cookie);
+    _dynamic_tenants_to_client_idx.insert_or_assign(tenant_name, idx);
     undo.cancel();
     return idx;
 }
@@ -1234,14 +1345,14 @@ future<> messaging_service::send_repair_put_row_diff(msg_addr id, uint32_t repai
 }
 
 // Wrapper for REPAIR_ROW_LEVEL_START
-void messaging_service::register_repair_row_level_start(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason)>&& func) {
+void messaging_service::register_repair_row_level_start(std::function<future<repair_row_level_start_response> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason)>&& func) {
     register_handler(this, messaging_verb::REPAIR_ROW_LEVEL_START, std::move(func));
 }
 future<> messaging_service::unregister_repair_row_level_start() {
     return unregister_handler(messaging_verb::REPAIR_ROW_LEVEL_START);
 }
-future<> messaging_service::send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason) {
-    return send_message<void>(this, messaging_verb::REPAIR_ROW_LEVEL_START, std::move(id), repair_meta_id, std::move(keyspace_name), std::move(cf_name), std::move(range), algo, max_row_buf_size, seed, remote_shard, remote_shard_count, remote_ignore_msb, std::move(remote_partitioner_name), std::move(schema_version), reason);
+future<rpc::optional<repair_row_level_start_response>> messaging_service::send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason) {
+    return send_message<rpc::optional<repair_row_level_start_response>>(this, messaging_verb::REPAIR_ROW_LEVEL_START, std::move(id), repair_meta_id, std::move(keyspace_name), std::move(cf_name), std::move(range), algo, max_row_buf_size, seed, remote_shard, remote_shard_count, remote_ignore_msb, std::move(remote_partitioner_name), std::move(schema_version), reason);
 }
 
 // Wrapper for REPAIR_ROW_LEVEL_STOP

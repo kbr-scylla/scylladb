@@ -16,6 +16,7 @@
 
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/result_set_assertions.hh"
+#include "test/lib/reader_permit.hh"
 
 #include "database.hh"
 #include "partition_slice_builder.hh"
@@ -45,13 +46,13 @@ SEASTAR_TEST_CASE(test_safety_after_truncate) {
             mutation m(s, pkey);
             m.set_clustered_cell(clustering_key_prefix::make_empty(), "v", int32_t(42), {});
             pranges.emplace_back(dht::partition_range::make_singular(dht::decorate_key(*s, std::move(pkey))));
-            db.apply(s, freeze(m), db::commitlog::force_sync::no, db::no_timeout).get();
+            db.apply(s, freeze(m), tracing::trace_state_ptr(), db::commitlog::force_sync::no, db::no_timeout).get();
         }
 
         auto assert_query_result = [&] (size_t expected_size) {
             auto max_size = std::numeric_limits<size_t>::max();
             auto cmd = query::read_command(s->id(), s->version(), partition_slice_builder(*s).build(), 1000);
-            auto result = db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0();
+            auto&& [result, cache_tempature] = db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0();
             assert_that(query::result_set::from_raw_result(s, cmd.slice, *result)).has_size(expected_size);
         };
         assert_query_result(1000);
@@ -81,34 +82,34 @@ SEASTAR_TEST_CASE(test_querying_with_limits) {
                 auto pkey = partition_key::from_single_value(*s, to_bytes(format("key{:d}", i)));
                 mutation m(s, pkey);
                 m.partition().apply(tombstone(api::timestamp_type(1), gc_clock::now()));
-                db.apply(s, freeze(m), db::commitlog::force_sync::no, db::no_timeout).get();
+                db.apply(s, freeze(m), tracing::trace_state_ptr(), db::commitlog::force_sync::no, db::no_timeout).get();
             }
             for (uint32_t i = 3; i <= 8; ++i) {
                 auto pkey = partition_key::from_single_value(*s, to_bytes(format("key{:d}", i)));
                 mutation m(s, pkey);
                 m.set_clustered_cell(clustering_key_prefix::make_empty(), "v", int32_t(42), 1);
-                db.apply(s, freeze(m), db::commitlog::force_sync::no, db::no_timeout).get();
+                db.apply(s, freeze(m), tracing::trace_state_ptr(), db::commitlog::force_sync::no, db::no_timeout).get();
                 pranges.emplace_back(dht::partition_range::make_singular(dht::decorate_key(*s, std::move(pkey))));
             }
 
             auto max_size = std::numeric_limits<size_t>::max();
             {
                 auto cmd = query::read_command(s->id(), s->version(), partition_slice_builder(*s).build(), 3);
-                auto result = db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0();
+                auto result = std::get<0>(db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0());
                 assert_that(query::result_set::from_raw_result(s, cmd.slice, *result)).has_size(3);
             }
 
             {
                 auto cmd = query::read_command(s->id(), s->version(), partition_slice_builder(*s).build(),
                         query::max_rows, gc_clock::now(), std::nullopt, 5);
-                auto result = db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0();
+                auto result = std::get<0>(db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0());
                 assert_that(query::result_set::from_raw_result(s, cmd.slice, *result)).has_size(5);
             }
 
             {
                 auto cmd = query::read_command(s->id(), s->version(), partition_slice_builder(*s).build(),
                         query::max_rows, gc_clock::now(), std::nullopt, 3);
-                auto result = db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0();
+                auto result = std::get<0>(db.query(s, cmd, query::result_options::only_result(), pranges, nullptr, max_size, db::no_timeout).get0());
                 assert_that(query::result_set::from_raw_result(s, cmd.slice, *result)).has_size(3);
             }
         });
@@ -127,7 +128,7 @@ SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_sourc
             service::get_local_migration_manager().announce_new_column_family(s, true).get();
             column_family& cf = e.local_db().find_column_family(s);
             for (auto&& m : partitions) {
-                e.local_db().apply(cf.schema(), freeze(m), db::commitlog::force_sync::no, db::no_timeout).get();
+                e.local_db().apply(cf.schema(), freeze(m), tracing::trace_state_ptr(), db::commitlog::force_sync::no, db::no_timeout).get();
             }
             cf.flush().get();
             cf.get_row_cache().invalidate([] {}).get();
@@ -139,7 +140,7 @@ SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_sourc
                     tracing::trace_state_ptr trace_state,
                     streamed_mutation::forwarding fwd,
                     mutation_reader::forwarding fwd_mr) {
-                return cf.make_reader(s, range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+                return cf.make_reader(s, tests::make_permit(), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
             });
         });
         return make_ready_future<>();

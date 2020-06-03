@@ -49,7 +49,6 @@
 #include "frozen_mutation.hh"
 #include <seastar/core/do_with.hh>
 #include "service/migration_manager.hh"
-#include "service/storage_service.hh"
 #include "message/messaging_service.hh"
 #include "mutation_query.hh"
 #include <seastar/core/fstream.hh>
@@ -68,6 +67,7 @@
 #include "sstables/progress_monitor.hh"
 #include "auth/common.hh"
 #include "tracing/trace_keyspace_helper.hh"
+#include "gms/feature_service.hh"
 
 #include "checked-file-impl.hh"
 #include "utils/disk-error-handler.hh"
@@ -102,11 +102,11 @@ make_flush_controller(const db::config& cfg, seastar::scheduling_group sg, const
 
 inline
 std::unique_ptr<compaction_manager>
-make_compaction_manager(const db::config& cfg, database_config& dbcfg) {
+make_compaction_manager(const db::config& cfg, database_config& dbcfg, abort_source& as) {
     if (cfg.compaction_static_shares() > 0) {
-        return std::make_unique<compaction_manager>(dbcfg.compaction_scheduling_group, service::get_local_compaction_priority(), dbcfg.available_memory, cfg.compaction_static_shares());
+        return std::make_unique<compaction_manager>(dbcfg.compaction_scheduling_group, service::get_local_compaction_priority(), dbcfg.available_memory, cfg.compaction_static_shares(), as);
     }
-    return std::make_unique<compaction_manager>(dbcfg.compaction_scheduling_group, service::get_local_compaction_priority(), dbcfg.available_memory);
+    return std::make_unique<compaction_manager>(dbcfg.compaction_scheduling_group, service::get_local_compaction_priority(), dbcfg.available_memory, as);
 }
 
 lw_shared_ptr<keyspace_metadata>
@@ -150,7 +150,7 @@ void keyspace::remove_user_type(const user_type ut) {
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
-database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm)
+database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, locator::token_metadata& tm, abort_source& as)
     : _stats(make_lw_shared<db_stats>())
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
@@ -179,17 +179,20 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_count_streaming_concurrent_reads,
             max_memory_streaming_concurrent_reads(),
             "_streaming_concurrency_sem")
+    // No limits, just for accounting.
+    , _compaction_concurrency_sem(reader_concurrency_semaphore::no_limits{})
     , _system_read_concurrency_sem(
-            max_count_system_concurrent_reads,
+            // Using higher initial concurrency, see revert_initial_system_read_concurrency_boost().
+            max_count_concurrent_reads,
             max_memory_system_concurrent_reads(),
             "_system_read_concurrency_sem")
     , _data_query_stage("data_query", &column_family::query)
     , _mutation_query_stage()
     , _apply_stage("db_apply", &database::do_apply)
     , _version(empty_version)
-    , _compaction_manager(make_compaction_manager(_cfg, dbcfg))
+    , _compaction_manager(make_compaction_manager(_cfg, dbcfg, as))
     , _enable_incremental_backups(cfg.incremental_backups())
-    , _querier_cache(_read_concurrency_sem, dbcfg.available_memory * 0.04)
+    , _querier_cache(dbcfg.available_memory * 0.04)
     , _large_data_handler(std::make_unique<db::cql_table_large_data_handler>(_cfg.compaction_large_partition_warning_threshold_mb()*1024*1024,
               _cfg.compaction_large_row_warning_threshold_mb()*1024*1024,
               _cfg.compaction_large_cell_warning_threshold_mb()*1024*1024,
@@ -520,6 +523,11 @@ database::setup_metrics() {
                         sm::description("The number of times the schema changed")),
         });
     }
+}
+
+void database::set_format(sstables::sstable_version_types format) {
+    get_user_sstables_manager().set_format(format);
+    get_system_sstables_manager().set_format(format);
 }
 
 database::~database() {
@@ -900,8 +908,8 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.compaction_enforce_min_threshold = _config.compaction_enforce_min_threshold;
     cfg.dirty_memory_manager = _config.dirty_memory_manager;
     cfg.streaming_dirty_memory_manager = _config.streaming_dirty_memory_manager;
-    cfg.read_concurrency_semaphore = _config.read_concurrency_semaphore;
     cfg.streaming_read_concurrency_semaphore = _config.streaming_read_concurrency_semaphore;
+    cfg.compaction_concurrency_semaphore = _config.compaction_concurrency_semaphore;
     cfg.cf_stats = _config.cf_stats;
     cfg.enable_incremental_backups = _config.enable_incremental_backups;
     cfg.compaction_scheduling_group = _config.compaction_scheduling_group;
@@ -915,10 +923,8 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     // avoid self-reporting
     if (is_system_table(s)) {
         cfg.sstables_manager = &db.get_system_sstables_manager();
-        cfg.max_memory_for_unlimited_query = std::numeric_limits<uint64_t>::max();
     } else {
         cfg.sstables_manager = &db.get_user_sstables_manager();
-        cfg.max_memory_for_unlimited_query = db_config.max_memory_for_unlimited_query();
     }
 
     cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
@@ -1155,7 +1161,7 @@ compare_atomic_cell_for_merge(atomic_cell_view left, atomic_cell_view right) {
     return 0;
 }
 
-future<lw_shared_ptr<query::result>, cache_temperature>
+future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
                 tracing::trace_state_ptr trace_state, uint64_t max_result_size, db::timeout_clock::time_point timeout) {
     column_family& cf = find_column_family(cmd.cf_id);
@@ -1163,6 +1169,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     return _data_query_stage(&cf,
             std::move(s),
             seastar::cref(cmd),
+            make_query_class_config(),
             opts,
             seastar::cref(ranges),
             std::move(trace_state),
@@ -1172,17 +1179,17 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
             std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate(), op = cf.read_in_progress()] (auto f) {
         if (f.failed()) {
             ++s->total_reads_failed;
-            return make_exception_future<lw_shared_ptr<query::result>, cache_temperature>(f.get_exception());
+            return make_exception_future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>(f.get_exception());
         } else {
             ++s->total_reads;
             auto result = f.get0();
             s->short_data_queries += bool(result->is_short_read());
-            return make_ready_future<lw_shared_ptr<query::result>, cache_temperature>(std::move(result), hit_rate);
+            return make_ready_future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>(std::tuple(std::move(result), hit_rate));
         }
     });
 }
 
-future<reconcilable_result, cache_temperature>
+future<std::tuple<reconcilable_result, cache_temperature>>
 database::query_mutations(schema_ptr s, const query::read_command& cmd, const dht::partition_range& range,
                           query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
     column_family& cf = find_column_family(cmd.cf_id);
@@ -1195,18 +1202,18 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
             cmd.partition_limit,
             cmd.timestamp,
             timeout,
-            cf.get_config().max_memory_for_unlimited_query,
+            make_query_class_config(),
             std::move(accounter),
             std::move(trace_state),
             std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate(), op = cf.read_in_progress()] (auto f) {
         if (f.failed()) {
             ++s->total_reads_failed;
-            return make_exception_future<reconcilable_result, cache_temperature>(f.get_exception());
+            return make_exception_future<std::tuple<reconcilable_result, cache_temperature>>(f.get_exception());
         } else {
             ++s->total_reads;
             auto result = f.get0();
             s->short_mutation_queries += bool(result.is_short_read());
-            return make_ready_future<reconcilable_result, cache_temperature>(std::move(result), hit_rate);
+            return make_ready_future<std::tuple<reconcilable_result, cache_temperature>>(std::tuple(std::move(result), hit_rate));
         }
     });
 }
@@ -1255,6 +1262,19 @@ void database::register_connection_drop_notifier(netw::messaging_service& ms) {
             cf->drop_hit_rate(ep);
         }
     });
+}
+
+query_class_config database::make_query_class_config() {
+    // Everything running in the statement group is considered a user query
+    if (current_scheduling_group() == _dbcfg.statement_scheduling_group) {
+        return query_class_config{_read_concurrency_sem, _cfg.max_memory_for_unlimited_query()};
+    // Reads done on behalf of view update generation run in the streaming group
+    } else if (current_scheduling_group() == _dbcfg.streaming_scheduling_group) {
+        return query_class_config{_streaming_concurrency_sem, std::numeric_limits<uint64_t>::max()};
+    // Everything else is considered a system query
+    } else {
+        return query_class_config{_system_read_concurrency_sem, std::numeric_limits<uint64_t>::max()};
+    }
 }
 
 std::ostream& operator<<(std::ostream& out, const column_family& cf) {
@@ -1313,7 +1333,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
             // counter state for each modified cell...
 
             tracing::trace(trace_state, "Reading counter values from the CF");
-            return counter_write_query(m_schema, cf.as_mutation_source(), m.decorated_key(), slice, trace_state)
+            return counter_write_query(m_schema, cf.as_mutation_source(), make_query_class_config().semaphore.make_permit(), m.decorated_key(), slice, trace_state)
                     .then([this, &cf, &m, m_schema, timeout, trace_state] (auto mopt) {
                 // ...now, that we got existing state of all affected counter
                 // cells we can look for our shard in each of them, increment
@@ -1505,7 +1525,7 @@ future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::
     return apply_in_memory(m, std::move(s), {}, timeout);
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
@@ -1524,7 +1544,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_
     if (cf.views().empty()) {
         return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout, sync).finally([op = std::move(op)] { });
     }
-    future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m, timeout);
+    future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m, timeout, std::move(tr_state), make_query_class_config().semaphore);
     return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout, &cf, op = std::move(op), sync] (row_locker::lock_holder lock) mutable {
         return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout, sync).finally(
                 // Hold the local lock on the base-table partition or row
@@ -1557,7 +1577,7 @@ void database::update_write_metrics_for_timed_out_write() {
     ++_stats->total_writes_timedout;
 }
 
-future<> database::apply(schema_ptr s, const frozen_mutation& m, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout) {
+future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
@@ -1565,15 +1585,15 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, db::commitlog::
         update_write_metrics_for_timed_out_write();
         return make_exception_future<>(timed_out_error{});
     }
-    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout, sync));
+    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync));
 }
 
-future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
+future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply hint {}", m.pretty_printer(s));
     }
-    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, timeout] () mutable {
-        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), timeout, db::commitlog::force_sync::no));
+    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, tr_state = std::move(tr_state), timeout] () mutable {
+        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no));
     });
 }
 
@@ -1615,8 +1635,8 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     cfg.compaction_enforce_min_threshold = _cfg.compaction_enforce_min_threshold;
     cfg.dirty_memory_manager = &_dirty_memory_manager;
     cfg.streaming_dirty_memory_manager = &_streaming_dirty_memory_manager;
-    cfg.read_concurrency_semaphore = &_read_concurrency_sem;
     cfg.streaming_read_concurrency_semaphore = &_streaming_concurrency_sem;
+    cfg.compaction_concurrency_semaphore = &_compaction_concurrency_sem;
     cfg.cf_stats = &_cf_stats;
     cfg.enable_incremental_backups = _enable_incremental_backups;
 
@@ -1737,10 +1757,14 @@ future<> database::stop_large_data_handler() {
     return _large_data_handler->stop();
 }
 
+void database::revert_initial_system_read_concurrency_boost() {
+    _system_read_concurrency_sem.consume({database::max_count_concurrent_reads - database::max_count_system_concurrent_reads, 0});
+    dblog.debug("Reverted system read concurrency from initial {} to normal {}", database::max_count_concurrent_reads, database::max_count_system_concurrent_reads);
+}
+
 future<>
 database::stop() {
     assert(!_large_data_handler->running());
-    assert(_compaction_manager->stopped());
 
     // try to ensure that CL has done disk flushing
     future<> maybe_shutdown_commitlog = _commitlog != nullptr ? _commitlog->shutdown() : make_ready_future<>();
@@ -2036,8 +2060,9 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
                 std::move(trace_state), fwd_mr);
     });
     auto&& full_slice = schema->full_slice();
-    return make_flat_multi_range_reader(std::move(schema), std::move(ms), std::move(range_generator), std::move(full_slice),
-            service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);
+    auto& cf = db.local().find_column_family(schema);
+    return make_flat_multi_range_reader(std::move(schema), cf.streaming_read_concurrency_semaphore().make_permit(), std::move(ms),
+            std::move(range_generator), std::move(full_slice), service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);
 }
 
 std::ostream& operator<<(std::ostream& os, gc_clock::time_point tp) {

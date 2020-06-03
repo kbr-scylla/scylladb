@@ -22,6 +22,7 @@
 #include <seastar/core/align.hh>
 #include <seastar/core/print.hh>
 #include <seastar/core/metrics.hh>
+#include <seastar/core/reactor.hh>
 #include <seastar/util/alloc_failure_injector.hh>
 #include <seastar/util/backtrace.hh>
 
@@ -370,23 +371,28 @@ public:
     void register_region(region::impl*);
     void unregister_region(region::impl*) noexcept;
     size_t reclaim(size_t bytes);
+    // Compacts one segment at a time from sparsest segment to least sparse until work_waiting_on_reactor returns true
+    // or there are no more segments to compact.
     idle_cpu_handler_result compact_on_idle(work_waiting_on_reactor check_for_work);
     // Releases whole segments back to the segment pool.
     // After the call, if there is enough evictable memory, the amount of free segments in the pool
     // will be at least reserve_segments + div_ceil(bytes, segment::size).
     // Returns the amount by which segment_pool.total_memory_in_use() has decreased.
     size_t compact_and_evict(size_t reserve_segments, size_t bytes);
-    // Like compact_and_evict() but assumes that reclaim_lock is held around the operation.
-    size_t compact_and_evict_locked(size_t reserve_segments, size_t bytes);
     void full_compaction();
     void reclaim_all_free_segments();
     occupancy_stats region_occupancy();
     occupancy_stats occupancy();
     size_t non_lsa_used_space();
+    // Set the minimum number of segments reclaimed during single reclamation cycle.
     void set_reclamation_step(size_t step_in_segments) { _reclamation_step = step_in_segments; }
     size_t reclamation_step() const { return _reclamation_step; }
+    // Abort on allocation failure from LSA
     void enable_abort_on_bad_alloc() { _abort_on_bad_alloc = true; }
     bool should_abort_on_bad_alloc() const { return _abort_on_bad_alloc; }
+private:
+    // Like compact_and_evict() but assumes that reclaim_lock is held around the operation.
+    size_t compact_and_evict_locked(size_t reserve_segments, size_t bytes);
 };
 
 class tracker_reclaimer_lock {
@@ -405,10 +411,6 @@ tracker::~tracker() {
 
 size_t tracker::reclaim(size_t bytes) {
     return _impl->reclaim(bytes);
-}
-
-idle_cpu_handler_result tracker::compact_on_idle(work_waiting_on_reactor check_for_work) {
-    return _impl->compact_on_idle(check_for_work);
 }
 
 occupancy_stats tracker::region_occupancy() {
@@ -1648,20 +1650,25 @@ region_group_binomial_group_sanity_check(const region_group::region_heap& bh) {
 #endif
 }
 
-void tracker::set_reclamation_step(size_t step_in_segments) {
-    _impl->set_reclamation_step(step_in_segments);
-}
-
 size_t tracker::reclamation_step() const {
     return _impl->reclamation_step();
 }
 
-void tracker::enable_abort_on_bad_alloc() {
-    return _impl->enable_abort_on_bad_alloc();
-}
-
 bool tracker::should_abort_on_bad_alloc() {
     return _impl->should_abort_on_bad_alloc();
+}
+
+void tracker::configure(const config& cfg) {
+    if (cfg.defragment_on_idle) {
+        engine().set_idle_cpu_handler([this] (reactor::work_waiting_on_reactor check_for_work) {
+            return _impl->compact_on_idle(check_for_work);
+        });
+    }
+
+    _impl->set_reclamation_step(cfg.lsa_reclamation_step);
+    if (cfg.abort_on_lsa_bad_alloc) {
+        _impl->enable_abort_on_bad_alloc();
+    }
 }
 
 memory::reclaiming_result tracker::reclaim(seastar::memory::reclaimer::request r) {
@@ -1935,7 +1942,9 @@ size_t tracker::impl::compact_and_evict(size_t reserve_segments, size_t memory_t
     }
     reclaiming_lock rl(*this);
     reclaim_timer timing_guard;
-    return compact_and_evict_locked(reserve_segments, memory_to_release);
+    size_t released = compact_and_evict_locked(reserve_segments, memory_to_release);
+    timing_guard.stop(released);
+    return released;
 }
 
 size_t tracker::impl::compact_and_evict_locked(size_t reserve_segments, size_t memory_to_release) {

@@ -8,7 +8,6 @@ import configparser
 import io
 import logging
 import os
-import platform
 import re
 import shlex
 import shutil
@@ -21,6 +20,9 @@ import yaml
 import psutil
 import sys
 from pathlib import Path
+
+import distro
+
 
 def scriptsdir_p():
     p = Path(sys.argv[0]).resolve()
@@ -423,11 +425,11 @@ def current_umask():
     return current
 
 def dist_name():
-    return platform.dist()[0]
+    return distro.name()
 
 
 def dist_ver():
-    return platform.dist()[1]
+    return distro.version()
 
 
 def is_unused_disk(dev):

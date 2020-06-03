@@ -81,9 +81,15 @@ static ::shared_ptr<cql3::restrictions::single_column_restriction::EQ> make_key_
     return make_shared<cql3::restrictions::single_column_restriction::EQ>(cdef, std::move(restriction_value));
 }
 
-::shared_ptr<cql3::restrictions::statement_restrictions> get_filtering_restrictions(schema_ptr schema, const column_definition& attrs_col, const rjson::value& query_filter) {
+// Convert a QueryFilter or ScanFilter parameter into an equivalent set of
+// Scylla statement_restrictions which can be used in filtering a query.
+::shared_ptr<cql3::restrictions::statement_restrictions> get_filtering_restrictions(schema_ptr schema, const column_definition& attrs_col, const rjson::value& query_filter, bool require_all) {
     clogger.trace("Getting filtering restrictions for: {}", rjson::print(query_filter));
     auto filtering_restrictions = ::make_shared<cql3::restrictions::statement_restrictions>(schema, true);
+    if (!require_all) {
+        // FIXME: Need to implement ConditionalOperator=OR case
+        throw api_error("ValidationException", "QueryFilter or ScanFilter with ConditionalOperator=OR not yet implemented");
+    }
     for (auto it = query_filter.MemberBegin(); it != query_filter.MemberEnd(); ++it) {
         std::string_view column_name(it->name.GetString(), it->name.GetStringLength());
         const rjson::value& condition = it->value;
@@ -218,15 +224,9 @@ static bool check_BEGINS_WITH(const rjson::value* v1, const rjson::value& v2) {
         return false;
     }
     if (it2->name == "S") {
-        std::string_view val1(it1->value.GetString(), it1->value.GetStringLength());
-        std::string_view val2(it2->value.GetString(), it2->value.GetStringLength());
-        return val1.substr(0, val2.size()) == val2;
+        return rjson::to_string_view(it1->value).starts_with(rjson::to_string_view(it2->value));
     } else /* it2->name == "B" */ {
-        // TODO (optimization): Check the begins_with condition directly on
-        // the base64-encoded string, without making a decoded copy.
-        bytes val1 = base64_decode(it1->value);
-        bytes val2 = base64_decode(it2->value);
-        return val1.substr(0, val2.size()) == val2;
+        return base64_begins_with(rjson::to_string_view(it1->value), rjson::to_string_view(it2->value));
     }
 }
 
@@ -519,6 +519,24 @@ static bool verify_expected_one(const rjson::value& condition, const rjson::valu
     }
 }
 
+conditional_operator_type get_conditional_operator(const rjson::value& req) {
+    const rjson::value* conditional_operator = rjson::find(req, "ConditionalOperator");
+    if (!conditional_operator) {
+        return conditional_operator_type::MISSING;
+    }
+    if (!conditional_operator->IsString()) {
+        throw api_error("ValidationException", "'ConditionalOperator' parameter, if given, must be a string");
+    }
+    auto s = rjson::to_string_view(*conditional_operator);
+    if (s == "AND") {
+        return conditional_operator_type::AND;
+    } else if (s == "OR") {
+        return conditional_operator_type::OR;
+    } else {
+        throw api_error("ValidationException", "'ConditionalOperator' parameter must be AND, OR or missing");
+    }
+}
+
 // Check if the existing values of the item (previous_item) match the
 // conditions given by the Expected and ConditionalOperator parameters
 // (if they exist) in the request (an UpdateItem, PutItem or DeleteItem).
@@ -526,32 +544,19 @@ static bool verify_expected_one(const rjson::value& condition, const rjson::valu
 // are errors in the format of the condition itself.
 bool verify_expected(const rjson::value& req, const std::unique_ptr<rjson::value>& previous_item) {
     const rjson::value* expected = rjson::find(req, "Expected");
+    auto conditional_operator = get_conditional_operator(req);
+    if (conditional_operator != conditional_operator_type::MISSING &&
+        (!expected || (expected->IsObject() && expected->GetObject().ObjectEmpty()))) {
+            throw api_error("ValidationException", "'ConditionalOperator' parameter cannot be specified for missing or empty Expression");
+    }
     if (!expected) {
         return true;
     }
     if (!expected->IsObject()) {
         throw api_error("ValidationException", "'Expected' parameter, if given, must be an object");
     }
-    // ConditionalOperator can be "AND" for requiring all conditions, or
-    // "OR" for requiring one condition, and defaults to "AND" if missing.
-    const rjson::value* conditional_operator = rjson::find(req, "ConditionalOperator");
-    bool require_all = true;
-    if (conditional_operator) {
-        if (!conditional_operator->IsString()) {
-            throw api_error("ValidationException", "'ConditionalOperator' parameter, if given, must be a string");
-        }
-        std::string_view s(conditional_operator->GetString(), conditional_operator->GetStringLength());
-        if (s == "AND") {
-            // require_all is already true
-        } else if (s == "OR") {
-            require_all = false;
-        } else {
-            throw api_error("ValidationException", "'ConditionalOperator' parameter must be AND, OR or missing");
-        }
-        if (expected->GetObject().ObjectEmpty()) {
-            throw api_error("ValidationException", "'ConditionalOperator' parameter cannot be specified for empty Expression");
-        }
-    }
+
+    bool require_all = conditional_operator != conditional_operator_type::OR;
 
     for (auto it = expected->MemberBegin(); it != expected->MemberEnd(); ++it) {
         const rjson::value* got = nullptr;

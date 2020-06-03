@@ -223,11 +223,30 @@ public:
     };
 
     struct scheduling_config {
-        scheduling_group statement;
+        struct tenant {
+            scheduling_group sched_group;
+            sstring name;
+        };
+        // Must have at least one element. No two tenants should have the same
+        // scheduling group. [0] is the default tenant, that all unknown
+        // scheduling groups will fall back to. The default tenant should use
+        // the statement scheduling group, for backward compatibility. In fact
+        // any other scheduling group would be dropped as the default tenant,
+        // does not transfer its scheduling group across the wire.
+        std::vector<tenant> statement_tenants;
         scheduling_group streaming;
         scheduling_group gossip;
     };
 
+private:
+    struct scheduling_info_for_connection_index {
+        scheduling_group sched_group;
+        sstring isolation_cookie;
+    };
+    struct tenant_connection_index {
+        scheduling_group sched_group;
+        unsigned cliend_idx;
+    };
 private:
     gms::inet_address _listen_address;
     uint16_t _port;
@@ -249,7 +268,9 @@ private:
     std::list<std::function<void(gms::inet_address ep)>> _connection_drop_notifiers;
     memory_config _mcfg;
     scheduling_config _scheduling_config;
-    std::unordered_map<sstring, size_t> _service_level_to_client_idx;
+    std::vector<scheduling_info_for_connection_index> _scheduling_info_for_connection_index;
+    std::vector<tenant_connection_index> _connection_index_for_tenant;
+    std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
     qos::service_level_controller& _sl_controller;
 public:
     using clock_type = lowres_clock;
@@ -349,9 +370,9 @@ public:
     future<> send_repair_put_row_diff(msg_addr id, uint32_t repair_meta_id, repair_rows_on_wire row_diff);
 
     // Wrapper for REPAIR_ROW_LEVEL_START
-    void register_repair_row_level_start(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason)>&& func);
+    void register_repair_row_level_start(std::function<future<repair_row_level_start_response> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason)>&& func);
     future<> unregister_repair_row_level_start();
-    future<> send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason);
+    future<rpc::optional<repair_row_level_start_response>> send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason);
 
     // Wrapper for REPAIR_ROW_LEVEL_STOP
     void register_repair_row_level_stop(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range)>&& func);
@@ -519,7 +540,6 @@ public:
 private:
     bool remove_rpc_client_one(clients_map& clients, msg_addr id, bool dead_only);
     void do_start_listen();
-    unsigned get_rpc_client_idx(messaging_verb verb);
 public:
     // Return rpc::protocol::client for a shard which is a ip + cpuid pair.
     shared_ptr<rpc_protocol_client_wrapper> get_rpc_client(messaging_verb verb, msg_addr id);
@@ -530,8 +550,11 @@ public:
     void unregister_connection_drop_notifier(drop_notifier_handler h);
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
-    scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
-    unsigned add_service_level_config(sstring service_level_name);
+    scheduling_group scheduling_group_for_verb(messaging_verb verb);
+    scheduling_group scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
+    std::vector<messaging_service::scheduling_info_for_connection_index> initial_scheduling_info() const;
+    unsigned get_rpc_client_idx(messaging_verb verb);
+    unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
 };
 
 extern distributed<messaging_service> _the_messaging_service;

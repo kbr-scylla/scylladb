@@ -36,6 +36,8 @@ import shlex
 import time
 from random import randint
 
+output_is_a_tty = sys.stdout.isatty()
+
 LDAP_SERVER_CONFIGURATION_FILE = os.path.join(os.path.dirname(__file__), 'test', 'resource', 'slapd.conf')
 
 DEFAULT_ENTRIES = [
@@ -110,7 +112,7 @@ def create_formatter(*decorators):
 
     def nocolor(arg):
         return str(arg)
-    return color if os.isatty(sys.stdout.fileno()) else nocolor
+    return color if output_is_a_tty else nocolor
 
 
 class palette:
@@ -206,6 +208,8 @@ class TestSuite(ABC):
                 continue
             t = os.path.join(self.name, shortname)
             patterns = options.name if options.name else [t]
+            if options.skip_pattern and options.skip_pattern in t:
+                continue
             for p in patterns:
                 if p in t:
                     for i in range(options.repeat):
@@ -348,6 +352,7 @@ class BoostTest(UnitTest):
         boost_args += ['--report_level=no',
                        '--logger=HRF,test_suite:XML,test_suite,' + self.xmlout]
         boost_args += ['--catch_system_errors=no']  # causes undebuggable cores
+        boost_args += ['--color_output={}'.format('true' if output_is_a_tty else 'false')]
         boost_args += ['--']
         self.args = boost_args + self.args
 
@@ -590,6 +595,12 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
                 cleanup_fn()
             return True
         try:
+            log.write("=== TEST.PY STARTING TEST #{} ===\n".format(test.id).encode(encoding="UTF-8"))
+            log.write("export UBSAN_OPTIONS='{}'\n".format(":".join(filter(None, UBSAN_OPTIONS))).encode(encoding="UTF-8"))
+            log.write("export ASAN_OPTIONS='{}'\n".format(":".join(filter(None, ASAN_OPTIONS))).encode(encoding="UTF-8"))
+            log.write("{} {}\n".format(test.path, " ".join(test.args)).encode(encoding="UTF-8"))
+            log.write("=== TEST.PY TEST OUTPUT ===\n".format(test.id).encode(encoding="UTF-8"))
+            log.flush();
             process = await asyncio.create_subprocess_exec(
                 test.path,
                 *test.args,
@@ -691,13 +702,16 @@ def parse_cmd_line():
     parser.add_argument('--save-log-on-success', "-s", default=False,
                         dest="save_log_on_success", action="store_true",
                         help="Save test log output on success.")
+    parser.add_argument('--skip', default="",
+                        dest="skip_pattern", action="store",
+                        help="Skip tests which match the provided pattern")
     parser.add_argument('--manual-execution', action='store_true', default=False,
                         help='Let me manually run the test executable at the moment this script would run it')
     parser.add_argument('--byte-limit', action="store", default=None, type=int,
                         help="Specific byte limit for failure injection (random by default)")
     args = parser.parse_args()
 
-    if not sys.stdout.isatty():
+    if not output_is_a_tty:
         args.verbose = True
 
     if not args.modes:

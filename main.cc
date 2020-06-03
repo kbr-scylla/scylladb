@@ -51,6 +51,7 @@
 #include "tracing/tracing_backend_registry.hh"
 #include <seastar/core/prometheus.hh>
 #include "message/messaging_service.hh"
+#include "db/sstables-format-selector.hh"
 #include <seastar/net/dns.hh>
 #include <seastar/core/io_queue.hh>
 #include <seastar/core/abort_on_ebadf.hh>
@@ -70,6 +71,7 @@
 #include "cdc/log.hh"
 #include "cdc/cdc_extension.hh"
 #include "alternator/tags_extension.hh"
+#include "alternator/rmw_operation.hh"
 
 namespace fs = std::filesystem;
 
@@ -745,7 +747,7 @@ int main(int ac, char** av) {
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
             dbcfg.available_memory = get_available_memory();
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata)).get();
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata), std::ref(stop_signal.as_sharded_abort_source())).get();
             start_large_data_handler(db).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
@@ -865,7 +867,13 @@ int main(int ac, char** av) {
             sstables::init_metrics().get();
 
             db::system_keyspace::minimal_setup(db, qp);
-            service::read_sstables_format(service::get_storage_service()).get();
+
+            db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db);
+
+            sst_format_selector.start().get();
+            auto stop_format_selector = defer_verbose_shutdown("sstables format selector", [&sst_format_selector] {
+                sst_format_selector.stop().get();
+            });
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
@@ -906,7 +914,7 @@ int main(int ac, char** av) {
                 db.register_connection_drop_notifier(netw::get_local_messaging_service());
             }).get();
             supervisor::notify("setting up system keyspace");
-            db::system_keyspace::setup(db, qp, service::get_storage_service()).get();
+            db::system_keyspace::setup(db, qp, feature_service).get();
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
             if (cl != nullptr) {
@@ -926,7 +934,7 @@ int main(int ac, char** av) {
             }
 
             db.invoke_on_all([&proxy] (database& db) {
-                db.get_compaction_manager().start();
+                db.get_compaction_manager().enable();
             }).get();
 
             // If the same sstable is shared by several shards, it cannot be
@@ -1016,7 +1024,13 @@ int main(int ac, char** av) {
                 gms::stop_gossiping().get();
             });
 
-            ss.init_server_without_the_messaging_service_part().get();
+            ss.init_server().get();
+            sst_format_selector.sync();
+            ss.join_cluster().get();
+
+            startlog.info("SSTable data integrity checker is {}.",
+                    cfg->enable_sstable_data_integrity_check() ? "enabled" : "disabled");
+
             api::set_server_snapshot(ctx).get();
             auto stop_snapshots = defer_verbose_shutdown("snapshots", [] {
                 service::get_storage_service().invoke_on_all(&service::storage_service::snapshots_close).get();
@@ -1078,6 +1092,10 @@ int main(int ac, char** av) {
             // Truncate `clients' CF - this table should not persist between server restarts.
             clear_clientlist().get();
 
+            db.invoke_on_all([] (database& db) {
+                db.revert_initial_system_read_concurrency_boost();
+            }).get();
+
             audit::audit::start_audit(*cfg).get();
 
             if (cfg->start_native_transport()) {
@@ -1093,6 +1111,7 @@ int main(int ac, char** av) {
             }
 
             if (cfg->alternator_port() || cfg->alternator_https_port()) {
+                alternator::rmw_operation::set_default_write_isolation(cfg->alternator_write_isolation());
                 static sharded<alternator::executor> alternator_executor;
                 static sharded<alternator::server> alternator_server;
 
@@ -1162,21 +1181,14 @@ int main(int ac, char** av) {
                 }).get();
             }
 
-            if (cfg->defragment_memory_on_idle()) {
-                smp::invoke_on_all([] () {
-                    engine().set_idle_cpu_handler([] (reactor::work_waiting_on_reactor check_for_work) {
-                        return logalloc::shard_tracker().compact_on_idle(check_for_work);
-                    });
-                }).get();
-            }
-            smp::invoke_on_all([&cfg] () {
-                return logalloc::shard_tracker().set_reclamation_step(cfg->lsa_reclamation_step());
+            smp::invoke_on_all([&cfg] {
+                logalloc::tracker::config st_cfg;
+                st_cfg.defragment_on_idle = cfg->defragment_memory_on_idle();
+                st_cfg.abort_on_lsa_bad_alloc = cfg->abort_on_lsa_bad_alloc();
+                st_cfg.lsa_reclamation_step = cfg->lsa_reclamation_step();
+                logalloc::shard_tracker().configure(st_cfg);
             }).get();
-            if (cfg->abort_on_lsa_bad_alloc()) {
-                smp::invoke_on_all([&cfg]() {
-                    return logalloc::shard_tracker().enable_abort_on_bad_alloc();
-                }).get();
-            }
+
             seastar::set_abort_on_ebadf(cfg->abort_on_ebadf());
             api::set_server_done(ctx).get();
             supervisor::notify("serving");
@@ -1198,12 +1210,6 @@ int main(int ac, char** av) {
                 if (cfg->view_building()) {
                     view_builder.stop().get();
                 }
-            });
-
-            auto stop_compaction_manager = defer_verbose_shutdown("compaction manager", [&db] {
-                db.invoke_on_all([](auto& db) {
-                    return db.get_compaction_manager().stop();
-                }).get();
             });
 
             auto stop_redis_service = defer_verbose_shutdown("redis service", [&cfg] {

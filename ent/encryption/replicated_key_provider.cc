@@ -96,7 +96,7 @@ public:
             return true;
         }
         auto& qp = _ctxt.get_query_processor();
-        return !qp.local_is_initialized() || _ctxt.get_database().local().get_compaction_manager().stopped();
+        return !qp.local_is_initialized() || _ctxt.get_database().local().get_compaction_manager().enabled();
     }
 
     void print(std::ostream& os) const override {
@@ -349,7 +349,7 @@ replicated_key_provider_factory::replicated_key_provider_factory()
 replicated_key_provider_factory::~replicated_key_provider_factory()
 {}
 
-namespace bfs = boost::filesystem;
+namespace bfs = std::filesystem;
 
 shared_ptr<key_provider> replicated_key_provider_factory::get_provider(encryption_context& ctxt, const options& map) {
     opt_wrapper opts(map);

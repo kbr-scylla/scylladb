@@ -58,6 +58,4 @@ public:
     }
 };
 
-GCC6_CONCEPT(
-static_assert(StreamedMutationTranformer<schema_upgrader>());
-)
+static_assert(StreamedMutationTranformer<schema_upgrader>);

@@ -30,7 +30,7 @@
 #include "db/schema_tables.hh"
 
 #include "service/migration_manager.hh"
-#include "service/storage_service.hh"
+#include "gms/feature_service.hh"
 #include "partition_slice_builder.hh"
 #include "dht/i_partitioner.hh"
 #include "system_keyspace.hh"
@@ -78,7 +78,6 @@
 #include "user_types_metadata.hh"
 
 #include "index/target_parser.hh"
-#include "service/storage_service.hh"
 #include "lua.hh"
 
 using namespace db::system_keyspace;
@@ -213,7 +212,7 @@ future<> save_system_schema(const sstring & ksname) {
             deletion_timestamp), ksm->name()).discard_result();
     }).then([ksm] {
         auto mvec  = make_create_keyspace_mutations(ksm, schema_creation_timestamp(), true);
-        return qctx->proxy().mutate_locally(std::move(mvec));
+        return qctx->proxy().mutate_locally(std::move(mvec), tracing::trace_state_ptr());
     });
 }
 
@@ -929,7 +928,7 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
        /*auto& old_aggregates = */read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces).get0();
 #endif
 
-       proxy.local().mutate_locally(std::move(mutations)).get0();
+       proxy.local().mutate_locally(std::move(mutations), tracing::trace_state_ptr()).get0();
 
        if (do_flush) {
            proxy.local().get_db().invoke_on_all([s, cfs = std::move(column_families)] (database& db) {

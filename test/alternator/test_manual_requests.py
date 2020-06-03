@@ -30,7 +30,7 @@ def get_signed_request(dynamodb, target, payload):
     # to unexpected changes
     class Request:
         url=dynamodb.meta.client._endpoint.host
-        headers={'X-Amz-Target': 'DynamoDB_20120810.' + target}
+        headers={'X-Amz-Target': 'DynamoDB_20120810.' + target, 'Content-Type': 'application/x-amz-json-1.0'}
         body=payload.encode(encoding='UTF-8')
         method='POST'
         context={}
@@ -100,7 +100,10 @@ def test_too_large_request(dynamodb, test_table):
     # in alternator and DynamoDB. The former returns 413, the latter
     # a ClientError explaining that the element size was too large.
     with pytest.raises(BotoCoreError):
-        test_table.put_item(Item={'p': p, 'c': c, 'big': big})
+        try:
+            test_table.put_item(Item={'p': p, 'c': c, 'big': big})
+        except ClientError:
+            raise BotoCoreError()
 
 def test_incorrect_json(dynamodb, test_table):
     correct_req = '{"TableName": "' + test_table.name + '", "Item": {"p": {"S": "x"}, "c": {"S": "x"}}}'

@@ -36,22 +36,20 @@ static constexpr size_t merger_small_vector_size = 4;
 template<typename T>
 using merger_vector = utils::small_vector<T, merger_small_vector_size>;
 
-GCC6_CONCEPT(
-    template<typename Producer>
-    concept bool FragmentProducer = requires(Producer p, dht::partition_range part_range, position_range pos_range,
-            db::timeout_clock::time_point timeout) {
-        // The returned fragments are expected to have the same
-        // position_in_partition. Iterators and references are expected
-        // to be valid until the next call to operator()().
-        { p(timeout) } -> future<boost::iterator_range<merger_vector<mutation_fragment>::iterator>>;
-        // These have the same semantics as their
-        // flat_mutation_reader counterparts.
-        { p.next_partition() };
-        { p.fast_forward_to(part_range, timeout) } -> future<>;
-        { p.fast_forward_to(pos_range, timeout) } -> future<>;
-        { p.buffer_size() } -> size_t;
-    };
-)
+template<typename Producer>
+concept FragmentProducer = requires(Producer p, dht::partition_range part_range, position_range pos_range,
+        db::timeout_clock::time_point timeout) {
+    // The returned fragments are expected to have the same
+    // position_in_partition. Iterators and references are expected
+    // to be valid until the next call to operator()().
+    { p(timeout) } -> std::same_as<future<boost::iterator_range<merger_vector<mutation_fragment>::iterator>>>;
+    // These have the same semantics as their
+    // flat_mutation_reader counterparts.
+    { p.next_partition() };
+    { p.fast_forward_to(part_range, timeout) } -> std::same_as<future<>>;
+    { p.fast_forward_to(pos_range, timeout) } -> std::same_as<future<>>;
+    { p.buffer_size() } -> std::same_as<size_t>;
+};
 
 /**
  * Merge mutation-fragments produced by producer.
@@ -68,9 +66,7 @@ GCC6_CONCEPT(
  * fast_forward_to() and next_partition(), as appropriate.
  */
 template<class Producer>
-GCC6_CONCEPT(
-    requires FragmentProducer<Producer>
-)
+requires FragmentProducer<Producer>
 class mutation_fragment_merger {
     using iterator = merger_vector<mutation_fragment>::iterator;
 
@@ -667,6 +663,7 @@ class restricting_mutation_reader : public flat_mutation_reader::impl {
     struct mutation_source_and_params {
         mutation_source _ms;
         schema_ptr _s;
+        reader_permit _permit;
         std::reference_wrapper<const dht::partition_range> _range;
         std::reference_wrapper<const query::partition_slice> _slice;
         std::reference_wrapper<const io_priority_class> _pc;
@@ -674,45 +671,44 @@ class restricting_mutation_reader : public flat_mutation_reader::impl {
         streamed_mutation::forwarding _fwd;
         mutation_reader::forwarding _fwd_mr;
 
-        flat_mutation_reader operator()(reader_permit permit) {
-            return _ms.make_reader(std::move(_s), std::move(permit), _range.get(), _slice.get(), _pc.get(), std::move(_trace_state), _fwd, _fwd_mr);
+        flat_mutation_reader operator()() {
+            return _ms.make_reader(std::move(_s), std::move(_permit), _range.get(), _slice.get(), _pc.get(), std::move(_trace_state), _fwd, _fwd_mr);
         }
     };
 
     struct pending_state {
-        reader_concurrency_semaphore& semaphore;
         mutation_source_and_params reader_factory;
     };
     struct admitted_state {
         flat_mutation_reader reader;
+        reader_permit::resource_units units;
     };
     std::variant<pending_state, admitted_state> _state;
 
     static const ssize_t new_reader_base_cost{16 * 1024};
 
     template<typename Function>
-    GCC6_CONCEPT(
-        requires std::is_move_constructible<Function>::value
-            && requires(Function fn, flat_mutation_reader& reader) {
-                fn(reader);
-            }
-    )
+    requires std::is_move_constructible<Function>::value
+        && requires(Function fn, flat_mutation_reader& reader) {
+            fn(reader);
+        }
     decltype(auto) with_reader(Function fn, db::timeout_clock::time_point timeout) {
         if (auto* state = std::get_if<admitted_state>(&_state)) {
             return fn(state->reader);
         }
 
-        return std::get<pending_state>(_state).semaphore.wait_admission(new_reader_base_cost,
-                timeout).then([this, fn = std::move(fn)] (reader_permit permit) mutable {
+        return std::get<pending_state>(_state).reader_factory._permit.wait_admission(new_reader_base_cost,
+                timeout).then([this, fn = std::move(fn)] (reader_permit::resource_units units) mutable {
             auto reader_factory = std::move(std::get<pending_state>(_state).reader_factory);
-            _state.emplace<admitted_state>(admitted_state{reader_factory(std::move(permit))});
+            _state.emplace<admitted_state>(admitted_state{reader_factory(), std::move(units)});
             return fn(std::get<admitted_state>(_state).reader);
         });
     }
 public:
-    restricting_mutation_reader(reader_concurrency_semaphore& semaphore,
+    restricting_mutation_reader(
             mutation_source ms,
             schema_ptr s,
+            reader_permit permit,
             const dht::partition_range& range,
             const query::partition_slice& slice,
             const io_priority_class& pc,
@@ -720,8 +716,8 @@ public:
             streamed_mutation::forwarding fwd,
             mutation_reader::forwarding fwd_mr)
         : impl(s)
-        , _state(pending_state{semaphore,
-                mutation_source_and_params{std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr}}) {
+        , _state(pending_state{
+                mutation_source_and_params{std::move(ms), std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr}}) {
     }
 
     virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
@@ -757,24 +753,26 @@ public:
         }, timeout);
     }
     virtual size_t buffer_size() const override {
+        auto buffer_size = flat_mutation_reader::impl::buffer_size();
         if (auto* state = std::get_if<admitted_state>(&_state)) {
-            return state->reader.buffer_size();
+            buffer_size += state->reader.buffer_size();
         }
-        return 0;
+        return buffer_size;
     }
 };
 
 flat_mutation_reader
-make_restricted_flat_reader(reader_concurrency_semaphore& semaphore,
+make_restricted_flat_reader(
                        mutation_source ms,
                        schema_ptr s,
+                       reader_permit permit,
                        const dht::partition_range& range,
                        const query::partition_slice& slice,
                        const io_priority_class& pc,
                        tracing::trace_state_ptr trace_state,
                        streamed_mutation::forwarding fwd,
                        mutation_reader::forwarding fwd_mr) {
-    return make_flat_mutation_reader<restricting_mutation_reader>(semaphore, std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+    return make_flat_mutation_reader<restricting_mutation_reader>(std::move(ms), std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
 }
 
 
@@ -1771,14 +1769,12 @@ public:
         return make_exception_future<>(make_backtraced_exception_ptr<std::bad_function_call>());
     }
     future<> push(mutation_fragment&& mf) {
+        push_and_maybe_notify(std::move(mf));
         if (!is_buffer_full()) {
-            push_and_maybe_notify(std::move(mf));
             return make_ready_future<>();
         }
         _not_full.emplace();
-        return _not_full->get_future().then([this, mf = std::move(mf)] () mutable {
-            push_and_maybe_notify(std::move(mf));
-        });
+        return _not_full->get_future();
     }
     void push_end_of_stream() {
         _end_of_stream = true;

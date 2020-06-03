@@ -92,7 +92,7 @@ future<prepare_response> paxos_state::prepare(tracing::trace_state_ptr tr_state,
                     // Silently ignore any errors querying the current value as the caller is prepared to fall back
                     // on querying it by itself in case it's missing in the response.
                     if (!f2.failed()) {
-                        auto&& [result, hit_rate] = f2.get();
+                        auto&& [result, hit_rate] = f2.get0();
                         if (only_digest) {
                             data_or_digest = *result->digest();
                         } else {
@@ -180,7 +180,7 @@ future<> paxos_state::learn(schema_ptr schema, proposal decision, clock_type::ti
             f = f.then([schema, &decision, timeout, tr_state] {
                 logger.debug("Committing decision {}", decision);
                 tracing::trace(tr_state, "Committing decision {}", decision);
-                return get_local_storage_proxy().mutate_locally(schema, decision.update, db::commitlog::force_sync::yes, timeout);
+                return get_local_storage_proxy().mutate_locally(schema, decision.update, tr_state, db::commitlog::force_sync::yes, timeout);
             });
         } else {
             logger.debug("Not committing decision {} as ballot timestamp predates last truncation time", decision);

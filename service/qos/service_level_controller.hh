@@ -206,6 +206,17 @@ public:
     future<service_levels_info> get_distributed_service_levels();
     future<service_levels_info> get_distributed_service_level(sstring service_level_name);
 
+    /**
+     * Returns true if `service_level_name` is recognised as a
+     * service level name and false otherwise.
+     *
+     * @param service_level_name - the service level name to test.
+     **/
+     bool has_service_level(sstring service_level_name) {
+         return _service_levels_db.contains(service_level_name);
+     }
+
+
 private:
     /**
      *  Adds a service level configuration if it doesn't exists, and updates

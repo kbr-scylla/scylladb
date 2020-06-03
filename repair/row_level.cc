@@ -442,7 +442,7 @@ class repair_writer {
     size_t _nr_peer_nodes;
     // Needs more than one for repair master
     std::vector<std::optional<future<>>> _writer_done;
-    std::vector<std::optional<seastar::queue<mutation_fragment_opt>>> _mq;
+    std::vector<std::optional<queue_reader_handle>> _mq;
     // Current partition written to disk
     std::vector<lw_shared_ptr<const decorated_key_with_hash>> _current_dk_written_to_sstable;
     // Is current partition still open. A partition is opened when a
@@ -450,6 +450,7 @@ class repair_writer {
     // written.
     std::vector<bool> _partition_opened;
     streaming::stream_reason _reason;
+    named_semaphore _sem{1, named_semaphore_exception_factory{"repair_writer"}};
 public:
     repair_writer(
             schema_ptr schema,
@@ -466,14 +467,14 @@ public:
     future<> write_start_and_mf(lw_shared_ptr<const decorated_key_with_hash> dk, mutation_fragment mf, unsigned node_idx)  {
         _current_dk_written_to_sstable[node_idx] = dk;
         if (mf.is_partition_start()) {
-            return _mq[node_idx]->push_eventually(mutation_fragment_opt(std::move(mf))).then([this, node_idx] {
+            return _mq[node_idx]->push(std::move(mf)).then([this, node_idx] {
                 _partition_opened[node_idx] = true;
             });
         } else {
             auto start = mutation_fragment(partition_start(dk->dk, tombstone()));
-            return _mq[node_idx]->push_eventually(mutation_fragment_opt(std::move(start))).then([this, node_idx, mf = std::move(mf)] () mutable {
+            return _mq[node_idx]->push(std::move(start)).then([this, node_idx, mf = std::move(mf)] () mutable {
                 _partition_opened[node_idx] = true;
-                return _mq[node_idx]->push_eventually(mutation_fragment_opt(std::move(mf)));
+                return _mq[node_idx]->push(std::move(mf));
             });
         }
     };
@@ -489,13 +490,10 @@ public:
         if (_writer_done[node_idx]) {
             return;
         }
-        _mq[node_idx] = seastar::queue<mutation_fragment_opt>(16);
-        auto get_next_mutation_fragment = [this, node_idx] () mutable {
-            return _mq[node_idx]->pop_eventually();
-        };
+        auto [queue_reader, queue_handle] = make_queue_reader(_schema);
+        _mq[node_idx] = std::move(queue_handle);
         table& t = db.local().find_column_family(_schema->id());
-        _writer_done[node_idx] = mutation_writer::distribute_reader_and_consume_on_shards(_schema,
-                make_generating_reader(_schema, std::move(get_next_mutation_fragment)),
+        _writer_done[node_idx] = mutation_writer::distribute_reader_and_consume_on_shards(_schema, std::move(queue_reader),
                 [&db, reason = this->_reason, estimated_partitions = this->_estimated_partitions] (flat_mutation_reader reader) {
             auto& t = db.local().find_column_family(reader.schema());
             return db::view::check_needs_view_update_path(_sys_dist_ks->local(), t, reason).then([t = t.shared_from_this(), estimated_partitions, reader = std::move(reader)] (bool use_view_update_path) mutable {
@@ -537,7 +535,7 @@ public:
 
     future<> write_partition_end(unsigned node_idx) {
         if (_partition_opened[node_idx]) {
-            return _mq[node_idx]->push_eventually(mutation_fragment(partition_end())).then([this, node_idx] {
+            return _mq[node_idx]->push(partition_end()).then([this, node_idx] {
                 _partition_opened[node_idx] = false;
             });
         }
@@ -547,7 +545,7 @@ public:
     future<> do_write(unsigned node_idx, lw_shared_ptr<const decorated_key_with_hash> dk, mutation_fragment mf) {
         if (_current_dk_written_to_sstable[node_idx]) {
             if (_current_dk_written_to_sstable[node_idx]->dk.equal(*_schema, dk->dk)) {
-                return _mq[node_idx]->push_eventually(mutation_fragment_opt(std::move(mf)));
+                return _mq[node_idx]->push(std::move(mf));
             } else {
                 return write_partition_end(node_idx).then([this,
                         node_idx, dk = std::move(dk), mf = std::move(mf)] () mutable {
@@ -561,16 +559,17 @@ public:
 
     future<> write_end_of_stream(unsigned node_idx) {
         if (_mq[node_idx]) {
+          return with_semaphore(_sem, 1, [this, node_idx] {
             // Partition_end is never sent on wire, so we have to write one ourselves.
             return write_partition_end(node_idx).then([this, node_idx] () mutable {
-                // Empty mutation_fragment_opt means no more data, so the writer can seal the sstables.
-                return _mq[node_idx]->push_eventually(mutation_fragment_opt());
+                _mq[node_idx]->push_end_of_stream();
             }).handle_exception([this, node_idx] (std::exception_ptr ep) {
                 _mq[node_idx]->abort(ep);
                 rlogger.warn("repair_writer: keyspace={}, table={}, write_end_of_stream failed: {}",
                         _schema->ks_name(), _schema->cf_name(), ep);
                 return make_exception_future<>(std::move(ep));
             });
+          });
         } else {
             return make_ready_future<>();
         }
@@ -592,6 +591,10 @@ public:
                     _schema->ks_name(), _schema->cf_name(), ep);
             return make_exception_future<>(std::move(ep));
         });
+    }
+
+    named_semaphore& sem() {
+        return _sem;
     }
 };
 
@@ -1196,6 +1199,23 @@ private:
         }
     }
 
+    future<> do_apply_rows(std::list<repair_row>& row_diff, unsigned node_idx, update_working_row_buf update_buf) {
+        return with_semaphore(_repair_writer.sem(), 1, [this, node_idx, update_buf, &row_diff] {
+            _repair_writer.create_writer(_db, node_idx);
+            return do_for_each(row_diff, [this, node_idx, update_buf] (repair_row& r) {
+                if (update_buf) {
+                    _working_row_buf_combined_hash.add(r.hash());
+                }
+                // The repair_row here is supposed to have
+                // mutation_fragment attached because we have stored it in
+                // to_repair_rows_list above where the repair_row is created.
+                mutation_fragment mf = std::move(r.get_mutation_fragment());
+                auto dk_with_hash = r.get_dk_with_hash();
+                return _repair_writer.do_write(node_idx, std::move(dk_with_hash), std::move(mf));
+            });
+        });
+    }
+
     // Give a list of rows, apply the rows to disk and update the _working_row_buf and _peer_row_hash_sets if requested
     // Must run inside a seastar thread
     void apply_rows_on_master_in_thread(repair_rows_on_wire rows, gms::inet_address from, update_working_row_buf update_buf,
@@ -1221,18 +1241,7 @@ private:
             _peer_row_hash_sets[node_idx] = boost::copy_range<std::unordered_set<repair_hash>>(row_diff |
                     boost::adaptors::transformed([] (repair_row& r) { thread::maybe_yield(); return r.hash(); }));
         }
-        _repair_writer.create_writer(_db, node_idx);
-        for (auto& r : row_diff) {
-            if (update_buf) {
-                _working_row_buf_combined_hash.add(r.hash());
-            }
-            // The repair_row here is supposed to have
-            // mutation_fragment attached because we have stored it in
-            // to_repair_rows_list above where the repair_row is created.
-            mutation_fragment mf = std::move(r.get_mutation_fragment());
-            auto dk_with_hash = r.get_dk_with_hash();
-            _repair_writer.do_write(node_idx, std::move(dk_with_hash), std::move(mf)).get();
-        }
+        do_apply_rows(row_diff, node_idx, update_buf).get();
     }
 
     future<>
@@ -1243,15 +1252,7 @@ private:
         return to_repair_rows_list(rows).then([this] (std::list<repair_row> row_diff) {
             return do_with(std::move(row_diff), [this] (std::list<repair_row>& row_diff) {
                 unsigned node_idx = 0;
-                _repair_writer.create_writer(_db, node_idx);
-                return do_for_each(row_diff, [this, node_idx] (repair_row& r) {
-                    // The repair_row here is supposed to have
-                    // mutation_fragment attached because we have stored it in
-                    // to_repair_rows_list above where the repair_row is created.
-                    mutation_fragment mf = std::move(r.get_mutation_fragment());
-                    auto dk_with_hash = r.get_dk_with_hash();
-                    return _repair_writer.do_write(node_idx, std::move(dk_with_hash), std::move(mf));
-                });
+                return do_apply_rows(row_diff, node_idx, update_working_row_buf::no);
             });
         });
     }
@@ -1454,23 +1455,33 @@ public:
         // the time this change is introduced.
         sstring remote_partitioner_name = "org.apache.cassandra.dht.Murmur3Partitioner";
         return netw::get_local_messaging_service().send_repair_row_level_start(msg_addr(remote_node),
-                _repair_meta_id, std::move(ks_name), std::move(cf_name), std::move(range), _algo, _max_row_buf_size, _seed,
+                _repair_meta_id, ks_name, cf_name, std::move(range), _algo, _max_row_buf_size, _seed,
                 _master_node_shard_config.shard, _master_node_shard_config.shard_count, _master_node_shard_config.ignore_msb,
-                remote_partitioner_name, std::move(schema_version), reason);
+                remote_partitioner_name, std::move(schema_version), reason).then([ks_name, cf_name] (rpc::optional<repair_row_level_start_response> resp) {
+            if (resp && resp->status == repair_row_level_start_status::no_such_column_family) {
+                return make_exception_future<>(no_such_column_family(ks_name, cf_name));
+            } else {
+                return make_ready_future<>();
+            }
+        });
     }
 
     // RPC handler
-    static future<>
+    static future<repair_row_level_start_response>
     repair_row_level_start_handler(gms::inet_address from, uint32_t src_cpu_id, uint32_t repair_meta_id, sstring ks_name, sstring cf_name,
             dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size,
             uint64_t seed, shard_config master_node_shard_config, table_schema_version schema_version, streaming::stream_reason reason) {
         if (!_sys_dist_ks->local_is_initialized() || !_view_update_generator->local_is_initialized()) {
-            return make_exception_future<>(std::runtime_error(format("Node {} is not fully initialized for repair, try again later",
+            return make_exception_future<repair_row_level_start_response>(std::runtime_error(format("Node {} is not fully initialized for repair, try again later",
                     utils::fb_utilities::get_broadcast_address())));
         }
         rlogger.debug(">>> Started Row Level Repair (Follower): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, schema_version={}, range={}, seed={}, max_row_buf_siz={}",
             utils::fb_utilities::get_broadcast_address(), from, repair_meta_id, ks_name, cf_name, schema_version, range, seed, max_row_buf_size);
-        return insert_repair_meta(from, src_cpu_id, repair_meta_id, std::move(range), algo, max_row_buf_size, seed, std::move(master_node_shard_config), std::move(schema_version), reason);
+        return insert_repair_meta(from, src_cpu_id, repair_meta_id, std::move(range), algo, max_row_buf_size, seed, std::move(master_node_shard_config), std::move(schema_version), reason).then([] {
+            return repair_row_level_start_response{repair_row_level_start_status::ok};
+        }).handle_exception_type([] (no_such_column_family&) {
+            return repair_row_level_start_response{repair_row_level_start_status::no_such_column_family};
+        });
     }
 
     // RPC API
@@ -1941,22 +1952,17 @@ static future<> repair_get_row_diff_with_rpc_stream_handler(
                             current_set_diff,
                             std::move(hash_cmd_opt)).handle_exception([sink, &error] (std::exception_ptr ep) mutable {
                         error = true;
-                        return sink(repair_row_on_wire_with_cmd{repair_stream_cmd::error, repair_row_on_wire()}).then([sink] ()  mutable {
-                            return sink.close();
-                        }).then([sink] {
+                        return sink(repair_row_on_wire_with_cmd{repair_stream_cmd::error, repair_row_on_wire()}).then([] {
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
                     });
                 } else {
-                    if (error) {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    }
-                    return sink.close().then([sink] {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    });
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
             });
         });
+    }).finally([sink] () mutable {
+        return sink.close().finally([sink] { });
     });
 }
 
@@ -1982,22 +1988,17 @@ static future<> repair_put_row_diff_with_rpc_stream_handler(
                             current_rows,
                             std::move(row_opt)).handle_exception([sink, &error] (std::exception_ptr ep) mutable {
                         error = true;
-                        return sink(repair_stream_cmd::error).then([sink] ()  mutable {
-                            return sink.close();
-                        }).then([sink] {
+                        return sink(repair_stream_cmd::error).then([] {
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
                     });
                 } else {
-                    if (error) {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    }
-                    return sink.close().then([sink] {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    });
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
             });
         });
+    }).finally([sink] () mutable {
+        return sink.close().finally([sink] { });
     });
 }
 
@@ -2022,22 +2023,17 @@ static future<> repair_get_full_row_hashes_with_rpc_stream_handler(
                             error,
                             std::move(status_opt)).handle_exception([sink, &error] (std::exception_ptr ep) mutable {
                         error = true;
-                        return sink(repair_hash_with_cmd{repair_stream_cmd::error, repair_hash()}).then([sink] ()  mutable {
-                            return sink.close();
-                        }).then([sink] {
+                        return sink(repair_hash_with_cmd{repair_stream_cmd::error, repair_hash()}).then([] () {
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
                     });
                 } else {
-                    if (error) {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    }
-                    return sink.close().then([sink] {
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    });
+                    return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
             });
         });
+    }).finally([sink] () mutable {
+        return sink.close().finally([sink] { });
     });
 }
 
@@ -2469,6 +2465,7 @@ public:
             };
             auto s = _cf.schema();
             auto schema_version = s->version();
+            bool table_dropped = false;
 
             repair_meta master(_ri.db,
                     _cf,
@@ -2521,11 +2518,16 @@ public:
                     }
                     send_missing_rows_to_follower_nodes(master);
                 }
+            } catch (no_such_column_family& e) {
+                table_dropped = true;
+                rlogger.warn("repair id {} on shard {}, keyspace={}, cf={}, range={}, got error in row level repair: {}",
+                        _ri.id, this_shard_id(), _ri.keyspace, _cf_name, _range, e);
+                _failed = true;
             } catch (std::exception& e) {
-                rlogger.info("Got error in row level repair: {}", e);
+                rlogger.warn("repair id {} on shard {}, keyspace={}, cf={}, range={}, got error in row level repair: {}",
+                        _ri.id, this_shard_id(), _ri.keyspace, _cf_name, _range, e);
                 // In case the repair process fail, we need to call repair_row_level_stop to clean up repair followers
                 _failed = true;
-                _ri.nr_failed_ranges++;
             }
 
             parallel_for_each(nodes_to_stop, [&] (const gms::inet_address& node) {
@@ -2534,7 +2536,11 @@ public:
 
             _ri.update_statistics(master.stats());
             if (_failed) {
-                throw std::runtime_error(format("Failed to repair for keyspace={}, cf={}, range={}", _ri.keyspace, _cf_name, _range));
+                if (table_dropped) {
+                    throw no_such_column_family(_ri.keyspace,  _cf_name);
+                } else {
+                    throw std::runtime_error(format("Failed to repair for keyspace={}, cf={}, range={}", _ri.keyspace, _cf_name, _range));
+                }
             }
             rlogger.debug("<<< Finished Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, range={}, tx_hashes_nr={}, rx_hashes_nr={}, tx_row_nr={}, rx_row_nr={}, row_from_disk_bytes={}, row_from_disk_nr={}",
                     master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _ri.keyspace, _cf_name, _range, master.stats().tx_hashes_nr, master.stats().rx_hashes_nr, master.stats().tx_row_nr, master.stats().rx_row_nr, master.stats().row_from_disk_bytes, master.stats().row_from_disk_nr);
@@ -2545,8 +2551,11 @@ public:
 future<> repair_cf_range_row_level(repair_info& ri,
         sstring cf_name, dht::token_range range,
         const std::vector<gms::inet_address>& all_peer_nodes) {
-    return do_with(row_level_repair(ri, std::move(cf_name), std::move(range), all_peer_nodes), [] (row_level_repair& repair) {
-        return repair.run();
+    return seastar::futurize_invoke([&ri, cf_name = std::move(cf_name), range = std::move(range), &all_peer_nodes] () mutable {
+        auto repair = row_level_repair(ri, std::move(cf_name), std::move(range), all_peer_nodes);
+        return do_with(std::move(repair), [] (row_level_repair& repair) {
+            return repair.run();
+        });
     });
 }
 

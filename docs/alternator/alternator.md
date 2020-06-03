@@ -25,21 +25,27 @@ By default, Scylla listens on this port on all network interfaces.
 To listen only on a specific interface, pass also an "`alternator-address`"
 option.
 
-DynamoDB clients usually specify a single "endpoint" address, e.g.,
-`dynamodb.us-east-1.amazonaws.com`, and a DNS server hosted on that address
-distributes the connections to many different backend nodes. Alternator
-does not yet provide such a DNS server, so you should either supply your
-own (having it return one of the live Scylla nodes at random, with a TTL
-of a few seconds), or you should use a different mechanism to distribute
-different DynamoDB requests to different Scylla nodes, to balance the load.
+As we explain below in the "Write isolation policies", Alternator has
+four different choices for the implementation of writes, each with
+different advantages. You should consider which of the options makes
+more sense for your intended use case, and use the "`--alternator-write-isolation`"
+option to choose one. There is currently no default for this option: Trying
+to run Scylla with Alternator enabled without passing this option will
+result in an error asking you to set it.
 
-Alternator tables are stored as Scylla tables in the "alternator" keyspace.
-This keyspace is initialized when the first Alternator table is created
-(with a CreateTable request). The replication factor (RF) for this keyspace
-and all Alternator tables is chosen at that point, depending on the size of
-the cluster: RF=3 is used on clusters with three or more live nodes, and
-RF=1 is used for smaller clusters. Such smaller clusters are, of course,
-only recommended for tests because of the risk of data loss.
+DynamoDB clients usually specify a single "endpoint" address, e.g.,
+`dynamodb.us-east-1.amazonaws.com`, and a DNS server and/or load balancers
+distribute the connections to many different backend nodes. Alternator
+does not provide such a load-balancing setup, so you set one up - having
+it forward each request to one of the live Scylla nodes at random.
+
+Alternator tables are stored as Scylla tables, each in a separate keyspace.
+Each keyspace is initialized when the corresponding Alternator table is
+created (with a CreateTable request). The replication factor (RF) for this
+keyspace is chosen at that point, depending on the size of the cluster:
+RF=3 is used on clusters with three or more nodes, and RF=1 is used for
+smaller clusters. Such smaller clusters are, of course, only recommended
+for tests because of the risk of data loss.
 
 ## Current compatibility with DynamoDB
 
@@ -108,12 +114,15 @@ implemented, with the following limitations:
   Writes are done in LOCAL_QURUM and reads in LOCAL_ONE (eventual consistency)
   or LOCAL_QUORUM (strong consistency).
 ### Global Tables
-* Currently, *all* Alternator tables are created as "Global Tables", i.e., can
-  be accessed from all of Scylla's DCs.
-* We do not yet support the DynamoDB API calls to make some of the tables
-  global and others local to a particular DC: CreateGlobalTable,
-  UpdateGlobalTable, DescribeGlobalTable, ListGlobalTables,
-  UpdateGlobalTableSettings, DescribeGlobalTableSettings, and UpdateTable.
+* Currently, *all* Alternator tables are created as "global" tables and can
+  be accessed from all the DCs existing at the time of the table's creation.
+  If a DC is added after a table is created, the table won't be visible from
+  the new DC and changing that requires a CQL "ALTER TABLE" statement to
+  modify the table's replication strategy.
+* We do not yet support the DynamoDB API calls that control which table is
+  visible from what DC: CreateGlobalTable, UpdateGlobalTable,
+  DescribeGlobalTable, ListGlobalTables, UpdateGlobalTableSettings,
+  DescribeGlobalTableSettings, and UpdateTable.
 ### Backup and Restore
 * On-demand backup: the DynamoDB APIs are not yet supported: CreateBackup,
   DescribeBackup, DeleteBackup, ListBackups, RestoreTableFromBackup.
@@ -153,23 +162,28 @@ implemented, with the following limitations:
 
 ### Write isolation policies
 DynamoDB API update requests may involve a read before the write - e.g., a
-_conditional_ update, or an update based on the old value of an attribute.
+_conditional_ update or an update based on the old value of an attribute.
 The read and the write should be treated as a single transaction - protected
 (_isolated_) from other parallel writes to the same item.
 
-By default, Alternator does this isolation by using Scylla's LWT (lightweight
-transactions) for every write operation. However, LWT significantly slows
-writes down, so Alternator supports three additional _write isolation
-policies_, which can be chosen on a per-table basis and may make sense for
-certain workloads as explained below.
+Alternator could do this isolation by using Scylla's LWT (lightweight
+transactions) for every write operation, but this significantly slows
+down writes, and not necessary for workloads which don't use read-modify-write
+(RMW) updates.
 
-The write isolation policy of a table is configured by tagging the table (at
-CreateTable time, or any time later with TagResource) with the key
+So Alternator supports four _write isolation policies_, which can be chosen
+on a per-table basis and may make sense for certain workloads as explained
+below.
+
+A default write isolation policy **must** be chosen using the
+`--alternator-write-isolation` configuration option. Additionally, the write
+isolation policy for a specific table can be overriden by tagging the table
+(at CreateTable time, or any time later with TagResource) with the key
 `system:write_isolation`, and one of the following values:
 
-  * `a`, `always`, or `always_use_lwt` - This is the default choice.
-    It performs every write operation - even those that do not need a read
-    before the write - as a lightweight transaction.
+  * `a`, `always`, or `always_use_lwt` - This mode performs every write
+    operation - even those that do not need a read before the write - as a
+    lightweight transaction.
 
     This is the slowest choice, but also the only choice guaranteed to work
     correctly for every workload.
@@ -245,7 +259,7 @@ and "strong consistency". These two modes are implemented using Scylla's CL
 consistency level, then strongly-consistent reads are done with
 LOCAL_QUORUM, while eventually-consistent reads are with just LOCAL_ONE.
 
-Each table in Alternator is stored as a Scylla table in the "alternator"
+Each table in Alternator is stored as a Scylla table in a separate
 keyspace. The DynamoDB key columns (hash and sort key) have known types,
 and become partition and clustering key columns of the Scylla table.
 All other attributes may be different for each row, so are stored in one

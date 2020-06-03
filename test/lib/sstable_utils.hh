@@ -21,6 +21,7 @@
 #include <boost/range/adaptor/map.hpp>
 #include "test/lib/test_services.hh"
 #include "test/lib/sstable_test_env.hh"
+#include "test/lib/reader_permit.hh"
 #include "gc_clock.hh"
 
 using namespace sstables;
@@ -86,12 +87,12 @@ public:
     }
 
     future<temporary_buffer<char>> data_read(uint64_t pos, size_t len) {
-        return _sst->data_read(pos, len, default_priority_class());
+        return _sst->data_read(pos, len, default_priority_class(), tests::make_permit());
     }
 
     future<index_list> read_indexes() {
         auto l = make_lw_shared<index_list>();
-        return do_with(std::make_unique<index_reader>(_sst, no_reader_permit(), default_priority_class(), tracing::trace_state_ptr()),
+        return do_with(std::make_unique<index_reader>(_sst, tests::make_permit(), default_priority_class(), tracing::trace_state_ptr()),
                 [this, l] (std::unique_ptr<index_reader>& ir) {
             return ir->read_partition_data().then([&, l] {
                 l->push_back(std::move(ir->current_partition_entry()));
@@ -233,7 +234,7 @@ inline auto replacer_fn_no_op() {
 }
 
 template<typename AsyncAction>
-GCC6_CONCEPT( requires requires (AsyncAction aa, sstables::sstable::version_types& c) { { aa(c) } -> future<>; } )
+requires requires (AsyncAction aa, sstables::sstable::version_types& c) { { aa(c) } -> std::same_as<future<>>; }
 inline
 future<> for_each_sstable_version(AsyncAction action) {
     return seastar::do_for_each(all_sstable_versions, std::move(action));

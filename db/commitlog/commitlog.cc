@@ -98,7 +98,7 @@ public:
         return _c.process(reinterpret_cast<const uint8_t*>(data), size);
     }
     template<typename FragmentedBuffer>
-    GCC6_CONCEPT(requires FragmentRange<FragmentedBuffer>)
+    requires FragmentRange<FragmentedBuffer>
     void process_fragmented(const FragmentedBuffer& buffer) {
         return _c.process_fragmented(buffer);
     }
@@ -1279,7 +1279,7 @@ static auto close_on_failure(future<file> file_fut, Func func) {
 future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment_ex(const descriptor& d, sstring filename, open_flags flags) {
     file_open_options opt;
     opt.extent_allocation_size_hint = max_size;
-    auto fut = do_io_check(commit_error_handler, [=] {
+    auto fut = do_io_check(commit_error_handler, [this, filename, flags, opt] {
         auto fut = open_file_dma(filename, flags, opt);
         if (cfg.extensions && !cfg.extensions->commitlog_file_extensions().empty()) {
             for (auto * ext : cfg.extensions->commitlog_file_extensions()) {
@@ -1376,7 +1376,7 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
         // that recycled the file we could potentially have
         // out-of-order files. (Sort does not help).
         clogger.debug("Using recycled segment file {} -> {}", src, dst);
-        return rename_file(std::move(src), dst).then([=] {
+        return rename_file(std::move(src), dst).then([this, d, dst, flags] {
             return allocate_segment_ex(d, dst, flags);
         });
     }
@@ -1607,7 +1607,7 @@ future<> db::commitlog::segment_manager::delete_segments(std::vector<sstring> fi
                 // must rename the file since we must ensure the
                 // data is not replayed. Changing the name will
                 // cause header ID to be invalid in the file -> ignored
-                return rename_file(filename, dst).then([=] {
+                return rename_file(filename, dst).then([this, dst] {
                     _recycled_segments.emplace_back(dst);
                     return make_ready_future<>();
                 }).handle_exception([this, filename](auto&&) {

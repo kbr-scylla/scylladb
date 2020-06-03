@@ -17,6 +17,7 @@
 #include "sstables/shared_sstable.hh"
 #include "exceptions/exceptions.hh"
 #include "sstables/compaction_backlog_manager.hh"
+#include "compaction_strategy_type.hh"
 
 class table;
 using column_family = table;
@@ -25,17 +26,6 @@ class flat_mutation_reader;
 struct mutation_source_metadata;
 
 namespace sstables {
-
-enum class compaction_strategy_type {
-    null,
-    major,
-    size_tiered,
-    leveled,
-    date_tiered,
-    time_window,
-    in_memory,
-    incremental,
-};
 
 class compaction_strategy_impl;
 class sstable;
@@ -139,6 +129,9 @@ public:
     uint64_t adjust_partition_estimate(const mutation_source_metadata& ms_meta, uint64_t partition_estimate);
 
     reader_consumer make_interposer_consumer(const mutation_source_metadata& ms_meta, reader_consumer end_consumer);
+
+    // Returns whether or not interposer consumer is used by a given strategy.
+    bool use_interposer_consumer() const;
 };
 
 // Creates a compaction_strategy object from one of the strategies available.

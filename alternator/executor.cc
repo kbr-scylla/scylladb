@@ -573,22 +573,59 @@ static bool validate_legal_tag_chars(std::string_view tag) {
     return std::all_of(tag.begin(), tag.end(), &is_legal_tag_char);
 }
 
+static const std::unordered_set<std::string_view> allowed_write_isolation_values = {
+    "f", "forbid", "forbid_rmw",
+    "a", "always", "always_use_lwt",
+    "o", "only_rmw_uses_lwt",
+    "u", "unsafe", "unsafe_rmw",
+};
+
 static void validate_tags(const std::map<sstring, sstring>& tags) {
-    static const std::unordered_set<std::string_view> allowed_values = {
-        "f", "forbid", "forbid_rmw",
-        "a", "always", "always_use_lwt",
-        "o", "only_rmw_uses_lwt",
-        "u", "unsafe", "unsafe_rmw",
-    };
     auto it = tags.find(rmw_operation::WRITE_ISOLATION_TAG_KEY);
     if (it != tags.end()) {
         std::string_view value = it->second;
-        elogger.warn("Allowed values count {} {}", value, allowed_values.count(value));
-        if (allowed_values.count(value) == 0) {
+        if (allowed_write_isolation_values.count(value) == 0) {
             throw api_error("ValidationException",
-                    format("Incorrect write isolation tag {}. Allowed values: {}", value, allowed_values));
+                    format("Incorrect write isolation tag {}. Allowed values: {}", value, allowed_write_isolation_values));
         }
     }
+}
+
+static rmw_operation::write_isolation parse_write_isolation(std::string_view value) {
+    if (!value.empty()) {
+        switch (value[0]) {
+        case 'f':
+            return rmw_operation::write_isolation::FORBID_RMW;
+        case 'a':
+            return rmw_operation::write_isolation::LWT_ALWAYS;
+        case 'o':
+            return rmw_operation::write_isolation::LWT_RMW_ONLY;
+        case 'u':
+            return rmw_operation::write_isolation::UNSAFE_RMW;
+        }
+    }
+    // Shouldn't happen as validate_tags() / set_default_write_isolation()
+    // verify allow only a closed set of values.
+    return rmw_operation::default_write_isolation;
+
+}
+// This default_write_isolation is always overwritten in main.cc, which calls
+// set_default_write_isolation().
+rmw_operation::write_isolation rmw_operation::default_write_isolation =
+        rmw_operation::write_isolation::LWT_ALWAYS;
+void rmw_operation::set_default_write_isolation(std::string_view value) {
+    if (value.empty()) {
+        throw std::runtime_error("When Alternator is enabled, write "
+                "isolation policy must be selected, using the "
+                "'--alternator-write-isolation' option. "
+                "See docs/alternator/alternator.md for instructions.");
+    }
+    if (allowed_write_isolation_values.count(value) == 0) {
+        throw std::runtime_error(format("Invalid --alternator-write-isolation "
+                "setting '{}'. Allowed values: {}.",
+                value, allowed_write_isolation_values));
+    }
+    default_write_isolation = parse_write_isolation(value);
 }
 
 // FIXME: Updating tags currently relies on updating schema, which may be subject
@@ -994,9 +1031,6 @@ static void validate_value(const rjson::value& v, const char* caller) {
         if (!it->value.IsString()) {
             throw api_error("ValidationException", format("{}: improperly formatted value '{}'", caller, v));
         }
-        if (it->value.GetStringLength() == 0) {
-            throw api_error("ValidationException", format("{}: empty string not allowed", caller));
-        }
     } else if (type != "N" && type != "L" && type != "M" && type != "BOOL" && type != "NULL") {
         // TODO: can do more sanity checks on the content of the above types.
         throw api_error("ValidationException", format("{}: unknown type {} for value {}", caller, type, v));
@@ -1206,22 +1240,9 @@ rmw_operation::write_isolation rmw_operation::get_write_isolation_for_schema(sch
     const auto& tags = get_tags_of_table(schema);
     auto it = tags.find(WRITE_ISOLATION_TAG_KEY);
     if (it == tags.end() || it->second.empty()) {
-        // By default, fall back to always enforcing LWT
-        return write_isolation::LWT_ALWAYS;
+        return default_write_isolation;
     }
-    switch (it->second[0]) {
-    case 'f':
-        return write_isolation::FORBID_RMW;
-    case 'a':
-        return write_isolation::LWT_ALWAYS;
-    case 'o':
-        return write_isolation::LWT_RMW_ONLY;
-    case 'u':
-        return write_isolation::UNSAFE_RMW;
-    default:
-        // In case of an incorrect tag, fall back to the safest option: LWT_ALWAYS
-        return write_isolation::LWT_ALWAYS;
-    }
+    return parse_write_isolation(it->second);
 }
 
 // shard_for_execute() checks whether execute() must be called on a specific
@@ -1272,7 +1293,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
         stats& stats) {
     if (needs_read_before_write) {
         if (_write_isolation == write_isolation::FORBID_RMW) {
-            throw api_error("ValidationException", "Read-modify-write operations not supported");
+            throw api_error("ValidationException", "Read-modify-write operations are disabled by 'forbid_rmw' write isolation policy. Refer to https://github.com/scylladb/scylla/blob/master/docs/alternator/alternator.md#write-isolation-policies for more information.");
         }
         stats.reads_before_write++;
         if (_write_isolation == write_isolation::UNSAFE_RMW) {
@@ -1916,12 +1937,10 @@ static rjson::value calculate_size(const rjson::value& v) {
         }
         ret = it->value.MemberCount();
     } else if (it->name == "B") {
-        // TODO (optimization): Calculate the length of a base64-encoded
-        // string directly, without decoding it first.
         if (!it->value.IsString()) {
             throw api_error("ValidationException", format("invalid byte string: {}", v));
         }
-        ret = base64_decode(it->value).size();
+        ret = base64_decoded_len(rjson::to_string_view(it->value));
     } else {
         rjson::value json_ret = rjson::empty_object();
         rjson::set(json_ret, "null", rjson::value(true));
@@ -2103,15 +2122,11 @@ rjson::value calculate_value(const parsed::value& v,
                         auto it2 = v2.MemberBegin();
                         if (it1->name == it2->name) {
                             if (it2->name == "S") {
-                                std::string_view val1(it1->value.GetString(), it1->value.GetStringLength());
-                                std::string_view val2(it2->value.GetString(), it2->value.GetStringLength());
-                                ret = val1.substr(0, val2.size()) == val2;
+                                std::string_view val1 = rjson::to_string_view(it1->value);
+                                std::string_view val2 = rjson::to_string_view(it2->value);
+                                ret = val1.starts_with(val2);
                             } else /* it2->name == "B" */ {
-                                // TODO (optimization): Check the begins_with condition directly on
-                                // the base64-encoded string, without making a decoded copy.
-                                bytes val1 = base64_decode(it1->value);
-                                bytes val2 = base64_decode(it2->value);
-                                ret = val1.substr(0, val2.size()) == val2;
+                                ret = base64_begins_with(rjson::to_string_view(it1->value), rjson::to_string_view(it2->value));
                             }
                         }
                     }
@@ -3053,8 +3068,14 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
     }
 
     rjson::value* exclusive_start_key = rjson::find(request, "ExclusiveStartKey");
-    //FIXME(sarna): ScanFilter is deprecated in favor of FilterExpression
+
     rjson::value* scan_filter = rjson::find(request, "ScanFilter");
+    auto conditional_operator = get_conditional_operator(request);
+    if (conditional_operator != conditional_operator_type::MISSING &&
+        (!scan_filter || (scan_filter->IsObject() && scan_filter->GetObject().ObjectEmpty()))) {
+            throw api_error("ValidationException", "'ConditionalOperator' parameter cannot be specified for missing or empty ScanFilter");
+    }
+
     db::consistency_level cl = get_read_consistency(request);
     if (table_type == table_or_view_type::gsi && cl != db::consistency_level::LOCAL_ONE) {
         return make_ready_future<request_return_type>(api_error("ValidationException",
@@ -3079,7 +3100,8 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
     ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions;
     if (scan_filter) {
         const cql3::query_options query_options = cql3::query_options(cl, infinite_timeout_config, std::vector<cql3::raw_value>{});
-        filtering_restrictions = get_filtering_restrictions(schema, attrs_column(*schema), *scan_filter);
+        bool require_all = conditional_operator != conditional_operator_type::OR;
+        filtering_restrictions = get_filtering_restrictions(schema, attrs_column(*schema), *scan_filter, require_all);
         partition_ranges = filtering_restrictions->get_partition_key_ranges(query_options);
         ck_bounds = filtering_restrictions->get_clustering_bounds(query_options);
     }
@@ -3087,16 +3109,17 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
             std::move(filtering_restrictions), query::partition_slice::option_set(), client_state, _stats.cql_stats, trace_state, std::move(permit));
 }
 
-static dht::partition_range calculate_pk_bound(schema_ptr schema, const column_definition& pk_cdef, comparison_operator_type op, const rjson::value& attrs) {
-    if (attrs.Size() != 1) {
-        throw api_error("ValidationException", format("Only a single attribute is allowed for a hash key restriction: {}", attrs));
+static dht::partition_range calculate_pk_bound(schema_ptr schema, const column_definition& pk_cdef, const rjson::value& comp_definition, const rjson::value& attrs) {
+    auto op = get_comparison_operator(comp_definition);
+    if (op != comparison_operator_type::EQ) {
+        throw api_error("ValidationException", format("Hash key can only be restricted with equality operator (EQ). {} not supported.", comp_definition));
     }
-    bytes raw_value = pk_cdef.type->from_string(attrs[0][type_to_string(pk_cdef.type)].GetString());
+    if (attrs.Size() != 1) {
+        throw api_error("ValidationException", format("A single attribute is required for a hash key EQ restriction: {}", attrs));
+    }
+    bytes raw_value = get_key_from_typed_value(attrs[0], pk_cdef);
     partition_key pk = partition_key::from_singular(*schema, pk_cdef.type->deserialize(raw_value));
     auto decorated_key = dht::decorate_key(*schema, pk);
-    if (op != comparison_operator_type::EQ) {
-        throw api_error("ValidationException", format("Hash key {} can only be restricted with equality operator (EQ)"));
-    }
     return dht::partition_range(decorated_key);
 }
 
@@ -3111,12 +3134,13 @@ static query::clustering_range get_clustering_range_for_begins_with(bytes&& targ
     return query::clustering_range::make_starting_with(query::clustering_range::bound(ck));
 }
 
-static query::clustering_range calculate_ck_bound(schema_ptr schema, const column_definition& ck_cdef, comparison_operator_type op, const rjson::value& attrs) {
+static query::clustering_range calculate_ck_bound(schema_ptr schema, const column_definition& ck_cdef, const rjson::value& comp_definition, const rjson::value& attrs) {
+    auto op = get_comparison_operator(comp_definition);
     const size_t expected_attrs_size = (op == comparison_operator_type::BETWEEN) ? 2 : 1;
     if (attrs.Size() != expected_attrs_size) {
         throw api_error("ValidationException", format("{} arguments expected for a sort key restriction: {}", expected_attrs_size, attrs));
     }
-    bytes raw_value = ck_cdef.type->from_string(attrs[0][type_to_string(ck_cdef.type)].GetString());
+    bytes raw_value = get_key_from_typed_value(attrs[0], ck_cdef);
     clustering_key ck = clustering_key::from_single_value(*schema, raw_value);
     switch (op) {
     case comparison_operator_type::EQ:
@@ -3130,7 +3154,7 @@ static query::clustering_range calculate_ck_bound(schema_ptr schema, const colum
     case comparison_operator_type::GT:
         return query::clustering_range::make_starting_with(query::clustering_range::bound(ck, false));
     case comparison_operator_type::BETWEEN: {
-        bytes raw_upper_limit = ck_cdef.type->from_string(attrs[1][type_to_string(ck_cdef.type)].GetString());
+        bytes raw_upper_limit = get_key_from_typed_value(attrs[1], ck_cdef);
         clustering_key upper_limit = clustering_key::from_single_value(*schema, raw_upper_limit);
         return query::clustering_range::make(query::clustering_range::bound(ck), query::clustering_range::bound(upper_limit));
     }
@@ -3143,12 +3167,10 @@ static query::clustering_range calculate_ck_bound(schema_ptr schema, const colum
         if (!ck_cdef.type->is_compatible_with(*utf8_type)) {
             throw api_error("ValidationException", format("BEGINS_WITH operator cannot be applied to type {}", type_to_string(ck_cdef.type)));
         }
-        std::string raw_upper_limit_str = attrs[0][type_to_string(ck_cdef.type)].GetString();
-        bytes raw_upper_limit = ck_cdef.type->from_string(raw_upper_limit_str);
-        return get_clustering_range_for_begins_with(std::move(raw_upper_limit), ck, schema, ck_cdef.type);
+        return get_clustering_range_for_begins_with(std::move(raw_value), ck, schema, ck_cdef.type);
     }
     default:
-        throw api_error("ValidationException", format("Unknown primary key bound passed: {}", int(op)));
+        throw api_error("ValidationException", format("Operator {} not supported for sort key", comp_definition));
     }
 }
 
@@ -3165,21 +3187,19 @@ calculate_bounds_conditions(schema_ptr schema, const rjson::value& conditions) {
         const rjson::value& comp_definition = rjson::get(condition, "ComparisonOperator");
         const rjson::value& attr_list = rjson::get(condition, "AttributeValueList");
 
-        auto op = get_comparison_operator(comp_definition);
-
         const column_definition& pk_cdef = schema->partition_key_columns().front();
         const column_definition* ck_cdef = schema->clustering_key_size() > 0 ? &schema->clustering_key_columns().front() : nullptr;
         if (sstring(key) == pk_cdef.name_as_text()) {
             if (!partition_ranges.empty()) {
                 throw api_error("ValidationException", "Currently only a single restriction per key is allowed");
             }
-            partition_ranges.push_back(calculate_pk_bound(schema, pk_cdef, op, attr_list));
+            partition_ranges.push_back(calculate_pk_bound(schema, pk_cdef, comp_definition, attr_list));
         }
         if (ck_cdef && sstring(key) == ck_cdef->name_as_text()) {
             if (!ck_bounds.empty()) {
                 throw api_error("ValidationException", "Currently only a single restriction per key is allowed");
             }
-            ck_bounds.push_back(calculate_ck_bound(schema, *ck_cdef, op, attr_list));
+            ck_bounds.push_back(calculate_ck_bound(schema, *ck_cdef, comp_definition, attr_list));
         }
     }
 
@@ -3504,6 +3524,7 @@ calculate_bounds_condition_expression(schema_ptr schema,
     return {std::move(partition_ranges), std::move(ck_bounds)};
 }
 
+
 future<executor::request_return_type> executor::query(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     _stats.api_operations.query++;
     elogger.trace("Querying {}", request);
@@ -3549,14 +3570,19 @@ future<executor::request_return_type> executor::query(client_state& client_state
                         rjson::find(request, "ExpressionAttributeNames"),
                         used_attribute_names);
 
-    //FIXME(sarna): QueryFilter is deprecated in favor of FilterExpression
     rjson::value* query_filter = rjson::find(request, "QueryFilter");
+    auto conditional_operator = get_conditional_operator(request);
+    if (conditional_operator != conditional_operator_type::MISSING &&
+        (!query_filter || (query_filter->IsObject() && query_filter->GetObject().ObjectEmpty()))) {
+            throw api_error("ValidationException", "'ConditionalOperator' parameter cannot be specified for missing or empty QueryFilter");
+    }
 
     auto attrs_to_get = calculate_attrs_to_get(request);
 
     ::shared_ptr<cql3::restrictions::statement_restrictions> filtering_restrictions;
     if (query_filter) {
-        filtering_restrictions = get_filtering_restrictions(schema, attrs_column(*schema), *query_filter);
+        bool require_all = conditional_operator != conditional_operator_type::OR;
+        filtering_restrictions = get_filtering_restrictions(schema, attrs_column(*schema), *query_filter, require_all);
         auto pk_defs = filtering_restrictions->get_partition_key_restrictions()->get_column_defs();
         auto ck_defs = filtering_restrictions->get_clustering_columns_restrictions()->get_column_defs();
         if (!pk_defs.empty()) {

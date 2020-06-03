@@ -30,7 +30,7 @@
 
 namespace encryption {
 
-namespace bfs = boost::filesystem;
+namespace bfs = std::filesystem;
 
 const sstring default_key_file_path = (bfs::path(db::config::get_conf_dir()) / "data_encryption_keys").string();
 

@@ -177,14 +177,12 @@ std::string bytes_to_string(query::result_bytes_view v) {
 }
 
 namespace thrift {
-GCC6_CONCEPT(
 template<typename T>
-concept bool Aggregator =
+concept Aggregator =
     requires() { typename T::type; }
     && requires(T aggregator, typename T::type* aggregation, const bytes& name, const query::result_atomic_cell_view& cell) {
-        { aggregator.on_column(aggregation, name, cell) } -> void;
+        { aggregator.on_column(aggregation, name, cell) } -> std::same_as<void>;
     };
-)
 }
 
 enum class query_order { no, yes };
@@ -604,7 +602,7 @@ public:
                 throw make_exception<InvalidRequestException>("keyspace not set");
             }
 
-            return _query_state.get_client_state().has_column_family_access(current_keyspace(), cfname, auth::permission::MODIFY).then([=] {
+            return _query_state.get_client_state().has_column_family_access(current_keyspace(), cfname, auth::permission::MODIFY).then([this, cfname] {
                 if (_db.local().find_schema(current_keyspace(), cfname)->is_view()) {
                     throw make_exception<InvalidRequestException>("Cannot truncate Materialized Views");
                 }
@@ -837,7 +835,7 @@ public:
     }
     void system_drop_column_family(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& column_family) {
         with_cob(std::move(cob), std::move(exn_cob), [&] {
-            return _query_state.get_client_state().has_column_family_access(current_keyspace(), column_family, auth::permission::DROP).then([=] {
+            return _query_state.get_client_state().has_column_family_access(current_keyspace(), column_family, auth::permission::DROP).then([this, column_family] {
                 auto& cf = _db.local().find_column_family(current_keyspace(), column_family);
                 if (cf.schema()->is_view()) {
                     throw make_exception<InvalidRequestException>("Cannot drop Materialized Views from Thrift");
@@ -870,7 +868,7 @@ public:
                 throw NotFoundException();
             }
 
-            return _query_state.get_client_state().has_keyspace_access(keyspace, auth::permission::DROP).then([=] {
+            return _query_state.get_client_state().has_keyspace_access(keyspace, auth::permission::DROP).then([this, keyspace] {
                 return service::get_local_migration_manager().announce_keyspace_drop(keyspace, false).then([this] {
                     return std::string(_db.local().get_version().to_sstring());
                 });
@@ -1605,7 +1603,7 @@ private:
     };
 
     template<typename Aggregator, query_order QueryOrder>
-    GCC6_CONCEPT( requires thrift::Aggregator<Aggregator> )
+    requires thrift::Aggregator<Aggregator>
     class column_visitor : public Aggregator {
         const schema& _s;
         const query::partition_slice& _slice;

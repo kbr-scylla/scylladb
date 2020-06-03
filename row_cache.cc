@@ -47,7 +47,7 @@ using namespace cache;
 flat_mutation_reader
 row_cache::create_underlying_reader(read_context& ctx, mutation_source& src, const dht::partition_range& pr) {
     ctx.on_underlying_created();
-    return src.make_reader(_schema, no_reader_permit(), pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
+    return src.make_reader(_schema, ctx.permit(), pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
 }
 
 static thread_local mutation_application_stats dummy_app_stats;
@@ -524,12 +524,14 @@ public:
         , _read_context(ctx)
     {}
 
-    future<flat_mutation_reader_opt, mutation_fragment_opt > operator()(db::timeout_clock::time_point timeout) {
+    using read_result = std::tuple<flat_mutation_reader_opt, mutation_fragment_opt>;
+
+    future<read_result> operator()(db::timeout_clock::time_point timeout) {
         return _reader.move_to_next_partition(timeout).then([this] (auto&& mfopt) mutable {
             {
                 if (!mfopt) {
                     this->handle_end_of_stream();
-                    return make_ready_future<flat_mutation_reader_opt, mutation_fragment_opt>(std::nullopt, std::nullopt);
+                    return make_ready_future<read_result>(read_result(std::nullopt, std::nullopt));
                 }
                 _cache.on_partition_miss();
                 const partition_start& ps = mfopt->as_partition_start();
@@ -541,14 +543,14 @@ public:
                                                                _reader.creation_phase(),
                                                                this->can_set_continuity() ? &*_last_key : nullptr);
                         _last_key = row_cache::previous_entry_pointer(key);
-                        return make_ready_future<flat_mutation_reader_opt, mutation_fragment_opt>(
-                            e.read(_cache, _read_context, _reader.creation_phase()), std::nullopt);
+                        return make_ready_future<read_result>(
+                                read_result(e.read(_cache, _read_context, _reader.creation_phase()), std::nullopt));
                     });
                 } else {
                     _cache._tracker.on_mispopulate();
                     _last_key = row_cache::previous_entry_pointer(key);
-                    return make_ready_future<flat_mutation_reader_opt, mutation_fragment_opt>(
-                        read_directly_from_underlying(_read_context), std::move(mfopt));
+                    return make_ready_future<read_result>(
+                            read_result(read_directly_from_underlying(_read_context), std::move(mfopt)));
                 }
             }
         });
@@ -650,7 +652,8 @@ private:
     }
 
     future<flat_mutation_reader_opt> read_from_secondary(db::timeout_clock::time_point timeout) {
-        return _secondary_reader(timeout).then([this, timeout] (flat_mutation_reader_opt fropt, mutation_fragment_opt ps) {
+        return _secondary_reader(timeout).then([this, timeout] (range_populating_reader::read_result&& res) {
+            auto&& [fropt, ps] = res;
             if (fropt) {
                 if (ps) {
                     push_mutation_fragment(std::move(*ps));
@@ -734,6 +737,7 @@ row_cache::make_scanning_reader(const dht::partition_range& range, lw_shared_ptr
 
 flat_mutation_reader
 row_cache::make_reader(schema_ptr s,
+                       reader_permit permit,
                        const dht::partition_range& range,
                        const query::partition_slice& slice,
                        const io_priority_class& pc,
@@ -741,7 +745,7 @@ row_cache::make_reader(schema_ptr s,
                        streamed_mutation::forwarding fwd,
                        mutation_reader::forwarding fwd_mr)
 {
-    auto ctx = make_lw_shared<read_context>(*this, s, range, slice, pc, trace_state, fwd_mr);
+    auto ctx = make_lw_shared<read_context>(*this, s, std::move(permit), range, slice, pc, trace_state, fwd_mr);
 
     if (!ctx->is_range_query() && !fwd_mr) {
         auto mr = _read_section(_tracker.region(), [&] {

@@ -63,9 +63,9 @@ fedora_packages=(
     ant
     ant-junit
     maven
-    pystache
     patchelf
     python3
+    python3-pip
     python3-PyYAML
     python3-pyudev
     python3-setuptools
@@ -76,10 +76,10 @@ fedora_packages=(
     python3-setuptools
     python3-magic
     python3-psutil
-    python3-cassandra-driver
     python3-colorama
     python3-boto3
     python3-pytest
+    python3-distro
     dnf-utils
     pigz
     net-tools
@@ -158,6 +158,7 @@ elif [ "$ID" = "fedora" ]; then
         exit 1
     fi
     yum install -y "${fedora_packages[@]}"
+    pip3 install pystache cassandra-driver
 elif [ "$ID" = "centos" ]; then
     centos_packages+=(openssl-devel)
     yum install -y "${centos_packages[@]}"

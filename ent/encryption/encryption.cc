@@ -578,7 +578,7 @@ public:
     }
 };
 
-namespace bfs = boost::filesystem;
+namespace bfs = std::filesystem;
 
 class encryption_commitlog_file_extension : public db::commitlog_file_extension {
     const ::shared_ptr<encryption_context> _ctxt;
@@ -596,7 +596,7 @@ public:
         bfs::path p(filename);
         auto dir = p.parent_path();
         auto file = p.filename();
-        return (dir / ("." + file.string())).string();
+        return (dir / bfs::path("." + file.string())).string();
     }
     future<file> wrap_file(const sstring& filename, file f, open_flags flags) override {
         auto cfg_file = config_name(filename);

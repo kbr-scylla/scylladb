@@ -34,6 +34,7 @@
 #include "db/batchlog_manager.hh"
 #include "schema_builder.hh"
 #include "test/lib/tmpdir.hh"
+#include "test/lib/reader_permit.hh"
 #include "db/query_context.hh"
 #include "test/lib/test_services.hh"
 #include "unit_test_service_levels_accessor.hh"
@@ -271,7 +272,7 @@ public:
                                       table_name = std::move(table_name)] (database& db) mutable {
           auto& cf = db.find_column_family(ks_name, table_name);
           auto schema = cf.schema();
-          return cf.find_partition_slow(schema, pkey)
+          return cf.find_partition_slow(schema, tests::make_permit(), pkey)
                   .then([schema, ckey, column_name, exp] (column_family::const_mutation_partition_ptr p) {
             assert(p != nullptr);
             auto row = p->find_row(*schema, ckey);
@@ -439,8 +440,7 @@ public:
 
             auto stop_sys_dist_ks = defer([&sys_dist_ks] { sys_dist_ks.stop().get(); });
 
-            gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg);
-            fcfg.disabled_features = cfg_in.disabled_features;
+            gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg, cfg_in.disabled_features);
             sharded<gms::feature_service> feature_service;
             feature_service.start(fcfg).get();
             auto stop_feature_service = defer([&] { feature_service.stop().get(); });
@@ -465,13 +465,13 @@ public:
 
             database_config dbcfg;
             dbcfg.available_memory = memory::stats().total_memory();
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata)).get();
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources)).get();
             auto stop_db = defer([&db] {
                 db.stop().get();
             });
 
             db.invoke_on_all([] (database& db) {
-                db.get_compaction_manager().start();
+                db.get_compaction_manager().enable();
             }).get();
 
             auto stop_ms_fd_gossiper = defer([] {
@@ -540,7 +540,9 @@ public:
             db::system_keyspace::migrate_truncation_records(feature_service.local().cluster_supports_truncation_table()).get();
 
             service::get_local_storage_service().init_messaging_service_part().get();
-            service::get_local_storage_service().init_server_without_the_messaging_service_part(service::bind_messaging_port(false)).get();
+            service::get_local_storage_service().init_server(service::bind_messaging_port(false)).get();
+            service::get_local_storage_service().join_cluster().get();
+
             auto deinit_storage_service_server = defer([&auth_service] {
                 gms::stop_gossiping().get();
                 auth_service.stop().get();

@@ -95,23 +95,28 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES) {
 }
 
-feature_config feature_config_from_db_config(db::config& cfg) {
+feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> disabled) {
     feature_config fcfg;
 
-    if (cfg.enable_sstables_mc_format()) {
-        fcfg.enable_sstables_mc_format = true;
+    fcfg._masked_features.insert(sstring(gms::features::UNBOUNDED_RANGE_TOMBSTONES));
+
+    fcfg._disabled_features = std::move(disabled);
+
+    if (!cfg.enable_sstables_mc_format()) {
+        fcfg._disabled_features.insert(sstring(gms::features::MC_SSTABLE));
     }
-    if (cfg.enable_user_defined_functions()) {
+    if (!cfg.enable_user_defined_functions()) {
+        fcfg._disabled_features.insert(sstring(gms::features::UDF));
+    } else {
         if (!cfg.check_experimental(db::experimental_features_t::UDF)) {
             throw std::runtime_error(
                     "You must use both enable_user_defined_functions and experimental_features:udf "
                     "to enable user-defined functions");
         }
-        fcfg.enable_user_defined_functions = true;
     }
 
-    if (cfg.check_experimental(db::experimental_features_t::CDC)) {
-        fcfg.enable_cdc = true;
+    if (!cfg.check_experimental(db::experimental_features_t::CDC)) {
+        fcfg._disabled_features.insert(sstring(gms::features::CDC));
     }
 
     return fcfg;
@@ -136,6 +141,10 @@ void feature_service::enable(const sstring& name) {
         auto&& f = it->second;
         f.get().enable();
     }
+}
+
+void feature_service::support(const std::string_view& name) {
+    _config._masked_features.erase(sstring(name));
 }
 
 std::set<std::string_view> feature_service::known_feature_set() {
@@ -168,21 +177,23 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::HINTED_HANDOFF_SEPARATE_CONNECTION,
         gms::features::PER_TABLE_PARTITIONERS,
         gms::features::PER_TABLE_CACHING,
+        gms::features::LWT,
+        gms::features::MC_SSTABLE,
+        gms::features::UDF,
+        gms::features::CDC,
         gms::features::IN_MEMORY_TABLES,
     };
 
-    if (_config.enable_sstables_mc_format) {
-        features.insert(gms::features::MC_SSTABLE);
+    for (const sstring& s : _config._disabled_features) {
+        features.erase(s);
     }
-    if (_config.enable_user_defined_functions) {
-        features.insert(gms::features::UDF);
-    }
-    if (_config.enable_cdc) {
-        features.insert(gms::features::CDC);
-    }
-    features.insert(gms::features::LWT);
+    return features;
+}
 
-    for (const sstring& s : _config.disabled_features) {
+std::set<std::string_view> feature_service::supported_feature_set() {
+    auto features = known_feature_set();
+
+    for (const sstring& s : _config._masked_features) {
         features.erase(s);
     }
     return features;

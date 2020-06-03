@@ -158,31 +158,32 @@ void stats::register_stats() {
     });
 }
 
-bool partition_key_matches(const schema& base, const view_info& view, const dht::decorated_key& key) {
+bool partition_key_matches(const schema& base, const view_info& view, const dht::decorated_key& key, gc_clock::time_point now) {
     return view.select_statement().get_restrictions()->get_partition_key_restrictions()->is_satisfied_by(
-            base, key.key(), clustering_key_prefix::make_empty(), row(), cql3::query_options({ }), gc_clock::now());
+            base, key.key(), clustering_key_prefix::make_empty(), row(), cql3::query_options({ }), now);
 }
 
-bool clustering_prefix_matches(const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck) {
+bool clustering_prefix_matches(const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck, gc_clock::time_point now) {
     return view.select_statement().get_restrictions()->get_clustering_columns_restrictions()->is_satisfied_by(
-            base, key, ck, row(), cql3::query_options({ }), gc_clock::now());
+            base, key, ck, row(), cql3::query_options({ }), now);
 }
 
-bool may_be_affected_by(const schema& base, const view_info& view, const dht::decorated_key& key, const rows_entry& update) {
+bool may_be_affected_by(const schema& base, const view_info& view, const dht::decorated_key& key, const rows_entry& update, gc_clock::time_point now) {
     // We can guarantee that the view won't be affected if:
     //  - the primary key is excluded by the view filter (note that this isn't true of the filter on regular columns:
     //    even if an update don't match a view condition on a regular column, that update can still invalidate a
     //    pre-existing entry) - note that the upper layers should already have checked the partition key;
-    return clustering_prefix_matches(base, view, key.key(), update.key());
+    return clustering_prefix_matches(base, view, key.key(), update.key(), now);
 }
 
 static bool update_requires_read_before_write(const schema& base,
         const std::vector<view_ptr>& views,
         const dht::decorated_key& key,
-        const rows_entry& update) {
+        const rows_entry& update,
+        gc_clock::time_point now) {
     for (auto&& v : views) {
         view_info& vf = *v->view_info();
-        if (may_be_affected_by(base, vf, key, update)) {
+        if (may_be_affected_by(base, vf, key, update, now)) {
             return true;
         }
     }
@@ -216,7 +217,7 @@ static bool is_partition_key_empty(
 }
 
 bool matches_view_filter(const schema& base, const view_info& view, const partition_key& key, const clustering_row& update, gc_clock::time_point now) {
-    return clustering_prefix_matches(base, view, key, update.key())
+    return clustering_prefix_matches(base, view, key, update.key(), now)
             && boost::algorithm::all_of(
                 view.select_statement().get_restrictions()->get_non_pk_restriction() | boost::adaptors::map_values,
                 [&] (auto&& r) {
@@ -744,14 +745,15 @@ public:
     view_update_builder(schema_ptr s,
         std::vector<view_updates>&& views_to_update,
         flat_mutation_reader&& updates,
-        flat_mutation_reader_opt&& existings)
+        flat_mutation_reader_opt&& existings,
+        gc_clock::time_point now)
             : _schema(std::move(s))
             , _view_updates(std::move(views_to_update))
             , _updates(std::move(updates))
             , _existings(std::move(existings))
             , _update_tombstone_tracker(*_schema, false)
             , _existing_tombstone_tracker(*_schema, false)
-            , _now(gc_clock::now()) {
+            , _now(now) {
     }
 
     future<std::vector<frozen_mutation_and_schema>> build();
@@ -923,11 +925,12 @@ future<std::vector<frozen_mutation_and_schema>> generate_view_updates(
         const schema_ptr& base,
         std::vector<view_ptr>&& views_to_update,
         flat_mutation_reader&& updates,
-        flat_mutation_reader_opt&& existings) {
+        flat_mutation_reader_opt&& existings,
+        gc_clock::time_point now) {
     auto vs = boost::copy_range<std::vector<view_updates>>(views_to_update | boost::adaptors::transformed([&] (auto&& v) {
         return view_updates(std::move(v), base);
     }));
-    auto builder = std::make_unique<view_update_builder>(base, std::move(vs), std::move(updates), std::move(existings));
+    auto builder = std::make_unique<view_update_builder>(base, std::move(vs), std::move(updates), std::move(existings), now);
     auto f = builder->build();
     return f.finally([builder = std::move(builder)] { });
 }
@@ -935,7 +938,8 @@ future<std::vector<frozen_mutation_and_schema>> generate_view_updates(
 query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& base,
         const dht::decorated_key& key,
         const mutation_partition& mp,
-        const std::vector<view_ptr>& views) {
+        const std::vector<view_ptr>& views,
+        gc_clock::time_point now) {
     std::vector<nonwrapping_range<clustering_key_prefix_view>> row_ranges;
     std::vector<nonwrapping_range<clustering_key_prefix_view>> view_row_ranges;
     clustering_key_prefix_view::tri_compare cmp(base);
@@ -969,7 +973,7 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& 
     }
 
     for (auto&& row : mp.clustered_rows()) {
-        if (update_requires_read_before_write(base, views, key, row)) {
+        if (update_requires_read_before_write(base, views, key, row, now)) {
             row_ranges.emplace_back(row.key());
         }
     }
@@ -1061,6 +1065,7 @@ future<> mutate_MV(
         std::vector<frozen_mutation_and_schema> view_updates,
         db::view::stats& stats,
         cf_stats& cf_stats,
+        tracing::trace_state_ptr tr_state,
         db::timeout_semaphore_units pending_view_updates,
         service::allow_hints allow_hints,
         wait_for_all_updates wait_for_all)
@@ -1072,7 +1077,7 @@ future<> mutate_MV(
         auto& keyspace_name = mut.s->ks_name();
         auto paired_endpoint = get_view_natural_endpoint(keyspace_name, base_token, view_token);
         auto pending_endpoints = service::get_local_storage_service().get_token_metadata().pending_endpoints_for(view_token, keyspace_name);
-        auto maybe_account_failure = [&stats, &cf_stats, units = pending_view_updates.split(mut.fm.representation().size())] (
+        auto maybe_account_failure = [tr_state, &stats, &cf_stats, units = pending_view_updates.split(mut.fm.representation().size())] (
                 future<>&& f,
                 gms::inet_address target,
                 bool is_local,
@@ -1083,9 +1088,13 @@ future<> mutate_MV(
                 cf_stats.total_view_updates_failed_local += is_local;
                 cf_stats.total_view_updates_failed_remote += remotes;
                 auto ep = f.get_exception();
+                tracing::trace(tr_state, "Failed to apply {}view update for {} and {} remote endpoints",
+                        seastar::value_of([is_local]{return is_local ? "local " : "";}), target, remotes);
                 vlogger.error("Error applying view update to {}: {}", target, ep);
                 return make_exception_future<>(std::move(ep));
             } else {
+                tracing::trace(tr_state, "Successfully applied {}view update for {} and {} remote endpoints",
+                        seastar::value_of([is_local]{return is_local ? "local " : "";}), target, remotes);
                 return make_ready_future<>();
             }
         };
@@ -1114,7 +1123,9 @@ future<> mutate_MV(
                 // writes but mutate_locally() doesn't, so we need to do that here.
                 ++stats.writes;
                 auto mut_ptr = std::make_unique<frozen_mutation>(std::move(mut.fm));
-                future<> local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, db::commitlog::force_sync::no).then_wrapped(
+                tracing::trace(tr_state, "Locally applying view update for {}.{}; base token = {}; view token = {}",
+                        mut.s->ks_name(), mut.s->cf_name(), base_token, view_token);
+                future<> local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, std::move(tr_state), db::commitlog::force_sync::no).then_wrapped(
                         [&stats,
                          maybe_account_failure = std::move(maybe_account_failure),
                          mut_ptr = std::move(mut_ptr)] (future<>&& f) {
@@ -1131,11 +1142,14 @@ future<> mutate_MV(
                 // to send the update there. Currently, we do this from *each* of
                 // the base replicas, but this is probably excessive - see
                 // See https://issues.apache.org/jira/browse/CASSANDRA-14262/
+                tracing::trace(tr_state, "Sending view update for {}.{} to {}, with pending endpoints = {}; base token = {}; view token = {}",
+                        mut.s->ks_name(), mut.s->cf_name(), *paired_endpoint, pending_endpoints, base_token, view_token);
                 future<> view_update = service::get_local_storage_proxy().send_to_endpoint(
                         std::move(mut),
                         *paired_endpoint,
                         std::move(pending_endpoints),
                         db::write_type::VIEW,
+                        std::move(tr_state),
                         stats,
                         allow_hints).then_wrapped(
                                 [paired_endpoint,
@@ -1167,11 +1181,14 @@ future<> mutate_MV(
             cf_stats.total_view_updates_pushed_remote += updates_pushed_remote;
             auto target = pending_endpoints.back();
             pending_endpoints.pop_back();
+            tracing::trace(tr_state, "Sending view update for {}.{} to {}, with pending endpoints = {}; base token = {}; view token = {}",
+                    mut.s->ks_name(), mut.s->cf_name(), target, pending_endpoints, base_token, view_token);
             future<> view_update = service::get_local_storage_proxy().send_to_endpoint(
                     std::move(mut),
                     target,
                     std::move(pending_endpoints),
                     db::write_type::VIEW,
+                    std::move(tr_state),
                     allow_hints).then_wrapped(
                             [target,
                              updates_pushed_remote,
@@ -1267,9 +1284,10 @@ view_builder::build_step& view_builder::get_or_create_build_step(utils::UUID bas
 void view_builder::initialize_reader_at_current_token(build_step& step) {
     step.pslice = make_partition_slice(*step.base->schema());
     step.prange = dht::partition_range(dht::ring_position::starting_at(step.current_token()), dht::ring_position::max());
+    auto permit = _db.make_query_class_config().semaphore.make_permit();
     step.reader = make_local_shard_sstable_reader(
             step.base->schema(),
-            no_reader_permit(),
+            std::move(permit),
             make_lw_shared(sstables::sstable_set(step.base->get_sstable_set())),
             step.prange,
             step.pslice,
@@ -1635,6 +1653,7 @@ private:
     view_builder& _builder;
     build_step& _step;
     built_views _built_views;
+    gc_clock::time_point _now;
     std::vector<view_ptr> _views_to_build;
     std::deque<mutation_fragment> _fragments;
     // The compact_for_query<> that feeds this consumer is already configured
@@ -1648,10 +1667,11 @@ private:
     // beyond our limit on mutation size (by default 32 MB).
     size_t _fragments_memory_usage = 0;
 public:
-    consumer(view_builder& builder, build_step& step)
+    consumer(view_builder& builder, build_step& step, gc_clock::time_point now)
             : _builder(builder)
             , _step(step)
-            , _built_views{step} {
+            , _built_views{step}
+            , _now(now) {
         if (!step.current_key.key().is_empty(*_step.reader.schema())) {
             load_views_to_build();
         }
@@ -1660,7 +1680,7 @@ public:
     void load_views_to_build() {
         for (auto&& vs : _step.build_status) {
             if (_step.current_token() >= vs.next_token) {
-                if (partition_key_matches(*_step.reader.schema(), *vs.view->view_info(), _step.current_key)) {
+                if (partition_key_matches(*_step.reader.schema(), *vs.view->view_info(), _step.current_key, _now)) {
                     _views_to_build.push_back(vs.view);
                 }
                 if (vs.next_token || _step.current_token() != vs.first_token) {
@@ -1732,7 +1752,8 @@ public:
             _step.base->populate_views(
                     _views_to_build,
                     _step.current_token(),
-                    make_flat_mutation_reader_from_fragments(_step.base->schema(), std::move(_fragments))).get();
+                    make_flat_mutation_reader_from_fragments(_step.base->schema(), std::move(_fragments)),
+                    _now).get();
             _fragments.clear();
             _fragments_memory_usage = 0;
         }
@@ -1766,13 +1787,14 @@ public:
 
 // Called in the context of a seastar::thread.
 void view_builder::execute(build_step& step, exponential_backoff_retry r) {
+    gc_clock::time_point now = gc_clock::now();
     auto consumer = compact_for_query<emit_only_live_rows::yes, view_builder::consumer>(
             *step.reader.schema(),
-            gc_clock::now(),
+            now,
             step.pslice,
             batch_size,
             query::max_partitions,
-            view_builder::consumer{*this, step});
+            view_builder::consumer{*this, step, now});
     consumer.consume_new_partition(step.current_key); // Initialize the state in case we're resuming a partition
     auto built = step.reader.consume_in_thread(std::move(consumer), db::no_timeout);
 

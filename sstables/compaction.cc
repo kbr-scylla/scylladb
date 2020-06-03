@@ -133,14 +133,25 @@ struct compaction_writer {
 class compacting_sstable_writer {
     compaction& _c;
     std::optional<compaction_writer> _writer = {};
+private:
+    inline void maybe_abort_compaction();
 public:
     explicit compacting_sstable_writer(compaction& c) : _c(c) { }
     void consume_new_partition(const dht::decorated_key& dk);
 
     void consume(tombstone t) { _writer->writer.consume(t); }
-    stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer->writer.consume(std::move(sr)); }
-    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) { return _writer->writer.consume(std::move(cr)); }
-    stop_iteration consume(range_tombstone&& rt) { return _writer->writer.consume(std::move(rt)); }
+    stop_iteration consume(static_row&& sr, tombstone, bool) {
+        maybe_abort_compaction();
+        return _writer->writer.consume(std::move(sr));
+    }
+    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) {
+        maybe_abort_compaction();
+        return _writer->writer.consume(std::move(cr));
+    }
+    stop_iteration consume(range_tombstone&& rt) {
+        maybe_abort_compaction();
+        return _writer->writer.consume(std::move(rt));
+    }
 
     stop_iteration consume_end_of_partition();
     void consume_end_of_stream();
@@ -393,6 +404,7 @@ protected:
     column_family& _cf;
     creator_fn _sstable_creator;
     schema_ptr _schema;
+    reader_permit _permit;
     std::vector<shared_sstable> _sstables;
     // Unused sstables are tracked because if compaction is interrupted we can only delete them.
     // Deleting used sstables could potentially result in data loss.
@@ -417,6 +429,7 @@ protected:
         : _cf(cf)
         , _sstable_creator(std::move(descriptor.creator))
         , _schema(cf.schema())
+        , _permit(_cf.compaction_concurrency_semaphore().make_permit())
         , _sstables(std::move(descriptor.sstables))
         , _max_sstable_size(descriptor.max_sstable_bytes)
         , _sstable_level(descriptor.level)
@@ -478,6 +491,9 @@ public:
     compaction& operator=(const compaction&) = delete;
     compaction(const compaction&) = delete;
 
+    compaction(compaction&& other) = delete;
+    compaction& operator=(compaction&& other) = delete;
+
     virtual ~compaction() {
         if (_info) {
             _cf.get_compaction_manager().deregister_compaction(_info);
@@ -488,9 +504,7 @@ private:
     virtual flat_mutation_reader make_sstable_reader() const = 0;
 
     template <typename GCConsumer>
-    GCC6_CONCEPT(
-        requires CompactedFragmentsConsumer<GCConsumer>
-    )
+    requires CompactedFragmentsConsumer<GCConsumer>
     future<> setup(GCConsumer gc_consumer) {
         auto ssts = make_lw_shared<sstables::sstable_set>(_cf.get_compaction_strategy().make_sstable_set(_schema));
         sstring formatted_msg = "[";
@@ -556,6 +570,7 @@ private:
     }
 
     virtual reader_consumer make_interposer_consumer(reader_consumer end_consumer) = 0;
+    virtual bool use_interposer_consumer() const = 0;
 
     compaction_info finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
         _info->ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(ended_at.time_since_epoch()).count();
@@ -637,14 +652,14 @@ public:
         return garbage_collected_sstable_writer(_gc_sstable_writer_data);
     }
 
-    bool contains_multi_fragment_runs() const {
-        return _contains_multi_fragment_runs;
+    bool enable_garbage_collected_sstable_writer() const {
+        // FIXME: Disable GC writer if interposer consumer is enabled until they both can work simultaneously.
+        // More details can be found at https://github.com/scylladb/scylla/issues/6472
+        return _contains_multi_fragment_runs && !use_interposer_consumer();
     }
 
     template <typename GCConsumer = noop_compacted_fragments_consumer>
-    GCC6_CONCEPT(
-        requires CompactedFragmentsConsumer<GCConsumer>
-    )
+    requires CompactedFragmentsConsumer<GCConsumer>
     static future<compaction_info> run(std::unique_ptr<compaction> c, GCConsumer gc_consumer = GCConsumer());
 
     friend class compacting_sstable_writer;
@@ -652,11 +667,15 @@ public:
     friend class garbage_collected_sstable_writer::data;
 };
 
-void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& dk) {
-    if (_c._info->is_stop_requested()) {
+void compacting_sstable_writer::maybe_abort_compaction() {
+    if (_c._info->is_stop_requested()) [[unlikely]] {
         // Compaction manager will catch this exception and re-schedule the compaction.
         throw compaction_stop_exception(_c._info->ks_name, _c._info->cf_name, _c._info->stop_requested);
     }
+}
+
+void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& dk) {
+    maybe_abort_compaction();
     if (!_writer) {
         _writer = _c.create_compaction_writer(dk);
     }
@@ -727,7 +746,7 @@ public:
 
     flat_mutation_reader make_sstable_reader() const override {
         return ::make_local_shard_sstable_reader(_schema,
-                no_reader_permit(),
+                _permit,
                 _compacting,
                 query::full_partition_range,
                 _schema->full_slice(),
@@ -740,6 +759,10 @@ public:
 
     reader_consumer make_interposer_consumer(reader_consumer end_consumer) override {
         return _cf.get_compaction_strategy().make_interposer_consumer(_ms_metadata, std::move(end_consumer));
+    }
+
+    bool use_interposer_consumer() const override {
+        return _cf.get_compaction_strategy().use_interposer_consumer();
     }
 
     void report_start(const sstring& formatted_msg) const override {
@@ -821,7 +844,7 @@ private:
     void maybe_replace_exhausted_sstables_by_sst(shared_sstable sst) {
         // Skip earlier replacement of exhausted sstables if compaction works with only single-fragment runs,
         // meaning incremental compaction is disabled for this compaction.
-        if (!_contains_multi_fragment_runs) {
+        if (!enable_garbage_collected_sstable_writer()) {
             return;
         }
         // Replace exhausted sstable(s), if any, by new one(s) in the column family.
@@ -1222,7 +1245,7 @@ public:
     // Use reader that makes sure no non-local mutation will not be filtered out.
     flat_mutation_reader make_sstable_reader() const override {
         return ::make_range_sstable_reader(_schema,
-                no_reader_permit(),
+                _permit,
                 _compacting,
                 query::full_partition_range,
                 _schema->full_slice(),
@@ -1237,6 +1260,10 @@ public:
         return [this, end_consumer = std::move(end_consumer)] (flat_mutation_reader reader) mutable -> future<> {
             return mutation_writer::segregate_by_shard(std::move(reader), std::move(end_consumer));
         };
+    }
+
+    bool use_interposer_consumer() const override {
+        return true;
     }
 
     void report_start(const sstring& formatted_msg) const override {
@@ -1273,9 +1300,7 @@ public:
 };
 
 template <typename GCConsumer>
-GCC6_CONCEPT(
-    requires CompactedFragmentsConsumer<GCConsumer>
-)
+requires CompactedFragmentsConsumer<GCConsumer>
 future<compaction_info> compaction::run(std::unique_ptr<compaction> c, GCConsumer gc_consumer) {
     return seastar::async([c = std::move(c), gc_consumer = std::move(gc_consumer)] () mutable {
         auto consumer = c->setup(std::move(gc_consumer));
@@ -1330,7 +1355,7 @@ compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf) 
                 cf.schema()->ks_name(), cf.schema()->cf_name()));
     }
     auto c = make_compaction(cf, std::move(descriptor));
-    if (c->contains_multi_fragment_runs()) {
+    if (c->enable_garbage_collected_sstable_writer()) {
         auto gc_writer = c->make_garbage_collected_sstable_writer();
         return compaction::run(std::move(c), std::move(gc_writer));
     }

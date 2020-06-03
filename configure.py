@@ -148,9 +148,27 @@ def maybe_static(flag, libs):
     return libs
 
 
-class Thrift(object):
-    def __init__(self, source, service):
+class Source(object):
+    def __init__(self, source, hh_prefix, cc_prefix):
         self.source = source
+        self.hh_prefix = hh_prefix
+        self.cc_prefix = cc_prefix
+
+    def headers(self, gen_dir):
+        return [x for x in self.generated(gen_dir) if x.endswith(self.hh_prefix)]
+
+    def sources(self, gen_dir):
+        return [x for x in self.generated(gen_dir) if x.endswith(self.cc_prefix)]
+
+    def objects(self, gen_dir):
+        return [x.replace(self.cc_prefix, '.o') for x in self.sources(gen_dir)]
+
+    def endswith(self, end):
+        return self.source.endswith(end)
+
+class Thrift(Source):
+    def __init__(self, source, service):
+        Source.__init__(self, source, '.h', '.cpp')
         self.service = service
 
     def generated(self, gen_dir):
@@ -161,19 +179,6 @@ class Thrift(object):
                   for ext in ['.cpp', '.h']]
         return [os.path.join(gen_dir, file) for file in files]
 
-    def headers(self, gen_dir):
-        return [x for x in self.generated(gen_dir) if x.endswith('.h')]
-
-    def sources(self, gen_dir):
-        return [x for x in self.generated(gen_dir) if x.endswith('.cpp')]
-
-    def objects(self, gen_dir):
-        return [x.replace('.cpp', '.o') for x in self.sources(gen_dir)]
-
-    def endswith(self, end):
-        return self.source.endswith(end)
-
-
 def default_target_arch():
     if platform.machine() in ['i386', 'i686', 'x86_64']:
         return 'westmere'   # support PCLMUL
@@ -183,9 +188,9 @@ def default_target_arch():
         return ''
 
 
-class Antlr3Grammar(object):
+class Antlr3Grammar(Source):
     def __init__(self, source):
-        self.source = source
+        Source.__init__(self, source, '.hpp', '.cpp')
 
     def generated(self, gen_dir):
         basename = os.path.splitext(self.source)[0]
@@ -193,18 +198,12 @@ class Antlr3Grammar(object):
                  for ext in ['Lexer.cpp', 'Lexer.hpp', 'Parser.cpp', 'Parser.hpp']]
         return [os.path.join(gen_dir, file) for file in files]
 
-    def headers(self, gen_dir):
-        return [x for x in self.generated(gen_dir) if x.endswith('.hpp')]
+class Json2Code(Source):
+    def __init__(self, source):
+        Source.__init__(self, source, '.hh', '.cc')
 
-    def sources(self, gen_dir):
-        return [x for x in self.generated(gen_dir) if x.endswith('.cpp')]
-
-    def objects(self, gen_dir):
-        return [x.replace('.cpp', '.o') for x in self.sources(gen_dir)]
-
-    def endswith(self, end):
-        return self.source.endswith(end)
-
+    def generated(self, gen_dir):
+        return [os.path.join(gen_dir, self.source + '.hh'), os.path.join(gen_dir, self.source + '.cc')]
 
 def find_headers(repodir, excluded_dirs):
     walker = os.walk(repodir)
@@ -256,6 +255,7 @@ scylla_tests = set([
     'test/boost/UUID_test',
     'test/boost/aggregate_fcts_test',
     'test/boost/allocation_strategy_test',
+    'test/boost/alternator_base64_test',
     'test/boost/anchorless_list_test',
     'test/boost/auth_passwords_test',
     'test/boost/auth_resource_test',
@@ -402,6 +402,7 @@ perf_tests = set([
     'test/perf/perf_mutation_fragment',
     'test/perf/perf_idl',
     'test/perf/perf_vint',
+    'test/perf/perf_big_decimal',
 ])
 
 apps = set([
@@ -461,8 +462,6 @@ arg_parser.add_argument('--python', action='store', dest='python', default='pyth
                         help='Python3 path')
 arg_parser.add_argument('--split-dwarf', dest='split_dwarf', action='store_true', default=False,
                         help='use of split dwarf (https://gcc.gnu.org/wiki/DebugFission) to speed up linking')
-arg_parser.add_argument('--enable-gcc6-concepts', dest='gcc6_concepts', action='store_true', default=False,
-                        help='enable experimental support for C++ Concepts as implemented in GCC 6')
 arg_parser.add_argument('--enable-alloc-failure-injector', dest='alloc_failure_injector', action='store_true', default=False,
                         help='enable allocation failure injection')
 arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', default=None,
@@ -506,6 +505,7 @@ scylla_core = (['database.cc',
                 'utils/limiting_data_source.cc',
                 'utils/updateable_value.cc',
                 'utils/directories.cc',
+                'utils/generation-number.cc',
                 'mutation_partition.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
@@ -671,6 +671,7 @@ scylla_core = (['database.cc',
                 'db/view/view.cc',
                 'db/view/view_update_generator.cc',
                 'db/view/row_locking.cc',
+                'db/sstables-format-selector.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
                 'utils/UUID_gen.cc',
@@ -812,41 +813,41 @@ scylla_core = (['database.cc',
                )
 
 api = ['api/api.cc',
-       'api/api-doc/storage_service.json',
-       'api/api-doc/lsa.json',
+       Json2Code('api/api-doc/storage_service.json'),
+       Json2Code('api/api-doc/lsa.json'),
        'api/storage_service.cc',
-       'api/api-doc/commitlog.json',
+       Json2Code('api/api-doc/commitlog.json'),
        'api/commitlog.cc',
-       'api/api-doc/gossiper.json',
+       Json2Code('api/api-doc/gossiper.json'),
        'api/gossiper.cc',
-       'api/api-doc/failure_detector.json',
+       Json2Code('api/api-doc/failure_detector.json'),
        'api/failure_detector.cc',
-       'api/api-doc/column_family.json',
+       Json2Code('api/api-doc/column_family.json'),
        'api/column_family.cc',
        'api/messaging_service.cc',
-       'api/api-doc/messaging_service.json',
-       'api/api-doc/storage_proxy.json',
+       Json2Code('api/api-doc/messaging_service.json'),
+       Json2Code('api/api-doc/storage_proxy.json'),
        'api/storage_proxy.cc',
-       'api/api-doc/cache_service.json',
+       Json2Code('api/api-doc/cache_service.json'),
        'api/cache_service.cc',
-       'api/api-doc/collectd.json',
+       Json2Code('api/api-doc/collectd.json'),
        'api/collectd.cc',
-       'api/api-doc/endpoint_snitch_info.json',
+       Json2Code('api/api-doc/endpoint_snitch_info.json'),
        'api/endpoint_snitch.cc',
-       'api/api-doc/compaction_manager.json',
+       Json2Code('api/api-doc/compaction_manager.json'),
        'api/compaction_manager.cc',
-       'api/api-doc/hinted_handoff.json',
+       Json2Code('api/api-doc/hinted_handoff.json'),
        'api/hinted_handoff.cc',
-       'api/api-doc/utils.json',
+       Json2Code('api/api-doc/utils.json'),
        'api/lsa.cc',
-       'api/api-doc/stream_manager.json',
+       Json2Code('api/api-doc/stream_manager.json'),
        'api/stream_manager.cc',
-       'api/api-doc/system.json',
+       Json2Code('api/api-doc/system.json'),
        'api/system.cc',
        'api/config.cc',
-       'api/api-doc/config.json',
-        'api/error_injection.cc',
-        'api/api-doc/error_injection.json',
+       Json2Code('api/api-doc/config.json'),
+       'api/error_injection.cc',
+       Json2Code('api/api-doc/error_injection.json'),
        ]
 
 alternator = [
@@ -912,6 +913,8 @@ scylla_tests_generic_dependencies = [
     'test/lib/cql_test_env.cc',
     'test/lib/test_services.cc',
     'test/lib/log.cc',
+    'test/lib/reader_permit.cc',
+    'test/lib/test_utils.cc',
 ]
 
 scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependencies + [
@@ -967,6 +970,7 @@ pure_boost_tests = set([
 ])
 
 tests_not_using_seastar_test_framework = set([
+    'test/boost/alternator_base64_test',
     'test/boost/small_vector_test',
     'test/manual/gossip',
     'test/manual/message',
@@ -1037,6 +1041,7 @@ deps['test/boost/linearizing_input_stream_test'] = [
 ]
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
+deps['test/boost/alternator_base64_test'] += ['alternator/base64.cc']
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
@@ -1199,8 +1204,24 @@ extra_cxxflags["release.cc"] = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\
 for m in ['debug', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
 
-get_dynamic_linker_output = subprocess.check_output(['./reloc/get-dynamic-linker.sh'], shell=True)
-dynamic_linker = get_dynamic_linker_output.decode('utf-8').strip()
+# The relocatable package includes its own dynamic linker. We don't
+# know the path it will be installed to, so for now use a very long
+# path so that patchelf doesn't need to edit the program headers.  The
+# kernel imposes a limit of 4096 bytes including the null. The other
+# constraint is that the build-id has to be in the first page, so we
+# can't use all 4096 bytes for the dynamic linker.
+# In here we just guess that 2000 extra / should be enough to cover
+# any path we get installed to but not so large that the build-id is
+# pushed to the second page.
+# At the end of the build we check that the build-id is indeed in the
+# first page. At install time we check that patchelf doesn't modify
+# the program headers.
+
+gcc_linker_output = subprocess.check_output(['gcc', '-###', '/dev/null', '-o', 't'], stderr=subprocess.STDOUT).decode('utf-8')
+original_dynamic_linker = re.search('-dynamic-linker ([^ ]*)', gcc_linker_output).groups()[0]
+# gdb has a SO_NAME_MAX_PATH_SIZE of 512, so limit the path size to
+# that. The 512 includes the null at the end, hence the 511 bellow.
+dynamic_linker = '/' * (511 - len(original_dynamic_linker)) + original_dynamic_linker
 
 forced_ldflags = '-Wl,'
 
@@ -1236,8 +1257,8 @@ def configure_seastar(build_dir, mode):
         '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON',
         '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']).replace(' ', ';')),
         '-DSeastar_LD_FLAGS={}'.format(seastar_ldflags),
-        '-DSeastar_CXX_DIALECT=gnu++17',
-        '-DSeastar_STD_OPTIONAL_VARIANT_STRINGVIEW=ON',
+        '-DSeastar_CXX_DIALECT=gnu++20',
+        '-DSeastar_API_LEVEL=2',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
     ]
 
@@ -1247,8 +1268,6 @@ def configure_seastar(build_dir, mode):
 
     if args.dpdk:
         seastar_cmake_args += ['-DSeastar_DPDK=ON', '-DSeastar_DPDK_MACHINE=wsm']
-    if args.gcc6_concepts:
-        seastar_cmake_args += ['-DSeastar_GCC6_CONCEPTS=ON']
     if args.split_dwarf:
         seastar_cmake_args += ['-DSeastar_SPLIT_DWARF=ON']
     if args.alloc_failure_injector:
@@ -1419,7 +1438,7 @@ with open(buildfile_tmp, 'w') as f:
             command = echo -e $text > $out
             description = GEN $out
         rule swagger
-            command = {args.seastar_path}/scripts/seastar-json2code.py -f $in -o $out
+            command = {args.seastar_path}/scripts/seastar-json2code.py --create-cc -f $in -o $out
             description = SWAGGER $out
         rule serializer
             command = {python} ./idl-compiler.py --ns ser -f $in -o $out
@@ -1505,7 +1524,7 @@ with open(buildfile_tmp, 'w') as f:
             )
         )
         compiles = {}
-        swaggers = {}
+        swaggers = set()
         serializers = {}
         thrifts = set()
         ragels = {}
@@ -1526,6 +1545,8 @@ with open(buildfile_tmp, 'w') as f:
                     has_thrift = True
                     objs += dep.objects('$builddir/' + mode + '/gen')
                 if isinstance(dep, Antlr3Grammar):
+                    objs += dep.objects('$builddir/' + mode + '/gen')
+                if isinstance(dep, Json2Code):
                     objs += dep.objects('$builddir/' + mode + '/gen')
             if binary.endswith('.a'):
                 f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
@@ -1565,8 +1586,7 @@ with open(buildfile_tmp, 'w') as f:
                     hh = '$builddir/' + mode + '/gen/' + src.replace('.idl.hh', '.dist.hh')
                     serializers[hh] = src
                 elif src.endswith('.json'):
-                    hh = '$builddir/' + mode + '/gen/' + src + '.hh'
-                    swaggers[hh] = src
+                    swaggers.add(src)
                 elif src.endswith('.rl'):
                     hh = '$builddir/' + mode + '/gen/' + src.replace('.rl', '.hh')
                     ragels[hh] = src
@@ -1608,12 +1628,14 @@ with open(buildfile_tmp, 'w') as f:
             )
         )
 
+        gen_dir = '$builddir/{}/gen'.format(mode)
         gen_headers = []
         for th in thrifts:
             gen_headers += th.headers('$builddir/{}/gen'.format(mode))
         for g in antlr3_grammars:
             gen_headers += g.headers('$builddir/{}/gen'.format(mode))
-        gen_headers += list(swaggers.keys())
+        for g in swaggers:
+            gen_headers += g.headers('$builddir/{}/gen'.format(mode))
         gen_headers += list(serializers.keys())
         gen_headers += list(ragels.keys())
         gen_headers_dep = ' '.join(gen_headers)
@@ -1623,9 +1645,13 @@ with open(buildfile_tmp, 'w') as f:
             f.write('build {}: cxx.{} {} || {} {}\n'.format(obj, mode, src, seastar_dep, gen_headers_dep))
             if src in extra_cxxflags:
                 f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=extra_cxxflags[src], **modeval))
-        for hh in swaggers:
-            src = swaggers[hh]
-            f.write('build {}: swagger {} | {}/scripts/seastar-json2code.py\n'.format(hh, src, args.seastar_path))
+        for swagger in swaggers:
+            hh = swagger.headers(gen_dir)[0]
+            cc = swagger.sources(gen_dir)[0]
+            obj = swagger.objects(gen_dir)[0]
+            src = swagger.source
+            f.write('build {} | {} : swagger {} | {}/scripts/seastar-json2code.py\n'.format(hh, cc, src, args.seastar_path))
+            f.write('build {}: cxx.{} {}\n'.format(obj, mode, cc))
         for hh in serializers:
             src = serializers[hh]
             f.write('build {}: serializer {} | idl-compiler.py\n'.format(hh, src))
@@ -1674,7 +1700,7 @@ with open(buildfile_tmp, 'w') as f:
         f.write(textwrap.dedent('''\
             build build/{mode}/iotune: copy build/{mode}/seastar/apps/iotune/iotune
             ''').format(**locals()))
-        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
+        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE build/debian/debian | always\n'.format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  mode = {mode}\n'.format(**locals()))
         f.write('rule libdeflate.{mode}\n'.format(**locals()))
@@ -1720,6 +1746,9 @@ with open(buildfile_tmp, 'w') as f:
         rule scylla_version_gen
             command = ./SCYLLA-VERSION-GEN
         build build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE: scylla_version_gen
+        rule debian_files_gen
+            command = ./dist/debian/debian_files_gen.py
+        build build/debian/debian: debian_files_gen | always
         ''').format(modes_list=' '.join(build_modes), **globals()))
 
 os.rename(buildfile_tmp, buildfile)
