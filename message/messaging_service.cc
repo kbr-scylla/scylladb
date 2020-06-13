@@ -400,17 +400,21 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     , _sl_controller(sl_controller)
 {
     _rpc->set_logger(&rpc_logger);
+
+    // this initialization should be done before any handler registration
+    // this is because register_handler calls to: scheduling_group_for_verb
+    // which in turn relies on _connection_index_for_tenant to be initialized.
+    _connection_index_for_tenant.reserve(_scheduling_config.statement_tenants.size());
+    for (unsigned i = 0; i <  _scheduling_config.statement_tenants.size(); ++i) {
+        _connection_index_for_tenant.push_back({_scheduling_config.statement_tenants[i].sched_group, i});
+    }
+
     register_handler(this, messaging_verb::CLIENT_ID, [] (rpc::client_info& ci, gms::inet_address broadcast_address, uint32_t src_cpu_id, rpc::optional<uint64_t> max_result_size) {
         ci.attach_auxiliary("baddr", broadcast_address);
         ci.attach_auxiliary("src_cpu_id", src_cpu_id);
         ci.attach_auxiliary("max_result_size", max_result_size.value_or(query::result_memory_limiter::maximum_result_size));
         return rpc::no_wait;
     });
-
-    _connection_index_for_tenant.reserve(_scheduling_config.statement_tenants.size());
-    for (unsigned i = 0; i <  _scheduling_config.statement_tenants.size(); ++i) {
-        _connection_index_for_tenant.push_back({_scheduling_config.statement_tenants[i].sched_group, i});
-    }
 }
 
 msg_addr messaging_service::get_source(const rpc::client_info& cinfo) {

@@ -1313,6 +1313,30 @@ def test_update_condition_unused_entries_succeeded(test_table_s):
             ExpressionAttributeValues={':val2': 2},
             ExpressionAttributeNames={'#name2': 'b', '#name3': 'c'})
 
+# Another reason why we must test for used references right after parsing
+# the expressions, NOT at evaluation time, is that in some cases evaluation
+# may short-circuit and not reach certain parts of the expression, and as
+# a result we may wrongly think some names were not used, and refuse a
+# perfectly good request. Such a bug (see issue #6572) can be fixed by
+# either by dropping short-circuit evaluation (i.e., evaluate all parts
+# of the expression even if the first OR succeeds), or by testing for
+# unused references before evaluating anything.
+@pytest.mark.xfail(reason="unused entries are checked too late")
+def test_update_condition_unused_entries_short_circuit(test_table_s):
+    p = random_string()
+    test_table_s.update_item(Key={'p': p},
+        AttributeUpdates={'a': {'Value': 1, 'Action': 'PUT'}})
+    # If short-circuit evaluation is done for ConditionExpression, it will
+    # not use #name2 or :val2. But we should't fail this request claiming
+    # these references weren't used... They were used in the expression,
+    # just not in the evaluation. This request *should* work.
+    test_table_s.update_item(Key={'p': p},
+        ConditionExpression='#name1 = :val1 OR #name2 = :val2',
+        UpdateExpression='SET #name1 = :val3',
+        ExpressionAttributeValues={':val1': 1, ':val2': 2, ':val3': 3},
+        ExpressionAttributeNames={'#name1': 'a', '#name2': 'b'})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item'] == {'p': p, 'a': 3}
+
 # Test a bunch of cases with permissive write isolation levels,
 # i.e. LWT_ALWAYS, LWT_RMW_ONLY and UNSAFE_RMW.
 # These test cases make sense only for alternator, so they're skipped
@@ -1351,3 +1375,37 @@ def test_condition_expression_with_forbidden_rmw(scylla_only, dynamodb, test_tab
     assert test_table_s.get_item(Key={'p': s}, ConsistentRead=True)['Item'] == {'p': s, 'regular': 'write'}
     test_table_s.update_item(Key={'p': s}, AttributeUpdates={'write': {'Value': 'regular', 'Action': 'PUT'}})
     assert test_table_s.get_item(Key={'p': s}, ConsistentRead=True)['Item'] == {'p': s, 'regular': 'write', 'write': 'regular'}
+
+# Reproducer for issue #6573: binary strings should be ordered as unsigned
+# bytes, i.e., byte 128 comes after 127, not before as with signed bytes.
+# Test the five ordering operators: <, <=, >, >=, between
+def test_condition_expression_unsigned_bytes(test_table_s):
+    p = random_string()
+    test_table_s.put_item(Item={'p': p, 'b': bytearray([127])})
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='SET z = :newval',
+        ConditionExpression='b < :oldval',
+        ExpressionAttributeValues={':newval': 1, ':oldval': bytearray([128])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['z'] == 1
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='SET z = :newval',
+        ConditionExpression='b <= :oldval',
+        ExpressionAttributeValues={':newval': 2, ':oldval': bytearray([128])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['z'] == 2
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='SET z = :newval',
+        ConditionExpression='b between :oldval1 and :oldval2',
+        ExpressionAttributeValues={':newval': 3, ':oldval1': bytearray([126]), ':oldval2': bytearray([128])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['z'] == 3
+
+    test_table_s.put_item(Item={'p': p, 'b': bytearray([128])})
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='SET z = :newval',
+        ConditionExpression='b > :oldval',
+        ExpressionAttributeValues={':newval': 4, ':oldval': bytearray([127])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['z'] == 4
+    test_table_s.update_item(Key={'p': p},
+        UpdateExpression='SET z = :newval',
+        ConditionExpression='b >= :oldval',
+        ExpressionAttributeValues={':newval': 5, ':oldval': bytearray([127])})
+    assert test_table_s.get_item(Key={'p': p}, ConsistentRead=True)['Item']['z'] == 5

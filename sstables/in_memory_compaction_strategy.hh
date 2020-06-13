@@ -88,7 +88,7 @@ inline compaction_descriptor
 in_memory_compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
     // compact everything into one sstable
     if (candidates.size() > 1) {
-        return sstables::compaction_descriptor(std::move(candidates), service::get_local_compaction_priority());
+        return sstables::compaction_descriptor(std::move(candidates), cfs.get_sstable_set(), service::get_local_compaction_priority());
     }
     return sstables::compaction_descriptor();
 }

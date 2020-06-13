@@ -12,7 +12,7 @@
 #include <iterator>
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
-#include <sstables/sstables.hh>
+#include "sstables/sstables.hh"
 #include <seastar/core/do_with.hh>
 #include "test/lib/cql_test_env.hh"
 #include "cql3/functions/functions.hh"
@@ -153,13 +153,13 @@ public:
             , _sl_controller(sl_controller)
     { }
 
-    virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(const sstring& text) override {
+    virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(sstring_view text) override {
         auto qs = make_query_state();
         return local_qp().execute_direct(text, *qs, cql3::query_options::DEFAULT).finally([qs] {});
     }
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(
-        const sstring& text,
+        sstring_view text,
         std::unique_ptr<cql3::query_options> qo) override
     {
         auto qs = make_query_state();

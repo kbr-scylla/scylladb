@@ -42,6 +42,7 @@ debian_base_packages=(
     git
     pigz
     libunistring-dev
+    libzstd-dev
     slapd
     ldap-utils
 )
@@ -92,6 +93,8 @@ fedora_packages=(
     glibc-langpack-en
     lld
     xxhash-devel
+    makeself
+    libzstd-static libzstd-devel
     openldap-servers
     openldap-devel
     toxiproxy

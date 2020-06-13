@@ -4,7 +4,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include <seastarx.hh>
+#include "seastarx.hh"
 #include "cql3/statements/attach_service_level_statement.hh"
 #include "service/qos/service_level_controller.hh"
 #include "exceptions/exceptions.hh"

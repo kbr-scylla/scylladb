@@ -173,7 +173,7 @@ class aws_instance:
         instance_size = self.instance_size()
         if instance_class in ['c3', 'c4', 'd2', 'i2', 'r3']:
             return 'ixgbevf'
-        if instance_class in ['c5', 'c5d', 'f1', 'g3', 'h1', 'i3', 'i3en', 'm5', 'm5d', 'p2', 'p3', 'r4', 'x1']:
+        if instance_class in ['a1', 'c5', 'c5d', 'f1', 'g3', 'g4', 'h1', 'i3', 'i3en', 'inf1', 'm5', 'm5a', 'm5ad', 'm5d', 'm5dn', 'm5n', 'm6g', 'p2', 'p3', 'r4', 'r5', 'r5a', 'r5ad', 'r5d', 'r5dn', 'r5n', 't3', 't3a', 'u-6tb1', 'u-9tb1', 'u-12tb1', 'u-18tn1', 'u-24tb1', 'x1', 'x1e', 'z1d']:
             return 'ena'
         if instance_class == 'm4':
             if instance_size == '16xlarge':
@@ -359,6 +359,9 @@ def is_debian_variant():
 def is_redhat_variant():
     d = os_release['ID_LIKE'] if 'ID_LIKE' in os_release else os_release['ID']
     return ('rhel' in d) or ('fedora' in d) or ('ol') in d
+
+def is_amzn2():
+    return ('amzn' in os_release['ID']) and ('2' in os_release['VERSION_ID'])
 
 def is_gentoo_variant():
     return ('gentoo' in os_release['ID'])
@@ -607,7 +610,7 @@ class systemd_unit:
         try:
             run('systemctl {} cat {}'.format(self.ctlparam, unit), silent=True)
         except subprocess.CalledProcessError:
-            raise SystemdException('unit {} not found'.format(unit))
+            raise SystemdException('unit {} is not found or invalid'.format(unit))
         self._unit = unit
 
     def start(self):

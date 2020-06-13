@@ -35,6 +35,7 @@
 #include "db/data_listeners.hh"
 #include "memtable-sstable.hh"
 #include "sstables/compaction_manager.hh"
+#include "sstables/sstable_directory.hh"
 #include "db/system_keyspace.hh"
 #include "db/query_context.hh"
 #include "query-result-writer.hh"
@@ -44,6 +45,7 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/adaptor/map.hpp>
+#include "utils/error_injection.hh"
 
 static logging::logger tlogger("table");
 static seastar::metrics::label column_family_label("cf");
@@ -627,9 +629,6 @@ table::open_sstable(sstables::foreign_sstable_open_info info, sstring dir, int64
         tlogger.debug("sstable {} not relevant for this shard, ignoring", sst->get_filename());
         return make_ready_future<sstables::shared_sstable>();
     }
-    if (!belongs_to_other_shard(info.owners)) {
-        sst->set_unshared();
-    }
     return sst->load(std::move(info)).then([this, sst] () mutable {
         if (schema()->is_counter() && !sst->has_scylla_component()) {
             auto error = "Reading non-Scylla SSTables containing counters is not supported.";
@@ -682,6 +681,13 @@ inline void table::add_sstable_to_backlog_tracker(compaction_backlog_tracker& tr
     // given that such sstables are supposed to be tracked only by resharding's own tracker.
     if (!sstable->is_shared()) {
         tracker.add_sstable(sstable);
+    }
+}
+
+inline void table::remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable) {
+    // Shared sstables belong to resharding's own backlog tracker.
+    if (!sstable->is_shared()) {
+        tracker.remove_sstable(std::move(sstable));
     }
 }
 
@@ -822,8 +828,6 @@ table::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
         return with_lock(_sstables_lock.for_read(), [this, old, permit = std::move(permit)] () mutable {
             auto newtab = make_sstable();
 
-            newtab->set_unshared();
-
             tlogger.debug("Flushing to {}", newtab->get_filename());
 
             // This is somewhat similar to the main memtable flush, but with important differences.
@@ -880,8 +884,6 @@ future<> table::seal_active_streaming_memtable_big(streaming_memtable_big& smb, 
         return with_gate(smb.flush_in_progress, [this, old, &smb, permit = std::move(permit)] () mutable {
             return with_lock(_sstables_lock.for_read(), [this, old, &smb, permit = std::move(permit)] () mutable {
                 auto newtab = make_sstable();
-
-                newtab->set_unshared();
 
                 auto fp = permit.release_sstable_write_permit();
                 auto monitor = std::make_unique<database_sstable_write_monitor>(std::move(fp), newtab, _compaction_manager, _compaction_strategy, old->get_max_timestamp());
@@ -968,7 +970,6 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
   return with_scheduling_group(_config.memtable_scheduling_group, [this, old = std::move(old), permit = std::move(permit)] () mutable {
     auto newtab = make_sstable();
 
-    newtab->set_unshared();
     tlogger.debug("Flushing to {}", newtab->get_filename());
     // Note that due to our sharded architecture, it is possible that
     // in the face of a value change some shards will backup sstables
@@ -1062,7 +1063,7 @@ table::reshuffle_sstables(std::set<int64_t> all_generations, int64_t start) {
             }
             return make_exception_future<>(std::runtime_error("Loading SSTables from the main SSTable directory is unsafe and no longer supported."
                    " You will find a directory called upload/ inside the table directory that can be used to load new SSTables into the system"));
-        }, &manifest_json_filter).then([&work] {
+        }, &sstables::manifest_json_filter).then([&work] {
             return make_ready_future<std::vector<sstables::entry_descriptor>>();
         });
     });
@@ -1263,10 +1264,11 @@ future<> table::replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> an
     }
     return rebuild_sstable_list_with_deletion_sem(new_sstables, old_sstables).then([this, new_sstables, old_sstables] {
         for (auto& sst : new_sstables) {
-            _compaction_strategy.get_backlog_tracker().add_sstable(sst);
+            add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
         }
+
         for (auto& sst : old_sstables) {
-            _compaction_strategy.get_backlog_tracker().remove_sstable(sst);
+            remove_sstable_from_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
             _sstables_need_rewrite.erase(sst->generation());
         }
     });
@@ -1286,7 +1288,6 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
     return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor)] () mutable {
         descriptor.creator = [this] (shard_id dummy) {
                 auto sst = make_sstable();
-                sst->set_unshared();
                 return sst;
         };
         descriptor.replacer = [this, release_exhausted = descriptor.release_exhausted] (sstables::compaction_completion_desc desc) {
@@ -1465,15 +1466,6 @@ const std::vector<sstables::shared_sstable>& table::compacted_undeleted_sstables
     return _sstables_compacted_but_not_deleted;
 }
 
-inline bool table::manifest_json_filter(const fs::path&, const directory_entry& entry) {
-    // Filter out directories. If type of the entry is unknown - check its name.
-    if (entry.type.value_or(directory_entry_type::regular) != directory_entry_type::directory && (entry.name == "manifest.json" || entry.name == "schema.cql")) {
-        return false;
-    }
-
-    return true;
-}
-
 lw_shared_ptr<memtable_list>
 table::make_memory_only_memtable_list() {
     auto get_schema = [this] { return schema(); };
@@ -1642,11 +1634,13 @@ seal_snapshot(sstring jsondir) {
 
     return io_check([jsondir] { return recursive_touch_directory(jsondir); }).then([jsonfile, json = std::move(json)] {
         return open_checked_file_dma(general_disk_error_handler, jsonfile, open_flags::wo | open_flags::create | open_flags::truncate).then([json](file f) {
-            return do_with(make_file_output_stream(std::move(f)), [json] (output_stream<char>& out) {
-                return out.write(json.c_str(), json.size()).then([&out] {
-                   return out.flush();
-                }).then([&out] {
-                   return out.close();
+            return make_file_output_stream(std::move(f)).then([json](output_stream<char>&& out) {
+                return do_with(std::move(out), [json] (output_stream<char>& out) {
+                    return out.write(json.c_str(), json.size()).then([&out] {
+                       return out.flush();
+                    }).then([&out] {
+                       return out.close();
+                    });
                 });
             });
         });
@@ -1668,11 +1662,13 @@ future<> table::write_schema_as_cql(sstring dir) const {
     auto schema_description = ss.str();
     auto schema_file_name = dir + "/schema.cql";
     return open_checked_file_dma(general_disk_error_handler, schema_file_name, open_flags::wo | open_flags::create | open_flags::truncate).then([schema_description = std::move(schema_description)](file f) {
-        return do_with(make_file_output_stream(std::move(f)), [schema_description  = std::move(schema_description)] (output_stream<char>& out) {
-            return out.write(schema_description.c_str(), schema_description.size()).then([&out] {
-               return out.flush();
-            }).then([&out] {
-               return out.close();
+        return make_file_output_stream(std::move(f)).then([schema_description  = std::move(schema_description)] (output_stream<char>&& out) mutable {
+            return do_with(std::move(out), [schema_description  = std::move(schema_description)] (output_stream<char>& out) {
+                return out.write(schema_description.c_str(), schema_description.size()).then([&out] {
+                   return out.flush();
+                }).then([&out] {
+                   return out.close();
+                });
             });
         });
     });
@@ -1938,7 +1934,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
             rebuild_statistics();
 
             return parallel_for_each(p->remove, [this](sstables::shared_sstable s) {
-                _compaction_strategy.get_backlog_tracker().remove_sstable(s);
+                remove_sstable_from_backlog_tracker(_compaction_strategy.get_backlog_tracker(), s);
                 return sstables::delete_atomically({s});
             }).then([p] {
                 return make_ready_future<db::replay_position>(p->rp);
@@ -2501,7 +2497,7 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
                 return sst->move_to_new_dir(dir(), sst->generation(), false).then_wrapped([this, sst, &dirs_to_sync] (future<> f) {
                     if (!f.failed()) {
                         _sstables_staging.erase(sst->generation());
-                        _compaction_strategy.get_backlog_tracker().add_sstable(sst);
+                        add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
                         return make_ready_future<>();
                     } else {
                         auto ep = f.get_exception();
@@ -2543,6 +2539,9 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(const schema
     auto& base = schema();
     m.upgrade(base);
     gc_clock::time_point now = gc_clock::now();
+    utils::get_local_injector().inject("table_push_view_replica_updates_stale_time_point", [&now] {
+        now -= 10s;
+    });
     auto views = affected_views(base, m, now);
     if (views.empty()) {
         return make_ready_future<row_locker::lock_holder>();
@@ -2573,8 +2572,9 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(const schema
     // We'll return this lock to the caller, which will release it after
     // writing the base-table update.
     future<row_locker::lock_holder> lockf = local_base_lock(base, m.decorated_key(), slice.default_row_ranges(), timeout);
-    return lockf.then([m = std::move(m), slice = std::move(slice), views = std::move(views), base, this, timeout, now, source = std::move(source), tr_state = std::move(tr_state), &sem, &io_priority] (row_locker::lock_holder lock) mutable {
-      tracing::trace(tr_state, "View updates for {}.{} require read-before-write - base table reader is created", base->ks_name(), base->cf_name());
+    return utils::get_local_injector().inject("table_push_view_replica_updates_timeout", timeout).then([lockf = std::move(lockf), timeout] () mutable {
+        return std::move(lockf);
+    }).then([m = std::move(m), slice = std::move(slice), views = std::move(views), base, this, timeout, now, source = std::move(source), &sem, tr_state = std::move(tr_state), &io_priority] (row_locker::lock_holder lock) mutable {
       return do_with(
         dht::partition_range::make_singular(m.decorated_key()),
         std::move(slice),

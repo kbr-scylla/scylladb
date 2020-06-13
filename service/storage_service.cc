@@ -900,7 +900,11 @@ void storage_service::bootstrap() {
     } else {
         dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, _token_metadata);
         // Does the actual streaming of newly replicated token ranges.
-        bs.bootstrap().get();
+        if (db().local().is_replacing()) {
+            bs.bootstrap(streaming::stream_reason::replace).get();
+        } else {
+            bs.bootstrap(streaming::stream_reason::bootstrap).get();
+        }
     }
     _db.invoke_on_all([this] (database& db) {
         for (auto& cf : db.get_non_system_column_families()) {
@@ -2901,6 +2905,7 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name) {
 
     slogger.info("Loading new SSTables for {}.{}...", ks_name, cf_name);
 
+    return distributed_loader::process_upload_dir(_db, ks_name, cf_name).then([this, ks_name, cf_name] {
     // First, we need to stop SSTable creation for that CF in all shards. This is a really horrible
     // thing to do, because under normal circumnstances this can make dirty memory go up to the point
     // of explosion.
@@ -2992,6 +2997,7 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name) {
         return distributed_loader::load_new_sstables(_db, _view_update_generator, ks_name, cf_name, std::move(new_tables)).then([ks_name, cf_name] {
             slogger.info("Done loading new SSTables for {}.{} for all shards", ks_name, cf_name);
         });
+    });
     }).finally([this] {
         _loading_new_sstables = false;
     });

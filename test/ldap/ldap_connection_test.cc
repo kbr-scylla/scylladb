@@ -20,7 +20,7 @@
 #include <set>
 #include <string>
 
-#include <ent/ldap/ldap_connection.hh>
+#include "ent/ldap/ldap_connection.hh"
 #include "test/lib/exception_utils.hh"
 #include "ldap_common.hh"
 #include "seastarx.hh"

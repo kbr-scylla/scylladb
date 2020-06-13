@@ -576,6 +576,7 @@ private:
     // Strong exception guarantees.
     void add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable);
     static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
+    static void remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     // returns an empty pointer if sstable doesn't belong to current shard.
     future<sstables::shared_sstable> open_sstable(sstables::foreign_sstable_open_info info, sstring dir,
         int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
@@ -1072,9 +1073,6 @@ private:
     // repair can now choose whatever strategy - small or big ranges - it wants, resting assure
     // that the incoming memtables will be coalesced together.
     future<> seal_active_streaming_memtable_immediate(flush_permit&&);
-
-    // filter manifest.json files out
-    static bool manifest_json_filter(const fs::path&, const directory_entry& entry);
 
     void check_valid_rp(const db::replay_position&) const;
 public:

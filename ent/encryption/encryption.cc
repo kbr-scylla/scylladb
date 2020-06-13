@@ -153,13 +153,15 @@ future<temporary_buffer<char>> read_text_file_fully(const sstring& filename) {
 
 future<> write_text_file_fully(const sstring& filename, temporary_buffer<char> buf) {
     return open_file_dma(filename, open_flags::wo|open_flags::create).then([buf = std::move(buf)](file f) mutable {
-        return do_with(make_file_output_stream(f), [buf = std::move(buf)](output_stream<char>& out) mutable {
+      return make_file_output_stream(f).then([buf = std::move(buf)] (output_stream<char> out) mutable {
+        return do_with(std::move(out), [buf = std::move(buf)](output_stream<char>& out) mutable {
             auto p = buf.get();
             auto s = buf.size();
             return out.write(p, s).finally([&out, buf = std::move(buf)] {
                 return out.close();
             });
         });
+      });
     });
 }
 

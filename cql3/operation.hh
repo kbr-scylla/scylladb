@@ -170,7 +170,7 @@ public:
      */
     class raw_deletion {
     public:
-        ~raw_deletion() {}
+        virtual ~raw_deletion() = default;
 
         /**
          * The name of the column affected by this delete operation.

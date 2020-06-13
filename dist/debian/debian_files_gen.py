@@ -41,7 +41,7 @@ with open('build/SCYLLA-PRODUCT-FILE') as f:
     product = f.read().strip()
 
 with open('build/SCYLLA-VERSION-FILE') as f:
-    version = f.read().strip()
+    version = f.read().strip().replace('.rc', '~rc').replace('_', '-')
 
 with open('build/SCYLLA-RELEASE-FILE') as f:
     release = f.read().strip()
@@ -61,7 +61,7 @@ else:
 shutil.copy('dist/common/systemd/scylla-housekeeping-daily.service', 'build/debian/debian/{}-server.scylla-housekeeping-daily.service'.format(product))
 shutil.copy('dist/common/systemd/scylla-housekeeping-restart.service', 'build/debian/debian/{}-server.scylla-housekeeping-restart.service'.format(product))
 shutil.copy('dist/common/systemd/scylla-fstrim.service', 'build/debian/debian/{}-server.scylla-fstrim.service'.format(product))
-shutil.copy('dist/common/systemd/node-exporter.service', 'build/debian/debian/{}-server.scylla-node-exporter.service'.format(product))
+shutil.copy('dist/common/systemd/node-exporter.service', 'build/debian/debian/{}-server.node-exporter.service'.format(product))
 
 s = DebianFilesTemplate(changelog_template)
 changelog_applied = s.substitute(product=product, version=version, release=release, revision='1', codename='stable')

@@ -351,6 +351,7 @@ scylla_tests = set([
     'test/boost/schema_changes_test',
     'test/boost/sstable_conforms_to_mutation_source_test',
     'test/boost/sstable_resharding_test',
+    'test/boost/sstable_directory_test',
     'test/boost/incremental_compaction_test',
     'test/boost/sstable_test',
     'test/boost/storage_proxy_test',
@@ -442,8 +443,8 @@ arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='gcc'
                         help='C compiler path')
 arg_parser.add_argument('--with-osv', action='store', dest='with_osv', default='',
                         help='Shortcut for compile for OSv')
-arg_parser.add_argument('--enable-dpdk', action='store_true', dest='dpdk', default=False,
-                        help='Enable dpdk (from seastar dpdk sources)')
+add_tristate(arg_parser, name='enable-dpdk', dest='dpdk',
+                        help='Use dpdk (from seastar dpdk sources) (default=True for release builds)')
 arg_parser.add_argument('--dpdk-target', action='store', dest='dpdk_target', default='',
                         help='Path to DPDK SDK target location (e.g. <DPDK SDK dir>/x86_64-native-linuxapp-gcc)')
 arg_parser.add_argument('--debuginfo', action='store', dest='debuginfo', type=int, default=1,
@@ -498,7 +499,6 @@ scylla_core = (['database.cc',
                 'frozen_mutation.cc',
                 'memtable.cc',
                 'schema_mutations.cc',
-                'supervisor.cc',
                 'utils/logalloc.cc',
                 'utils/large_bitset.cc',
                 'utils/buffer_input_stream.cc',
@@ -533,6 +533,7 @@ scylla_core = (['database.cc',
                 'sstables/integrity_checked_file_impl.cc',
                 'sstables/prepended_input_stream.cc',
                 'sstables/m_format_read_helpers.cc',
+                'sstables/sstable_directory.cc',
                 'sstables/incremental_compaction_strategy.cc',
                 'transport/event.cc',
                 'transport/event_notifier.cc',
@@ -559,6 +560,7 @@ scylla_core = (['database.cc',
                 'cql3/functions/functions.cc',
                 'cql3/functions/aggregate_fcts.cc',
                 'cql3/functions/castas_fcts.cc',
+                'cql3/functions/error_injection_fcts.cc',
                 'cql3/statements/cf_prop_defs.cc',
                 'cql3/statements/cf_statement.cc',
                 'cql3/statements/authentication_statement.cc',
@@ -1104,34 +1106,14 @@ else:
 # a list element means a list of alternative packages to consider
 # the first element becomes the HAVE_pkg define
 # a string element is a package name with no alternatives
-optional_packages = [['libsystemd', 'libsystemd-daemon']]
+optional_packages = [[]]
 pkgs = []
 
 # Lua can be provided by lua53 package on Debian-like
 # systems and by Lua on others.
 pkgs.append('lua53' if have_pkg('lua53') else 'lua')
 
-
-def setup_first_pkg_of_list(pkglist):
-    # The HAVE_pkg symbol is taken from the first alternative
-    upkg = pkglist[0].upper().replace('-', '_')
-    for pkg in pkglist:
-        if have_pkg(pkg):
-            pkgs.append(pkg)
-            defines.append('HAVE_{}=1'.format(upkg))
-            return True
-    return False
-
-
-for pkglist in optional_packages:
-    if isinstance(pkglist, str):
-        pkglist = [pkglist]
-    if not setup_first_pkg_of_list(pkglist):
-        if len(pkglist) == 1:
-            print('Missing optional package {pkglist[0]}'.format(**locals()))
-        else:
-            alternatives = ':'.join(pkglist[1:])
-            print('Missing optional package {pkglist[0]} (or alteratives {alternatives})'.format(**locals()))
+pkgs.append('libsystemd')
 
 
 compiler_test_src = '''
@@ -1243,7 +1225,6 @@ if args.target != '':
 seastar_ldflags = args.user_ldflags
 
 libdeflate_cflags = seastar_cflags
-zstd_cflags = seastar_cflags + ' -Wno-implicit-fallthrough'
 
 MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev', 'sanitize' : 'Sanitize' }
 
@@ -1258,7 +1239,7 @@ def configure_seastar(build_dir, mode):
         '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']).replace(' ', ';')),
         '-DSeastar_LD_FLAGS={}'.format(seastar_ldflags),
         '-DSeastar_CXX_DIALECT=gnu++20',
-        '-DSeastar_API_LEVEL=2',
+        '-DSeastar_API_LEVEL=3',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
     ]
 
@@ -1266,7 +1247,10 @@ def configure_seastar(build_dir, mode):
         stack_guards = 'ON' if args.stack_guards else 'OFF'
         seastar_cmake_args += ['-DSeastar_STACK_GUARDS={}'.format(stack_guards)]
 
-    if args.dpdk:
+    dpdk = args.dpdk
+    if dpdk is None:
+        dpdk = mode == 'release'
+    if dpdk:
         seastar_cmake_args += ['-DSeastar_DPDK=ON', '-DSeastar_DPDK_MACHINE=wsm']
     if args.split_dwarf:
         seastar_cmake_args += ['-DSeastar_SPLIT_DWARF=ON']
@@ -1275,7 +1259,7 @@ def configure_seastar(build_dir, mode):
 
     seastar_cmd = ['cmake', '-G', 'Ninja', os.path.relpath(args.seastar_path, seastar_build_dir)] + seastar_cmake_args
     cmake_dir = seastar_build_dir
-    if args.dpdk:
+    if dpdk:
         # need to cook first
         cmake_dir = args.seastar_path # required by cooking.sh
         relative_seastar_build_dir = os.path.join('..', seastar_build_dir)  # relative to seastar/
@@ -1308,29 +1292,13 @@ for mode in build_modes:
     modes[mode]['seastar_cflags'] = seastar_cflags
     modes[mode]['seastar_libs'] = seastar_libs
 
-# We need to use experimental features of the zstd library (to use our own allocators for the (de)compression context),
-# which are available only when the library is linked statically.
-def configure_zstd(build_dir, mode):
-    zstd_build_dir = os.path.join(build_dir, mode, 'zstd')
-
-    zstd_cmake_args = [
-        '-DCMAKE_BUILD_TYPE={}'.format(MODE_TO_CMAKE_BUILD_TYPE[mode]),
-        '-DCMAKE_C_COMPILER={}'.format(args.cc),
-        '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
-        '-DCMAKE_C_FLAGS={}'.format(zstd_cflags),
-        '-DZSTD_BUILD_PROGRAMS=OFF'
-    ]
-
-    zstd_cmd = ['cmake', '-G', 'Ninja', os.path.relpath('zstd/build/cmake', zstd_build_dir)] + zstd_cmake_args
-
-    print(zstd_cmd)
-    os.makedirs(zstd_build_dir, exist_ok=True)
-    subprocess.check_call(zstd_cmd, shell=False, cwd=zstd_build_dir)
-
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
+                 # Must link with static version of libzstd, since
+                 # experimental APIs that we use are only present there.
+                 maybe_static(True, '-lzstd'),
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
 pkgconfig_libs = [
@@ -1412,9 +1380,6 @@ if args.ragel_exec:
 else:
     ragel_exec = "ragel"
 
-for mode in build_modes:
-    configure_zstd(outdir, mode)
-
 # configure.py may run automatically from an already-existing build.ninja.
 # If the user interrupts configure.py in the middle, we need build.ninja
 # to remain in a valid state.  So we write our output to a temporary
@@ -1467,7 +1432,7 @@ with open(buildfile_tmp, 'w') as f:
         f.write(textwrap.dedent('''\
             cxx_ld_flags_{mode} = {cxx_ld_flags}
             ld_flags_{mode} = $cxx_ld_flags_{mode}
-            cxxflags_{mode} = $cxx_ld_flags_{mode} {cxxflags} -I. -I $builddir/{mode}/gen
+            cxxflags_{mode} = $cxx_ld_flags_{mode} {cxxflags} -iquote. -iquote $builddir/{mode}/gen
             libs_{mode} = -l{fmt_lib}
             seastar_libs_{mode} = {seastar_libs}
             rule cxx.{mode}
@@ -1553,7 +1518,6 @@ with open(buildfile_tmp, 'w') as f:
             else:
                 objs.extend(['$builddir/' + mode + '/' + artifact for artifact in [
                     'libdeflate/libdeflate.a',
-                    'zstd/lib/libzstd.a',
                 ]])
                 objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary in tests:
@@ -1707,10 +1671,6 @@ with open(buildfile_tmp, 'w') as f:
         f.write('  command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc} ../build/{mode}/libdeflate//libdeflate.a\n'.format(**locals()))
         f.write('build build/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
         f.write('  pool = submodule_pool\n')
-        f.write('build build/{mode}/zstd/lib/libzstd.a: ninja\n'.format(**locals()))
-        f.write('  pool = submodule_pool\n')
-        f.write('  subdir = build/{mode}/zstd\n'.format(**locals()))
-        f.write('  target = libzstd.a\n'.format(**locals()))
 
     mode = 'dev' if 'dev' in modes else modes[0]
     f.write('build checkheaders: phony || {}\n'.format(' '.join(['$builddir/{}/{}.o'.format(mode, hh) for hh in headers])))

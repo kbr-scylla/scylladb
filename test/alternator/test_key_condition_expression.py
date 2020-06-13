@@ -221,14 +221,9 @@ def test_key_condition_expression_multi(test_table_sn_with_sorted_partition):
     with pytest.raises(ClientError, match='ValidationException'):
         full_query(table, KeyConditionExpression='p=:p AND c>=:c1 AND c>=:c1',
             ExpressionAttributeValues={':p': p, ':c1': 3})
-    # DynamoDB's produces a somewhat confusing error message for the
-    # following. Before complaining on too many conditions on c, it ignores
-    # the second - and then complains that the attribute value c2 isn't used.
-    # But the details are less important, as long as we consider this an
-    # error and use the word "syntax" in the error message, like Dynamo.
-    with pytest.raises(ClientError, match='ValidationException.*yntax'):
+    with pytest.raises(ClientError, match='ValidationException'):
         full_query(table, KeyConditionExpression='p=:p AND c>=:c1 AND c<=:c2',
-            ExpressionAttributeValues={':p': p, ':c1': 3, 'c2': 7})
+            ExpressionAttributeValues={':p': p, ':c1': 3, ':c2': 7})
 
 # Although the syntax for KeyConditionExpression is only a subset of that
 # of ConditionExpression, it turns out that DynamoDB actually use the same
@@ -518,6 +513,42 @@ def test_key_condition_expression_and_conditions(test_table_sn_with_sorted_parti
             KeyConditions={'c' : {'AttributeValueList': [3],
                 'ComparisonOperator': 'GT'}}
             )
+
+# Demonstrate that issue #6573 was not a bug for KeyConditionExpression:
+# binary strings are ordered as unsigned bytes, i.e., byte 128 comes after
+# 127, not as signed bytes.
+# Test the five ordering operators: <, <=, >, >=, between
+def test_key_condition_expression_unsigned_bytes(test_table_sb):
+    p = random_string()
+    items = [{'p': p, 'c': bytearray([i])} for i in range(126,129)]
+    with test_table_sb.batch_writer() as batch:
+        for item in items:
+            batch.put_item(item)
+    got_items = full_query(test_table_sb,
+        KeyConditionExpression='p=:p AND c<:c',
+        ExpressionAttributeValues={':p': p, ':c': bytearray([127])})
+    expected_items = [item for item in items if item['c'] < bytearray([127])]
+    assert(got_items == expected_items)
+    got_items = full_query(test_table_sb,
+        KeyConditionExpression='p=:p AND c<=:c',
+        ExpressionAttributeValues={':p': p, ':c': bytearray([127])})
+    expected_items = [item for item in items if item['c'] <= bytearray([127])]
+    assert(got_items == expected_items)
+    got_items = full_query(test_table_sb,
+        KeyConditionExpression='p=:p AND c>:c',
+        ExpressionAttributeValues={':p': p, ':c': bytearray([127])})
+    expected_items = [item for item in items if item['c'] > bytearray([127])]
+    assert(got_items == expected_items)
+    got_items = full_query(test_table_sb,
+        KeyConditionExpression='p=:p AND c>=:c',
+        ExpressionAttributeValues={':p': p, ':c': bytearray([127])})
+    expected_items = [item for item in items if item['c'] >= bytearray([127])]
+    assert(got_items == expected_items)
+    got_items = full_query(test_table_sb,
+        KeyConditionExpression='p=:p AND c BETWEEN :c1 AND :c2',
+        ExpressionAttributeValues={':p': p, ':c1': bytearray([127]), ':c2': bytearray([128])})
+    expected_items = [item for item in items if item['c'] >= bytearray([127]) and item['c'] <= bytearray([128])]
+    assert(got_items == expected_items)
 
 # The following is an older test we had, which test one arbitrary use case
 # for KeyConditionExpression. It uses filled_test_table (the one we also
