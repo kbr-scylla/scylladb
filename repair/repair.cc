@@ -76,6 +76,26 @@ static std::vector<sstring> list_column_families(const database& db, const sstri
     return ret;
 }
 
+// Must run inside a seastar thread
+static std::vector<utils::UUID> get_table_ids(const database& db, const sstring& keyspace, const std::vector<sstring>& tables) {
+    std::vector<utils::UUID> table_ids;
+    table_ids.reserve(tables.size());
+    for (auto& table : tables) {
+        thread::maybe_yield();
+        table_ids.push_back(db.find_uuid(keyspace, table));
+    }
+    return table_ids;
+}
+
+static std::vector<sstring> get_table_names(const database& db, const std::vector<utils::UUID>& table_ids) {
+    std::vector<sstring> table_names;
+    table_names.reserve(table_ids.size());
+    for (auto& table_id : table_ids) {
+        table_names.push_back(db.find_column_family(table_id).schema()->cf_name());
+    }
+    return table_names;
+}
+
 template<typename Collection, typename T>
 void remove_item(Collection& c, T& item) {
     auto it = std::find(c.begin(), c.end(), item);
@@ -314,10 +334,10 @@ named_semaphore& tracker::range_parallelism_semaphore() {
     return _range_parallelism_semaphores[this_shard_id()];
 }
 
-future<> tracker::run(int id, std::function<future<> ()> func) {
+future<> tracker::run(int id, std::function<void ()> func) {
     return seastar::with_gate(_gate, [this, id, func =std::move(func)] {
         start(id);
-        return func().then([this, id] {
+        return seastar::async([func = std::move(func)] { func(); }).then([this, id] {
             rlogger.info("repair id {} completed successfully", id);
             done(id, true);
         }).handle_exception([this, id] (std::exception_ptr ep) {
@@ -630,14 +650,14 @@ future<uint64_t> estimate_partitions(seastar::sharded<database>& db, const sstri
 
 static
 const dht::sharder&
-get_sharder_for_tables(seastar::sharded<database>& db, const sstring& keyspace, const std::vector<sstring>& names) {
+get_sharder_for_tables(seastar::sharded<database>& db, const sstring& keyspace, const std::vector<utils::UUID>& table_ids) {
     schema_ptr last_s;
-    for (auto& name : names) {
+    for (size_t idx = 0 ; idx < table_ids.size(); idx++) {
         schema_ptr s;
         try {
-            s = db.local().find_column_family(keyspace, name).schema();
+            s = db.local().find_column_family(table_ids[idx]).schema();
         } catch(...) {
-            throw std::runtime_error(format("No column family '{}' in keyspace '{}'", name, keyspace));
+            throw std::runtime_error(format("No column family '{}' in keyspace '{}'", table_ids[idx], keyspace));
         }
         if (last_s && last_s->get_sharder() != s->get_sharder()) {
             throw std::runtime_error(
@@ -650,7 +670,7 @@ get_sharder_for_tables(seastar::sharded<database>& db, const sstring& keyspace, 
     }
     if (!last_s) {
         throw std::runtime_error(format("Failed to find sharder for keyspace={}, tables={}, no table in this keyspace",
-                keyspace, names));
+                keyspace, table_ids));
     }
     return last_s->get_sharder();
 }
@@ -658,16 +678,17 @@ get_sharder_for_tables(seastar::sharded<database>& db, const sstring& keyspace, 
 repair_info::repair_info(seastar::sharded<database>& db_,
     const sstring& keyspace_,
     const dht::token_range_vector& ranges_,
-    const std::vector<sstring>& cfs_,
+    std::vector<utils::UUID> table_ids_,
     int id_,
     const std::vector<sstring>& data_centers_,
     const std::vector<sstring>& hosts_,
     streaming::stream_reason reason_)
     : db(db_)
-    , sharder(get_sharder_for_tables(db_, keyspace_, cfs_))
+    , sharder(get_sharder_for_tables(db_, keyspace_, table_ids_))
     , keyspace(keyspace_)
     , ranges(ranges_)
-    , cfs(cfs_)
+    , cfs(get_table_names(db_.local(), table_ids_))
+    , table_ids(std::move(table_ids_))
     , id(id_)
     , shard(this_shard_id())
     , data_centers(data_centers_)
@@ -1000,7 +1021,7 @@ static future<> repair_range(repair_info& ri, const dht::token_range& range) {
                 ri.nr_failed_ranges++;
                 auto status = format("failed: mandatory neighbor={} is not alive", node);
                 rlogger.error("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}, peers={}, live_peers={}, status={}",
-                    ri.ranges_index, ri.ranges.size(), ri.id, ri.shard, ri.keyspace, ri.cfs, range, neighbors, live_neighbors, status);
+                    ri.ranges_index, ri.ranges.size(), ri.id, ri.shard, ri.keyspace, ri.table_names(), range, neighbors, live_neighbors, status);
                 ri.abort();
                 return make_exception_future<>(std::runtime_error(format("Repair mandatory neighbor={} is not alive, keyspace={}, mandatory_neighbors={}",
                     node, ri.keyspace, mandatory_neighbors)));
@@ -1010,20 +1031,21 @@ static future<> repair_range(repair_info& ri, const dht::token_range& range) {
             ri.nr_failed_ranges++;
             auto status = live_neighbors.empty() ? "skipped" : "partial";
             rlogger.warn("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}, peers={}, live_peers={}, status={}",
-            ri.ranges_index, ri.ranges.size(), ri.id, ri.shard, ri.keyspace, ri.cfs, range, neighbors, live_neighbors, status);
+            ri.ranges_index, ri.ranges.size(), ri.id, ri.shard, ri.keyspace, ri.table_names(), range, neighbors, live_neighbors, status);
             if (live_neighbors.empty()) {
                 return make_ready_future<>();
             }
             neighbors.swap(live_neighbors);
       }
       return ::service::get_local_migration_manager().sync_schema(ri.db.local(), neighbors).then([&neighbors, &ri, range, id] {
-        return do_for_each(ri.cfs.begin(), ri.cfs.end(), [&ri, &neighbors, range] (auto&& cf) {
+        return do_for_each(ri.table_ids.begin(), ri.table_ids.end(), [&ri, &neighbors, range] (utils::UUID table_id) {
+            auto cf = ri.db.local().find_column_family(table_id).schema()->cf_name();
             ri._sub_ranges_nr++;
             if (ri.row_level_repair()) {
                 if (ri.dropped_tables.count(cf)) {
                     return make_ready_future<>();
                 }
-                return repair_cf_range_row_level(ri, cf, range, neighbors).handle_exception_type([&ri, cf] (no_such_column_family&) mutable {
+                return repair_cf_range_row_level(ri, cf, table_id, range, neighbors).handle_exception_type([&ri, cf] (no_such_column_family&) mutable {
                     ri.dropped_tables.insert(cf);
                     return make_ready_future<>();
                 }).handle_exception([&ri] (std::exception_ptr ep) mutable {
@@ -1322,7 +1344,7 @@ static future<> do_repair_ranges(lw_shared_ptr<repair_info> ri) {
                 ri->check_in_abort();
                 ri->ranges_index++;
                 rlogger.info("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}",
-                    ri->ranges_index, ri->ranges.size(), ri->id, ri->shard, ri->keyspace, ri->cfs, range);
+                    ri->ranges_index, ri->ranges.size(), ri->id, ri->shard, ri->keyspace, ri->table_names(), range);
                 return repair_range(*ri, range);
             });
         });
@@ -1332,7 +1354,7 @@ static future<> do_repair_ranges(lw_shared_ptr<repair_info> ri) {
             ri->check_in_abort();
             ri->ranges_index++;
             rlogger.info("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}",
-                ri->ranges_index, ri->ranges.size(), ri->id, ri->shard, ri->keyspace, ri->cfs, range);
+                ri->ranges_index, ri->ranges.size(), ri->id, ri->shard, ri->keyspace, ri->table_names(), range);
             return do_with(dht::selective_token_range_sharder(ri->sharder, range, ri->shard), [ri] (auto& sharder) {
                 return repeat([ri, &sharder] () {
                     check_in_shutdown();
@@ -1461,17 +1483,18 @@ static int do_repair_start(seastar::sharded<database>& db, sstring keyspace,
             cfs = std::move(cfs), ranges = std::move(ranges), options = std::move(options)] () mutable {
         std::vector<future<>> repair_results;
         repair_results.reserve(smp::count);
+        auto table_ids = get_table_ids(db.local(), keyspace, cfs);
         for (auto shard : boost::irange(unsigned(0), smp::count)) {
-            auto f = db.invoke_on(shard, [&db, keyspace, cfs, id, ranges,
+            auto f = db.invoke_on(shard, [&db, keyspace, table_ids, id, ranges,
                     data_centers = options.data_centers, hosts = options.hosts] (database& localdb) mutable {
                 auto ri = make_lw_shared<repair_info>(db,
-                        std::move(keyspace), std::move(ranges), std::move(cfs),
+                        std::move(keyspace), std::move(ranges), std::move(table_ids),
                         id, std::move(data_centers), std::move(hosts), streaming::stream_reason::repair);
                 return repair_ranges(ri);
             });
             repair_results.push_back(std::move(f));
         }
-        return when_all(repair_results.begin(), repair_results.end()).then([id] (std::vector<future<>> results) mutable {
+        when_all(repair_results.begin(), repair_results.end()).then([id] (std::vector<future<>> results) mutable {
             std::vector<sstring> errors;
             for (unsigned shard = 0; shard < results.size(); shard++) {
                 auto& f = results[shard];
@@ -1484,7 +1507,7 @@ static int do_repair_start(seastar::sharded<database>& db, sstring keyspace,
                 return make_exception_future<>(std::runtime_error(format("{}", errors)));
             }
             return make_ready_future<>();
-        });
+        }).get();
     }).handle_exception([id] (std::exception_ptr ep) {
         rlogger.info("repair_tracker run for repair id {} failed: {}", id, ep);
     });
@@ -1540,23 +1563,24 @@ future<> sync_data_using_repair(seastar::sharded<database>& db,
             auto cfs = list_column_families(db.local(), keyspace);
             if (cfs.empty()) {
                 rlogger.warn("repair id {} to sync data for keyspace={}, no table in this keyspace", id, keyspace);
-                return make_ready_future<>();
+                return;
             }
+            auto table_ids = get_table_ids(db.local(), keyspace, cfs);
             std::vector<future<>> repair_results;
             repair_results.reserve(smp::count);
             for (auto shard : boost::irange(unsigned(0), smp::count)) {
-                auto f = db.invoke_on(shard, [keyspace, cfs, id, ranges, neighbors, reason] (database& localdb) mutable {
+                auto f = db.invoke_on(shard, [keyspace, table_ids, id, ranges, neighbors, reason] (database& localdb) mutable {
                     auto data_centers = std::vector<sstring>();
                     auto hosts = std::vector<sstring>();
                     auto ri = make_lw_shared<repair_info>(service::get_local_storage_service().db(),
-                            std::move(keyspace), std::move(ranges), std::move(cfs),
+                            std::move(keyspace), std::move(ranges), std::move(table_ids),
                             id, std::move(data_centers), std::move(hosts), reason);
                     ri->neighbors = std::move(neighbors);
                     return repair_ranges(ri);
                 });
                 repair_results.push_back(std::move(f));
             }
-            return when_all(repair_results.begin(), repair_results.end()).then([id, keyspace] (std::vector<future<>> results) mutable {
+            when_all(repair_results.begin(), repair_results.end()).then([id, keyspace] (std::vector<future<>> results) mutable {
                 std::vector<sstring> errors;
                 for (unsigned shard = 0; shard < results.size(); shard++) {
                     auto& f = results[shard];
@@ -1569,7 +1593,7 @@ future<> sync_data_using_repair(seastar::sharded<database>& db,
                     return make_exception_future<>(std::runtime_error(format("{}", errors)));
                 }
                 return make_ready_future<>();
-            });
+            }).get();
         }).then([id, keyspace] {
             rlogger.info("repair id {} to sync data for keyspace={}, status=succeeded", id, keyspace);
         }).handle_exception([&db, id, keyspace] (std::exception_ptr ep) {
@@ -1767,6 +1791,7 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
             dht::token_range_vector ranges_for_removenode;
             auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
             auto local_dc = get_local_dc();
+            bool find_node_in_local_dc_only = strat.get_type() == locator::replication_strategy_type::network_topology;
             for (auto&r : ranges) {
                 seastar::thread::maybe_yield();
                 auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
@@ -1782,6 +1807,19 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
                     throw std::runtime_error(format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, zero replica after the removal",
                             op, keyspace_name, r, current_eps, new_eps));
                 }
+                auto get_neighbors_set = [&] (const std::vector<inet_address>& nodes) {
+                    for (auto& node : nodes) {
+                        if (snitch_ptr->get_datacenter(node) == local_dc) {
+                            return std::unordered_set<inet_address>{node};;
+                        }
+                    }
+                    if (find_node_in_local_dc_only) {
+                        throw std::runtime_error(format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, can not find new node in local dc={}",
+                                op, keyspace_name, r, current_eps, new_eps, local_dc));
+                    } else {
+                        return std::unordered_set<inet_address>{nodes.front()};
+                    }
+                };
                 if (new_owner.size() == 1) {
                     // For example, with RF = 3 and 4 nodes n1, n2, n3, n4 in
                     // the cluster, n3 is removed, old_replicas = {n1, n2, n3},
@@ -1806,14 +1844,7 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
                         // responsible for.
                         // Choose the decommission node n3 to run repair to
                         // sync with the new owner node n4.
-                        for (auto& node : new_owner) {
-                            if (snitch_ptr->get_datacenter(node) == local_dc) {
-                                neighbors_set = std::unordered_set<inet_address>{node};
-                                break;
-                            }
-                            throw std::runtime_error(format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, can not find new node in local dc={}",
-                                    op, keyspace_name, r, current_eps, new_eps, local_dc));
-                        }
+                        neighbors_set = get_neighbors_set(std::vector<inet_address>{*new_owner.begin()});
                     }
                 } else if (new_owner.size() == 0) {
                     // For example, with RF = 3 and 3 nodes n1, n2, n3 in the
@@ -1836,14 +1867,7 @@ future<> do_decommission_removenode_with_repair(seastar::sharded<database>& db, 
                         // Choose the decommission node n3 to run repair to
                         // sync with one of the replica nodes, e.g., n1, in the
                         // local DC.
-                        for (auto& node : new_eps) {
-                            if (snitch_ptr->get_datacenter(node) == local_dc) {
-                                neighbors_set = std::unordered_set<inet_address>{node};
-                                break;
-                            }
-                            throw std::runtime_error(format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, can not find new node in local dc={}",
-                                    op, keyspace_name, r, current_eps, new_eps, local_dc));
-                        }
+                        neighbors_set = get_neighbors_set(new_eps);
                     }
                 } else {
                     throw std::runtime_error(format("{}: keyspace={}, range={}, current_replica_endpoints={}, new_replica_endpoints={}, wrong nubmer of new owner node={}",

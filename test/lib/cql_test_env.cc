@@ -30,6 +30,7 @@
 #include "message/messaging_service.hh"
 #include "service/storage_service.hh"
 #include "auth/service.hh"
+#include "auth/common.hh"
 #include "db/config.hh"
 #include "db/batchlog_manager.hh"
 #include "schema_builder.hh"
@@ -47,7 +48,6 @@
 #include "gms/feature_service.hh"
 #include "service/storage_service.hh"
 #include "service/qos/service_level_controller.hh"
-#include "auth/service.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
 
@@ -411,12 +411,14 @@ public:
             mm_notif.start().get();
             auto stop_mm_notify = defer([&mm_notif] { mm_notif.stop().get(); });
 
+            sharded<auth::service> auth_service;
+
             set_abort_on_internal_error(true);
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto& ms = netw::get_messaging_service();
             auto sl_controller = sharded<qos::service_level_controller>();
-            sl_controller.start(qos::service_level_options{1000}).get();
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
             sl_controller.invoke_on_all([&sys_dist_ks, &sl_controller] (qos::service_level_controller& service) {
@@ -428,8 +430,6 @@ public:
             // don't start listening so tests can be run in parallel
             ms.start(std::ref(sl_controller), listen, std::move(7000)).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
-
-            sharded<auth::service> auth_service;
 
             // Normally the auth server is already stopped in here,
             // but if there is an initialization failure we have to
@@ -460,7 +460,7 @@ public:
             auto& ss = service::get_storage_service();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            ss.start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(auth_service), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(token_metadata), std::ref(sl_controller), true).get();
+            ss.start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(token_metadata), std::ref(sl_controller), true).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             database_config dbcfg;
@@ -542,6 +542,25 @@ public:
             service::get_local_storage_service().init_messaging_service_part().get();
             service::get_local_storage_service().init_server(service::bind_messaging_port(false)).get();
             service::get_local_storage_service().join_cluster().get();
+
+            auth::permissions_cache_config perm_cache_config;
+            perm_cache_config.max_entries = cfg->permissions_cache_max_entries();
+            perm_cache_config.validity_period = std::chrono::milliseconds(cfg->permissions_validity_in_ms());
+            perm_cache_config.update_period = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
+
+            const qualified_name qualified_authorizer_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authorizer());
+            const qualified_name qualified_authenticator_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authenticator());
+            const qualified_name qualified_role_manager_name(auth::meta::AUTH_PACKAGE_NAME, cfg->role_manager());
+
+            auth::service_config auth_config;
+            auth_config.authorizer_java_name = qualified_authorizer_name;
+            auth_config.authenticator_java_name = qualified_authenticator_name;
+            auth_config.role_manager_java_name = qualified_role_manager_name;
+
+            auth_service.start(perm_cache_config, std::ref(qp), std::ref(mm_notif), std::ref(mm), auth_config).get();
+            auth_service.invoke_on_all([&mm] (auth::service& auth) {
+                return auth.start(mm.local());
+            }).get();
 
             auto deinit_storage_service_server = defer([&auth_service] {
                 gms::stop_gossiping().get();

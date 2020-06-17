@@ -258,7 +258,7 @@ public:
     }
 
 public:
-    void set_keyspace(database& db, sstring keyspace);
+    void set_keyspace(database& db, std::string_view keyspace);
 
     void set_raw_keyspace(sstring new_keyspace) noexcept {
         _keyspace = std::move(new_keyspace);

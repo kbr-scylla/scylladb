@@ -10,7 +10,6 @@
 
 #include "test/lib/test_services.hh"
 #include "test/lib/reader_permit.hh"
-#include "auth/service.hh"
 #include "db/config.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/view/view_update_generator.hh"
@@ -28,11 +27,11 @@ class storage_service_for_tests::impl {
     sharded<gms::gossiper> _gossiper;
     distributed<database> _db;
     db::config _cfg;
-    sharded<auth::service> _auth_service;
     sharded<locator::token_metadata> _token_metadata;
     sharded<service::migration_notifier> _mnotif;
     sharded<db::system_distributed_keyspace> _sys_dist_ks;
     sharded<db::view::view_update_generator> _view_update_generator;
+    sharded<auth::service> _auth_service;
     sharded<qos::service_level_controller> _sl_controller;
 public:
     impl() {
@@ -46,11 +45,11 @@ public:
         _mnotif.start().get();
         _feature_service.start(gms::feature_config_from_db_config(_cfg)).get();
         _gossiper.start(std::ref(_abort_source), std::ref(_feature_service), std::ref(_token_metadata), std::ref(_cfg)).get();
-        _sl_controller.start(qos::service_level_options{1000}).get();
+        _sl_controller.start(std::ref(_auth_service), qos::service_level_options{1000}).get();
         netw::get_messaging_service().start(std::ref(_sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
         service::storage_service_config sscfg;
         sscfg.available_memory = memory::stats().total_memory();
-        service::get_storage_service().start(std::ref(_abort_source), std::ref(_db), std::ref(_gossiper), std::ref(_auth_service), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), sscfg, std::ref(_mnotif), std::ref(_token_metadata), std::ref(_sl_controller), true).get();
+        service::get_storage_service().start(std::ref(_abort_source), std::ref(_db), std::ref(_gossiper), std::ref(_sys_dist_ks), std::ref(_view_update_generator), std::ref(_feature_service), sscfg, std::ref(_mnotif), std::ref(_token_metadata), std::ref(_sl_controller), true).get();
         service::get_storage_service().invoke_on_all([] (auto& ss) {
             ss.enable_all_features();
         }).get();

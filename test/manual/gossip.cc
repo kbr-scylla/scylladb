@@ -50,13 +50,12 @@ namespace bpo = boost::program_options;
 
 int main(int ac, char ** av) {
     distributed<database> db;
-    sharded<auth::service> auth_service;
     app_template app;
     app.add_options()
         ("seed", bpo::value<std::vector<std::string>>(), "IP address of seed node")
         ("listen-address", bpo::value<std::string>()->default_value("0.0.0.0"), "IP address to listen");
-    return app.run_deprecated(ac, av, [&auth_service, &db, &app] {
-        return async([&auth_service, &db, &app] {
+    return app.run_deprecated(ac, av, [&db, &app] {
+        return async([&db, &app] {
             auto config = app.configuration();
             logging::logger_registry().set_logger_level("gossip", logging::log_level::trace);
             const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
@@ -71,6 +70,7 @@ int main(int ac, char ** av) {
             sharded<abort_source> abort_sources;
             sharded<service::migration_notifier> mnotif;
             sharded<locator::token_metadata> token_metadata;
+            sharded<auth::service> auth_service;
 
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
@@ -79,11 +79,11 @@ int main(int ac, char ** av) {
             mnotif.start().get();
             auto stop_mnotifier = defer([&] { mnotif.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
-            sl_controller.start(qos::service_level_options{1000}).get();
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
             gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(*cfg)).get();
-            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), auth_service, sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, token_metadata, sl_controller).get();
+            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, token_metadata, sl_controller).get();
             netw::get_messaging_service().start(std::ref(sl_controller), listen).get();
             auto& server = netw::get_local_messaging_service();
             auto port = server.port();

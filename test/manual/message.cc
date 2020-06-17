@@ -163,9 +163,10 @@ int main(int ac, char ** av) {
         ("cpuid", bpo::value<uint32_t>()->default_value(0), "Server cpuid");
 
     distributed<database> db;
+    sharded<auth::service> auth_service;
     distributed<qos::service_level_controller> sl_controller;
 
-    return app.run_deprecated(ac, av, [&app, &sl_controller] {
+    return app.run_deprecated(ac, av, [&app, &sl_controller, &auth_service] {
         auto config = app.configuration();
         uint16_t api_port = config["api-port"].as<uint16_t>();
         bool stay_alive = config["stay-alive"].as<bool>();
@@ -174,7 +175,7 @@ int main(int ac, char ** av) {
         }
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
-        return sl_controller.start(qos::service_level_options{1000}).then([listen, &sl_controller] {
+        return sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).then([listen, &sl_controller] {
             return netw::get_messaging_service().start(std::ref(sl_controller), listen);
         }).then([config, api_port, stay_alive] () {
             auto testers = new distributed<tester>;

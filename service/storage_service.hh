@@ -28,7 +28,6 @@
 
 #pragma once
 
-#include "auth/service.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "locator/token_metadata.hh"
@@ -55,17 +54,14 @@
 #include "sstables/version.hh"
 #include "cdc/metadata.hh"
 
+namespace cql_transport { class controller; }
+
 namespace db {
 class system_distributed_keyspace;
 namespace view {
 class view_update_generator;
 }
 }
-
-namespace cql_transport {
-    class cql_server;
-}
-class thrift_server;
 
 namespace dht {
 class boot_strapper;
@@ -129,7 +125,6 @@ private:
     gms::feature_service& _feature_service;
     distributed<database>& _db;
     gms::gossiper& _gossiper;
-    sharded<auth::service>& _auth_service;
     sharded<service::migration_notifier>& _mnotifier;
     sharded<qos::service_level_controller>& _sl_controller;
     // Note that this is obviously only valid for the current shard. Users of
@@ -139,8 +134,7 @@ private:
     // It shouldn't be impossible to actively serialize two callers if the need
     // ever arise.
     bool _loading_new_sstables = false;
-    std::unique_ptr<distributed<cql_transport::cql_server>> _cql_server;
-    std::unique_ptr<distributed<thrift_server>> _thrift_server;
+    friend class cql_transport::controller;
     sstring _operation_in_progress;
     bool _force_remove_completion = false;
     bool _ms_stopped = false;
@@ -160,9 +154,7 @@ private:
      */
     bool _for_testing;
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<auth::service>&, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::token_metadata& tm, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
-    void isolate_on_error();
-    void isolate_on_commit_error();
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::token_metadata& tm, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
 
     // Needed by distributed<>
     future<> stop();
@@ -177,10 +169,6 @@ public:
     future<> keyspace_changed(const sstring& ks_name);
     future<> update_pending_ranges();
     void update_pending_ranges_nowait(inet_address endpoint);
-
-    auth::service& get_local_auth_service() {
-        return _auth_service.local();
-    }
 
     const locator::token_metadata& get_token_metadata() const {
         return _token_metadata;
@@ -311,19 +299,6 @@ public:
     // should only be called via JMX
     future<bool> is_gossip_running();
 
-    // should only be called via JMX
-    future<> start_rpc_server();
-
-    future<> stop_rpc_server();
-
-    future<bool> is_rpc_server_running();
-
-    future<> start_native_transport();
-
-    future<> stop_native_transport();
-
-    future<bool> is_native_transport_running();
-
     void register_client_shutdown_hook(std::string name, client_shutdown_hook hook) {
         _client_shutdown_hooks.push_back({std::move(name), std::move(hook)});
     }
@@ -335,8 +310,6 @@ public:
         }
     }
 private:
-    future<> do_stop_rpc_server();
-    future<> do_stop_native_transport();
     future<> do_stop_ms();
     future<> do_stop_stream_manager();
     // Runs in thread context
@@ -554,6 +527,9 @@ private:
      */
     void scan_cdc_generations();
 
+public:
+    future<> check_and_repair_cdc_streams();
+private:
     future<> replicate_to_all_cores();
     future<> do_replicate_to_all_cores();
     serialized_action _replicate_action;
@@ -893,12 +869,13 @@ public:
     }
 private:
     void do_isolate_on_error(disk_error type);
+    future<> isolate();
+
     utils::UUID _local_host_id;
 public:
     utils::UUID get_local_id() const { return _local_host_id; }
 
 private:
-    future<> set_cql_ready(bool ready);
     void notify_down(inet_address endpoint);
     void notify_left(inet_address endpoint);
     void notify_up(inet_address endpoint);
@@ -909,7 +886,7 @@ public:
     bool is_repair_based_node_ops_enabled();
 };
 
-future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper, sharded<auth::service>& auth_service,
+future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
         storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::token_metadata>& tm, sharded<qos::service_level_controller>& sl_controller);

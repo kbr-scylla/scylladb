@@ -76,6 +76,7 @@ private:
 
     stats _stats;
     seastar::metrics::metric_groups _metrics;
+    double _last_backlog = 0.0f;
 
     std::list<lw_shared_ptr<sstables::compaction_info>> _compactions;
 
@@ -246,7 +247,7 @@ public:
     // called before compaction seals sstable and such and after all compaction work is done.
     void on_compaction_complete(compaction_weight_registration& weight_registration);
 
-    float backlog() {
+    double backlog() {
         return _backlog_manager.backlog();
     }
 
