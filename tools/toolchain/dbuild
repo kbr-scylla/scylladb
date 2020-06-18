@@ -4,12 +4,12 @@ if [[ -f ~/.config/scylladb/dbuild ]]; then
     . ~/.config/scylladb/dbuild
 fi
 
-if which podman >/dev/null 2>&1 ; then
-    tool=${DBUILD_TOOL-podman}
-elif which docker >/dev/null 2>&1 ; then
-    tool=${DBUILD_TOOL-docker}
+if which docker >/dev/null 2>&1 ; then
+  tool=${DBUILD_TOOL-docker}
+elif which podman >/dev/null 2>&1 ; then
+  tool=${DBUILD_TOOL-podman}
 else
-    die "Please make sure you install either podman or docker on this machine to run dbuild"
+  die "Please make sure you install either podman or docker on this machine to run dbuild"
 fi
 
 here="$(realpath $(dirname "$0"))"

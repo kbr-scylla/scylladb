@@ -202,6 +202,8 @@ public:
             , _is_compound(true)
     { }
 
+    explicit composite(const composite_view& v);
+
     composite()
             : _bytes()
             , _is_compound(true)
@@ -492,6 +494,7 @@ public:
 };
 
 class composite_view final {
+    friend class composite;
     bytes_view _bytes;
     bool _is_compound;
 public:
@@ -590,6 +593,11 @@ public:
         return os << "{" << ::join(", ", v.components()) << ", compound=" << v._is_compound << ", static=" << v.is_static() << "}";
     }
 };
+
+inline
+composite::composite(const composite_view& v)
+    : composite(bytes(v._bytes), v._is_compound)
+{ }
 
 inline
 std::ostream& operator<<(std::ostream& os, const composite& v) {
