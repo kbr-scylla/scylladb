@@ -183,7 +183,7 @@ future<> standard_role_manager::create_metadata_tables_if_missing() const {
                     _qp,
                     create_role_members_query,
                     _migration_manager),
-            std::move(role_attributes_table_created));
+            std::move(role_attributes_table_created)).discard_result();
 }
 
 future<> standard_role_manager::create_default_role_if_missing() const {
@@ -446,7 +446,7 @@ standard_role_manager::modify_membership(
         return make_ready_future<>();
     };
 
-    return when_all_succeed(modify_roles(), modify_role_members());
+    return when_all_succeed(modify_roles(), modify_role_members()).discard_result();
 }
 
 future<>

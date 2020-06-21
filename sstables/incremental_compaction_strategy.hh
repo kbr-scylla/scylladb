@@ -95,8 +95,6 @@ public:
         return _backlog_tracker;
     }
 
-    virtual std::vector<resharding_descriptor> get_resharding_jobs(column_family& cf, std::vector<shared_sstable> candidates) override;
-
     virtual std::unique_ptr<sstable_set_impl> make_sstable_set(schema_ptr schema) const override;
 };
 

@@ -184,24 +184,6 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(column_fa
     return n;
 }
 
-std::vector<resharding_descriptor>
-incremental_compaction_strategy::get_resharding_jobs(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
-    std::vector<resharding_descriptor> jobs;
-    shard_id reshard_at_current = 0;
-
-    clogger.debug("Trying to get resharding jobs for {}.{}...", cf.schema()->ks_name(), cf.schema()->cf_name());
-    std::unordered_map<utils::UUID, sstable_run> runs;
-    for (auto& candidate : candidates) {
-        runs[candidate->run_identifier()].insert(candidate);
-    }
-    for (auto& run : runs | boost::adaptors::map_values) {
-        std::vector<shared_sstable> all_fragments;
-        std::move(run.all().begin(), run.all().end(), std::back_inserter(all_fragments));
-        jobs.push_back(resharding_descriptor{std::move(all_fragments), _fragment_size, reshard_at_current++ % smp::count, 0});
-    }
-    return jobs;
-}
-
 incremental_compaction_strategy::incremental_compaction_strategy(const std::map<sstring, sstring>& options)
     : compaction_strategy_impl(options)
     , _options(options)

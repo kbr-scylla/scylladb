@@ -23,4 +23,5 @@ enum class compaction_strategy_type {
     incremental,
 };
 
+enum class reshape_mode { strict, relaxed };
 }
