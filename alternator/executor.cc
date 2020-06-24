@@ -619,16 +619,16 @@ void rmw_operation::set_default_write_isolation(std::string_view value) {
 // to races during concurrent updates of the same table. Once Scylla schema updates
 // are fixed, this issue will automatically get fixed as well.
 enum class update_tags_action { add_tags, delete_tags };
-static future<> update_tags(const rjson::value& tags, schema_ptr schema, std::map<sstring, sstring>&& tags_map, update_tags_action action) {
+static future<> update_tags(service::migration_manager& mm, const rjson::value& tags, schema_ptr schema, std::map<sstring, sstring>&& tags_map, update_tags_action action) {
     if (action == update_tags_action::add_tags) {
         for (auto it = tags.Begin(); it != tags.End(); ++it) {
             const rjson::value& key = (*it)["Key"];
             const rjson::value& value = (*it)["Value"];
-            std::string_view tag_key(key.GetString(), key.GetStringLength());
+            auto tag_key = rjson::to_string_view(key);
             if (tag_key.empty() || tag_key.size() > 128 || !validate_legal_tag_chars(tag_key)) {
                 throw api_error("ValidationException", "The Tag Key provided is invalid string");
             }
-            std::string_view tag_value(value.GetString(), value.GetStringLength());
+            auto tag_value = rjson::to_string_view(value);
             if (tag_value.empty() || tag_value.size() > 256 || !validate_legal_tag_chars(tag_value)) {
                 throw api_error("ValidationException", "The Tag Value provided is invalid string");
             }
@@ -636,8 +636,7 @@ static future<> update_tags(const rjson::value& tags, schema_ptr schema, std::ma
         }
     } else if (action == update_tags_action::delete_tags) {
         for (auto it = tags.Begin(); it != tags.End(); ++it) {
-            std::string_view tag_key(it->GetString(), it->GetStringLength());
-            tags_map.erase(sstring(tag_key));
+            tags_map.erase(sstring(it->GetString(), it->GetStringLength()));
         }
     }
 
@@ -646,24 +645,12 @@ static future<> update_tags(const rjson::value& tags, schema_ptr schema, std::ma
     }
     validate_tags(tags_map);
 
-    std::stringstream serialized_tags;
-    serialized_tags << '{';
-    for (auto& tag_entry : tags_map) {
-        serialized_tags << format("'{}':'{}',", tag_entry.first, tag_entry.second);
-    }
-    std::string serialized_tags_str = serialized_tags.str();
-    if (!tags_map.empty()) {
-        serialized_tags_str[serialized_tags_str.size() - 1] = '}'; // trims the last ',' delimiter
-    } else {
-        serialized_tags_str.push_back('}');
-    }
-
-    sstring req = format("ALTER TABLE \"{}\".\"{}\" WITH {} = {}",
-            schema->ks_name(), schema->cf_name(), tags_extension::NAME, serialized_tags_str);
-    return db::execute_cql(std::move(req)).discard_result();
+    schema_builder builder(schema);
+    builder.set_extensions(schema::extensions_map{{sstring(tags_extension::NAME), ::make_shared<tags_extension>(std::move(tags_map))}});
+    return mm.announce_column_family_update(builder.build(), false, std::vector<view_ptr>(), false);
 }
 
-static future<> add_tags(service::storage_proxy& proxy, schema_ptr schema, rjson::value& request_info) {
+static future<> add_tags(service::migration_manager& mm, service::storage_proxy& proxy, schema_ptr schema, rjson::value& request_info) {
     const rjson::value* tags = rjson::find(request_info, "Tags");
     if (!tags || !tags->IsArray()) {
         return make_exception_future<>(api_error("ValidationException", format("Cannot parse tags")));
@@ -673,7 +660,7 @@ static future<> add_tags(service::storage_proxy& proxy, schema_ptr schema, rjson
     }
 
     std::map<sstring, sstring> tags_map = get_tags_of_table(schema);
-    return update_tags(rjson::copy(*tags), schema, std::move(tags_map), update_tags_action::add_tags);
+    return update_tags(mm, rjson::copy(*tags), schema, std::move(tags_map), update_tags_action::add_tags);
 }
 
 future<executor::request_return_type> executor::tag_resource(client_state& client_state, service_permit permit, rjson::value request) {
@@ -684,8 +671,8 @@ future<executor::request_return_type> executor::tag_resource(client_state& clien
         if (!arn || !arn->IsString()) {
             return api_error("AccessDeniedException", "Incorrect resource identifier");
         }
-        schema_ptr schema = get_table_from_arn(_proxy, std::string_view(arn->GetString(), arn->GetStringLength()));
-        add_tags(_proxy, schema, request).get();
+        schema_ptr schema = get_table_from_arn(_proxy, rjson::to_string_view(*arn));
+        add_tags(_mm, _proxy, schema, request).get();
         return json_string("");
     });
 }
@@ -703,10 +690,10 @@ future<executor::request_return_type> executor::untag_resource(client_state& cli
             return api_error("ValidationException", format("Cannot parse tag keys"));
         }
 
-        schema_ptr schema = get_table_from_arn(_proxy, std::string_view(arn->GetString(), arn->GetStringLength()));
+        schema_ptr schema = get_table_from_arn(_proxy, rjson::to_string_view(*arn));
 
         std::map<sstring, sstring> tags_map = get_tags_of_table(schema);
-        update_tags(*tags, schema, std::move(tags_map), update_tags_action::delete_tags).get();
+        update_tags(_mm, *tags, schema, std::move(tags_map), update_tags_action::delete_tags).get();
         return json_string("");
     });
 }
@@ -717,7 +704,7 @@ future<executor::request_return_type> executor::list_tags_of_resource(client_sta
     if (!arn || !arn->IsString()) {
         return make_ready_future<request_return_type>(api_error("AccessDeniedException", "Incorrect resource identifier"));
     }
-    schema_ptr schema = get_table_from_arn(_proxy, std::string_view(arn->GetString(), arn->GetStringLength()));
+    schema_ptr schema = get_table_from_arn(_proxy, rjson::to_string_view(*arn));
 
     auto tags_map = get_tags_of_table(schema);
     rjson::value ret = rjson::empty_object();
@@ -734,12 +721,12 @@ future<executor::request_return_type> executor::list_tags_of_resource(client_sta
     return make_ready_future<executor::request_return_type>(make_jsonable(std::move(ret)));
 }
 
-static future<> wait_for_schema_agreement(db::timeout_clock::time_point deadline) {
-    return do_until([deadline] {
+static future<> wait_for_schema_agreement(service::migration_manager& mm, db::timeout_clock::time_point deadline) {
+    return do_until([&mm, deadline] {
         if (db::timeout_clock::now() > deadline) {
             throw std::runtime_error("Unable to reach schema agreement");
         }
-        return service::get_local_migration_manager().have_schema_agreement();
+        return mm.have_schema_agreement();
     }, [] {
         return seastar::sleep(500ms);
     });
@@ -932,15 +919,15 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             // Ignore the fact that the keyspace may already exist. See discussion in #6340
         }).then([this, table_name, request = std::move(request), schema, view_builders = std::move(view_builders)] () mutable {
         return futurize_invoke([&] { return _mm.announce_new_column_family(schema, false); }).then([this, table_info = std::move(request), schema, view_builders = std::move(view_builders)] () mutable {
-            return parallel_for_each(std::move(view_builders), [schema] (schema_builder builder) {
-                return service::get_local_migration_manager().announce_new_view(view_ptr(builder.build()));
+            return parallel_for_each(std::move(view_builders), [this, schema] (schema_builder builder) {
+                return _mm.announce_new_view(view_ptr(builder.build()));
             }).then([this, table_info = std::move(table_info), schema] () mutable {
                 future<> f = make_ready_future<>();
                 if (rjson::find(table_info, "Tags")) {
-                    f = add_tags(_proxy, schema, table_info);
+                    f = add_tags(_mm, _proxy, schema, table_info);
                 }
-                return f.then([] {
-                    return wait_for_schema_agreement(db::timeout_clock::now() + 10s);
+                return f.then([this] {
+                    return wait_for_schema_agreement(_mm, db::timeout_clock::now() + 10s);
                 }).then([table_info = std::move(table_info), schema] () mutable {
                     rjson::value status = rjson::empty_object();
                     supplement_table_info(table_info, *schema);
@@ -2657,7 +2644,7 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto query_options = std::make_unique<cql3::query_options>(cl, infinite_timeout_config, std::vector<cql3::raw_value>{});
     query_options = std::make_unique<cql3::query_options>(std::move(query_options), std::move(paging_state));
-    auto p = service::pager::query_pagers::pager(schema, selection, *query_state_ptr, *query_options, command, std::move(partition_ranges), cql_stats, nullptr);
+    auto p = service::pager::query_pagers::pager(schema, selection, *query_state_ptr, *query_options, command, std::move(partition_ranges), nullptr);
 
     return p->fetch_page(limit, gc_clock::now(), default_timeout()).then(
             [p, schema, cql_stats, partition_slice = std::move(partition_slice),
@@ -2675,6 +2662,7 @@ static future<executor::request_return_type> do_query(schema_ptr schema,
             rjson::set(items, "LastEvaluatedKey", encode_paging_state(*schema, *paging_state));
         }
         if (has_filter){
+            cql_stats.filtered_rows_read_total += p->stats().rows_read_total;
             // update our "filtered_row_matched_total" for all the rows matched, despited the filter
             cql_stats.filtered_rows_matched_total += items["Items"].Size();
         }

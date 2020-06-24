@@ -95,6 +95,12 @@ fedora_packages=(
     xxhash-devel
     makeself
     libzstd-static libzstd-devel
+    rpm-build
+    devscripts
+    debhelper
+    fakeroot
+    file
+
     openldap-servers
     openldap-devel
     toxiproxy

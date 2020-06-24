@@ -153,12 +153,16 @@ future<> distributed_loader::verify_owner_and_mode(fs::path path) {
 
 future<>
 distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir) {
-    return dir.invoke_on_all([&dir] (sstables::sstable_directory& d) {
+    return dir.invoke_on(0, [] (const sstables::sstable_directory& d) {
+        return distributed_loader::verify_owner_and_mode(d.sstable_dir());
+    }).then([&dir] {
+      return dir.invoke_on_all([&dir] (sstables::sstable_directory& d) {
         // Supposed to be called with the node either down or on behalf of maintenance tasks
         // like nodetool refresh
-        return d.process_sstable_dir(service::get_local_streaming_read_priority()).then([&dir, &d] {
+        return d.process_sstable_dir(service::get_local_streaming_priority()).then([&dir, &d] {
             return d.move_foreign_sstables(dir);
         });
+      });
     }).then([&dir] {
         return dir.invoke_on_all([&dir] (sstables::sstable_directory& d) {
             return d.commit_directory_changes();
@@ -263,7 +267,7 @@ future<> run_resharding_jobs(sharded<sstables::sstable_directory>& dir, std::vec
             auto info_vec = std::move(reshard_jobs[this_shard_id()].info_vec);
             auto& cm = table.get_compaction_manager();
             auto max_threshold = table.schema()->max_compaction_threshold();
-            auto& iop = service::get_local_streaming_read_priority();
+            auto& iop = service::get_local_streaming_priority();
             return d.reshard(std::move(info_vec), cm, table, max_threshold, creator, iop).then([&d, &dir] {
                 return d.move_foreign_sstables(dir);
             });
@@ -312,7 +316,7 @@ distributed_loader::reshape(sharded<sstables::sstable_directory>& dir, sharded<d
     return dir.map_reduce0([&dir, &db, ks_name = std::move(ks_name), table_name = std::move(table_name), creator = std::move(creator), mode] (sstables::sstable_directory& d) {
         auto& table = db.local().find_column_family(ks_name, table_name);
         auto& cm = table.get_compaction_manager();
-        auto& iop = service::get_local_streaming_read_priority();
+        auto& iop = service::get_local_streaming_priority();
         return d.reshape(cm, table, creator, iop, mode);
     }, uint64_t(0), std::plus<uint64_t>()).then([start] (uint64_t total_size) {
         if (total_size > 0) {
@@ -630,7 +634,7 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
 
         sharded<sstables::sstable_directory> directory;
         directory.start(fs::path(sstdir), db.local().get_config().initial_sstable_loading_concurrency(),
-            sstables::sstable_directory::need_mutate_level::yes,
+            sstables::sstable_directory::need_mutate_level::no,
             sstables::sstable_directory::lack_of_toc_fatal::yes,
             sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
             sstables::sstable_directory::allow_loading_materialized_view::yes,

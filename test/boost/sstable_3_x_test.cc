@@ -4663,6 +4663,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_table_empty_clustering_key) {
  * containing complex columns with zero subcolumns.
  */
 SEASTAR_THREAD_TEST_CASE(test_complex_column_zero_subcolumns_read) {
+    auto abj = defer([] { await_background_jobs().get(); });
     using utils::UUID;
     const sstring path =
         "test/resource/sstables/3.x/uncompressed/complex_column_zero_subcolumns";
@@ -4767,9 +4768,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_read_two_rows_fast_forwarding) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_dead_row_marker) {
+    auto abj = defer([] { await_background_jobs().get(); });
     api::timestamp_type ts = 1543494402386839;
     gc_clock::time_point tp = gc_clock::time_point{} + gc_clock::duration{1543494402};
-    auto abj = defer([] { await_background_jobs().get(); });
     sstring table_name = "dead_row_marker";
     // CREATE TABLE dead_row_marker (pk int, ck int, st int static, rc int , PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
@@ -4798,6 +4799,7 @@ SEASTAR_THREAD_TEST_CASE(test_dead_row_marker) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
+    auto abj = defer([] { await_background_jobs().get(); });
     /* The created SSTables content should match that of
      * an MV filled with the following queries:
      *
@@ -4806,7 +4808,6 @@ SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
      * INSERT INTO cf (p, v) VALUES (1, 0);
      * UPDATE cf SET v = 1 WHERE p = 1;
      */
-    auto abj = defer([] { await_background_jobs().get(); });
     sstring table_name = "shadowable_deletion";
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
@@ -4839,6 +4840,7 @@ SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
+    auto abj = defer([] { await_background_jobs().get(); });
     /* The created SSTables content should match that of
      * an MV filled with the following queries:
      *
@@ -4849,7 +4851,6 @@ SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
      * UPDATE cf USING TIMESTAMP 1540230874370002 SET v = 0 WHERE p = 1 AND c = 1;
      * UPDATE cf USING TIMESTAMP 1540230874370003 SET v = 1 WHERE p = 1 AND c = 1;
      */
-    auto abj = defer([] { await_background_jobs().get(); });
     sstring table_name = "regular_and_shadowable_deletion";
     schema_builder builder("sst3", table_name);
     builder.with_column("v", int32_type, column_kind::partition_key);
@@ -5051,8 +5052,8 @@ SEASTAR_THREAD_TEST_CASE(test_read_missing_summary) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_sstable_reader_on_unknown_column) {
+    auto abj = defer([] { await_background_jobs().get(); });
     api::timestamp_type write_timestamp = 1525385507816568;
-    auto wait_bg = seastar::defer([] { sstables::await_background_jobs().get(); });
     storage_service_for_tests ssft;
     auto get_builder = [&] (bool has_missing_column) {
         auto builder = schema_builder("ks", "cf")
@@ -5184,6 +5185,7 @@ static void test_sstable_write_large_row_f(schema_ptr s, memtable& mt, const par
 }
 
 SEASTAR_THREAD_TEST_CASE(test_sstable_write_large_row) {
+    auto abj = defer([] { await_background_jobs().get(); });
     storage_service_for_tests ssft;
     simple_schema s;
     mutation partition = s.new_mutation("pv");
@@ -5235,6 +5237,7 @@ static void test_sstable_log_too_many_rows_f(int rows, uint64_t threshold, bool 
 }
 
 SEASTAR_THREAD_TEST_CASE(test_sstable_log_too_many_rows) {
+    auto abj = defer([] { await_background_jobs().get(); });
     storage_service_for_tests ssft;
 
     // Generates a pseudo-random number from 1 to 100

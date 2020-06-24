@@ -756,7 +756,7 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
     remove(*cf);
     cf->clear_views();
     auto& ks = find_keyspace(ks_name);
-    return when_all_succeed(cf->await_pending_writes(), cf->await_pending_reads()).then([this, &ks, cf, tsf = std::move(tsf), snapshot] {
+    return when_all_succeed(cf->await_pending_writes(), cf->await_pending_reads()).then_unpack([this, &ks, cf, tsf = std::move(tsf), snapshot] {
         return truncate(ks, *cf, std::move(tsf), snapshot).finally([this, cf] {
             return cf->stop();
         });
@@ -2066,7 +2066,7 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
     auto&& full_slice = schema->full_slice();
     auto& cf = db.local().find_column_family(schema);
     return make_flat_multi_range_reader(std::move(schema), cf.streaming_read_concurrency_semaphore().make_permit(), std::move(ms),
-            std::move(range_generator), std::move(full_slice), service::get_local_streaming_read_priority(), {}, mutation_reader::forwarding::no);
+            std::move(range_generator), std::move(full_slice), service::get_local_streaming_priority(), {}, mutation_reader::forwarding::no);
 }
 
 std::ostream& operator<<(std::ostream& os, gc_clock::time_point tp) {

@@ -395,9 +395,8 @@ future<> standard_role_manager::drop(std::string_view role_name) const {
                     {sstring(role_name)}).discard_result();
         };
 
-
         return when_all_succeed(revoke_from_members(), revoke_members_of(),
-                remove_attributes_of()).then([delete_role = std::move(delete_role)] {
+                remove_attributes_of()).then_unpack([delete_role = std::move(delete_role)] {
             return delete_role();
         });
     });
@@ -475,7 +474,7 @@ standard_role_manager::grant(std::string_view grantee_name, std::string_view rol
         });
     };
 
-   return when_all_succeed(check_redundant(), check_cycle()).then([this, role_name, grantee_name] {
+   return when_all_succeed(check_redundant(), check_cycle()).then_unpack([this, role_name, grantee_name] {
        return this->modify_membership(grantee_name, role_name, membership_change::add);
    });
 }
