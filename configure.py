@@ -482,8 +482,6 @@ defines = ['XXH_PRIVATE_API',
 
 extra_cxxflags = {}
 
-cassandra_interface = Thrift(source='interface/cassandra.thrift', service='Cassandra')
-
 scylla_core = (['database.cc',
                 'absl-flat_hash_map.cc',
                 'table.cc',
@@ -541,6 +539,7 @@ scylla_core = (['database.cc',
                 'sstables/m_format_read_helpers.cc',
                 'sstables/sstable_directory.cc',
                 'sstables/incremental_compaction_strategy.cc',
+                'transport/cql_protocol_extension.cc',
                 'transport/event.cc',
                 'transport/event_notifier.cc',
                 'transport/server.cc',
@@ -682,6 +681,7 @@ scylla_core = (['database.cc',
                 'db/view/view_update_generator.cc',
                 'db/view/row_locking.cc',
                 'db/sstables-format-selector.cc',
+                'db/snapshot-ctl.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
                 'utils/UUID_gen.cc',
@@ -1126,9 +1126,9 @@ pkgs.append('libsystemd')
 
 
 compiler_test_src = '''
-#if __GNUC__ < 8
+#if __GNUC__ < 10
     #error "MAJOR"
-#elif __GNUC__ == 8
+#elif __GNUC__ == 10
     #if __GNUC_MINOR__ < 1
         #error "MINOR"
     #elif __GNUC_MINOR__ == 1
@@ -1141,7 +1141,7 @@ compiler_test_src = '''
 int main() { return 0; }
 '''
 if not try_compile_and_link(compiler=args.cxx, source=compiler_test_src):
-    print('Wrong GCC version. Scylla needs GCC >= 8.1.1 to compile.')
+    print('Wrong GCC version. Scylla needs GCC >= 10.1.1 to compile.')
     sys.exit(1)
 
 if not try_compile(compiler=args.cxx, source='#include <boost/version.hpp>'):

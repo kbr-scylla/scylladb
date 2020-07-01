@@ -10,10 +10,12 @@
 
 #pragma once
 
+#include <seastar/core/sharded.hh>
 #include "api.hh"
 
 namespace cql_transport { class controller; }
 class thrift_controller;
+namespace db { class snapshot_ctl; }
 
 namespace api {
 
@@ -22,6 +24,7 @@ void set_transport_controller(http_context& ctx, routes& r, cql_transport::contr
 void unset_transport_controller(http_context& ctx, routes& r);
 void set_rpc_controller(http_context& ctx, routes& r, thrift_controller& ctl);
 void unset_rpc_controller(http_context& ctx, routes& r);
-void set_snapshot(http_context& ctx, routes& r);
+void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_ctl);
+void unset_snapshot(http_context& ctx, routes& r);
 
 }

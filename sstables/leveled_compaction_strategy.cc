@@ -10,6 +10,7 @@
 
 #include "leveled_compaction_strategy.hh"
 #include <algorithm>
+#include <ranges>
 
 namespace sstables {
 
@@ -132,15 +133,15 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
     std::array<std::vector<shared_sstable>, leveled_manifest::MAX_LEVELS> level_info;
 
     auto is_disjoint = [this, schema] (const std::vector<shared_sstable>& sstables, unsigned tolerance) {
-        unsigned disjoint_sstables = 0;
+        unsigned overlapping_sstables = 0;
         auto prev_last = dht::ring_position::min();
         for (auto& sst : sstables) {
             if (dht::ring_position(sst->get_first_decorated_key()).less_compare(*schema, prev_last)) {
-                disjoint_sstables++;
+                overlapping_sstables++;
             }
             prev_last = dht::ring_position(sst->get_last_decorated_key());
         }
-        return disjoint_sstables > tolerance;
+        return overlapping_sstables <= tolerance;
     };
 
     for (auto& sst : input) {
@@ -156,8 +157,8 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
         level_info[sst_level].push_back(sst);
     }
 
-    for (auto& level : level_info) {
-        std::sort(level.begin(), level.end(), [this, schema] (shared_sstable a, shared_sstable b) {
+    for (auto& level : level_info | std::ranges::views::drop(1)) {
+        std::sort(level.begin(), level.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
             return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
         });
     }
@@ -182,6 +183,7 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
         max_filled_level = std::max(max_filled_level, level);
 
         if (!is_disjoint(level_info[level], tolerance)) {
+            leveled_manifest::logger.warn("Turns out that level {} is not disjoint, so compacting everything on behalf of {}.{}", level, schema->ks_name(), schema->cf_name());
             // Unfortunately no good limit to limit input size to max_sstables for LCS major
             compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, max_filled_level, _max_sstable_size_in_mb * 1024 * 1024);
             desc.options = compaction_options::make_reshape();

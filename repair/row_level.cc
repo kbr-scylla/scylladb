@@ -56,7 +56,7 @@ distributed<db::view::view_update_generator>* _view_update_generator;
 template<class SinkType, class SourceType>
 class sink_source_for_repair {
     uint32_t _repair_meta_id;
-    using get_sink_source_fn_type = std::function<future<rpc::sink<SinkType>, rpc::source<SourceType>> (uint32_t repair_meta_id, netw::messaging_service::msg_addr addr)>;
+    using get_sink_source_fn_type = std::function<future<std::tuple<rpc::sink<SinkType>, rpc::source<SourceType>>> (uint32_t repair_meta_id, netw::messaging_service::msg_addr addr)>;
     using sink_type  = std::reference_wrapper<rpc::sink<SinkType>>;
     using source_type = std::reference_wrapper<rpc::source<SourceType>>;
     // The vectors below store sink and source object for peer nodes.
@@ -75,17 +75,18 @@ public:
     void mark_source_closed(unsigned node_idx) {
         _sources_closed[node_idx] = true;
     }
-    future<sink_type, source_type> get_sink_source(gms::inet_address remote_node, unsigned node_idx) {
+    future<std::tuple<sink_type, source_type>> get_sink_source(gms::inet_address remote_node, unsigned node_idx) {
+        using value_type = std::tuple<sink_type, source_type>;
         if (_sinks[node_idx] && _sources[node_idx]) {
-            return make_ready_future<sink_type, source_type>(_sinks[node_idx].value(), _sources[node_idx].value());
+            return make_ready_future<value_type>(value_type(_sinks[node_idx].value(), _sources[node_idx].value()));
         }
         if (_sinks[node_idx] || _sources[node_idx]) {
-            return make_exception_future<sink_type, source_type>(std::runtime_error(format("sink or source is missing for node {}", remote_node)));
+            return make_exception_future<value_type>(std::runtime_error(format("sink or source is missing for node {}", remote_node)));
         }
-        return _fn(_repair_meta_id, netw::messaging_service::msg_addr(remote_node)).then([this, node_idx] (rpc::sink<SinkType> sink, rpc::source<SourceType> source) mutable {
+        return _fn(_repair_meta_id, netw::messaging_service::msg_addr(remote_node)).then_unpack([this, node_idx] (rpc::sink<SinkType> sink, rpc::source<SourceType> source) mutable {
             _sinks[node_idx].emplace(std::move(sink));
             _sources[node_idx].emplace(std::move(source));
-            return make_ready_future<sink_type, source_type>(_sinks[node_idx].value(), _sources[node_idx].value());
+            return make_ready_future<value_type>(value_type(_sinks[node_idx].value(), _sources[node_idx].value()));
         });
     }
     future<> close() {
@@ -361,6 +362,7 @@ private:
     std::optional<utils::phased_barrier::operation> _local_read_op;
     // Local reader or multishard reader to read the range
     flat_mutation_reader _reader;
+    std::optional<evictable_reader_handle> _reader_handle;
     // Current partition read from disk
     lw_shared_ptr<const decorated_key_with_hash> _current_dk;
 
@@ -379,30 +381,47 @@ public:
             , _sharder(remote_sharder, range, remote_shard)
             , _seed(seed)
             , _local_read_op(local_reader ? std::optional(cf.read_in_progress()) : std::nullopt)
-            , _reader(make_reader(db, cf, local_reader)) {
-    }
-
-private:
-    flat_mutation_reader
-    make_reader(seastar::sharded<database>& db,
-            column_family& cf,
-            is_local_reader local_reader) {
+            , _reader(nullptr) {
         if (local_reader) {
-            return cf.make_streaming_reader(_schema, _range);
+            auto ms = mutation_source([&cf] (
+                        schema_ptr s,
+                        reader_permit,
+                        const dht::partition_range& pr,
+                        const query::partition_slice& ps,
+                        const io_priority_class& pc,
+                        tracing::trace_state_ptr,
+                        streamed_mutation::forwarding,
+                        mutation_reader::forwarding fwd_mr) {
+                return cf.make_streaming_reader(std::move(s), pr, ps, fwd_mr);
+            });
+            std::tie(_reader, _reader_handle) = make_manually_paused_evictable_reader(
+                    std::move(ms),
+                    _schema,
+                    cf.streaming_read_concurrency_semaphore().make_permit(),
+                    _range,
+                    _schema->full_slice(),
+                    service::get_local_streaming_priority(),
+                    {},
+                    mutation_reader::forwarding::no);
+        } else {
+            _reader = make_multishard_streaming_reader(db, _schema, [this] {
+                auto shard_range = _sharder.next();
+                if (shard_range) {
+                    return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
+                }
+                return std::optional<dht::partition_range>();
+            });
         }
-        return make_multishard_streaming_reader(db, _schema, [this] {
-            auto shard_range = _sharder.next();
-            if (shard_range) {
-                return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
-            }
-            return std::optional<dht::partition_range>();
-        });
     }
 
-public:
     future<mutation_fragment_opt>
     read_mutation_fragment() {
         return _reader(db::no_timeout);
+    }
+
+    void on_end_of_stream() {
+        _reader = make_empty_flat_reader(_schema);
+        _reader_handle.reset();
     }
 
     lw_shared_ptr<const decorated_key_with_hash>& get_current_dk() {
@@ -423,6 +442,11 @@ public:
         }
     }
 
+    void pause() {
+        if (_reader_handle) {
+            _reader_handle->pause();
+        }
+    }
 };
 
 class repair_writer {
@@ -1004,11 +1028,7 @@ private:
         return repair_hash(h.finalize_uint64());
     }
 
-    stop_iteration handle_mutation_fragment(mutation_fragment_opt mfopt, size_t& cur_size, size_t& new_rows_size, std::list<repair_row>& cur_rows) {
-        if (!mfopt) {
-            return stop_iteration::yes;
-        }
-        mutation_fragment& mf = *mfopt;
+    stop_iteration handle_mutation_fragment(mutation_fragment& mf, size_t& cur_size, size_t& new_rows_size, std::list<repair_row>& cur_rows) {
         if (mf.is_partition_start()) {
             auto& start = mf.as_partition_start();
             _repair_reader.set_current_dk(start.key());
@@ -1034,8 +1054,9 @@ private:
     // Read rows from sstable until the size of rows exceeds _max_row_buf_size  - current_size
     // This reads rows from where the reader left last time into _row_buf
     // _current_sync_boundary or _last_sync_boundary have no effect on the reader neither.
-    future<std::list<repair_row>, size_t>
+    future<std::tuple<std::list<repair_row>, size_t>>
     read_rows_from_disk(size_t cur_size) {
+        using value_type = std::tuple<std::list<repair_row>, size_t>;
         return do_with(cur_size, size_t(0), std::list<repair_row>(), [this] (size_t& cur_size, size_t& new_rows_size, std::list<repair_row>& cur_rows) {
             return repeat([this, &cur_size, &cur_rows, &new_rows_size] () mutable {
                 if (cur_size >= _max_row_buf_size) {
@@ -1043,10 +1064,19 @@ private:
                 }
                 _gate.check();
                 return _repair_reader.read_mutation_fragment().then([this, &cur_size, &new_rows_size, &cur_rows] (mutation_fragment_opt mfopt) mutable {
-                    return handle_mutation_fragment(std::move(mfopt), cur_size, new_rows_size, cur_rows);
+                    if (!mfopt) {
+                        _repair_reader.on_end_of_stream();
+                        return stop_iteration::yes;
+                    }
+                    return handle_mutation_fragment(*mfopt, cur_size, new_rows_size, cur_rows);
                 });
-            }).then([&cur_rows, &new_rows_size] () mutable {
-                return make_ready_future<std::list<repair_row>, size_t>(std::move(cur_rows), new_rows_size);
+            }).then_wrapped([this, &cur_rows, &new_rows_size] (future<> fut) mutable {
+                if (fut.failed()) {
+                    _repair_reader.on_end_of_stream();
+                    return make_exception_future<value_type>(fut.get_exception());
+                }
+                _repair_reader.pause();
+                return make_ready_future<value_type>(value_type(std::move(cur_rows), new_rows_size));
             });
         });
     }
@@ -1069,7 +1099,7 @@ private:
         rlogger.trace("SET _last_sync_boundary from {} to {}", _last_sync_boundary, _current_sync_boundary);
         _last_sync_boundary = _current_sync_boundary;
         return row_buf_size().then([this, sb = std::move(skipped_sync_boundary)] (size_t cur_size) {
-            return read_rows_from_disk(cur_size).then([this, sb = std::move(sb)] (std::list<repair_row> new_rows, size_t new_rows_size) mutable {
+            return read_rows_from_disk(cur_size).then_unpack([this, sb = std::move(sb)] (std::list<repair_row> new_rows, size_t new_rows_size) mutable {
                 size_t new_rows_nr = new_rows.size();
                 _row_buf.splice(_row_buf.end(), new_rows);
                 return row_buf_csum().then([this, new_rows_size, new_rows_nr, sb = std::move(sb)] (repair_hash row_buf_combined_hash) {
@@ -1382,7 +1412,7 @@ public:
             return get_full_row_hashes_handler();
         }
         auto current_hashes = make_lw_shared<std::unordered_set<repair_hash>>();
-        return _sink_source_for_get_full_row_hashes.get_sink_source(remote_node, node_idx).then(
+        return _sink_source_for_get_full_row_hashes.get_sink_source(remote_node, node_idx).then_unpack(
                 [this, current_hashes, remote_node, node_idx]
                 (rpc::sink<repair_stream_cmd>& sink, rpc::source<repair_hash_with_cmd>& source) mutable {
             auto source_op = get_full_row_hashes_source_op(current_hashes, remote_node, node_idx, source);
@@ -1662,7 +1692,7 @@ public:
                 _metrics.tx_hashes_nr += set_diff.size();
             }
             stats().rpc_call_nr++;
-            auto f = _sink_source_for_get_row_diff.get_sink_source(remote_node, node_idx).get();
+            auto f = _sink_source_for_get_row_diff.get_sink_source(remote_node, node_idx).get0();
             rpc::sink<repair_hash_with_cmd>& sink = std::get<0>(f);
             rpc::source<repair_row_on_wire_with_cmd>& source = std::get<1>(f);
             auto sink_op = get_row_diff_sink_op(std::move(set_diff), needs_all_rows, sink, remote_node);
@@ -1776,7 +1806,7 @@ public:
                         stats().tx_row_bytes += row_bytes;
                         stats().rpc_call_nr++;
                         return to_repair_rows_on_wire(std::move(row_diff)).then([this, remote_node, node_idx] (repair_rows_on_wire rows)  {
-                            return  _sink_source_for_put_row_diff.get_sink_source(remote_node, node_idx).then(
+                            return  _sink_source_for_put_row_diff.get_sink_source(remote_node, node_idx).then_unpack(
                                     [this, rows = std::move(rows), remote_node, node_idx]
                                     (rpc::sink<repair_row_on_wire_with_cmd>& sink, rpc::source<repair_stream_cmd>& source) mutable {
                                 auto source_op = put_row_diff_source_op(remote_node, node_idx, source);

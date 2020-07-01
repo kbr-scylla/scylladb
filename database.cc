@@ -1601,20 +1601,6 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
     });
 }
 
-future<> database::apply_streaming_mutation(schema_ptr s, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
-    if (!s->is_synced()) {
-        throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
-                                 s->ks_name(), s->cf_name(), s->version()));
-    }
-    return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, fragmented, plan_id] () mutable {
-        return _streaming_dirty_memory_manager.region_group().run_when_memory_available([this, &m, plan_id, fragmented, s = std::move(s)] {
-            auto uuid = m.column_family_id();
-            auto& cf = find_column_family(uuid);
-            cf.apply_streaming_mutation(s, plan_id, std::move(m), fragmented);
-        }, db::no_timeout);
-    });
-}
-
 keyspace::config
 database::make_keyspace_config(const keyspace_metadata& ksm) {
     keyspace::config cfg;
@@ -1833,7 +1819,7 @@ future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_fun
                     future<> f = make_ready_future<>();
                     if (auto_snapshot) {
                         auto name = format("{:d}-{}", truncated_at.time_since_epoch().count(), cf.schema()->cf_name());
-                        f = cf.snapshot(name);
+                        f = cf.snapshot(*this, name);
                     }
                     return f.then([this, &cf, truncated_at, low_mark, should_flush] {
                         return cf.discard_sstables(truncated_at).then([this, &cf, truncated_at, low_mark, should_flush](db::replay_position rp) {
@@ -2018,9 +2004,10 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             reader_concurrency_semaphore* semaphore;
         };
         distributed<database>& _db;
+        utils::UUID _table_id;
         std::vector<reader_context> _contexts;
     public:
-        explicit streaming_reader_lifecycle_policy(distributed<database>& db) : _db(db), _contexts(smp::count) {
+        streaming_reader_lifecycle_policy(distributed<database>& db, utils::UUID table_id) : _db(db), _table_id(table_id), _contexts(smp::count) {
         }
         virtual flat_mutation_reader create_reader(
                 schema_ptr schema,
@@ -2049,7 +2036,12 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             });
         }
         virtual reader_concurrency_semaphore& semaphore() override {
-            return *_contexts[this_shard_id()].semaphore;
+            const auto shard = this_shard_id();
+            if (!_contexts[shard].semaphore) {
+                auto& cf = _db.local().find_column_family(_table_id);
+                _contexts[shard].semaphore = &cf.streaming_read_concurrency_semaphore();
+            }
+            return *_contexts[shard].semaphore;
         }
     };
     auto ms = mutation_source([&db] (schema_ptr s,
@@ -2060,7 +2052,8 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding,
             mutation_reader::forwarding fwd_mr) {
-        return make_multishard_combining_reader(make_shared<streaming_reader_lifecycle_policy>(db), std::move(s), pr, ps, pc,
+        auto table_id = s->id();
+        return make_multishard_combining_reader(make_shared<streaming_reader_lifecycle_policy>(db, table_id), std::move(s), pr, ps, pc,
                 std::move(trace_state), fwd_mr);
     });
     auto&& full_slice = schema->full_slice();

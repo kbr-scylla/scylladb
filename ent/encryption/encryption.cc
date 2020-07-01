@@ -695,10 +695,10 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
         // them all.
         // Since we are in pre-init phase, this should be safe.
         f = f.then([opts, &exts] {
-            return smp::invoke_on_all([opts, &exts] {
+            return smp::invoke_on_all([opts = make_lw_shared<options>(opts), &exts] () mutable {
                 auto& f = exts.schema_extensions().at(encryption_attribute);
                 for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
-                    exts.add_extension_to_schema(s, encryption_attribute, f(opts));
+                    exts.add_extension_to_schema(s, encryption_attribute, f(*opts));
                 }
             });
         });

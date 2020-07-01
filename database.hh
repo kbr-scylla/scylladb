@@ -405,24 +405,6 @@ private:
 
     lw_shared_ptr<memtable_list> _memtables;
 
-    // In older incarnations, we simply commited the mutations to memtables.
-    // However, doing that makes it harder for us to provide QoS within the
-    // disk subsystem. Keeping them in separate memtables allow us to properly
-    // classify those streams into its own I/O class
-    //
-    // We could write those directly to disk, but we still want the mutations
-    // coming through the wire to go to a memtable staging area.  This has two
-    // major advantages:
-    //
-    // first, it will allow us to properly order the partitions. They are
-    // hopefuly sent in order but we can't really guarantee that without
-    // sacrificing sender-side parallelism.
-    //
-    // second, we will be able to coalesce writes from multiple plan_id's and
-    // even multiple senders, as well as automatically tapping into the dirty
-    // memory throttling mechanism, guaranteeing we will not overload the
-    // server.
-    lw_shared_ptr<memtable_list> _streaming_memtables;
     utils::phased_barrier _streaming_flush_phaser;
 
     // If mutations are fragmented during streaming the sstables cannot be made
@@ -437,21 +419,8 @@ private:
         sstables::shared_sstable sstable;
     };
 
-    struct streaming_memtable_big {
-        lw_shared_ptr<memtable_list> memtables;
-        std::vector<monitored_sstable> sstables;
-        seastar::gate flush_in_progress;
-    };
-    std::unordered_map<utils::UUID, lw_shared_ptr<streaming_memtable_big>> _streaming_memtables_big;
-
-    future<std::vector<monitored_sstable>> flush_streaming_big_mutations(utils::UUID plan_id);
-    void apply_streaming_big_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m);
-    future<> seal_active_streaming_memtable_big(streaming_memtable_big& smb, flush_permit&&);
-
     lw_shared_ptr<memtable_list> make_memory_only_memtable_list();
     lw_shared_ptr<memtable_list> make_memtable_list();
-    lw_shared_ptr<memtable_list> make_streaming_memtable_list();
-    lw_shared_ptr<memtable_list> make_streaming_memtable_big_list(streaming_memtable_big& smb);
 
     sstables::compaction_strategy _compaction_strategy;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
@@ -465,11 +434,6 @@ private:
     // in all shards at the same time, which makes it hard to store all sstables
     // we need to load later on for all shards.
     std::vector<sstables::shared_sstable> _sstables_opened_but_not_loaded;
-    // sstables that are shared between several shards so we want to rewrite
-    // them (split the data belonging to this shard to a separate sstable),
-    // but for correct compaction we need to start the compaction only after
-    // reading all sstables.
-    std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_need_rewrite;
     // sstables that should not be compacted (e.g. because they need to be used
     // to generate view updates later)
     std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_staging;
@@ -564,22 +528,18 @@ private:
     bool cache_enabled() const {
         return _config.enable_cache && _schema->caching_options().enabled();
     }
-    void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, const std::vector<unsigned>& shards_for_the_sstable) noexcept;
+    void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable) noexcept;
     // Adds new sstable to the set of sstables
     // Doesn't update the cache. The cache must be synchronized in order for reads to see
     // the writes contained in this sstable.
     // Cache must be synchronized atomically with this, otherwise write atomicity may not be respected.
     // Doesn't trigger compaction.
     // Strong exception guarantees.
-    void add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable);
+    void add_sstable(sstables::shared_sstable sstable);
     static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     static void remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
-    // returns an empty pointer if sstable doesn't belong to current shard.
-    future<sstables::shared_sstable> open_sstable(sstables::foreign_sstable_open_info info, sstring dir,
-        int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
     void load_sstable(sstables::shared_sstable& sstable, bool reset_level = false);
     lw_shared_ptr<memtable> new_memtable();
-    lw_shared_ptr<memtable> new_streaming_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt, sstable_write_permit&& permit);
     // Caller must keep m alive.
     future<> update_cache(lw_shared_ptr<memtable> m, sstables::shared_sstable sst);
@@ -609,18 +569,11 @@ private:
     // Rebuilds existing sstable set with new sstables added to it and old sstables removed from it.
     void rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
         const std::vector<sstables::shared_sstable>& old_sstables);
-    // Rebuild sstable list with the deletion semaphore acquired.
-    future<>
-    rebuild_sstable_list_with_deletion_sem(std::vector<sstables::shared_sstable> new_ssts, std::vector<sstables::shared_sstable> old_ssts);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
     void on_compaction_completion(sstables::compaction_completion_desc& desc);
 
     void rebuild_statistics();
-
-    // This function replaces new sstables by their ancestors, which are sstables that needed resharding.
-    future<> replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables);
-    future<> remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors);
 private:
     mutation_source_opt _virtual_reader;
     // Creates a mutation reader which covers given sstables.
@@ -642,10 +595,6 @@ private:
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
 public:
-    bool has_shared_sstables() const {
-        return bool(_sstables_need_rewrite.size());
-    }
-
     sstring dir() const {
         return _config.datadir;
     }
@@ -801,7 +750,6 @@ public:
     future<> stop();
     future<> flush();
     future<> flush_streaming_mutations(utils::UUID plan_id, dht::partition_range_vector ranges = dht::partition_range_vector{});
-    future<> fail_streaming_mutations(utils::UUID plan_id);
     future<> clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
@@ -832,7 +780,7 @@ public:
 
     db::replay_position set_low_replay_position_mark();
 
-    future<> snapshot(sstring name);
+    future<> snapshot(database& db, sstring name);
     future<std::unordered_map<sstring, snapshot_details>> get_snapshot_details();
 
     /*!
@@ -851,7 +799,7 @@ public:
      * CREATE INDEX command.
      * The same is true for local index and MATERIALIZED VIEW.
      */
-    future<> write_schema_as_cql(sstring dir) const;
+    future<> write_schema_as_cql(database& db, sstring dir) const;
 
     const bool incremental_backups_enabled() const {
         return _config.enable_incremental_backups;
@@ -891,7 +839,6 @@ public:
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;
     std::vector<sstables::shared_sstable> select_sstables(const dht::partition_range& range) const;
     std::vector<sstables::shared_sstable> candidates_for_compaction() const;
-    std::vector<sstables::shared_sstable> sstables_need_rewrite() const;
     size_t sstables_count() const;
     std::vector<uint64_t> sstable_count_per_level() const;
     int64_t get_unleveled_sstables() const;
@@ -1038,28 +985,6 @@ private:
     // waiting on this future. This is useful in situations where we want to
     // synchronously flush data to disk.
     future<> seal_active_memtable(flush_permit&&);
-
-    // I am assuming here that the repair process will potentially send ranges containing
-    // few mutations, definitely not enough to fill a memtable. It wants to know whether or
-    // not each of those ranges individually succeeded or failed, so we need a future for
-    // each.
-    //
-    // One of the ways to fix that, is changing the repair itself to send more mutations at
-    // a single batch. But relying on that is a bad idea for two reasons:
-    //
-    // First, the goals of the SSTable writer and the repair sender are at odds. The SSTable
-    // writer wants to write as few SSTables as possible, while the repair sender wants to
-    // break down the range in pieces as small as it can and checksum them individually, so
-    // it doesn't have to send a lot of mutations for no reason.
-    //
-    // Second, even if the repair process wants to process larger ranges at once, some ranges
-    // themselves may be small. So while most ranges would be large, we would still have
-    // potentially some fairly small SSTables lying around.
-    //
-    // The best course of action in this case is to coalesce the incoming streams write-side.
-    // repair can now choose whatever strategy - small or big ranges - it wants, resting assure
-    // that the incoming memtables will be coalesced together.
-    future<> seal_active_streaming_memtable_immediate(flush_permit&&);
 
     void check_valid_rp(const db::replay_position&) const;
 public:
@@ -1516,7 +1441,6 @@ public:
     // Throws timed_out_error when timeout is reached.
     future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
-    future<> apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;

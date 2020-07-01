@@ -101,6 +101,10 @@ public:
 
     virtual shared_ptr<const metadata> get_result_metadata() const = 0;
 
+    virtual bool is_conditional() const {
+        return false;
+    }
+
     audit::audit_info* get_audit_info() { return _audit_info.get(); }
     void set_audit_info(audit::audit_info_ptr&& info) { _audit_info = std::move(info); }
 
