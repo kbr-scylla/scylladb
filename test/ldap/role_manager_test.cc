@@ -10,6 +10,7 @@
 
 #include "auth/standard_role_manager.hh"
 #include "auth/ldap_role_manager.hh"
+#include "auth/password_authenticator.hh"
 
 #include <fmt/format.h>
 #include <seastar/testing/test_case.hh>
@@ -398,6 +399,7 @@ namespace {
 shared_ptr<db::config> make_ldap_config() {
     auto p = make_shared<db::config>();
     p->role_manager("com.scylladb.auth.LDAPRoleManager");
+    p->authenticator(auth::password_authenticator_name());
     p->ldap_url_template(default_query_template);
     p->ldap_attr_role("cn");
     p->ldap_bind_dn(manager_dn);
