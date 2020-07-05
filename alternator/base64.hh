@@ -12,7 +12,7 @@
 
 #include <string_view>
 #include "bytes.hh"
-#include "rjson.hh"
+#include "utils/rjson.hh"
 
 std::string base64_encode(bytes_view);
 

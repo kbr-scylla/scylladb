@@ -100,6 +100,7 @@ fedora_packages=(
     debhelper
     fakeroot
     file
+    dpkg-dev
 
     openldap-servers
     openldap-devel

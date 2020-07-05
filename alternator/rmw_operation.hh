@@ -13,7 +13,7 @@
 #include "seastarx.hh"
 #include "service/storage_proxy.hh"
 #include "service/storage_proxy.hh"
-#include "rjson.hh"
+#include "utils/rjson.hh"
 #include "executor.hh"
 
 namespace alternator {

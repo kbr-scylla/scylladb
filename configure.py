@@ -509,6 +509,7 @@ scylla_core = (['database.cc',
                 'utils/updateable_value.cc',
                 'utils/directories.cc',
                 'utils/generation-number.cc',
+                'utils/rjson.cc',
                 'mutation_partition.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
@@ -516,7 +517,6 @@ scylla_core = (['database.cc',
                 'mutation_reader.cc',
                 'flat_mutation_reader.cc',
                 'mutation_query.cc',
-                'json.cc',
                 'keys.cc',
                 'counters.cc',
                 'compress.cc',
@@ -869,7 +869,6 @@ alternator = [
        'alternator/expressions.cc',
        Antlr3Grammar('alternator/expressions.g'),
        'alternator/conditions.cc',
-       'alternator/rjson.cc',
        'alternator/auth.cc',
 ]
 
@@ -1516,6 +1515,7 @@ with open(buildfile_tmp, 'w') as f:
             rule thrift.{mode}
                 command = thrift -gen cpp:cob_style -out $builddir/{mode}/gen $in
                 description = THRIFT $in
+                restat = 1
             rule antlr3.{mode}
                 # We replace many local `ExceptionBaseType* ex` variables with a single function-scope one.
                 # Because we add such a variable to every function, and because `ExceptionBaseType` is not a global

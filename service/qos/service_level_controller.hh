@@ -16,6 +16,7 @@
 #include "auth/service.hh"
 #include "service/storage_service.hh"
 #include <map>
+#include <stack>
 #include <unordered_set>
 #include "qos_common.hh"
 
