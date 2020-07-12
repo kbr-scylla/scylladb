@@ -4555,10 +4555,10 @@ static void prepared_on_shard(cql_test_env& e, const sstring& query,
 
 SEASTAR_TEST_CASE(test_like_parameter_marker) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        cquery_nofail(e, "CREATE TABLE t (pk int PRIMARY KEY, col text)").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (1, 'aaa')").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (2, 'bbb')").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (3, 'ccc')").get();
+        cquery_nofail(e, "CREATE TABLE t (pk int PRIMARY KEY, col text)");
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (1, 'aaa')");
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (2, 'bbb')");
+        cquery_nofail(e, "INSERT INTO  t (pk, col) VALUES (3, 'ccc')");
 
         const sstring query("UPDATE t SET col = ? WHERE pk = ? IF col LIKE ?");
         prepared_on_shard(e, query, {T("err"), I(9), T("e%")}, {{B(false), {}}});
@@ -4572,11 +4572,11 @@ SEASTAR_TEST_CASE(test_like_parameter_marker) {
 
 SEASTAR_TEST_CASE(test_select_serial_consistency) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        cquery_nofail(e, "CREATE TABLE t (a int, b int, primary key (a,b))").get();
-        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (1, 1)").get();
-        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (1, 2)").get();
-        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (2, 1)").get();
-        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (2, 2)").get();
+        cquery_nofail(e, "CREATE TABLE t (a int, b int, primary key (a,b))");
+        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (1, 1)");
+        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (1, 2)");
+        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (2, 1)");
+        cquery_nofail(e, "INSERT INTO t (a, b) VALUES (2, 2)");
 
         auto check_fails = [&e] (const sstring& query, const source_location& loc = source_location::current()) {
             try {
@@ -4600,10 +4600,10 @@ SEASTAR_TEST_CASE(test_select_serial_consistency) {
 
 SEASTAR_TEST_CASE(test_range_deletions_for_specific_column) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
-        cquery_nofail(e, "CREATE TABLE t (pk int, ck int, col text, PRIMARY KEY(pk, ck))").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 1, 'aaa')").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 2, 'bbb')").get();
-        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 3, 'ccc')").get();
+        cquery_nofail(e, "CREATE TABLE t (pk int, ck int, col text, PRIMARY KEY(pk, ck))");
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 1, 'aaa')");
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 2, 'bbb')");
+        cquery_nofail(e, "INSERT INTO  t (pk, ck, col) VALUES (1, 3, 'ccc')");
 
         BOOST_REQUIRE_THROW(e.execute_cql("DELETE col FROM t WHERE pk = 0 AND ck > 1 AND ck <= 3").get(),
                 exceptions::invalid_request_exception);
@@ -4621,44 +4621,34 @@ SEASTAR_TEST_CASE(test_alter_table_default_ttl_reset) {
     });
 }
 
-SEASTAR_TEST_CASE(equals_null_is_forbidden) {
-    return do_with_cql_env([](cql_test_env& e) {
-        return seastar::async([&e] {
-            cquery_nofail(
-                    e, "create table t (pk int, ck1 int, ck2 int, r int, m map<int, int>, primary key(pk, ck1, ck2))");
-            cquery_nofail(e, "insert into t(pk,ck1,ck2,r,m) values(1,11,21,101,{1:1})");
-            using ire = exceptions::invalid_request_exception;
-            const auto nullerr = exception_predicate::message_contains("null");
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where pk=null").get(), ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where token(pk)=null").get(), ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where ck1=null allow filtering").get(), ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where (ck1,ck2)=(null,1) allow filtering").get(),
-                                    ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where r=null allow filtering").get(), ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where m[1]=null allow filtering").get(), ire, nullerr);
-        });
-    });
-}
-
-SEASTAR_TEST_CASE(ck_slice_with_null_is_forbidden) {
-    return do_with_cql_env([](cql_test_env& e) {
-        return seastar::async([&e] {
-            cquery_nofail(e, "create table t (p int primary key, r int)");
-            cquery_nofail(e, "insert into t(p,r) values (1,11)");
-            using ire = exceptions::invalid_request_exception;
-            const auto nullerr = exception_predicate::message_contains("null");
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where r<null allow filtering").get(), ire, nullerr);
-            BOOST_REQUIRE_EXCEPTION(e.execute_cql("select * from t where r>null allow filtering").get(), ire, nullerr);
-        });
-    });
-}
-
-SEASTAR_TEST_CASE(test_internal_alter_table_on_a_distributed_table) {
+SEASTAR_TEST_CASE(test_internal_schema_changes_on_a_distributed_table) {
     return do_with_cql_env([](cql_test_env& e) {
         return seastar::async([&e] {
             cquery_nofail(e, "create table t (p int primary key, v int)");
-            const auto local_err = exception_predicate::message_contains("local");
+            const auto local_err = exception_predicate::message_contains("internal query");
             BOOST_REQUIRE_EXCEPTION(db::execute_cql("alter table ks.t add col abcd").get(), std::logic_error, local_err);
+            BOOST_REQUIRE_EXCEPTION(db::execute_cql("create table ks.t2 (id int primary key)").get(), std::logic_error, local_err);
+            BOOST_REQUIRE_EXCEPTION(db::execute_cql("create index on ks.t(v)").get(), std::logic_error, local_err);
+            BOOST_REQUIRE_EXCEPTION(db::execute_cql("drop table ks.t").get(), std::logic_error, local_err);
+            BOOST_REQUIRE_EXCEPTION(db::execute_cql("drop keyspace ks").get(), std::logic_error, local_err);
         });
+    });
+}
+
+SEASTAR_TEST_CASE(test_impossible_where) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "CREATE TABLE t(p int PRIMARY KEY, r int)");
+        cquery_nofail(e, "INSERT INTO  t(p,r) VALUES (0, 0)");
+        cquery_nofail(e, "INSERT INTO  t(p,r) VALUES (1, 10)");
+        cquery_nofail(e, "INSERT INTO  t(p,r) VALUES (2, 20)");
+        require_rows(e, "SELECT * FROM t WHERE r>10 AND r<10 ALLOW FILTERING", {});
+        require_rows(e, "SELECT * FROM t WHERE r>=10 AND r<=0 ALLOW FILTERING", {});
+
+        cquery_nofail(e, "CREATE TABLE t2(p int, c int, PRIMARY KEY(p, c)) WITH CLUSTERING ORDER BY (c DESC)");
+        cquery_nofail(e, "INSERT INTO  t2(p,c) VALUES (0, 0)");
+        cquery_nofail(e, "INSERT INTO  t2(p,c) VALUES (1, 10)");
+        cquery_nofail(e, "INSERT INTO  t2(p,c) VALUES (2, 20)");
+        require_rows(e, "SELECT * FROM t2 WHERE c>10 AND c<10 ALLOW FILTERING", {});
+        require_rows(e, "SELECT * FROM t2 WHERE c>=10 AND c<=0 ALLOW FILTERING", {});
     });
 }

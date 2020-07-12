@@ -41,7 +41,7 @@ namespace role_members_table {
 constexpr std::string_view name{"role_members" , 12};
 
 static std::string_view qualified_name() noexcept {
-    static const sstring instance = AUTH_KS + "." + sstring(name);
+    static const sstring instance = make_sstring(meta::AUTH_KS, ".", name);
     return instance;
 }
 
@@ -51,7 +51,7 @@ namespace role_attributes_table {
 constexpr std::string_view name{"role_attributes", 15};
 
 static std::string_view qualified_name() noexcept {
-    static const sstring instance = AUTH_KS + "." + sstring(name);
+    static const sstring instance = make_sstring(AUTH_KS, ".", name);
     return instance;
 }
 static std::string_view creation_query() noexcept {
@@ -135,7 +135,7 @@ static bool has_can_login(const cql3::untyped_result_set_row& row) {
 }
 
 std::string_view standard_role_manager_name() noexcept {
-    static const sstring instance = meta::AUTH_PACKAGE_NAME + "CassandraRoleManager";
+    static const sstring instance = make_sstring(meta::AUTH_PACKAGE_NAME, "CassandraRoleManager");
     return instance;
 }
 

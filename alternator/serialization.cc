@@ -54,7 +54,7 @@ struct from_json_visitor {
 
     void operator()(const reversed_type_impl& t) const { visit(*t.underlying_type(), from_json_visitor{v, bo}); };
     void operator()(const string_type_impl& t) {
-        bo.write(t.from_string(sstring_view(v.GetString(), v.GetStringLength())));
+        bo.write(t.from_string(rjson::to_string_view(v)));
     }
     void operator()(const bytes_type_impl& t) const {
         bo.write(base64_decode(v));
@@ -63,7 +63,11 @@ struct from_json_visitor {
         bo.write(boolean_type->decompose(v.GetBool()));
     }
     void operator()(const decimal_type_impl& t) const {
-        bo.write(t.from_string(sstring_view(v.GetString(), v.GetStringLength())));
+        try {
+            bo.write(t.from_string(rjson::to_string_view(v)));
+        } catch (const marshal_exception& e) {
+            throw api_error("ValidationException", format("The parameter cannot be converted to a numeric value: {}", v));
+        }
     }
     // default
     void operator()(const abstract_type& t) const {
@@ -79,7 +83,7 @@ bytes serialize_item(const rjson::value& item) {
     type_info type_info = type_info_from_string(rjson::to_string_view(it->name)); // JSON keys are guaranteed to be strings
 
     if (type_info.atype == alternator_type::NOT_SUPPORTED_YET) {
-        slogger.trace("Non-optimal serialization of type {}", it->name.GetString());
+        slogger.trace("Non-optimal serialization of type {}", it->name);
         return bytes{int8_t(type_info.atype)} + to_bytes(rjson::print(item));
     }
 
@@ -173,7 +177,7 @@ bytes get_key_from_typed_value(const rjson::value& key_typed_value, const column
     if (it->name != type_to_string(column.type)) {
         throw api_error("ValidationException",
                 format("Type mismatch: expected type {} for key column {}, got type {}",
-                        type_to_string(column.type), column.name_as_text(), it->name.GetString()));
+                        type_to_string(column.type), column.name_as_text(), it->name));
     }
     std::string_view value_view = rjson::to_string_view(it->value);
     if (value_view.empty()) {
@@ -242,14 +246,18 @@ big_decimal unwrap_number(const rjson::value& v, std::string_view diagnostic) {
     if (it->name != "N") {
         throw api_error("ValidationException", format("{}: expected number, found type '{}'", diagnostic, it->name));
     }
-    if (it->value.IsNumber()) {
-         // FIXME(sarna): should use big_decimal constructor with numeric values directly:
-        return big_decimal(rjson::print(it->value));
+    try {
+        if (it->value.IsNumber()) {
+             // FIXME(sarna): should use big_decimal constructor with numeric values directly:
+            return big_decimal(rjson::print(it->value));
+        }
+        if (!it->value.IsString()) {
+            throw api_error("ValidationException", format("{}: improperly formatted number constant", diagnostic));
+        }
+        return big_decimal(rjson::to_string_view(it->value));
+    } catch (const marshal_exception& e) {
+        throw api_error("ValidationException", format("The parameter cannot be converted to a numeric value: {}", it->value));
     }
-    if (!it->value.IsString()) {
-        throw api_error("ValidationException", format("{}: improperly formatted number constant", diagnostic));
-    }
-    return big_decimal(it->value.GetString());
 }
 
 const std::pair<std::string, const rjson::value*> unwrap_set(const rjson::value& v) {

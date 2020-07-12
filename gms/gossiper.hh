@@ -305,21 +305,6 @@ private:
      */
     void quarantine_endpoint(inet_address endpoint, clk::time_point quarantine_start);
 
-public:
-    /**
-     * Quarantine endpoint specifically for replacement purposes.
-     * @param endpoint
-     */
-    void replacement_quarantine(inet_address endpoint);
-
-    /**
-     * Remove the Endpoint and evict immediately, to avoid gossiping about this node.
-     * This should only be called when a token is taken over by a new IP address.
-     *
-     * @param endpoint The endpoint that has been replaced
-     */
-    void replaced_endpoint(inet_address endpoint);
-
 private:
     /**
      * The gossip digest is built based on randomization

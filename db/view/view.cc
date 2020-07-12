@@ -165,12 +165,15 @@ void stats::register_stats() {
 }
 
 bool partition_key_matches(const schema& base, const view_info& view, const dht::decorated_key& key, gc_clock::time_point now) {
-    return view.select_statement().get_restrictions()->get_partition_key_restrictions()->is_satisfied_by(
-            base, key.key(), clustering_key_prefix::make_empty(), row(), cql3::query_options({ }), now);
+    const auto r = view.select_statement().get_restrictions()->get_partition_key_restrictions();
+    return cql3::restrictions::is_satisfied_by(
+            r->expression, base, key.key(), clustering_key_prefix::make_empty(), row(), cql3::query_options({ }), now);
 }
 
 bool clustering_prefix_matches(const schema& base, const view_info& view, const partition_key& key, const clustering_key_prefix& ck, gc_clock::time_point now) {
-    return view.select_statement().get_restrictions()->get_clustering_columns_restrictions()->is_satisfied_by(
+    const auto r = view.select_statement().get_restrictions()->get_clustering_columns_restrictions();
+    return cql3::restrictions::is_satisfied_by(
+            r->expression,
             base, key, ck, row(), cql3::query_options({ }), now);
 }
 
@@ -227,7 +230,8 @@ bool matches_view_filter(const schema& base, const view_info& view, const partit
             && boost::algorithm::all_of(
                 view.select_statement().get_restrictions()->get_non_pk_restriction() | boost::adaptors::map_values,
                 [&] (auto&& r) {
-                    return r->is_satisfied_by(base, key, update.key(), update.cells(), cql3::query_options({ }), now);
+                    return cql3::restrictions::is_satisfied_by(
+                            r->expression, base, key, update.key(), update.cells(), cql3::query_options({ }), now);
                 });
 }
 
@@ -1430,7 +1434,7 @@ future<> view_builder::calculate_shard_build_step(
     // restart a view build at some common token (reshard), and which token
     // to restart at. So we need to wait until all shards have read the view
     // build statuses before they can all proceed to make the (same) decision.
-    // If we don't synchronoize here, a fast shard may make a decision, start
+    // If we don't synchronize here, a fast shard may make a decision, start
     // building and finish a build step - before the slowest shard even read
     // the view build information.
     container().invoke_on(0, [] (view_builder& builder) {
@@ -1473,8 +1477,7 @@ future<> view_builder::calculate_shard_build_step(
 
     auto f = seastar::when_all_succeed(bookkeeping_ops->begin(), bookkeeping_ops->end());
     return f.handle_exception([this, bookkeeping_ops = std::move(bookkeeping_ops)] (std::exception_ptr ep) {
-        log_level severity = _as.abort_requested() ? log_level::warn : log_level::error;
-        vlogger.log(severity, "Failed to update materialized view bookkeeping ({}), continuing anyway.", ep);
+        vlogger.warn("Failed to update materialized view bookkeeping while synchronizing view builds on all shards ({}), continuing anyway.", ep);
     });
 }
 
@@ -1809,8 +1812,7 @@ void view_builder::execute(build_step& step, exponential_backoff_retry r) {
         }
     }
     seastar::when_all_succeed(bookkeeping_ops.begin(), bookkeeping_ops.end()).handle_exception([this] (std::exception_ptr ep) {
-        log_level severity = _as.abort_requested() ? log_level::warn : log_level::error;
-        vlogger.log(severity, "Failed to update materialized view bookkeeping ({}), continuing anyway.", ep);
+        vlogger.warn("Failed to update materialized view bookkeeping ({}), continuing anyway.", ep);
     }).get();
 }
 

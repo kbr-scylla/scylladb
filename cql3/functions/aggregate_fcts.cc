@@ -256,10 +256,13 @@ public:
     }
 };
 
-/// The same as `impl_max_function_for' but without knowledge of `Type'.
+/// The same as `impl_max_function_for' but without compile-time dependency on `Type'.
 class impl_max_dynamic_function final : public aggregate_function::aggregate {
+    data_type _io_type;
     opt_bytes _max;
 public:
+    impl_max_dynamic_function(data_type io_type) : _io_type(std::move(io_type)) {}
+
     virtual void reset() override {
         _max = {};
     }
@@ -267,12 +270,11 @@ public:
         return _max.value_or(bytes{});
     }
     virtual void add_input(cql_serialization_format sf, const std::vector<opt_bytes>& values) override {
-        if (!values[0]) {
+        if (values.empty() || !values[0]) {
             return;
         }
-        const auto val = *values[0];
-        if (!_max || *_max < val) {
-            _max = val;
+        if (!_max || _io_type->less(*_max, *values[0])) {
+            _max = values[0];
         }
     }
 };
@@ -287,10 +289,13 @@ public:
 };
 
 class max_dynamic_function final : public native_aggregate_function {
+    data_type _io_type;
 public:
-    max_dynamic_function(data_type io_type) : native_aggregate_function("max", io_type, { io_type }) {}
+    max_dynamic_function(data_type io_type)
+            : native_aggregate_function("max", io_type, { io_type })
+            , _io_type(std::move(io_type)) {}
     virtual std::unique_ptr<aggregate> new_aggregate() override {
-        return std::make_unique<impl_max_dynamic_function>();
+        return std::make_unique<impl_max_dynamic_function>(_io_type);
     }
 };
 
@@ -347,10 +352,13 @@ public:
     }
 };
 
-/// The same as `impl_min_function_for' but without knowledge of `Type'.
+/// The same as `impl_min_function_for' but without compile-time dependency on `Type'.
 class impl_min_dynamic_function final : public aggregate_function::aggregate {
+    data_type _io_type;
     opt_bytes _min;
 public:
+    impl_min_dynamic_function(data_type io_type) : _io_type(std::move(io_type)) {}
+
     virtual void reset() override {
         _min = {};
     }
@@ -358,12 +366,11 @@ public:
         return _min.value_or(bytes{});
     }
     virtual void add_input(cql_serialization_format sf, const std::vector<opt_bytes>& values) override {
-        if (!values[0]) {
+        if (values.empty() || !values[0]) {
             return;
         }
-        const auto val = *values[0];
-        if (!_min || val < *_min) {
-            _min = val;
+        if (!_min || _io_type->less(*values[0], *_min)) {
+            _min = values[0];
         }
     }
 };
@@ -378,10 +385,13 @@ public:
 };
 
 class min_dynamic_function final : public native_aggregate_function {
+    data_type _io_type;
 public:
-    min_dynamic_function(data_type io_type) : native_aggregate_function("min", io_type, { io_type }) {}
+    min_dynamic_function(data_type io_type)
+            : native_aggregate_function("min", io_type, { io_type })
+            , _io_type(std::move(io_type)) {}
     virtual std::unique_ptr<aggregate> new_aggregate() override {
-        return std::make_unique<impl_min_dynamic_function>();
+        return std::make_unique<impl_min_dynamic_function>(_io_type);
     }
 };
 
