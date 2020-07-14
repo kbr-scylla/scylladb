@@ -1,6 +1,6 @@
 # Scylla
 
-## Quick-start
+## Build Prerequisites
 
 Scylla is fairly fussy about its build environment, requiring very recent
 versions of the C++20 compiler and of many libraries to build. The document
@@ -13,31 +13,42 @@ allows you to avoid changing anything in your build machine to meet Scylla's
 requirements - you just need to meet the frozen toolchain's prerequisites
 (mostly, Docker or Podman being available).
 
-Building and running Scylla with the frozen toolchain is as easy as:
+## Building Scylla
+
+Building Scylla with the frozen toolchain `dbuild` is as easy as:
 
 ```bash
-$ ./tools/toolchain/dbuild ./configure.py
-$ ./tools/toolchain/dbuild ninja build/release/scylla
-$ ./tools/toolchain/dbuild ./build/release/scylla --developer-mode 1
+$ git submodule update --init --force --recursive
+$ ./tools/toolchain/dbuild ./configure.py
+$ ./tools/toolchain/dbuild ninja build/release/scylla
 ```
+
+For further information, please see:
+
+* [Developer documentation] for more information on building Scylla.
+* [Packaging documentation] on how to build Scylla packages for different Linux distributions.
+* [Docker image build documentation] for information on how to build Docker images.
+
+[developer documentation]: HACKING.md
+[packaging documentation]: docs/building-packages.md
+[docker image build documentation]: dist/docker/redhat/README.md
 
 ## Running Scylla
 
-* Run Scylla
-```
-./build/release/scylla
+To start Scylla server, run:
 
-```
-
-* run Scylla with one CPU and ./tmp as work directory
-
-```
-./build/release/scylla --workdir tmp --smp 1
+```bash
+$ ./tools/toolchain/dbuild ./build/release/scylla --workdir tmp --smp 1 --developer-mode 1
 ```
 
-* For more run options:
-```
-./build/release/scylla --help
+This will start a Scylla node with one CPU core allocated to it and data files stored in the `tmp` directory.
+The `--developer-mode` is needed to disable the various checks Scylla performs at startup to ensure the machine is configured for maximum performance (not relevant on development workstations).
+Please note that you need to run Scylla with `dbuild` if you built it with the frozen toolchain.
+
+For more run options, run:
+
+```bash
+$ ./tools/toolchain/dbuild ./build/release/scylla --help
 ```
 
 ## Testing
@@ -69,27 +80,18 @@ The courses are free, self-paced and include hands-on examples. They cover a var
 administration, architecture, basic NoSQL concepts, using drivers for application development, Scylla setup, failover, compactions, 
 multi-datacenters and how Scylla integrates with third-party applications.
 
-## Building a CentOS-based Docker image
-
-Build a Docker image with:
-
-```
-cd dist/docker/redhat
-docker build -t <image-name> .
-```
-
-This build is based on executables downloaded from downloads.scylladb.com,
-**not** on the executables built in this source directory. See further
-instructions in dist/docker/redhat/README.md to build a docker image from
-your own executables.
-
-Run the image with:
-
-```
-docker run -p $(hostname -i):9042:9042 -i -t <image name>
-```
-
 ## Contributing to Scylla
 
 [Hacking howto](HACKING.md)
 [Guidelines for contributing](CONTRIBUTING.md)
+
+## Contact
+
+* The [users mailing list] and [Slack channel] are for users to discuss configuration, management, and operations of the ScyllaDB open source.
+* The [developers mailing list] is for developers and people interested in following the development of ScyllaDB to discuss technical topics.
+
+[Users mailing list]: https://groups.google.com/forum/#!forum/scylladb-users
+
+[Slack channel]: http://slack.scylladb.com/
+
+[Developers mailing list]: https://groups.google.com/forum/#!forum/scylladb-dev

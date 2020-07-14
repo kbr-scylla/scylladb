@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <concepts>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -154,13 +155,14 @@ extern std::ostream& operator<<(std::ostream&, const expression&);
 
 /// If there is a binary_operator atom b for which f(b) is true, returns it.  Otherwise returns null.
 template<typename Fn>
-const binary_operator* find_if(const expression& e, Fn f) {
+requires std::regular_invocable<Fn, const binary_operator&>
+const binary_operator* find_atom(const expression& e, Fn f) {
     return std::visit(overloaded_functor{
             [&] (const binary_operator& op) { return f(op) ? &op : nullptr; },
             [] (bool) -> const binary_operator* { return nullptr; },
             [&] (const conjunction& conj) -> const binary_operator* {
                 for (auto& child : conj.children) {
-                    if (auto found = find_if(child, f)) {
+                    if (auto found = find_atom(child, f)) {
                         return found;
                     }
                 }
@@ -171,6 +173,7 @@ const binary_operator* find_if(const expression& e, Fn f) {
 
 /// Counts binary_operator atoms b for which f(b) is true.
 template<typename Fn>
+requires std::regular_invocable<Fn, const binary_operator&>
 size_t count_if(const expression& e, Fn f) {
     return std::visit(overloaded_functor{
             [&] (const binary_operator& op) -> size_t { return f(op) ? 1 : 0; },
@@ -183,23 +186,23 @@ size_t count_if(const expression& e, Fn f) {
 }
 
 inline const binary_operator* find(const expression& e, const operator_type& op) {
-    return find_if(e, [&] (const binary_operator& o) { return *o.op == op; });
+    return find_atom(e, [&] (const binary_operator& o) { return *o.op == op; });
 }
 
 inline bool needs_filtering(const expression& e) {
-    return find_if(e, [] (const binary_operator& o) { return o.op->needs_filtering(); });
+    return find_atom(e, [] (const binary_operator& o) { return o.op->needs_filtering(); });
 }
 
 inline bool has_slice(const expression& e) {
-    return find_if(e, [] (const binary_operator& o) { return o.op->is_slice(); });
+    return find_atom(e, [] (const binary_operator& o) { return o.op->is_slice(); });
 }
 
 inline bool has_token(const expression& e) {
-    return find_if(e, [] (const binary_operator& o) { return std::holds_alternative<token>(o.lhs); });
+    return find_atom(e, [] (const binary_operator& o) { return std::holds_alternative<token>(o.lhs); });
 }
 
 inline bool has_slice_or_needs_filtering(const expression& e) {
-    return find_if(e, [] (const binary_operator& o) { return o.op->is_slice() || o.op->needs_filtering(); });
+    return find_atom(e, [] (const binary_operator& o) { return o.op->is_slice() || o.op->needs_filtering(); });
 }
 
 /// True iff binary_operator involves a collection.

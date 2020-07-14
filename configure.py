@@ -446,8 +446,6 @@ arg_parser.add_argument('--compiler', action='store', dest='cxx', default='g++',
                         help='C++ compiler path')
 arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='gcc',
                         help='C compiler path')
-arg_parser.add_argument('--with-osv', action='store', dest='with_osv', default='',
-                        help='Shortcut for compile for OSv')
 add_tristate(arg_parser, name='dpdk', dest='dpdk',
                         help='Use dpdk (from seastar dpdk sources) (default=True for release builds)')
 arg_parser.add_argument('--dpdk-target', action='store', dest='dpdk_target', default='',
@@ -475,6 +473,8 @@ arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', def
 arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', default='ragel',
         help='path to ragel executable')
 add_tristate(arg_parser, name='stack-guards', dest='stack_guards', help='Use stack guards')
+arg_parser.add_argument('--verbose', dest='verbose', action='store_true',
+                        help='Make configure.py output more verbose (useful for debugging the build process itself)')
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -1277,7 +1277,8 @@ def configure_seastar(build_dir, mode):
         relative_seastar_build_dir = os.path.join('..', seastar_build_dir)  # relative to seastar/
         seastar_cmd = ['./cooking.sh', '-i', 'dpdk', '-d', relative_seastar_build_dir, '--'] + seastar_cmd[4:]
 
-    print(seastar_cmd)
+    if args.verbose:
+        print(" \\\n  ".join(seastar_cmd))
     os.makedirs(seastar_build_dir, exist_ok=True)
     subprocess.check_call(seastar_cmd, shell=False, cwd=cmake_dir)
 
@@ -1544,7 +1545,7 @@ with open(buildfile_tmp, 'w') as f:
               description = TEST {mode}
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))
         f.write(
-            'build {mode}: phony {artifacts}\n'.format(
+            'build {mode}: phony {artifacts} dist-{mode}\n'.format(
                 mode=mode,
                 artifacts=str.join(' ', ('$builddir/' + mode + '/' + x for x in build_artifacts))
             )
@@ -1770,23 +1771,23 @@ with open(buildfile_tmp, 'w') as f:
         rule build-submodule-deb
           command = cd $dir && ./reloc/build_deb.sh --reloc-pkg $artifact
 
-        build scylla-jmx/build/scylla-jmx-package.tar.gz: build-submodule-reloc
-          reloc_dir = scylla-jmx
-        build dist-jmx-rpm: build-submodule-rpm scylla-jmx/build/scylla-jmx-package.tar.gz
-          dir = scylla-jmx
+        build tools/jmx/build/scylla-jmx-package.tar.gz: build-submodule-reloc
+          reloc_dir = tools/jmx
+        build dist-jmx-rpm: build-submodule-rpm tools/jmx/build/scylla-jmx-package.tar.gz
+          dir = tools/jmx
           artifact = build/scylla-jmx-package.tar.gz
-        build dist-jmx-deb: build-submodule-deb scylla-jmx/build/scylla-jmx-package.tar.gz
-          dir = scylla-jmx
+        build dist-jmx-deb: build-submodule-deb tools/jmx/build/scylla-jmx-package.tar.gz
+          dir = tools/jmx
           artifact = build/scylla-jmx-package.tar.gz
         build dist-jmx: phony dist-jmx-rpm dist-jmx-deb
 
-        build scylla-tools/build/scylla-tools-package.tar.gz: build-submodule-reloc
-          reloc_dir = scylla-tools
-        build dist-tools-rpm: build-submodule-rpm scylla-tools/build/scylla-tools-package.tar.gz
-          dir = scylla-tools
+        build tools/java/build/scylla-tools-package.tar.gz: build-submodule-reloc
+          reloc_dir = tools/java
+        build dist-tools-rpm: build-submodule-rpm tools/java/build/scylla-tools-package.tar.gz
+          dir = tools/java
           artifact = build/scylla-tools-package.tar.gz
-        build dist-tools-deb: build-submodule-deb scylla-tools/build/scylla-tools-package.tar.gz
-          dir = scylla-tools
+        build dist-tools-deb: build-submodule-deb tools/java/build/scylla-tools-package.tar.gz
+          dir = tools/java
           artifact = build/scylla-tools-package.tar.gz
         build dist-tools: phony dist-tools-rpm dist-tools-deb
 
@@ -1813,6 +1814,7 @@ with open(buildfile_tmp, 'w') as f:
         '''))
     for mode in build_modes:
         f.write(textwrap.dedent(f'''\
+        build dist-{mode}: phony dist-server-{mode} dist-python dist-tools dist-jmx
         build dist-check-{mode}: dist-check
           mode = {mode}
             '''))
