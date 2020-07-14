@@ -186,9 +186,10 @@ SEASTAR_THREAD_TEST_CASE(early_shutdown) {
     mylog.trace("early_shutdown: noop");
     with_ldap_connection(local_ldap_address, [] (ldap_connection&) {});
     mylog.trace("early_shutdown: bind");
-    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { (void) bind(c); });
+    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { bind(c).handle_exception(&ignore).get(); });
     mylog.trace("early_shutdown: search");
-    with_ldap_connection(local_ldap_address, [] (ldap_connection& c) { (void) search(c, base_dn); });
+    with_ldap_connection(
+            local_ldap_address, [] (ldap_connection& c) { search(c, base_dn).handle_exception(&ignore).get(); });
 }
 
 SEASTAR_THREAD_TEST_CASE(bind_after_fail) {

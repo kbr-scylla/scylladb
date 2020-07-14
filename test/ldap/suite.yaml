@@ -1,5 +1,3 @@
 type: ldap
 # Custom command line arguments for some of the tests
-custom_args:
-    ldap_connection_test:
-        - '-c2 -m2G --fail-on-abandoned-failed-futures=false'
+custom_args: {}
