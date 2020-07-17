@@ -288,7 +288,7 @@ void ldap_connection::read_ahead() {
     mylog.trace("read_ahead invoking socket read");
     _read_consumer = _input_stream.read().then([this] (temporary_buffer<char> b) {
         if (b.empty()) {
-            mylog.error("read_ahead received empty buffer; assuming EOF");
+            mylog.debug("read_ahead received empty buffer; assuming EOF");
             set_status(status::eof);
             return;
         }
