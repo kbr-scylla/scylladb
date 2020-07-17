@@ -377,6 +377,29 @@ system_distributed_keyspace::cdc_desc_exists(
     });
 }
 
+future<std::map<db_clock::time_point, cdc::streams_version>> 
+system_distributed_keyspace::cdc_get_versioned_streams(context ctx) {
+    return _qp.execute_internal(
+            format("SELECT * FROM {}.{}", NAME, CDC_DESC),
+            quorum_if_many(ctx.num_token_owners),
+            internal_distributed_timeout_config,
+            {},
+            false
+    ).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) {
+        std::map<db_clock::time_point, cdc::streams_version> result;
+
+        for (auto& row : *cql_result) {
+            auto ts = row.get_as<db_clock::time_point>("time");
+            auto exp = row.get_opt<db_clock::time_point>("expired");
+            std::vector<cdc::stream_id> ids;
+            row.get_list_data<bytes>("streams", std::back_inserter(ids)); 
+            result.emplace(ts, cdc::streams_version(std::move(ids), ts, exp));
+        }
+
+        return result;
+    });
+}
+
 future<qos::service_levels_info> system_distributed_keyspace::get_service_levels() const {
     static sstring prepared_query = format("SELECT * FROM {}.{};", NAME, SERVICE_LEVELS);
     return _qp.execute_internal(prepared_query,
@@ -425,4 +448,5 @@ future<> system_distributed_keyspace::drop_service_level(sstring service_level_n
             internal_distributed_timeout_config,
             {service_level_name}, true).discard_result();
 }
+
 }

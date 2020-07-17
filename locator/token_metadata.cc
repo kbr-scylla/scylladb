@@ -1040,7 +1040,7 @@ void token_metadata_impl::update_normal_tokens(const std::unordered_map<inet_add
             auto prev = _token_to_endpoint_map.insert(std::pair<token, inet_address>(t, endpoint));
             should_sort_tokens |= prev.second; // new token inserted -> sort
             if (prev.first->second != endpoint) {
-                tlogger.warn("Token {} changing ownership from {} to {}", t, prev.first->second, endpoint);
+                tlogger.debug("Token {} changing ownership from {} to {}", t, prev.first->second, endpoint);
                 prev.first->second = endpoint;
             }
         }
@@ -1212,9 +1212,8 @@ void token_metadata_impl::add_bootstrap_tokens(std::unordered_set<token> tokens,
 
 void token_metadata_impl::remove_bootstrap_tokens(std::unordered_set<token> tokens) {
     if (tokens.empty()) {
-        auto msg = format("tokens is empty in remove_bootstrap_tokens!");
-        tlogger.error("{}", msg);
-        throw std::runtime_error(msg);
+        tlogger.warn("tokens is empty in remove_bootstrap_tokens!");
+        return;
     }
     for (auto t : tokens) {
         _bootstrap_tokens.erase(t);

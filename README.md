@@ -1,5 +1,8 @@
 # Scylla
 
+[![Slack](https://img.shields.io/badge/slack-scylla-brightgreen.svg?logo=slack)](http://slack.scylladb.com)
+[![Twitter](https://img.shields.io/twitter/follow/ScyllaDB.svg?style=social&label=Follow)](https://twitter.com/intent/follow?screen_name=ScyllaDB)
+
 ## What is Scylla?
 
 Scylla is the real-time big data database that is API-compatible with Apache Cassandra and Amazon DynamoDB.
@@ -66,10 +69,10 @@ See [test.py manual](docs/testing.md).
 
 ## Scylla APIs and compatibility
 By default, Scylla is compatible with Apache Cassandra and its APIs - CQL and
-Thrift. There is also experimental support for the API of Amazon DynamoDB,
-but being experimental it needs to be explicitly enabled to be used. For more
-information on how to enable the experimental DynamoDB compatibility in Scylla,
-and the current limitations of this feature, see
+Thrift. There is also support for the API of Amazon DynamoDB™,
+which needs to be enabled and configured in order to be used. For more
+information on how to enable the DynamoDB™ API in Scylla,
+and the current compatibility of this feature as well as Scylla-specific extensions, see
 [Alternator](docs/alternator/alternator.md) and
 [Getting started with Alternator](docs/alternator/getting-started.md).
 
@@ -91,8 +94,12 @@ multi-datacenters and how Scylla integrates with third-party applications.
 
 ## Contributing to Scylla
 
-[Hacking howto](HACKING.md)
-[Guidelines for contributing](CONTRIBUTING.md)
+If you want to report a bug or submit a pull request or a patch, please read the [contribution guidelines].
+
+If you are a developer working on Scylla, please read the [developer guidelines].
+
+[contribution guidelines]: CONTRIBUTING.md
+[developer guidelines]: HACKING.md
 
 ## Contact
 

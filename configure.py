@@ -320,6 +320,7 @@ scylla_tests = set([
     'test/boost/estimated_histogram_test',
     'test/boost/logalloc_test',
     'test/boost/managed_vector_test',
+    'test/boost/intrusive_array_test',
     'test/boost/map_difference_test',
     'test/boost/memtable_test',
     'test/boost/meta_test',
@@ -376,6 +377,8 @@ scylla_tests = set([
     'test/boost/view_schema_ckey_test',
     'test/boost/vint_serialization_test',
     'test/boost/virtual_reader_test',
+    'test/boost/bptree_test',
+    'test/boost/double_decker_test',
     'test/boost/encrypted_file_test',
     'test/manual/ec2_snitch_test',
     'test/manual/gce_snitch_test',
@@ -393,6 +396,7 @@ scylla_tests = set([
     'test/perf/perf_fast_forward',
     'test/perf/perf_hash',
     'test/perf/perf_mutation',
+    'test/perf/perf_bptree',
     'test/perf/perf_row_cache_update',
     'test/perf/perf_simple_query',
     'test/perf/perf_sstable',
@@ -400,6 +404,8 @@ scylla_tests = set([
     'test/unit/lsa_sync_eviction_test',
     'test/unit/row_cache_alloc_stress_test',
     'test/unit/row_cache_stress_test',
+    'test/unit/bptree_stress_test',
+    'test/unit/bptree_compaction_test',
 ]) | ldap_tests
 
 perf_tests = set([
@@ -872,6 +878,8 @@ alternator = [
        Antlr3Grammar('alternator/expressions.g'),
        'alternator/conditions.cc',
        'alternator/auth.cc',
+       'alternator/error.cc',
+       'alternator/streams.cc',
 ]
 
 redis = [
@@ -977,6 +985,7 @@ pure_boost_tests = set([
     'test/boost/small_vector_test',
     'test/boost/top_k_test',
     'test/boost/vint_serialization_test',
+    'test/boost/bptree_test',
     'test/manual/streaming_histogram_test',
 ])
 
@@ -990,10 +999,13 @@ tests_not_using_seastar_test_framework = set([
     'test/perf/perf_cql_parser',
     'test/perf/perf_hash',
     'test/perf/perf_mutation',
+    'test/perf/perf_bptree',
     'test/perf/perf_row_cache_update',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
     'test/unit/row_cache_alloc_stress_test',
+    'test/unit/bptree_stress_test',
+    'test/unit/bptree_compaction_test',
     'test/manual/sstable_scan_footprint_test',
 ]) | pure_boost_tests
 
@@ -1486,6 +1498,8 @@ with open(buildfile_tmp, 'w') as f:
             command = reloc/build_rpm.sh --reloc-pkg $in --builddir $out
         rule debbuild
             command = reloc/build_deb.sh --reloc-pkg $in --builddir $out
+        rule unified
+            command = unified/build_unified.sh --mode $mode --unified-pkg $out
         ''').format(**globals()))
     for mode in build_modes:
         modeval = modes[mode]
@@ -1542,14 +1556,16 @@ with open(buildfile_tmp, 'w') as f:
               depfile = $out.d
             rule test.{mode}
               command = ./test.py --mode={mode}
+              pool = console
               description = TEST {mode}
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))
         f.write(
-            'build {mode}: phony {artifacts} dist-{mode}\n'.format(
+            'build {mode}-build: phony {artifacts}\n'.format(
                 mode=mode,
                 artifacts=str.join(' ', ('$builddir/' + mode + '/' + x for x in build_artifacts))
             )
         )
+        f.write(f'build {mode}: phony {mode}-build dist-{mode}\n')
         compiles = {}
         swaggers = set()
         serializers = {}
@@ -1645,7 +1661,7 @@ with open(buildfile_tmp, 'w') as f:
         )
 
         f.write(
-            'build {mode}-test: test.{mode} {test_executables} $builddir/{mode}/test/tools/cql_repl\n'.format(
+            'build {mode}-test: test.{mode} {test_executables} $builddir/{mode}/test/tools/cql_repl $builddir/{mode}/scylla\n'.format(
                 mode=mode,
                 test_executables=' '.join(['$builddir/{}/{}'.format(mode, binary) for binary in tests]),
             )
@@ -1738,6 +1754,9 @@ with open(buildfile_tmp, 'w') as f:
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
         f.write(f'build dist-server-{mode}: phony build/dist/{mode}/redhat build/dist/{mode}/debian\n')
+        f.write(f'build build/{mode}/scylla-unified-package.tar.gz: unified build/{mode}/scylla-package.tar.gz build/{mode}/scylla-python3-package.tar.gz tools/jmx/build/scylla-jmx-package.tar.gz tools/java/build/scylla-tools-package.tar.gz | always\n')
+        f.write(f'  pool = submodule_pool\n')
+        f.write(f'  mode = {mode}\n')
         f.write('rule libdeflate.{mode}\n'.format(**locals()))
         f.write('  command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc} ../build/{mode}/libdeflate//libdeflate.a\n'.format(**locals()))
         f.write('build build/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
@@ -1753,6 +1772,9 @@ with open(buildfile_tmp, 'w') as f:
     f.write('build checkheaders: phony || {}\n'.format(' '.join(['$builddir/{}/{}.o'.format(mode, hh) for hh in headers])))
 
     f.write(
+            'build build: phony {}\n'.format(' '.join([f'{mode}-build' for mode in modes]))
+    )
+    f.write(
             'build test: phony {}\n'.format(' '.join(['{mode}-test'.format(mode=mode) for mode in modes]))
     )
     f.write(
@@ -1765,7 +1787,7 @@ with open(buildfile_tmp, 'w') as f:
         build dist-server: phony dist-server-rpm dist-server-deb
 
         rule build-submodule-reloc
-          command = cd $reloc_dir && ./reloc/build_reloc.sh
+          command = cd $reloc_dir && ./reloc/build_reloc.sh --nodeps
         rule build-submodule-rpm
           command = cd $dir && ./reloc/build_rpm.sh --reloc-pkg $artifact
         rule build-submodule-deb

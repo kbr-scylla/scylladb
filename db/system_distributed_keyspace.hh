@@ -28,6 +28,7 @@ class query_processor;
 namespace cdc {
     class stream_id;
     class topology_description;
+    class streams_version;
 } // namespace cdc
 
 namespace db {
@@ -71,6 +72,8 @@ public:
     future<> create_cdc_desc(db_clock::time_point streams_ts, const std::vector<cdc::stream_id>&, context);
     future<> expire_cdc_desc(db_clock::time_point streams_ts, db_clock::time_point expiration_time, context);
     future<bool> cdc_desc_exists(db_clock::time_point streams_ts, context);
+
+    future<std::map<db_clock::time_point, cdc::streams_version>> cdc_get_versioned_streams(context);
 
     future<qos::service_levels_info> get_service_levels() const;
     future<qos::service_levels_info> get_service_level(sstring service_level_name) const;
