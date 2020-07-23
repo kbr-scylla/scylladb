@@ -27,6 +27,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include "mutation.hh"
 #include "modification_statement.hh"
 #include "cas_request.hh"
 #include <seastar/core/sleep.hh>

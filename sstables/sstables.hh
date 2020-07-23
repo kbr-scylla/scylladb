@@ -41,7 +41,6 @@
 #include "utils/disk-error-handler.hh"
 #include "sstables/progress_monitor.hh"
 #include "db/commitlog/replay_position.hh"
-#include "flat_mutation_reader.hh"
 #include "utils/phased_barrier.hh"
 #include "component_type.hh"
 #include "sstable_version.hh"
@@ -56,7 +55,7 @@
 #include <boost/intrusive/list.hpp>
 
 class sstable_assertions;
-
+class flat_mutation_reader;
 class row_consumer;
 
 namespace sstables {

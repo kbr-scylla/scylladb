@@ -49,6 +49,8 @@
 #include "range.hh"
 #include "types.hh"
 
+class row;
+
 namespace cql3 {
 
 namespace selection {

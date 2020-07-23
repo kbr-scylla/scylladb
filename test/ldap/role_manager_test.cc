@@ -11,6 +11,7 @@
 #include "auth/standard_role_manager.hh"
 #include "auth/ldap_role_manager.hh"
 #include "auth/password_authenticator.hh"
+#include "db/config.hh"
 
 #include <fmt/format.h>
 #include <seastar/testing/test_case.hh>

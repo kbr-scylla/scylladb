@@ -28,6 +28,8 @@ else
 fi
 
 bash seastar/install-dependencies.sh
+bash tools/jmx/install-dependencies.sh
+bash tools/java/install-dependencies.sh
 
 debian_base_packages=(
     liblua5.3-dev
@@ -168,7 +170,7 @@ elif [ "$ID" = "fedora" ]; then
         exit 1
     fi
     yum install -y "${fedora_packages[@]}"
-    pip3 install pystache cassandra-driver
+    pip3 install cassandra-driver
 elif [ "$ID" = "centos" ]; then
     centos_packages+=(openssl-devel)
     yum install -y "${centos_packages[@]}"

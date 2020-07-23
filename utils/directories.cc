@@ -13,6 +13,7 @@
 #include "directories.hh"
 #include "distributed_loader.hh"
 #include "utils/disk-error-handler.hh"
+#include "db/config.hh"
 
 namespace utils {
 
