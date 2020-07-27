@@ -236,7 +236,7 @@ modes = {
     },
     'release': {
         'cxxflags': '',
-        'cxx_ld_flags': '-O3 -Wstack-usage=%s' % (1024*13),
+        'cxx_ld_flags': '-O3 -Wl,--gc-sections -Wstack-usage=%s' % (1024*13),
     },
     'dev': {
         'cxxflags': '-DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
@@ -878,7 +878,6 @@ alternator = [
        Antlr3Grammar('alternator/expressions.g'),
        'alternator/conditions.cc',
        'alternator/auth.cc',
-       'alternator/error.cc',
        'alternator/streams.cc',
 ]
 

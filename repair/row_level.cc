@@ -520,7 +520,7 @@ public:
                     sstables::shared_sstable sst = use_view_update_path ? t->make_streaming_staging_sstable() : t->make_streaming_sstable_for_write();
                     schema_ptr s = reader.schema();
                     auto& pc = service::get_local_streaming_priority();
-                    return sst->write_components(std::move(reader), std::max(1ul, adjusted_estimated_partitions), s,
+                    return sst->write_components(std::move(reader), adjusted_estimated_partitions, s,
                                                  t->get_sstables_manager().configure_writer(),
                                                  encoding_stats{}, pc).then([sst] {
                         return sst->open_data();
@@ -2198,6 +2198,25 @@ future<> repair_init_messaging_service_handler(repair_service& rs, distributed<d
         ms.register_repair_get_diff_algorithms([] (const rpc::client_info& cinfo) {
             return make_ready_future<std::vector<row_level_diff_detect_algorithm>>(suportted_diff_detect_algorithms());
         });
+    });
+}
+
+future<> repair_uninit_messaging_service_handler() {
+    return netw::get_messaging_service().invoke_on_all([] (auto& ms) {
+        return when_all_succeed(
+            ms.unregister_repair_get_row_diff_with_rpc_stream(),
+            ms.unregister_repair_put_row_diff_with_rpc_stream(),
+            ms.unregister_repair_get_full_row_hashes_with_rpc_stream(),
+            ms.unregister_repair_get_full_row_hashes(),
+            ms.unregister_repair_get_combined_row_hash(),
+            ms.unregister_repair_get_sync_boundary(),
+            ms.unregister_repair_get_row_diff(),
+            ms.unregister_repair_put_row_diff(),
+            ms.unregister_repair_row_level_start(),
+            ms.unregister_repair_row_level_stop(),
+            ms.unregister_repair_get_estimated_partitions(),
+            ms.unregister_repair_set_estimated_partitions(),
+            ms.unregister_repair_get_diff_algorithms()).discard_result();
     });
 }
 
