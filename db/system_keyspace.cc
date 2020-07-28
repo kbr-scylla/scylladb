@@ -618,7 +618,7 @@ schema_ptr batches() {
        // FIXME: the original Java code also had:
        //.copy(new LocalPartitioner(TimeUUIDType.instance))
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"min_threshold", "2"}});
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -874,7 +874,7 @@ schema_ptr hints() {
         "*DEPRECATED* hints awaiting delivery"
        ));
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"enabled", "false"}});
        builder.with_version(generate_schema_version(builder.uuid()));
        builder.with(schema_builder::compact_storage::yes);
@@ -900,7 +900,7 @@ schema_ptr batchlog() {
         "*DEPRECATED* batchlog entries"
        ));
        builder.set_gc_grace_seconds(0);
-       builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+       builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"min_threshold", "2"}});
        builder.with(schema_builder::compact_storage::no);
        builder.with_version(generate_schema_version(builder.uuid()));

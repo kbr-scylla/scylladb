@@ -621,7 +621,7 @@ private:
         speculative_retry _speculative_retry = ::speculative_retry(speculative_retry::type::PERCENTILE, 0.99);
         // FIXME: SizeTiered doesn't really work yet. Being it marked here only means that this is the strategy
         // we will use by default - when we have the choice.
-        sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::size_tiered;
+        sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::incremental;
         std::map<sstring, sstring> _compaction_strategy_options;
         bool _compaction_enabled = true;
         caching_options _caching_options;
