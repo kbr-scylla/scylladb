@@ -93,6 +93,7 @@ private:
     gms::feature _per_table_partitioners_feature;
     gms::feature _per_table_caching_feature;
     gms::feature _in_memory_tables;
+    gms::feature _workload_prioritization;
 
 public:
     const gms::feature& cluster_supports_range_tombstones() const {
@@ -208,6 +209,10 @@ public:
 
     const gms::feature& cluster_supports_in_memory_tables() const {
         return _in_memory_tables;
+    }
+
+    const gms::feature& cluster_supports_workload_prioritization() const {
+        return _workload_prioritization;
     }
 };
 

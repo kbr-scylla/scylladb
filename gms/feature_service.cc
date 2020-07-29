@@ -46,6 +46,7 @@ constexpr std::string_view features::LWT = "LWT";
 constexpr std::string_view features::PER_TABLE_PARTITIONERS = "PER_TABLE_PARTITIONERS";
 constexpr std::string_view features::PER_TABLE_CACHING = "PER_TABLE_CACHING";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
+constexpr std::string_view features::WORKLOAD_PRIORITIZATION = "WORKLOAD_PRIORITIZATION";
 
 static logging::logger logger("features");
 
@@ -81,7 +82,8 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _lwt_feature(*this, features::LWT)
         , _per_table_partitioners_feature(*this, features::PER_TABLE_PARTITIONERS)
         , _per_table_caching_feature(*this, features::PER_TABLE_CACHING)
-        , _in_memory_tables(*this, features::IN_MEMORY_TABLES) {
+        , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
+        , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION) {
 }
 
 feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> disabled) {
@@ -171,6 +173,7 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::UDF,
         gms::features::CDC,
         gms::features::IN_MEMORY_TABLES,
+        gms::features::WORKLOAD_PRIORITIZATION,
     };
 
     for (const sstring& s : _config._disabled_features) {
@@ -275,6 +278,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_per_table_partitioners_feature),
         std::ref(_per_table_caching_feature),
         std::ref(_in_memory_tables),
+        std::ref(_workload_prioritization),
     })
     {
         if (list.count(f.name())) {
