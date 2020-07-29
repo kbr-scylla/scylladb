@@ -554,10 +554,27 @@ void storage_service::join_token_ring(int delay) {
 
     // now, that the system distributed keyspace is initialized and started,
     // pass an accessor to the service level controller so it can interact with it
-    _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
-        sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-                ::make_shared<qos::standard_service_level_distributed_data_accessor>(_sys_dist_ks.local())));
-    }).get();
+    // but only if the conditions are right (the cluster supports or have supported
+    // workload prioritization before):
+    if (_sys_dist_ks.local().workload_prioritization_tables_exists()) {
+        start_workload_prioritization(workload_prioritization_create_tables::no);
+    } else {
+        // if we got here, it means that the workload priotization didn't exist before and
+        // also that the cluster currently doesn't support workload prioritization.
+        // we delay the creation of the tables and accessing them until it does.
+        _workload_prioritization_registration = _feature_service.cluster_supports_workload_prioritization().when_enabled([this] () {
+            // since we are creating tables here and we wouldn't wont to have a race condition
+            // we will first wait for a random period of time and only then start the routine
+            // the race condition can happen because the feature flag will "light up" in about
+            // the same time on all nodes. The more nodes there are, the higher the chance for
+            // a race.
+            std::random_device seed_gen;
+            std::default_random_engine rnd_engine(seed_gen());
+            std::uniform_int_distribution<> delay_generator(0,5000000);
+            sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
+            start_workload_prioritization(workload_prioritization_create_tables::yes);
+        });
+    }
 
     slogger.debug("Setting tokens to {}", _bootstrap_tokens);
     // This node must know about its chosen tokens before other nodes do
@@ -3156,6 +3173,17 @@ future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
 
 bool storage_service::is_repair_based_node_ops_enabled() {
     return _db.local().get_config().enable_repair_based_node_ops();
+}
+
+
+void storage_service::start_workload_prioritization(workload_prioritization_create_tables create_tables) {
+        if (create_tables) {
+            _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start_workload_prioritization).get();
+        }
+        _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
+            sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                    ::make_shared<qos::standard_service_level_distributed_data_accessor>(_sys_dist_ks.local())));
+        }).get();
 }
 
 } // namespace service
