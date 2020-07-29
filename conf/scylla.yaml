@@ -221,7 +221,11 @@ batch_size_fail_threshold_in_kb: 50
 # - PasswordAuthenticator relies on username/password pairs to authenticate
 #   users. It keeps usernames and hashed passwords in system_auth.credentials table.
 #   Please increase system_auth keyspace replication factor if you use this authenticator.
+# - com.scylladb.auth.SaslauthdAuthenticator outsources authentication to a running saslauthd
+#   daemon. When using this authenticator, you must set the saslauthd_socket_path property to the
+#   Unix domain socket on which saslauthd is listening.
 # authenticator: AllowAllAuthenticator
+# saslauthd_socket_path: /var/state/saslauthd/mux
 
 # Authorization backend, implementing IAuthorizer; used to limit access/provide permissions
 # Out of the box, Scylla provides org.apache.cassandra.auth.{AllowAllAuthorizer,
