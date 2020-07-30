@@ -25,6 +25,7 @@ import pathlib
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -356,11 +357,10 @@ class BoostTest(UnitTest):
         ET.parse(self.xmlout)
         super().check_log(trim)
 
-def can_connect(port):
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def can_connect(address, family=socket.AF_INET):
+    s = socket.socket(family)
     try:
-        s.connect(('127.0.0.1', port))
+        s.connect(address)
         return True
     except:
         return False
@@ -373,6 +373,15 @@ def try_something_backoff(something):
         time.sleep(sleep_time)
         sleep_time *= 2
     return True
+
+
+def make_saslauthd_conf(port, instance_path):
+    """Creates saslauthd.conf with appropriate contents under instance_path.  Returns the path to the new file."""
+    saslauthd_conf_path = os.path.join(instance_path, 'saslauthd.conf')
+    with open(saslauthd_conf_path, 'w') as f:
+        f.write('ldap_servers: ldap://localhost:{}\nldap_search_base: dc=example,dc=com'.format(port))
+    return saslauthd_conf_path
+
 
 class LdapTest(BoostTest):
     """A unit test which can produce its own XML output, and needs an ldap server"""
@@ -419,15 +428,30 @@ class LdapTest(BoostTest):
         # Set up the server.
         SLAPD_URLS='ldap://:{}/ ldaps://:{}/'.format(port, port + 1)
         def can_connect_to_slapd():
-            return can_connect(port) and can_connect(port + 1) and can_connect(port + 2)
-        process = subprocess.Popen(['slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
+            return can_connect(('127.0.0.1', port)) and can_connect(('127.0.0.1', port + 1)) and can_connect(('127.0.0.1', port + 2))
+        def can_connect_to_saslauthd():
+            return can_connect(os.path.join(instance_path, 'mux'), socket.AF_UNIX)
+        slapd_proc = subprocess.Popen(['slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
+        saslauthd_conf_path = make_saslauthd_conf(port, instance_path)
+        saslauthd_proc = subprocess.Popen(
+            ['saslauthd', '-n', '1', '-a', 'ldap', '-O', saslauthd_conf_path, '-m', instance_path])
         def finalize():
-            process.terminate()
-            shutil.rmtree(instance_path)
+            slapd_proc.terminate()
+            saslauthd_proc.terminate()
+            # saslauthd unconditionally spawns a child process; there is no good way to find its pid/gpid directly.
+            for cmdf in glob.glob('/proc/[0-9]*/cmdline'):
+                with open(cmdf) as f:
+                    contents = f.read()
+                if (saslauthd_conf_path in contents):
+                    os.kill(int(cmdf[6:-8]), signal.SIGTERM)
+            shutil.rmtree(instance_path, ignore_errors=True)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
         if not try_something_backoff(can_connect_to_slapd):
             finalize()
             raise Exception('Unable to connect to slapd')
+        if not try_something_backoff(can_connect_to_saslauthd):
+            finalize()
+            raise Exception('Unable to connect to saslauthd')
         return finalize, '--byte-limit={}'.format(byte_limit)
 
 class CqlTest(Test):
@@ -584,10 +608,14 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
             "abort_on_error=1",
             os.getenv("ASAN_OPTIONS"),
         ]
+        ldap_instance_path = os.path.join(
+            os.path.abspath(os.path.join(os.path.split(test.path)[0], 'ldap_instances')),
+            str(ldap_port))
+        saslauthd_mux_path = os.path.join(ldap_instance_path, 'mux')
         if options.manual_execution:
             print('Please run the following shell command, then press <enter>:')
-            print('SEASTAR_LDAP_PORT={} {}'.format(
-                ldap_port, ' '.join([shlex.quote(e) for e in [test.path, *test.args]])))
+            print('SEASTAR_LDAP_PORT={} SASLAUTHD_MUX_PATH={} {}'.format(
+                ldap_port, saslauthd_mux_path, ' '.join([shlex.quote(e) for e in [test.path, *test.args]])))
             input('-- press <enter> to continue --')
             if cleanup_fn is not None:
                 cleanup_fn()
@@ -608,6 +636,7 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
                 stdout=log,
                 env=dict(os.environ,
                          SEASTAR_LDAP_PORT=str(ldap_port),
+                         SASLAUTHD_MUX_PATH=saslauthd_mux_path,
                          UBSAN_OPTIONS=":".join(filter(None, UBSAN_OPTIONS)),
                          ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
                          # TMPDIR env variable is used by any seastar/scylla
@@ -906,7 +935,7 @@ async def main():
         if [t for t in TestSuite.tests() if isinstance(t, LdapTest)]:
             tp_server = subprocess.Popen('toxiproxy-server', stderr=subprocess.DEVNULL)
             def can_connect_to_toxiproxy():
-                return can_connect(8474)
+                return can_connect(('127.0.0.1', 8474))
             if not try_something_backoff(can_connect_to_toxiproxy):
                 raise Exception('Could not connect to toxiproxy')
 
