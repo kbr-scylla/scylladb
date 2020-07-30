@@ -413,14 +413,14 @@ class LdapTest(BoostTest):
         subprocess.check_output(
             ['find', instance_path, '-type', 'f', '-exec', 'sed', '-i', replace_expression, '{}', ';'])
         # Put the test data in.
-        cmd = ['slapadd', '-F', os.path.abspath(instance_path)]
+        cmd = ['slapadd', '-F', instance_path]
         subprocess.check_output(
             cmd, input='\n\n'.join(DEFAULT_ENTRIES).encode('ascii'), stderr=subprocess.STDOUT)
         # Set up the server.
         SLAPD_URLS='ldap://:{}/ ldaps://:{}/'.format(port, port + 1)
         def can_connect_to_slapd():
             return can_connect(port) and can_connect(port + 1) and can_connect(port + 2)
-        process = subprocess.Popen(['slapd', '-F', os.path.abspath(instance_path), '-h', SLAPD_URLS, '-d', '0'])
+        process = subprocess.Popen(['slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
         def finalize():
             process.terminate()
             shutil.rmtree(instance_path)
