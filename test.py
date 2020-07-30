@@ -30,10 +30,6 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import yaml
-import shutil
-import signal
-import shlex
-import time
 from random import randint
 
 output_is_a_tty = sys.stdout.isatty()
