@@ -326,6 +326,7 @@ public:
     named_value<sstring> ldap_attr_role;
     named_value<sstring> ldap_bind_dn;
     named_value<sstring> ldap_bind_passwd;
+    named_value<sstring> saslauthd_socket_path;
 
     seastar::logging_settings logging_settings(const boost::program_options::variables_map&) const;
 
