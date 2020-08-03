@@ -552,6 +552,17 @@ void storage_service::join_token_ring(int delay) {
                      " causes UNDEFINED BEHAVIOR. DO NOT EVER do that.");
     }
 
+    slogger.debug("Setting tokens to {}", _bootstrap_tokens);
+    // This node must know about its chosen tokens before other nodes do
+    // since they may start sending writes to this node after it gossips status = NORMAL.
+    // Therefore, in case we haven't updated _token_metadata with our tokens yet, do it now.
+    _token_metadata.update_normal_tokens(_bootstrap_tokens, get_broadcast_address());
+
+    if (!db::system_keyspace::bootstrap_complete()) {
+        // If we're not bootstrapping nor replacing, then we shouldn't have chosen a CDC streams timestamp yet.
+        assert(should_bootstrap() || db().local().is_replacing() || !_cdc_streams_ts);
+    }
+
     // now, that the system distributed keyspace is initialized and started,
     // pass an accessor to the service level controller so it can interact with it
     // but only if the conditions are right (the cluster supports or have supported
@@ -574,17 +585,6 @@ void storage_service::join_token_ring(int delay) {
             sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
             start_workload_prioritization(workload_prioritization_create_tables::yes);
         });
-    }
-
-    slogger.debug("Setting tokens to {}", _bootstrap_tokens);
-    // This node must know about its chosen tokens before other nodes do
-    // since they may start sending writes to this node after it gossips status = NORMAL.
-    // Therefore, in case we haven't updated _token_metadata with our tokens yet, do it now.
-    _token_metadata.update_normal_tokens(_bootstrap_tokens, get_broadcast_address());
-
-    if (!db::system_keyspace::bootstrap_complete()) {
-        // If we're not bootstrapping nor replacing, then we shouldn't have chosen a CDC streams timestamp yet.
-        assert(should_bootstrap() || db().local().is_replacing() || !_cdc_streams_ts);
     }
 
     if (!_cdc_streams_ts && db().local().get_config().check_experimental(db::experimental_features_t::CDC)) {
