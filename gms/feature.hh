@@ -134,6 +134,7 @@ extern const std::string_view PER_TABLE_CACHING;
 
 // enterprise
 extern const std::string_view IN_MEMORY_TABLES;
+extern const std::string_view WORKLOAD_PRIORITIZATION;
 
 }
 

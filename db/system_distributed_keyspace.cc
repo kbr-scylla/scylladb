@@ -22,6 +22,7 @@
 #include "types/set.hh"
 #include "cdc/generation.hh"
 #include "cql3/query_processor.hh"
+#include "gms/feature_service.hh"
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -107,15 +108,23 @@ schema_ptr service_levels() {
     return schema;
 }
 
-static std::vector<schema_ptr> all_tables(const db::config& cfg) {
+static std::vector<schema_ptr> workload_prioritization_tables() {
+    return std::vector({service_levels()});
+}
+
+static std::vector<schema_ptr> all_tables(const database& db) {
     auto ret = std::vector<schema_ptr>({
         view_build_status(),
         cdc_generations(),
         cdc_desc(),
     });
-    if (cfg.create_service_levels_table) {
-        ret.push_back(service_levels());
+
+    if (db.get_config().create_service_levels_table &&
+            db.features().cluster_supports_workload_prioritization()) {
+        auto wp_tables = workload_prioritization_tables();
+        std::copy(std::begin(wp_tables), std::end(wp_tables), std::back_inserter(ret));
     }
+
     return ret;
 }
 
@@ -124,11 +133,7 @@ system_distributed_keyspace::system_distributed_keyspace(cql3::query_processor& 
         , _mm(mm) {
 }
 
-future<> system_distributed_keyspace::start() {
-    if (this_shard_id() != 0) {
-        return make_ready_future<>();
-    }
-
+future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tables) {
     static auto ignore_existing = [] (seastar::noncopyable_function<future<>()> func) {
         return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
     };
@@ -142,8 +147,8 @@ future<> system_distributed_keyspace::start() {
                 {{"replication_factor", "3"}},
                 true);
         return _mm.announce_new_keyspace(ksm, api::min_timestamp, false);
-    }).then([this] {
-        return do_with(all_tables(_qp.db().get_config()), [this] (std::vector<schema_ptr>& tables) {
+    }).then([this, tables = std::move(tables)] () mutable {
+        return do_with(std::vector<schema_ptr>{std::move(tables)}, [this] (std::vector<schema_ptr>& tables) {
             return do_for_each(tables, [this] (schema_ptr table) {
                 return ignore_existing([this, table = std::move(table)] {
                     return _mm.announce_new_column_family(std::move(table), api::min_timestamp, false);
@@ -151,6 +156,24 @@ future<> system_distributed_keyspace::start() {
             });
         });
     });
+}
+
+future<> system_distributed_keyspace::start_workload_prioritization() {
+    if (this_shard_id() != 0) {
+        return make_ready_future<>();
+    }
+    if (_qp.db().get_config().create_service_levels_table &&
+            _qp.db().features().cluster_supports_workload_prioritization()) {
+        return create_tables(workload_prioritization_tables());
+    }
+    return make_ready_future();
+}
+
+future<> system_distributed_keyspace::start() {
+    if (this_shard_id() != 0) {
+        return make_ready_future<>();
+    }
+    return create_tables(all_tables(_qp.db()));
 }
 
 future<> system_distributed_keyspace::stop() {
@@ -398,6 +421,14 @@ system_distributed_keyspace::cdc_get_versioned_streams(context ctx) {
 
         return result;
     });
+}
+
+bool system_distributed_keyspace::workload_prioritization_tables_exists() {
+    auto tables = workload_prioritization_tables();
+    auto table_exists = [this] (schema_ptr& table) {
+        return  _qp.db().has_schema(NAME, table->cf_name());
+    };
+    return std::all_of(std::begin(tables), std::end(tables), table_exists);
 }
 
 future<qos::service_levels_info> system_distributed_keyspace::get_service_levels() const {

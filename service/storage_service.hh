@@ -137,6 +137,7 @@ private:
     semaphore _service_memory_limiter;
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<std::pair<std::string, client_shutdown_hook>> _client_shutdown_hooks;
+    gms::feature::listener_registration _workload_prioritization_registration;
 
     /* For unit tests only.
      *
@@ -824,6 +825,10 @@ private:
 public:
     future<bool> is_cleanup_allowed(sstring keyspace);
     bool is_repair_based_node_ops_enabled();
+private:
+    struct workload_prioritization_create_tables_tag {};
+    using workload_prioritization_create_tables = bool_class<workload_prioritization_create_tables_tag>;
+    void start_workload_prioritization(workload_prioritization_create_tables create_tables);
 };
 
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
