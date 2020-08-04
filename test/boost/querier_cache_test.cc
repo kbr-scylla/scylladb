@@ -203,7 +203,7 @@ public:
 
         auto querier = make_querier<Querier>(range);
         auto [dk, ck] = querier.consume_page(dummy_result_builder{}, row_limit, std::numeric_limits<uint32_t>::max(),
-                gc_clock::now(), db::no_timeout, std::numeric_limits<uint64_t>::max()).get0();
+                gc_clock::now(), db::no_timeout, query::max_result_size(std::numeric_limits<uint64_t>::max())).get0();
         const auto memory_usage = querier.memory_usage();
         _cache.insert(cache_key, std::move(querier), nullptr);
 
@@ -647,25 +647,28 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
         auto s = cf.schema();
 
         cf.flush().get();
+        auto slice = s->full_slice();
+        slice.options.set<query::partition_slice::option::allow_short_read>();
 
         auto cmd1 = query::read_command(s->id(),
                 s->version(),
-                s->full_slice(),
+                slice,
                 1,
                 gc_clock::now(),
                 std::nullopt,
                 1,
-                utils::make_random_uuid());
+                utils::make_random_uuid(),
+                query::is_first_page::yes,
+                query::max_result_size(1024 * 1024));
 
         // Should save the querier in cache.
         db.query_mutations(s,
                 cmd1,
                 query::full_partition_range,
-                db.get_result_memory_limiter().new_mutation_read(1024 * 1024).get0(),
                 nullptr,
                 db::no_timeout).get();
 
-        auto& semaphore = db.make_query_class_config().semaphore;
+        auto& semaphore = db.get_reader_concurrency_semaphore();
         auto permit = semaphore.make_permit();
 
         BOOST_CHECK_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 0);
@@ -684,18 +687,19 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
 
         auto cmd2 = query::read_command(s->id(),
                 s->version(),
-                s->full_slice(),
+                slice,
                 1,
                 gc_clock::now(),
                 std::nullopt,
                 1,
-                utils::make_random_uuid());
+                utils::make_random_uuid(),
+                query::is_first_page::no,
+                query::max_result_size(1024 * 1024));
 
         // Should evict the already cached querier.
         db.query_mutations(s,
                 cmd2,
                 query::full_partition_range,
-                db.get_result_memory_limiter().new_mutation_read(1024 * 1024).get0(),
                 nullptr,
                 db::no_timeout).get();
 
@@ -709,10 +713,10 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
         // of the tracked buffers.
         cmd2.row_limit = query::max_rows;
         cmd2.partition_limit = query::max_partitions;
+        cmd2.max_result_size.emplace(query::result_memory_limiter::unlimited_result_size);
         db.query_mutations(s,
                 cmd2,
                 query::full_partition_range,
-                db.get_result_memory_limiter().new_mutation_read(1024 * 1024 * 1024 * 1024).get0(),
                 nullptr,
                 db::no_timeout).get();
         return make_ready_future<>();
@@ -757,4 +761,28 @@ SEASTAR_THREAD_TEST_CASE(test_immediate_evict_on_insert) {
     resources.reset();
 
     fut.get();
+}
+
+namespace {
+
+class inactive_read : public reader_concurrency_semaphore::inactive_read {
+public:
+    virtual void evict() override {
+    }
+};
+
+}
+
+SEASTAR_THREAD_TEST_CASE(test_unique_inactive_read_handle) {
+    reader_concurrency_semaphore sem1(reader_concurrency_semaphore::no_limits{}, "sem1");
+    reader_concurrency_semaphore sem2(reader_concurrency_semaphore::no_limits{}, ""); // to see the message for an unnamed semaphore
+
+    auto sem1_h1 = sem1.register_inactive_read(std::make_unique<inactive_read>());
+    auto sem2_h1 = sem2.register_inactive_read(std::make_unique<inactive_read>());
+
+    // Sanity check that lookup still works with empty handle.
+    BOOST_REQUIRE(!sem1.unregister_inactive_read(reader_concurrency_semaphore::inactive_read_handle{}));
+
+    BOOST_REQUIRE_THROW(sem1.unregister_inactive_read(std::move(sem2_h1)), std::runtime_error);
+    BOOST_REQUIRE_THROW(sem2.unregister_inactive_read(std::move(sem1_h1)), std::runtime_error);
 }

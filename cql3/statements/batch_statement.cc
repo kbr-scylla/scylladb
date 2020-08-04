@@ -374,7 +374,7 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::exe
                 make_shared<cql_transport::messages::result_message::bounce_to_shard>(shard));
     }
 
-    return proxy.cas(schema, request, request->read_command(), request->key(),
+    return proxy.cas(schema, request, request->read_command(proxy), request->key(),
             {read_timeout, qs.get_permit(), qs.get_client_state(), qs.get_trace_state()},
             cl_for_paxos, cl_for_learn, batch_timeout, cas_timeout).then([this, request] (bool is_applied) {
         return modification_statement::build_cas_result_set(_metadata, _columns_of_cas_result_set, is_applied, request->rows());
@@ -447,7 +447,7 @@ batch_statement::prepare(database& db, cql_stats& stats) {
     if (!have_multiple_cfs && batch_statement_.get_statements().size() > 0) {
         partition_key_bind_indices = bound_names.get_partition_key_bind_indexes(*batch_statement_.get_statements()[0].statement->s);
     }
-    return std::make_unique<prepared_statement>(audit_info(), make_shared(std::move(batch_statement_)),
+    return std::make_unique<prepared_statement>(audit_info(), make_shared<cql3::statements::batch_statement>(std::move(batch_statement_)),
                                                      bound_names.get_specifications(),
                                                      std::move(partition_key_bind_indices));
 }

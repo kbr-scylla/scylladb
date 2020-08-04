@@ -116,11 +116,6 @@ private:
     // Deregister weight for a column family.
     void deregister_weight(int weight);
 
-    // If weight of compaction job is taken, it will be trimmed until its new
-    // weight is not taken or its size is equal to minimum threshold.
-    // Return weight of compaction job.
-    int trim_to_compact(column_family* cf, sstables::compaction_descriptor& descriptor);
-
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
     std::vector<sstables::shared_sstable> get_candidates(const column_family& cf);
 
@@ -182,7 +177,8 @@ public:
     // distributed_loader.cc uses for resharding, remove this when the new resharding series lands.
     bool enabled() const { return _state == state::enabled; }
     // Stop all fibers, without waiting. Safe to be called multiple times.
-    void do_stop();
+    void do_stop() noexcept;
+    void really_do_stop();
 
     // Submit a column family to be compacted.
     void submit(column_family* cf);

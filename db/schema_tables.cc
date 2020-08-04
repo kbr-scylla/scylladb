@@ -226,7 +226,7 @@ static constexpr auto schema_gc_grace = std::chrono::duration_cast<std::chrono::
 
 schema_ptr keyspaces() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, KEYSPACES), NAME, KEYSPACES,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, KEYSPACES), NAME, KEYSPACES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -242,7 +242,7 @@ schema_ptr keyspaces() {
         utf8_type,
         // comment
         "keyspace definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -252,7 +252,7 @@ schema_ptr keyspaces() {
 
 schema_ptr tables() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, TABLES), NAME, TABLES,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, TABLES), NAME, TABLES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -283,7 +283,7 @@ schema_ptr tables() {
         utf8_type,
         // comment
         "table definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -347,7 +347,7 @@ schema_ptr scylla_tables(schema_features features) {
 // VIEW" would list them - while it should only list real, selected, columns.
 
 static schema_ptr columns_schema(const char* columns_table_name) {
-    schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, columns_table_name), NAME, columns_table_name,
+    schema_builder builder(make_shared_schema(generate_legacy_id(NAME, columns_table_name), NAME, columns_table_name,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -366,7 +366,7 @@ static schema_ptr columns_schema(const char* columns_table_name) {
         utf8_type,
         // comment
         "column definitions"
-        )));
+        ));
     builder.set_gc_grace_seconds(schema_gc_grace);
     builder.with_version(generate_schema_version(builder.uuid()));
     return builder.build();
@@ -388,7 +388,7 @@ schema_ptr view_virtual_columns() {
 // is defined in column_computation.hh and system_schema docs.
 //
 static schema_ptr computed_columns_schema(const char* columns_table_name) {
-    schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, columns_table_name), NAME, columns_table_name,
+    schema_builder builder(make_shared_schema(generate_legacy_id(NAME, columns_table_name), NAME, columns_table_name,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -401,7 +401,7 @@ static schema_ptr computed_columns_schema(const char* columns_table_name) {
         utf8_type,
         // comment
         "computed columns"
-        )));
+        ));
     builder.set_gc_grace_seconds(schema_gc_grace);
     builder.with_version(generate_schema_version(builder.uuid()));
     return builder.build();
@@ -414,7 +414,7 @@ schema_ptr computed_columns() {
 
 schema_ptr dropped_columns() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, DROPPED_COLUMNS), NAME, DROPPED_COLUMNS,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, DROPPED_COLUMNS), NAME, DROPPED_COLUMNS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -430,7 +430,7 @@ schema_ptr dropped_columns() {
         utf8_type,
         // comment
         "dropped column registry"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -440,7 +440,7 @@ schema_ptr dropped_columns() {
 
 schema_ptr triggers() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, TRIGGERS), NAME, TRIGGERS,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, TRIGGERS), NAME, TRIGGERS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -455,7 +455,7 @@ schema_ptr triggers() {
         utf8_type,
         // comment
         "trigger definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -465,7 +465,7 @@ schema_ptr triggers() {
 
 schema_ptr views() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, VIEWS), NAME, VIEWS,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, VIEWS), NAME, VIEWS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -499,7 +499,7 @@ schema_ptr views() {
         utf8_type,
         // comment
         "view definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -509,7 +509,7 @@ schema_ptr views() {
 
 schema_ptr indexes() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, INDEXES), NAME, INDEXES,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, INDEXES), NAME, INDEXES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -525,7 +525,7 @@ schema_ptr indexes() {
         utf8_type,
         // comment
         "secondary index definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -535,7 +535,7 @@ schema_ptr indexes() {
 
 schema_ptr types() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, TYPES), NAME, TYPES,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, TYPES), NAME, TYPES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -551,7 +551,7 @@ schema_ptr types() {
         utf8_type,
         // comment
         "user defined type definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -561,7 +561,7 @@ schema_ptr types() {
 
 schema_ptr functions() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, FUNCTIONS), NAME, FUNCTIONS,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, FUNCTIONS), NAME, FUNCTIONS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -580,7 +580,7 @@ schema_ptr functions() {
         utf8_type,
         // comment
         "user defined function definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -590,7 +590,7 @@ schema_ptr functions() {
 
 schema_ptr aggregates() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_lw_shared(::schema(generate_legacy_id(NAME, AGGREGATES), NAME, AGGREGATES,
+        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, AGGREGATES), NAME, AGGREGATES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -609,7 +609,7 @@ schema_ptr aggregates() {
         utf8_type,
         // comment
         "user defined aggregate definitions"
-        )));
+        ));
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build();
@@ -746,7 +746,7 @@ future<mutation> query_partition_mutation(service::storage_proxy& proxy,
 {
     auto dk = dht::decorate_key(*s, pkey);
     return do_with(dht::partition_range::make_singular(dk), [&proxy, dk, s = std::move(s), cmd = std::move(cmd)] (auto& range) {
-        return proxy.query_mutations_locally(s, std::move(cmd), range, db::no_timeout)
+        return proxy.query_mutations_locally(s, std::move(cmd), range, db::no_timeout, tracing::trace_state_ptr{})
                 .then([dk = std::move(dk), s](rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature> res_hit_rate) {
                     auto&& [res, hit_rate] = res_hit_rate;
                     auto&& partitions = res->partitions();
@@ -781,17 +781,17 @@ read_schema_partition_for_table(distributed<service::storage_proxy>& proxy, sche
     auto slice = partition_slice_builder(*schema)
             .with_range(std::move(clustering_range))
             .build();
-    auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), query::max_rows);
-    return query_partition_mutation(proxy.local(), std::move(schema), std::move(cmd), std::move(keyspace_key)).then([&proxy] (mutation mut) {
-         return redact_columns_for_missing_features(std::move(mut), proxy.local().get_db().local().features().cluster_schema_features());
-    });
+    auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.local().get_max_result_size(slice),
+            query::row_limit(query::max_rows));
+    return query_partition_mutation(proxy.local(), std::move(schema), std::move(cmd), std::move(keyspace_key));
 }
 
 future<mutation>
 read_keyspace_mutation(distributed<service::storage_proxy>& proxy, const sstring& keyspace_name) {
     schema_ptr s = keyspaces();
     auto key = partition_key::from_singular(*s, keyspace_name);
-    auto cmd = make_lw_shared<query::read_command>(s->id(), s->version(), s->full_slice());
+    auto slice = s->full_slice();
+    auto cmd = make_lw_shared<query::read_command>(s->id(), s->version(), std::move(slice), proxy.local().get_max_result_size(slice));
     return query_partition_mutation(proxy.local(), std::move(s), std::move(cmd), std::move(key));
 }
 

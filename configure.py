@@ -15,7 +15,9 @@ from distutils.spawn import find_executable
 
 curdir = os.getcwd()
 
-tempfile.tempdir = "./build/tmp"
+outdir = 'build'
+
+tempfile.tempdir = f"{outdir}/tmp"
 
 configure_args = str.join(' ', [shlex.quote(x) for x in sys.argv[1:]])
 
@@ -236,7 +238,7 @@ modes = {
     },
     'release': {
         'cxxflags': '',
-        'cxx_ld_flags': '-O3 -Wl,--gc-sections -Wstack-usage=%s' % (1024*13),
+        'cxx_ld_flags': '-O3 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wstack-usage=%s' % (1024*13),
     },
     'dev': {
         'cxxflags': '-DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
@@ -364,7 +366,6 @@ scylla_tests = set([
     'test/boost/storage_proxy_test',
     'test/boost/top_k_test',
     'test/boost/transport_test',
-    'test/boost/truncation_migration_test',
     'test/boost/symmetric_key_test',
     'test/boost/types_test',
     'test/boost/user_function_test',
@@ -933,6 +934,7 @@ scylla_tests_generic_dependencies = [
     'test/lib/log.cc',
     'test/lib/reader_permit.cc',
     'test/lib/test_utils.cc',
+    'test/lib/tmpdir.cc',
 ]
 
 scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependencies + [
@@ -946,7 +948,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 ]
 
 deps = {
-    'scylla': idls + ['main.cc', 'release.cc', 'build_id.cc'] + scylla_core + api + alternator + redis,
+    'scylla': idls + ['main.cc', 'release.cc', 'utils/build_id.cc'] + scylla_core + api + alternator + redis,
     'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
     #FIXME: we don't need all of scylla_core here, only the types module, need to modularize scylla_core.
     'tools/scylla-types': idls + ['tools/scylla-types.cc'] + scylla_core,
@@ -1197,9 +1199,9 @@ if status != 0:
     print('Version file generation failed')
     sys.exit(1)
 
-file = open('build/SCYLLA-VERSION-FILE', 'r')
+file = open(f'{outdir}/SCYLLA-VERSION-FILE', 'r')
 scylla_version = file.read().strip()
-file = open('build/SCYLLA-RELEASE-FILE', 'r')
+file = open(f'{outdir}/SCYLLA-RELEASE-FILE', 'r')
 scylla_release = file.read().strip()
 
 extra_cxxflags["release.cc"] = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\""
@@ -1294,9 +1296,9 @@ def configure_seastar(build_dir, mode):
     subprocess.check_call(seastar_cmd, shell=False, cwd=cmake_dir)
 
 for mode in build_modes:
-    configure_seastar('build', mode)
+    configure_seastar(outdir, mode)
 
-pc = {mode: 'build/{}/seastar/seastar.pc'.format(mode) for mode in build_modes}
+pc = {mode: f'{outdir}/{mode}/seastar/seastar.pc' for mode in build_modes}
 ninja = find_executable('ninja') or find_executable('ninja-build')
 if not ninja:
     print('Ninja executable (ninja or ninja-build) not found on PATH\n')
@@ -1421,13 +1423,9 @@ def kmip_arch():
 libs += ' kmipc/lib/kmipc-' + kmip_lib_ver + '-' + kmiplib() + '_' + kmip_arch() + '/libkmip.a'
 user_cflags += ' -Ikmipc/include -DHAVE_KMIP'
 
-outdir = 'build'
 buildfile = 'build.ninja'
 
 os.makedirs(outdir, exist_ok=True)
-do_sanitize = True
-if args.static:
-    do_sanitize = False
 
 if args.antlr3_exec:
     antlr3_exec = args.antlr3_exec
@@ -1532,19 +1530,19 @@ with open(buildfile_tmp, 'w') as f:
                 # name, we also add a global typedef to avoid compilation errors.
                 command = sed -e '/^#if 0/,/^#endif/d' $in > $builddir/{mode}/gen/$in $
                      && {antlr3_exec} $builddir/{mode}/gen/$in $
-                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Lexer.hpp $
-                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Lexer.cpp $
-                     && sed -i -e '/^.*On :.*$$/d' build/{mode}/gen/${{stem}}Parser.hpp $
+                     && sed -i -e '/^.*On :.*$$/d' $builddir/{mode}/gen/${{stem}}Lexer.hpp $
+                     && sed -i -e '/^.*On :.*$$/d' $builddir/{mode}/gen/${{stem}}Lexer.cpp $
+                     && sed -i -e '/^.*On :.*$$/d' $builddir/{mode}/gen/${{stem}}Parser.hpp $
                      && sed -i -e 's/^\\( *\)\\(ImplTraits::CommonTokenType\\* [a-zA-Z0-9_]* = NULL;\\)$$/\\1const \\2/' $
                         -e '/^.*On :.*$$/d' $
                         -e '1i using ExceptionBaseType = int;' $
                         -e 's/^{{/{{ ExceptionBaseType\* ex = nullptr;/; $
                             s/ExceptionBaseType\* ex = new/ex = new/; $
                             s/exceptions::syntax_exception e/exceptions::syntax_exception\& e/' $
-                        build/{mode}/gen/${{stem}}Parser.cpp
+                        $builddir/{mode}/gen/${{stem}}Parser.cpp
                 description = ANTLR3 $in
             rule checkhh.{mode}
-              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags --include $in -c -o $out build/{mode}/gen/empty.cc
+              command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags $cxxflags_{mode} $obj_cxxflags --include $in -c -o $out $builddir/{mode}/gen/empty.cc
               description = CHECKHH $in
               depfile = $out.d
             rule test.{mode}
@@ -1565,8 +1563,8 @@ with open(buildfile_tmp, 'w') as f:
         thrifts = set()
         ragels = {}
         antlr3_grammars = set()
-        seastar_dep = 'build/{}/seastar/libseastar.a'.format(mode)
-        seastar_testing_dep = 'build/{}/seastar/libseastar_testing.a'.format(mode)
+        seastar_dep = '$builddir/{}/seastar/libseastar.a'.format(mode)
+        seastar_testing_dep = '$builddir/{}/seastar/libseastar_testing.a'.format(mode)
         for binary in build_artifacts:
             if binary in other:
                 continue
@@ -1714,51 +1712,51 @@ with open(buildfile_tmp, 'w') as f:
                     if has_sanitize_address_use_after_scope:
                         flags += ' -fno-sanitize-address-use-after-scope'
                     f.write('  obj_cxxflags = %s\n' % flags)
-        f.write(f'build build/{mode}/gen/empty.cc: gen\n')
+        f.write(f'build $builddir/{mode}/gen/empty.cc: gen\n')
         for hh in headers:
-            f.write('build $builddir/{mode}/{hh}.o: checkhh.{mode} {hh} | build/{mode}/gen/empty.cc || {gen_headers_dep}\n'.format(
+            f.write('build $builddir/{mode}/{hh}.o: checkhh.{mode} {hh} | $builddir/{mode}/gen/empty.cc || {gen_headers_dep}\n'.format(
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))
 
-        f.write('build build/{mode}/seastar/libseastar.a: ninja | always\n'
+        f.write('build $builddir/{mode}/seastar/libseastar.a: ninja | always\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
-        f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
+        f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
         f.write('  target = seastar\n'.format(**locals()))
-        f.write('build build/{mode}/seastar/libseastar_testing.a: ninja | always\n'
+        f.write('build $builddir/{mode}/seastar/libseastar_testing.a: ninja | always\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
-        f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
+        f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
         f.write('  target = seastar_testing\n'.format(**locals()))
-        f.write('build build/{mode}/seastar/apps/iotune/iotune: ninja\n'
+        f.write('build $builddir/{mode}/seastar/apps/iotune/iotune: ninja\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
-        f.write('  subdir = build/{mode}/seastar\n'.format(**locals()))
+        f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
         f.write('  target = iotune\n'.format(**locals()))
         f.write(textwrap.dedent('''\
-            build build/{mode}/iotune: copy build/{mode}/seastar/apps/iotune/iotune
+            build $builddir/{mode}/iotune: copy $builddir/{mode}/seastar/apps/iotune/iotune
             ''').format(**locals()))
-        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE build/debian/debian | always\n'.format(**locals()))
+        f.write('build $builddir/{mode}/scylla-package.tar.gz: package $builddir/{mode}/scylla $builddir/{mode}/iotune $builddir/SCYLLA-RELEASE-FILE $builddir/SCYLLA-VERSION-FILE $builddir/debian/debian | always\n'.format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  mode = {mode}\n'.format(**locals()))
-        f.write(f'build build/dist/{mode}/redhat: rpmbuild build/{mode}/scylla-package.tar.gz\n')
+        f.write(f'build $builddir/dist/{mode}/redhat: rpmbuild $builddir/{mode}/scylla-package.tar.gz\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
-        f.write(f'build build/dist/{mode}/debian: debbuild build/{mode}/scylla-package.tar.gz\n')
+        f.write(f'build $builddir/dist/{mode}/debian: debbuild $builddir/{mode}/scylla-package.tar.gz\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
-        f.write(f'build dist-server-{mode}: phony build/dist/{mode}/redhat build/dist/{mode}/debian\n')
-        f.write(f'build build/{mode}/scylla-unified-package.tar.gz: unified build/{mode}/scylla-package.tar.gz build/{mode}/scylla-python3-package.tar.gz tools/jmx/build/scylla-jmx-package.tar.gz tools/java/build/scylla-tools-package.tar.gz | always\n')
+        f.write(f'build dist-server-{mode}: phony $builddir/dist/{mode}/redhat $builddir/dist/{mode}/debian\n')
+        f.write(f'build $builddir/{mode}/scylla-unified-package.tar.gz: unified $builddir/{mode}/scylla-package.tar.gz $builddir/{mode}/scylla-python3-package.tar.gz tools/jmx/build/scylla-jmx-package.tar.gz tools/java/build/scylla-tools-package.tar.gz | always\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
         f.write('rule libdeflate.{mode}\n'.format(**locals()))
-        f.write('  command = make -C libdeflate BUILD_DIR=../build/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc} ../build/{mode}/libdeflate//libdeflate.a\n'.format(**locals()))
-        f.write('build build/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
+        f.write('  command = make -C libdeflate BUILD_DIR=../$builddir/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc} ../$builddir/{mode}/libdeflate//libdeflate.a\n'.format(**locals()))
+        f.write('build $builddir/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
         f.write('  pool = submodule_pool\n')
 
         for lib in abseil_libs:
-            f.write('build build/{mode}/abseil/{lib}: ninja\n'.format(**locals()))
+            f.write('build $builddir/{mode}/abseil/{lib}: ninja\n'.format(**locals()))
             f.write('  pool = submodule_pool\n')
-            f.write('  subdir = build/{mode}/abseil\n'.format(**locals()))
+            f.write('  subdir = $builddir/{mode}/abseil\n'.format(**locals()))
             f.write('  target = {lib}\n'.format(**locals()))
 
     mode = 'dev' if 'dev' in modes else modes[0]
@@ -1775,8 +1773,8 @@ with open(buildfile_tmp, 'w') as f:
     )
 
     f.write(textwrap.dedent(f'''\
-        build dist-server-deb: phony {' '.join(['build/dist/{mode}/debian'.format(mode=mode) for mode in build_modes])}
-        build dist-server-rpm: phony {' '.join(['build/dist/{mode}/redhat'.format(mode=mode) for mode in build_modes])}
+        build dist-server-deb: phony {' '.join(['$builddir/dist/{mode}/debian'.format(mode=mode) for mode in build_modes])}
+        build dist-server-rpm: phony {' '.join(['$builddir/dist/{mode}/redhat'.format(mode=mode) for mode in build_modes])}
         build dist-server: phony dist-server-rpm dist-server-deb
 
         rule build-submodule-reloc
@@ -1790,20 +1788,20 @@ with open(buildfile_tmp, 'w') as f:
           reloc_dir = tools/jmx
         build dist-jmx-rpm: build-submodule-rpm tools/jmx/build/scylla-jmx-package.tar.gz
           dir = tools/jmx
-          artifact = build/scylla-jmx-package.tar.gz
+          artifact = $builddir/scylla-jmx-package.tar.gz
         build dist-jmx-deb: build-submodule-deb tools/jmx/build/scylla-jmx-package.tar.gz
           dir = tools/jmx
-          artifact = build/scylla-jmx-package.tar.gz
+          artifact = $builddir/scylla-jmx-package.tar.gz
         build dist-jmx: phony dist-jmx-rpm dist-jmx-deb
 
         build tools/java/build/scylla-tools-package.tar.gz: build-submodule-reloc
           reloc_dir = tools/java
         build dist-tools-rpm: build-submodule-rpm tools/java/build/scylla-tools-package.tar.gz
           dir = tools/java
-          artifact = build/scylla-tools-package.tar.gz
+          artifact = $builddir/scylla-tools-package.tar.gz
         build dist-tools-deb: build-submodule-deb tools/java/build/scylla-tools-package.tar.gz
           dir = tools/java
-          artifact = build/scylla-tools-package.tar.gz
+          artifact = $builddir/scylla-tools-package.tar.gz
         build dist-tools: phony dist-tools-rpm dist-tools-deb
 
         rule build-python-reloc
@@ -1813,9 +1811,9 @@ with open(buildfile_tmp, 'w') as f:
         rule build-python-deb
           command = ./reloc/python3/build_deb.sh
 
-        build build/release/scylla-python3-package.tar.gz: build-python-reloc
-        build dist-python-rpm: build-python-rpm build/release/scylla-python3-package.tar.gz
-        build dist-python-deb: build-python-deb build/release/scylla-python3-package.tar.gz
+        build $builddir/release/scylla-python3-package.tar.gz: build-python-reloc
+        build dist-python-rpm: build-python-rpm $builddir/release/scylla-python3-package.tar.gz
+        build dist-python-deb: build-python-deb $builddir/release/scylla-python3-package.tar.gz
         build dist-python: phony dist-python-rpm dist-python-deb
         build dist-deb: phony dist-server-deb dist-python-deb dist-jmx-deb dist-tools-deb
         build dist-rpm: phony dist-server-rpm dist-python-rpm dist-jmx-rpm dist-tools-rpm
@@ -1857,10 +1855,10 @@ with open(buildfile_tmp, 'w') as f:
         build always: phony
         rule scylla_version_gen
             command = ./SCYLLA-VERSION-GEN
-        build build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE: scylla_version_gen
+        build $builddir/SCYLLA-RELEASE-FILE $builddir/SCYLLA-VERSION-FILE: scylla_version_gen
         rule debian_files_gen
             command = ./dist/debian/debian_files_gen.py
-        build build/debian/debian: debian_files_gen | always
+        build $builddir/debian/debian: debian_files_gen | always
         ''').format(modes_list=' '.join(build_modes), **globals()))
 
 os.rename(buildfile_tmp, buildfile)

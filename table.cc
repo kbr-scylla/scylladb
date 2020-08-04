@@ -667,7 +667,7 @@ void table::add_sstable(sstables::shared_sstable sstable) {
         on_internal_error(tlogger, format("Attempted to load the shared SSTable {} at table", sstable->get_filename()));
     }
     // allow in-progress reads to continue using old list
-    auto new_sstables = make_lw_shared(*_sstables);
+    auto new_sstables = make_lw_shared<sstables::sstable_set>(*_sstables);
     new_sstables->insert(sstable);
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk());
@@ -1024,7 +1024,7 @@ table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sst
             new_sstable_list.insert(tab);
         }
     }
-    _sstables = make_lw_shared(std::move(new_sstable_list));
+    _sstables = make_lw_shared<sstables::sstable_set>(std::move(new_sstable_list));
 }
 
 // Note: must run in a seastar thread
@@ -1216,7 +1216,7 @@ int64_t table::get_unleveled_sstables() const {
 }
 
 future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const sstring& key) const {
-    return do_with(std::unordered_set<sstring>(), lw_shared_ptr<sstables::sstable_set::incremental_selector>(make_lw_shared(get_sstable_set().make_incremental_selector())),
+    return do_with(std::unordered_set<sstring>(), make_lw_shared<sstables::sstable_set::incremental_selector>(get_sstable_set().make_incremental_selector()),
             partition_key(partition_key::from_nodetool_style_string(_schema, key)),
             [this] (std::unordered_set<sstring>& filenames, lw_shared_ptr<sstables::sstable_set::incremental_selector>& sel, partition_key& pk) {
         return do_with(dht::decorated_key(dht::decorate_key(*_schema, pk)),
@@ -1268,7 +1268,7 @@ lw_shared_ptr<const sstable_list> table::get_sstables_including_compacted_undele
     if (_sstables_compacted_but_not_deleted.empty()) {
         return get_sstables();
     }
-    auto ret = make_lw_shared(*_sstables->all());
+    auto ret = make_lw_shared<sstable_list>(*_sstables->all());
     for (auto&& s : _sstables_compacted_but_not_deleted) {
         ret->insert(s);
     }
@@ -1304,7 +1304,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
                         )
     , _memtables(_config.enable_disk_writes ? make_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
-    , _sstables(make_lw_shared(_compaction_strategy.make_sstable_set(_schema)))
+    , _sstables(make_lw_shared<sstables::sstable_set>(_compaction_strategy.make_sstable_set(_schema)))
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(cl)
     , _compaction_manager(compaction_manager)
@@ -1320,7 +1320,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
 
 partition_presence_checker
 table::make_partition_presence_checker(lw_shared_ptr<sstables::sstable_set> sstables) {
-    auto sel = make_lw_shared(sstables->make_incremental_selector());
+    auto sel = make_lw_shared<sstables::sstable_set::incremental_selector>(sstables->make_incremental_selector());
     return [this, sstables = std::move(sstables), sel = std::move(sel)] (const dht::decorated_key& key) {
         auto& sst = sel->select(key).sstables;
         if (sst.empty()) {
@@ -1464,30 +1464,27 @@ future<> table::write_schema_as_cql(database& db, sstring dir) const {
 future<> table::snapshot(database& db, sstring name) {
     return flush().then([this, &db, name = std::move(name)]() {
        return with_semaphore(_sstable_deletion_sem, 1, [this, &db, name = std::move(name)]() {
-        auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables->all());
-        return do_with(std::move(tables), [this, &db, name](std::vector<sstables::shared_sstable> & tables) {
-            auto jsondir = _config.datadir + "/snapshots/" + name;
-            return io_check([jsondir] { return recursive_touch_directory(jsondir); }).then([this, name, jsondir, &tables] {
-                return parallel_for_each(tables, [name](sstables::shared_sstable sstable) {
-                    auto dir = sstable->get_dir() + "/snapshots/" + name;
-                    return io_check([dir] { return recursive_touch_directory(dir); }).then([sstable, dir] {
-                        return sstable->create_links(dir).then_wrapped([] (future<> f) {
-                            // If the SSTables are shared, one of the CPUs will fail here.
-                            // That is completely fine, though. We only need one link.
-                            try {
-                                f.get();
-                            } catch (std::system_error& e) {
-                                if (e.code() != std::error_code(EEXIST, std::system_category())) {
-                                    throw;
-                                }
-                            }
-                            return make_ready_future<>();
-                        });
+        // If the SSTables are shared, link this sstable to the snapshot directory only by one of the shards that own it.
+        auto& all = *_sstables->all();
+        std::vector<sstables::shared_sstable> tables;
+        tables.reserve(all.size());
+        for (auto& sst : all) {
+            const auto& shards = sst->get_shards_for_this_sstable();
+            if (shards.size() <= 1 || shards[0] == this_shard_id()) {
+                tables.emplace_back(sst);
+            }
+        }
+        auto jsondir = _config.datadir + "/snapshots/" + name;
+        return do_with(std::move(tables), std::move(jsondir), [this, &db] (std::vector<sstables::shared_sstable>& tables, const sstring& jsondir) {
+            return io_check([&jsondir] { return recursive_touch_directory(jsondir); }).then([this, &jsondir, &tables] {
+                return parallel_for_each(tables, [&jsondir] (sstables::shared_sstable sstable) {
+                    return io_check([sstable, &dir = jsondir] {
+                        return sstable->create_links(dir);
                     });
                 });
-            }).then([jsondir, &tables] {
-                return io_check(sync_directory, std::move(jsondir));
-            }).finally([this, &tables, &db, jsondir] {
+            }).then([&jsondir, &tables] {
+                return io_check(sync_directory, jsondir);
+            }).finally([this, &tables, &db, &jsondir] {
                 auto shard = std::hash<sstring>()(jsondir) % smp::count;
                 std::unordered_set<sstring> table_names;
                 for (auto& sst : tables) {
@@ -1495,7 +1492,7 @@ future<> table::snapshot(database& db, sstring name) {
                     auto rf = f.substr(sst->get_dir().size() + 1);
                     table_names.insert(std::move(rf));
                 }
-                return smp::submit_to(shard, [requester = this_shard_id(), jsondir = std::move(jsondir), this, &db,
+                return smp::submit_to(shard, [requester = this_shard_id(), &jsondir, this, &db,
                                               tables = std::move(table_names), datadir = _config.datadir] {
 
                     if (pending_snapshots.count(jsondir) == 0) {
@@ -1509,14 +1506,14 @@ future<> table::snapshot(database& db, sstring name) {
                     snapshot->requests.signal(1);
                     auto my_work = make_ready_future<>();
                     if (requester == this_shard_id()) {
-                        my_work = snapshot->requests.wait(smp::count).then([jsondir = std::move(jsondir),
+                        my_work = snapshot->requests.wait(smp::count).then([&jsondir,
                                                                             &db, snapshot, this] {
                             // this_shard_id() here == requester == this_shard_id() before submit_to() above,
                             // so the db reference is still local
-                            return write_schema_as_cql(db, jsondir).handle_exception([jsondir](std::exception_ptr ptr) {
+                            return write_schema_as_cql(db, jsondir).handle_exception([&jsondir](std::exception_ptr ptr) {
                                 tlogger.error("Failed writing schema file in snapshot in {} with exception {}", jsondir, ptr);
                                 return make_ready_future<>();
-                            }).finally([jsondir = std::move(jsondir), snapshot] () mutable {
+                            }).finally([&jsondir, snapshot] () mutable {
                                 return seal_snapshot(jsondir).then([snapshot] {
                                     snapshot->manifest_write.signal(smp::count);
                                     return make_ready_future<>();
@@ -1639,7 +1636,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         void prune(db_clock::time_point truncated_at) {
             auto gc_trunc = to_gc_clock(truncated_at);
 
-            auto pruned = make_lw_shared(cf._compaction_strategy.make_sstable_set(cf._schema));
+            auto pruned = make_lw_shared<sstables::sstable_set>(cf._compaction_strategy.make_sstable_set(cf._schema));
 
             for (auto& p : *cf._sstables->all()) {
                 if (p->max_data_age() <= gc_trunc) {
@@ -1990,7 +1987,7 @@ struct query_state {
                          const query::read_command& cmd,
                          query::result_options opts,
                          const dht::partition_range_vector& ranges,
-                         query::result_memory_accounter memory_accounter = { })
+                         query::result_memory_accounter memory_accounter)
             : schema(std::move(s))
             , cmd(cmd)
             , builder(cmd.slice, opts, std::move(memory_accounter))
@@ -2021,18 +2018,18 @@ struct query_state {
 future<lw_shared_ptr<query::result>>
 table::query(schema_ptr s,
         const query::read_command& cmd,
-        query_class_config class_config,
+        query::query_class_config class_config,
         query::result_options opts,
         const dht::partition_range_vector& partition_ranges,
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
-        uint64_t max_size,
         db::timeout_clock::time_point timeout,
         query::querier_cache_context cache_ctx) {
     utils::latency_counter lc;
     _stats.reads.set_latency(lc);
+    const auto short_read_allwoed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
     auto f = opts.request == query::result_request::only_digest
-             ? memory_limiter.new_digest_read(max_size) : memory_limiter.new_data_read(max_size);
+             ? memory_limiter.new_digest_read(*cmd.max_result_size, short_read_allwoed) : memory_limiter.new_data_read(*cmd.max_result_size, short_read_allwoed);
     return f.then([this, lc, s = std::move(s), &cmd, class_config, opts, &partition_ranges,
             trace_state = std::move(trace_state), timeout, cache_ctx = std::move(cache_ctx)] (query::result_memory_accounter accounter) mutable {
         auto qs_ptr = std::make_unique<query_state>(std::move(s), cmd, opts, partition_ranges, std::move(accounter));

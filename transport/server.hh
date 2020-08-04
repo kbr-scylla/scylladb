@@ -97,6 +97,8 @@ struct cql_server_config {
     std::function<semaphore& ()> get_service_memory_limiter_semaphore;
     sstring partitioner_name;
     unsigned sharding_ignore_msb;
+    std::optional<uint16_t> shard_aware_transport_port;
+    std::optional<uint16_t> shard_aware_transport_port_ssl;
     bool allow_shard_aware_drivers = true;
     smp_service_group bounce_request_smp_service_group = default_smp_service_group();
 };
@@ -127,7 +129,7 @@ public:
             service::migration_notifier& mn,
             cql_server_config config,
             qos::service_level_controller& sl_controller);
-    future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
+    future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool is_shard_aware = false, bool keepalive = false);
     future<> do_accepts(int which, bool keepalive, socket_address server_addr);
     future<> stop();
 public:

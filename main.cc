@@ -8,7 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "build_id.hh"
+#include "utils/build_id.hh"
 #include "supervisor.hh"
 #include "database.hh"
 #include <seastar/core/reactor.hh>
@@ -393,7 +393,7 @@ public:
 };
 
 template <typename Func>
-inline auto defer_verbose_shutdown(const char* what, Func&& func) {
+static auto defer_verbose_shutdown(const char* what, Func&& func) {
     auto vfunc = [what, func = std::forward<Func>(func)] () mutable {
         startlog.info("Shutting down {}", what);
         try {
@@ -405,7 +405,8 @@ inline auto defer_verbose_shutdown(const char* what, Func&& func) {
         startlog.info("Shutting down {} was successful", what);
     };
 
-    return deferred_action(std::move(vfunc));
+    auto ret = deferred_action(std::move(vfunc));
+    return ::make_shared<decltype(ret)>(std::move(ret));
 }
 
 int main(int ac, char** av) {
@@ -439,6 +440,7 @@ int main(int ac, char** av) {
     auto init = app.get_options_description().add_options();
 
     init("version", bpo::bool_switch(), "print version number and exit");
+    init("build-id", bpo::bool_switch(), "print build-id and exit");
 
     bpo::options_description deprecated("Deprecated options - ignored");
     deprecated.add_options()
@@ -462,6 +464,11 @@ int main(int ac, char** av) {
     bpo::store(parsed_opts, vm);
     if (vm["version"].as<bool>()) {
         fmt::print("{}\n", scylla_version());
+        return 0;
+    }
+
+    if (vm["build-id"].as<bool>()) {
+        fmt::print("{}\n", get_build_id());
         return 0;
     }
 
@@ -589,9 +596,9 @@ int main(int ac, char** av) {
             std::any stop_prometheus;
             if (pport) {
                 prometheus_server.start("prometheus").get();
-                stop_prometheus = ::make_shared(defer_verbose_shutdown("prometheus API server", [&prometheus_server, pport] {
+                stop_prometheus = defer_verbose_shutdown("prometheus API server", [&prometheus_server, pport] {
                     prometheus_server.stop().get();
-                }));
+                });
 
                 //FIXME discarded future
                 prometheus::config pctx;
@@ -891,9 +898,6 @@ int main(int ac, char** av) {
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
 
-            // truncation record migration
-            db::system_keyspace::migrate_truncation_records(feature_service.local().cluster_supports_truncation_table()).get();
-
             supervisor::notify("loading system sstables");
 
             distributed_loader::ensure_system_table_directories(db).get();
@@ -1167,9 +1171,9 @@ int main(int ac, char** av) {
                 }).get();
 
                 // FIXME -- this should be done via client hooks instead
-                stop_cql = ::make_shared(defer_verbose_shutdown("native transport", [&cql_server_ctl] {
+                stop_cql = defer_verbose_shutdown("native transport", [&cql_server_ctl] {
                     cql_server_ctl.stop().get();
-                }));
+                });
             }
 
             api::set_transport_controller(ctx, cql_server_ctl).get();
@@ -1190,9 +1194,9 @@ int main(int ac, char** av) {
                 }).get();
 
                 // FIXME -- this should be done via client hooks instead
-                stop_rpc = ::make_shared(defer_verbose_shutdown("rpc server", [&thrift_ctl] {
+                stop_rpc = defer_verbose_shutdown("rpc server", [&thrift_ctl] {
                     thrift_ctl.stop().get();
-                }));
+                });
             }
 
             api::set_rpc_controller(ctx, thrift_ctl).get();
@@ -1217,7 +1221,7 @@ int main(int ac, char** av) {
                 smp_service_group_config c;
                 c.max_nonlocal_requests = 5000;
                 smp_service_group ssg = create_smp_service_group(c).get0();
-                alternator_executor.start(std::ref(proxy), std::ref(mm), std::ref(sys_dist_ks), ssg).get();
+                alternator_executor.start(std::ref(proxy), std::ref(mm), std::ref(sys_dist_ks), std::ref(service::get_storage_service()), ssg).get();
                 alternator_server.start(std::ref(alternator_executor)).get();
                 std::optional<uint16_t> alternator_port;
                 if (cfg->alternator_port()) {

@@ -64,14 +64,15 @@ public:
 future<lw_shared_ptr<strings_result>> read_strings(service::storage_proxy& proxy, const redis_options& options, const bytes& key, service_permit permit) {
     auto schema = get_schema(proxy, options.get_keyspace_name(), redis::STRINGs);
     auto ps = partition_slice_builder(*schema).build();
-    query::read_command cmd(schema->id(), schema->version(), ps, 1, gc_clock::now(), std::nullopt, 1); 
+    const auto max_result_size = proxy.get_max_result_size(ps);
+    query::read_command cmd(schema->id(), schema->version(), ps, 1, gc_clock::now(), std::nullopt, 1, utils::UUID(), query::is_first_page::no, max_result_size);
     auto pkey = partition_key::from_single_value(*schema, key);
     auto partition_range = dht::partition_range::make_singular(dht::decorate_key(*schema, std::move(pkey)));
     dht::partition_range_vector partition_ranges;
     partition_ranges.emplace_back(std::move(partition_range));
     auto read_consistency_level = options.get_read_consistency_level();
     db::timeout_clock::time_point timeout = db::timeout_clock::now() + options.get_read_timeout();
-    return proxy.query(schema, make_lw_shared(std::move(cmd)), std::move(partition_ranges), read_consistency_level, {timeout, permit, service::client_state::for_internal_calls()}).then([ps, schema] (auto qr) {
+    return proxy.query(schema, make_lw_shared<query::read_command>(std::move(cmd)), std::move(partition_ranges), read_consistency_level, {timeout, permit, service::client_state::for_internal_calls()}).then([ps, schema] (auto qr) {
         return query::result_view::do_with(*qr.query_result, [&] (query::result_view v) {
             auto pd = make_lw_shared<strings_result>();
             v.consume(ps, strings_result_builder(pd, schema, ps));

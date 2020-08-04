@@ -36,6 +36,9 @@
 #include "cql3/result_set.hh"
 #include "cql3/type_json.hh"
 #include "schema_builder.hh"
+#include "service/storage_service.hh"
+#include "gms/feature.hh"
+#include "gms/feature_service.hh"
 
 #include "executor.hh"
 #include "tags_extension.hh"
@@ -390,7 +393,18 @@ future<executor::request_return_type> executor::describe_stream(client_state& cl
 
     auto& opts = bs->cdc_options();
 
-    rjson::set(stream_desc, "StreamStatus", rjson::from_string(opts.enabled() ? "ENABLED"s : "DISABLED"s));
+    auto status = "DISABLED";
+
+    if (opts.enabled()) {
+        auto& metadata = _ss.get_cdc_metadata();
+        if (!metadata.streams_available()) {
+            status = "ENABLING";
+        } else {
+            status = "ENABLED";
+        }
+    } 
+    
+    rjson::set(stream_desc, "StreamStatus", rjson::from_string(status));
 
     stream_view_type type = cdc_options_to_steam_view_type(opts);
 
@@ -717,7 +731,8 @@ future<executor::request_return_type> executor::get_records(client_state& client
     auto partition_slice = query::partition_slice(
         std::move(bounds)
         , {}, std::move(regular_columns), selection->get_query_options());
-    auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, limit * 4);
+    auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, _proxy.get_max_result_size(partition_slice),
+            query::row_limit(limit * 4));
 
     return _proxy.query(schema, std::move(command), std::move(partition_ranges), cl, service::storage_proxy::coordinator_query_options(default_timeout(), std::move(permit), client_state)).then(
             [this, schema, partition_slice = std::move(partition_slice), selection = std::move(selection), start_time = std::move(start_time), limit, key_names = std::move(key_names), attr_names = std::move(attr_names), type, iter, high_ts] (service::storage_proxy::coordinator_query_result qr) mutable {       
@@ -862,6 +877,12 @@ void executor::add_stream_options(const rjson::value& stream_specification, sche
     }
 
     if (stream_enabled->GetBool()) {
+        auto& db = _proxy.get_db().local();
+
+        if (!db.features().cluster_supports_cdc()) {
+            throw api_error::validation("StreamSpecification: streams (CDC) feature not enabled in cluster.");
+        }
+
         cdc::options opts;
         opts.enabled(true);
         auto type = rjson::get_opt<stream_view_type>(stream_specification, "StreamViewType").value_or(stream_view_type::KEYS_ONLY);

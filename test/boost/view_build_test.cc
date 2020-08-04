@@ -13,6 +13,7 @@
 #include "database.hh"
 #include "db/view/view_builder.hh"
 #include "db/system_keyspace.hh"
+#include "db/system_keyspace_view_types.hh"
 #include "db/config.hh"
 
 #include <seastar/testing/test_case.hh>
@@ -31,7 +32,7 @@ using namespace std::literals::chrono_literals;
 
 schema_ptr test_table_schema() {
     static thread_local auto s = [] {
-        schema_builder builder(make_lw_shared(schema(
+        schema_builder builder(make_shared_schema(
                 generate_legacy_id("try1", "data"), "try1", "data",
         // partition key
         {{"p", utf8_type}},
@@ -45,7 +46,7 @@ schema_ptr test_table_schema() {
         utf8_type,
         // comment
         ""
-       )));
+       ));
        return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
@@ -543,7 +544,7 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_deadlock) {
         t->add_sstable_and_update_cache(sst).get();
 
         auto& sem = *with_scheduling_group(e.local_db().get_streaming_scheduling_group(), [&] () {
-            return &e.local_db().make_query_class_config().semaphore;
+            return &e.local_db().get_reader_concurrency_semaphore();
         }).get0();
 
         // consume all units except what is needed to admit a single reader.
@@ -741,4 +742,17 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
             BOOST_REQUIRE_EQUAL(muts[i], collected_muts[i]);
         }
     }
+}
+
+// Checking for view_builds_in_progress used to assume that certain values
+// (e.g. first_token) are always present in every row, which lead to using
+// freed memory. In order to check for regressions, a row with missing
+// values is inserted and ensured that it produces a status without any
+// views in progress.
+SEASTAR_TEST_CASE(test_load_view_build_progress_with_values_missing) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, format("INSERT INTO system.{} (keyspace_name, view_name, cpu_id) VALUES ('ks', 'v', {})",
+                db::system_keyspace::v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS, this_shard_id()));
+        BOOST_REQUIRE(db::system_keyspace::load_view_build_progress().get0().empty());
+    });
 }

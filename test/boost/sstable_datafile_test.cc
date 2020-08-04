@@ -94,8 +94,8 @@ SEASTAR_TEST_CASE(datafile_generation_01) {
     // INSERT INTO test (p1, c1, r1) VALUES ('key1', 'abc', 1);
 
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -162,8 +162,8 @@ SEASTAR_TEST_CASE(datafile_generation_02) {
         // ) WITH compression = {};
         // INSERT INTO table (p1, p2, c1, r1) VALUES ('key1', 'key2', 'abc', 1);
 
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}, {"p2", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}, {"p2", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -232,8 +232,8 @@ SEASTAR_TEST_CASE(datafile_generation_03) {
     // ) WITH compression = {};
     // INSERT INTO table (p1, c1, c2, r1) VALUES ('key1', 'abc', 'cde', 1);
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}, {"c2", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}, {"c2", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -303,8 +303,8 @@ SEASTAR_TEST_CASE(datafile_generation_04) {
     // INSERT INTO test (p1, s1) VALUES ('key1', 10);
     // INSERT INTO test (p1, c1, r1) VALUES ('key1', 'abc', 1);
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {{"s1", int32_type}}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {{"s1", int32_type}}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -377,8 +377,8 @@ SEASTAR_TEST_CASE(datafile_generation_05) {
     //  ) WITH compression = {};
     // INSERT INTO test (p1, c1, r1) VALUES ('key1', 'abc', 1) USING TTL 3600;
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -452,8 +452,8 @@ SEASTAR_TEST_CASE(datafile_generation_06) {
     // after flushed:
     // DELETE r1 FROM test WHERE p1 = 'key1' AND c1 = 'abc';
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -523,8 +523,8 @@ SEASTAR_TEST_CASE(datafile_generation_07) {
     // INSERT INTO test (p1, c1, r1) VALUES ('key1', 'abc', 1);
     // INSERT INTO test (p1, c1, r1) VALUES ('key2', 'cde', 1);
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -583,8 +583,8 @@ SEASTAR_TEST_CASE(datafile_generation_08) {
     //    PRIMARY KEY (p1, c1)
     //  ) WITH compression = {};
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -645,8 +645,8 @@ SEASTAR_TEST_CASE(datafile_generation_08) {
 SEASTAR_TEST_CASE(datafile_generation_09) {
     // Test that generated sstable components can be successfully loaded.
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -690,8 +690,8 @@ static future<> test_digest_and_checksum(sstable_version_types version) {
     // Check that the component Digest was properly generated by using the
     // approach described above.
     return test_setup::do_with_tmp_directory([version] (test_env& env, sstring tmpdir_path) {
-        schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type)));
+        schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
         builder.set_compressor_params(compression_parameters::no_compression());
         auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -1031,8 +1031,8 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
   return test_env::do_with_async([] (test_env& env) {
     storage_service_for_tests ssft;
     BOOST_REQUIRE(smp::count == 1);
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto cm = make_lw_shared<compaction_manager>();
     cm->enable();
@@ -1134,7 +1134,7 @@ SEASTAR_TEST_CASE(compact) {
                 //   john |  20 |   deleted
                 //   nadav - deleted partition
                 return open_sstable(env, s, tmpdir_path, generation).then([s] (shared_sstable sst) {
-                    auto reader = make_lw_shared(sstable_reader(sst, s)); // reader holds sst and s alive.
+                    auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(sst, s)); // reader holds sst and s alive.
                     return read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s] (mutation_opt m) {
                         BOOST_REQUIRE(m);
                         BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, data_value(sstring("jerry")))));
@@ -1208,8 +1208,8 @@ static std::vector<sstables::shared_sstable> get_candidates_for_leveled_strategy
 static future<std::vector<unsigned long>> compact_sstables(test_env& env, sstring tmpdir_path, std::vector<unsigned long> generations_to_compact,
         unsigned long new_generation, bool create_sstables, uint64_t min_sstable_size, compaction_strategy_type strategy) {
     BOOST_REQUIRE(smp::count == 1);
-    schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type)));
+    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
     builder.set_compressor_params(compression_parameters::no_compression());
     builder.set_min_compaction_threshold(4);
     auto s = builder.build(schema_builder::compact_storage::no);
@@ -1312,8 +1312,8 @@ static future<> compact_sstables(test_env& env, sstring tmpdir_path, std::vector
 }
 
 static future<> check_compacted_sstables(test_env& env, sstring tmpdir_path, unsigned long generation, std::vector<unsigned long> compacted_generations) {
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto generations = make_lw_shared<std::vector<unsigned long>>(std::move(compacted_generations));
 
@@ -1503,9 +1503,9 @@ SEASTAR_TEST_CASE(datafile_generation_40) {
         // INSERT INTO table (p1, c1, r1) VALUES ('key1', 'b', 1);
 
         auto s = [] {
-            schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
+            schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
                 {{"p1", utf8_type}}, {{"c1", reversed_type_impl::get_instance(utf8_type)}}, {{"r1", int32_type}}, {}, utf8_type
-            )));
+            ));
             builder.set_compressor_params(compression_parameters::no_compression());
             return builder.build(schema_builder::compact_storage::yes);
         }();
@@ -1553,8 +1553,8 @@ SEASTAR_TEST_CASE(datafile_generation_40) {
 
 SEASTAR_TEST_CASE(datafile_generation_41) {
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -1590,8 +1590,8 @@ SEASTAR_TEST_CASE(check_compaction_ancestor_metadata) {
 
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
         return compact_sstables(env, tmpdir_path, { 42, 43, 44, 45 }, 46).then([&env, tmpdir_path] {
-            auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-                {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+            auto s = make_shared_schema({}, some_keyspace, some_column_family,
+                {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
             return open_sstable(env, s, tmpdir_path, 46).then([] (shared_sstable sst) {
                 std::set<unsigned long> ancestors;
                 const compaction_metadata& cm = sst->get_compaction_metadata();
@@ -1612,8 +1612,8 @@ SEASTAR_TEST_CASE(check_compaction_ancestor_metadata) {
 SEASTAR_TEST_CASE(datafile_generation_47) {
     // Tests the problem in which the sstable row parser would hang.
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -1628,7 +1628,7 @@ SEASTAR_TEST_CASE(datafile_generation_47) {
         auto sst = env.make_sstable(s, tmpdir_path, 47, la, big);
         return write_memtable_to_sstable_for_test(*mt, sst).then([&env, s, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 47).then([s] (auto sstp) mutable {
-                auto reader = make_lw_shared(sstable_reader(sstp, s));
+                auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(sstp, s));
                 return repeat([reader] {
                     return (*reader)(db::no_timeout).then([] (mutation_fragment_opt m) {
                         if (!m) {
@@ -2069,8 +2069,8 @@ SEASTAR_TEST_CASE(leveled_invariant_fix) {
 
 SEASTAR_TEST_CASE(leveled_stcs_on_L0) {
     test_env env;
-    schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type)));
+    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
     builder.set_min_compaction_threshold(4);
     auto s = builder.build(schema_builder::compact_storage::no);
 
@@ -2245,7 +2245,7 @@ SEASTAR_TEST_CASE(tombstone_purge_test) {
         };
 
         auto assert_that_produces_dead_cell = [&] (auto& sst, partition_key& key) {
-            auto reader = make_lw_shared(sstable_reader(sst, s));
+            auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(sst, s));
             read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s, &key] (mutation_opt m) {
                 BOOST_REQUIRE(m);
                 BOOST_REQUIRE(m->key().equal(*s, key));
@@ -2421,7 +2421,7 @@ SEASTAR_TEST_CASE(check_multi_schema) {
             auto sst = env.make_sstable(s, get_test_dir("multi_schema_test", s), 1, version, big);
             auto f = sst->load();
             return f.then([sst, s] {
-                auto reader = make_lw_shared(sstable_reader(sst, s));
+                auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(sst, s));
                 return read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s] (mutation_opt m) {
                     BOOST_REQUIRE(m);
                     BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, 0)));
@@ -2446,8 +2446,8 @@ SEASTAR_TEST_CASE(check_multi_schema) {
 SEASTAR_TEST_CASE(sstable_rewrite) {
     BOOST_REQUIRE(smp::count == 1);
     return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -2481,7 +2481,7 @@ SEASTAR_TEST_CASE(sstable_rewrite) {
                 BOOST_REQUIRE(new_tables->size() == 1);
                 auto newsst = (*new_tables)[0];
                 BOOST_REQUIRE(newsst->generation() == 52);
-                auto reader = make_lw_shared(sstable_reader(newsst, s));
+                auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(newsst, s));
                 return (*reader)(db::no_timeout).then([s, reader, key] (mutation_fragment_opt m) {
                     BOOST_REQUIRE(m);
                     BOOST_REQUIRE(m->is_partition_start());
@@ -2970,8 +2970,8 @@ SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
 }
 
 SEASTAR_TEST_CASE(basic_date_tiered_strategy_test) {
-    schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type)));
+    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
     builder.set_min_compaction_threshold(4);
     auto s = builder.build(schema_builder::compact_storage::no);
     test_env env;
@@ -3007,8 +3007,8 @@ SEASTAR_TEST_CASE(basic_date_tiered_strategy_test) {
 }
 
 SEASTAR_TEST_CASE(date_tiered_strategy_test_2) {
-    schema_builder builder(make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type)));
+    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
     builder.set_min_compaction_threshold(4);
     auto s = builder.build(schema_builder::compact_storage::no);
     test_env env;
@@ -3832,8 +3832,8 @@ SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
 
 SEASTAR_TEST_CASE(sstable_set_incremental_selector) {
     test_env env;
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type);
     auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, s->compaction_strategy_options());
     auto key_and_token_pair = token_generation_for_current_shard(8);
     auto decorated_keys = boost::copy_range<std::vector<dht::decorated_key>>(
@@ -3895,8 +3895,8 @@ SEASTAR_TEST_CASE(sstable_set_incremental_selector) {
 
 SEASTAR_TEST_CASE(sstable_set_erase) {
     test_env env;
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type);
     auto key_and_token_pair = token_generation_for_current_shard(1);
 
     // check that sstable_set::erase is capable of working properly when a non-existing element is given.
@@ -4014,8 +4014,8 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
     return test_env::do_with_async([] (test_env& env) {
         storage_service_for_tests ssft;
         auto tmp = tmpdir();
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -4182,8 +4182,8 @@ SEASTAR_TEST_CASE(sstable_owner_shards) {
 SEASTAR_TEST_CASE(test_summary_entry_spanning_more_keys_than_min_interval) {
     return test_env::do_with_async([] (test_env& env) {
         storage_service_for_tests ssft;
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
         const column_definition& r1_col = *s->get_column_definition("r1");
         std::vector<mutation> mutations;
@@ -5469,7 +5469,7 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
         auto ttl = 5;
 
         auto assert_that_produces_purged_tombstone = [&] (auto& sst, partition_key& key, tombstone tomb) {
-            auto reader = make_lw_shared(sstable_reader(sst, s));
+            auto reader = make_lw_shared<flat_mutation_reader>(sstable_reader(sst, s));
             read_mutation_from_flat_mutation_reader(*reader, db::no_timeout).then([reader, s, &key, is_tombstone_purgeable, &tomb] (mutation_opt m) {
                 BOOST_REQUIRE(m);
                 BOOST_REQUIRE(m->key().equal(*s, key));
@@ -5880,8 +5880,8 @@ SEASTAR_TEST_CASE(test_bug_6472) {
 
 SEASTAR_TEST_CASE(sstable_needs_cleanup_test) {
     test_env env;
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {}, {}, {}, utf8_type);
 
     auto tokens = token_generation_for_current_shard(10);
 

@@ -543,7 +543,7 @@ public:
     void unregister_connection_drop_notifier(drop_notifier_handler h);
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
-    scheduling_group scheduling_group_for_verb(messaging_verb verb);
+    scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
     scheduling_group scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
     std::vector<messaging_service::scheduling_info_for_connection_index> initial_scheduling_info() const;
     unsigned get_rpc_client_idx(messaging_verb verb);

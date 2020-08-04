@@ -103,8 +103,8 @@ with_column_family(schema_ptr s, column_family::config cfg, noncopyable_function
 
 SEASTAR_TEST_CASE(test_mutation_is_applied) {
     return seastar::async([] {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -128,10 +128,10 @@ SEASTAR_TEST_CASE(test_mutation_is_applied) {
 }
 
 SEASTAR_TEST_CASE(test_multi_level_row_tombstones) {
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}},
         {{"c1", int32_type}, {"c2", int32_type}, {"c3", int32_type}},
-        {{"r1", int32_type}}, {}, utf8_type));
+        {{"r1", int32_type}}, {}, utf8_type);
 
     auto ttl = gc_clock::now() + std::chrono::seconds(1);
 
@@ -163,8 +163,8 @@ SEASTAR_TEST_CASE(test_multi_level_row_tombstones) {
 }
 
 SEASTAR_TEST_CASE(test_row_tombstone_updates) {
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", int32_type}, {"c2", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", int32_type}, {"c2", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto c_key1 = clustering_key::from_deeply_exploded(*s, {1, 0});
@@ -206,8 +206,8 @@ collection_mutation_description make_collection_mutation(tombstone t, bytes key1
 SEASTAR_TEST_CASE(test_map_mutations) {
     return seastar::async([] {
         auto my_map_type = map_type_impl::get_instance(int32_type, utf8_type, true);
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_map_type}}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_map_type}}, utf8_type);
         auto mt = make_lw_shared<memtable>(s);
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         auto& column = *s->get_column_definition("s1");
@@ -242,8 +242,8 @@ SEASTAR_TEST_CASE(test_map_mutations) {
 SEASTAR_TEST_CASE(test_set_mutations) {
     return seastar::async([] {
         auto my_set_type = set_type_impl::get_instance(int32_type, true);
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_set_type}}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_set_type}}, utf8_type);
         auto mt = make_lw_shared<memtable>(s);
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         auto& column = *s->get_column_definition("s1");
@@ -278,8 +278,8 @@ SEASTAR_TEST_CASE(test_set_mutations) {
 SEASTAR_TEST_CASE(test_list_mutations) {
     return seastar::async([] {
         auto my_list_type = list_type_impl::get_instance(int32_type, true);
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_list_type}}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_list_type}}, utf8_type);
         auto mt = make_lw_shared<memtable>(s);
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         auto& column = *s->get_column_definition("s1");
@@ -319,8 +319,8 @@ SEASTAR_THREAD_TEST_CASE(test_udt_mutations) {
             {int32_type, utf8_type, long_type, utf8_type},
             true);
 
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", ut}}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", ut}}, utf8_type);
     auto mt = make_lw_shared<memtable>(s);
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto& column = *s->get_column_definition("s1");
@@ -478,8 +478,8 @@ SEASTAR_THREAD_TEST_CASE(test_large_collection_serialization_exception_safety) {
 SEASTAR_TEST_CASE(test_multiple_memtables_one_partition) {
     return seastar::async([] {
     storage_service_for_tests ssft;
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto cf_stats = make_lw_shared<::cf_stats>();
     column_family::config cfg = column_family_test_config();
@@ -607,8 +607,8 @@ SEASTAR_TEST_CASE(test_flush_in_the_middle_of_a_scan) {
 
 SEASTAR_TEST_CASE(test_multiple_memtables_multiple_partitions) {
     return seastar::async([] {
-    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", int32_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
+    auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", int32_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto cf_stats = make_lw_shared<::cf_stats>();
 
@@ -765,7 +765,8 @@ SEASTAR_TEST_CASE(test_querying_of_mutation) {
 
         auto resultify = [s] (const mutation& m) -> query::result_set {
             auto slice = make_full_slice(*s);
-            return query::result_set::from_raw_result(s, slice, m.query(slice));
+            return query::result_set::from_raw_result(s, slice,
+                    m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size }));
         };
 
         mutation m(s, partition_key::from_single_value(*s, "key1"));
@@ -800,7 +801,8 @@ SEASTAR_TEST_CASE(test_partition_with_no_live_data_is_absent_in_data_query_resul
 
         auto slice = make_full_slice(*s);
 
-        assert_that(query::result_set::from_raw_result(s, slice, m.query(slice)))
+        assert_that(query::result_set::from_raw_result(s, slice,
+                    m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size })))
             .is_empty();
     });
 }
@@ -823,7 +825,8 @@ SEASTAR_TEST_CASE(test_partition_with_live_data_in_static_row_is_present_in_the_
             .with_regular_column("v")
             .build();
 
-        assert_that(query::result_set::from_raw_result(s, slice, m.query(slice)))
+        assert_that(query::result_set::from_raw_result(s, slice,
+                    m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size })))
             .has_only(a_row()
                 .with_column("pk", data_value(bytes("key1")))
                 .with_column("v", data_value::make_null(bytes_type)));
@@ -846,7 +849,8 @@ SEASTAR_TEST_CASE(test_query_result_with_one_regular_column_missing) {
 
         auto slice = partition_slice_builder(*s).build();
 
-        assert_that(query::result_set::from_raw_result(s, slice, m.query(slice)))
+        assert_that(query::result_set::from_raw_result(s, slice,
+                    m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size })))
             .has_only(a_row()
                 .with_column("pk", data_value(bytes("key1")))
                 .with_column("ck", data_value(bytes("ck:A")))
@@ -1142,8 +1146,8 @@ SEASTAR_TEST_CASE(test_mutation_diff) {
 
 SEASTAR_TEST_CASE(test_large_blobs) {
     return seastar::async([] {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p1", utf8_type}}, {}, {}, {{"s1", bytes_type}}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {}, {}, {{"s1", bytes_type}}, utf8_type);
 
         auto mt = make_lw_shared<memtable>(s);
 
@@ -1232,8 +1236,10 @@ SEASTAR_TEST_CASE(test_query_digest) {
         auto check_digests_equal = [] (const mutation& m1, const mutation& m2) {
             auto ps1 = partition_slice_builder(*m1.schema()).build();
             auto ps2 = partition_slice_builder(*m2.schema()).build();
-            auto digest1 = *m1.query(ps1, query::result_options::only_digest(query::digest_algorithm::xxHash)).digest();
-            auto digest2 = *m2.query(ps2, query::result_options::only_digest(query::digest_algorithm::xxHash)).digest();
+            auto digest1 = *m1.query(ps1, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size },
+                    query::result_options::only_digest(query::digest_algorithm::xxHash)).digest();
+            auto digest2 = *m2.query(ps2, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size },
+                    query::result_options::only_digest(query::digest_algorithm::xxHash)).digest();
             if (digest1 != digest2) {
                 BOOST_FAIL(format("Digest should be the same for {} and {}", m1, m2));
             }
@@ -1482,7 +1488,8 @@ SEASTAR_THREAD_TEST_CASE(test_querying_expired_rows) {
                 .without_partition_key_columns()
                 .build();
         auto opts = query::result_options{query::result_request::result_and_digest, query::digest_algorithm::xxHash};
-        return query::result_set::from_raw_result(s, slice, m.query(slice, opts, t));
+        return query::result_set::from_raw_result(s, slice,
+                m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size }, opts, t));
     };
 
     mutation m(s, pk);
@@ -1546,7 +1553,8 @@ SEASTAR_TEST_CASE(test_querying_expired_cells) {
                     .without_partition_key_columns()
                     .build();
             auto opts = query::result_options{query::result_request::result_and_digest, query::digest_algorithm::xxHash};
-            return query::result_set::from_raw_result(s, slice, m.query(slice, opts, t));
+            return query::result_set::from_raw_result(s, slice,
+                    m.query(slice, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size }, opts, t));
         };
 
         {
@@ -1751,8 +1759,8 @@ SEASTAR_TEST_CASE(test_trim_rows) {
 
 SEASTAR_TEST_CASE(test_collection_cell_diff) {
     return seastar::async([] {
-        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
-            {{"p", utf8_type}}, {}, {{"v", list_type_impl::get_instance(bytes_type, true)}}, {}, utf8_type));
+        auto s = make_shared_schema({}, some_keyspace, some_column_family,
+            {{"p", utf8_type}}, {}, {{"v", list_type_impl::get_instance(bytes_type, true)}}, {}, utf8_type);
 
         auto& col = s->column_at(column_kind::regular_column, 0);
         auto k = dht::decorate_key(*s, partition_key::from_single_value(*s, to_bytes("key")));

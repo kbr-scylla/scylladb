@@ -48,7 +48,7 @@ future<> view_update_generator::start() {
                     // Exploit the fact that sstables in the staging directory
                     // are usually non-overlapping and use a partitioned set for
                     // the read.
-                    auto ssts = make_lw_shared(sstables::make_partitioned_sstable_set(s, make_lw_shared<sstable_list>(sstable_list{}), false));
+                    auto ssts = make_lw_shared<sstables::sstable_set>(sstables::make_partitioned_sstable_set(s, make_lw_shared<sstable_list>(sstable_list{}), false));
                     for (auto& sst : sstables) {
                         ssts->insert(sst);
                     }
@@ -67,7 +67,7 @@ future<> view_update_generator::start() {
                     auto [staging_sstable_reader, staging_sstable_reader_handle] = make_manually_paused_evictable_reader(
                             std::move(ms),
                             s,
-                            _db.make_query_class_config().semaphore.make_permit(),
+                            _db.get_reader_concurrency_semaphore().make_permit(),
                             query::full_partition_range,
                             s->full_slice(),
                             service::get_local_streaming_priority(),

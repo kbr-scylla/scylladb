@@ -227,7 +227,7 @@ public:
 
     virtual future<> create_table(std::function<schema(std::string_view)> schema_maker) override {
         auto id = utils::UUID_gen::get_time_UUID();
-        schema_builder builder(make_lw_shared(schema_maker(ks_name)));
+        schema_builder builder(make_lw_shared<schema>(schema_maker(ks_name)));
         builder.set_uuid(id);
         auto s = builder.build(schema_builder::compact_storage::no);
         return service::get_local_migration_manager().announce_new_column_family(s, true);
@@ -403,6 +403,13 @@ public:
                 create_directories((cfg->view_hints_directory() + "/" + std::to_string(i)).c_str());
             }
 
+            if (!cfg->max_memory_for_unlimited_query_soft_limit.is_set()) {
+                cfg->max_memory_for_unlimited_query_soft_limit.set(uint64_t(query::result_memory_limiter::unlimited_result_size));
+            }
+            if (!cfg->max_memory_for_unlimited_query_hard_limit.is_set()) {
+                cfg->max_memory_for_unlimited_query_hard_limit.set(uint64_t(query::result_memory_limiter::unlimited_result_size));
+            }
+
             sharded<locator::token_metadata> token_metadata;
             token_metadata.start().get();
             auto stop_token_metadata = defer([&token_metadata] { token_metadata.stop().get(); });
@@ -547,8 +554,6 @@ public:
 
             db::system_keyspace::init_local_cache().get();
             auto stop_local_cache = defer([] { db::system_keyspace::deinit_local_cache().get(); });
-
-            db::system_keyspace::migrate_truncation_records(feature_service.local().cluster_supports_truncation_table()).get();
 
             service::get_local_storage_service().init_messaging_service_part().get();
             service::get_local_storage_service().init_server(service::bind_messaging_port(false)).get();

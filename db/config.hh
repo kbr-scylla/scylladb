@@ -207,6 +207,8 @@ public:
     named_value<bool> start_native_transport;
     named_value<uint16_t> native_transport_port;
     named_value<uint16_t> native_transport_port_ssl;
+    named_value<uint16_t> native_shard_aware_transport_port;
+    named_value<uint16_t> native_shard_aware_transport_port_ssl;
     named_value<uint32_t> native_transport_max_threads;
     named_value<uint32_t> native_transport_max_frame_size_in_mb;
     named_value<sstring> broadcast_rpc_address;
@@ -292,7 +294,8 @@ public:
     named_value<bool> abort_on_internal_error;
     named_value<uint32_t> max_partition_key_restrictions_per_query;
     named_value<uint32_t> max_clustering_key_restrictions_per_query;
-    named_value<uint64_t> max_memory_for_unlimited_query;
+    named_value<uint64_t> max_memory_for_unlimited_query_soft_limit;
+    named_value<uint64_t> max_memory_for_unlimited_query_hard_limit;
     named_value<unsigned> initial_sstable_loading_concurrency;
     named_value<bool> enable_3_1_0_compatibility_mode;
     named_value<bool> enable_user_defined_functions;
@@ -329,9 +332,6 @@ public:
 
     seastar::logging_settings logging_settings(const boost::program_options::variables_map&) const;
 
-    boost::program_options::options_description_easy_init&
-    add_options(boost::program_options::options_description_easy_init&);
-
     const db::extensions& extensions() const;
 
     bool create_role_attributes_table = true; // Some upgrade tests don't want enterprise-only tables
@@ -349,8 +349,7 @@ private:
             return this->is_set() ? (*this)() : t;
         }
         // do not add to boost::options. We only care about yaml config
-        void add_command_line_option(boost::program_options::options_description_easy_init&,
-                        const std::string_view&, const std::string_view&) override {}
+        void add_command_line_option(boost::program_options::options_description_easy_init&) override {}
     };
 
     log_legacy_value<seastar::log_level> default_log_level;

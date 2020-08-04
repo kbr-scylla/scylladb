@@ -69,6 +69,12 @@ if __name__ == '__main__':
         print('{} is already mounted'.format(mount_at))
         sys.exit(1)
 
+    mntunit_bn = out('systemd-escape -p --suffix=mount {}'.format(mount_at))
+    mntunit = Path('/etc/systemd/system/{}'.format(mntunit_bn))
+    if mntunit.exists():
+        print('mount unit {} already exists'.format(mntunit))
+        sys.exit(1)
+
     if is_debian_variant():
         run('env DEBIAN_FRONTEND=noninteractive apt-get -y install mdadm xfsprogs')
     elif is_redhat_variant():
@@ -118,20 +124,19 @@ if __name__ == '__main__':
         res = out('mdadm --detail --scan')
         with open(confpath, 'w') as f:
             f.write(res)
+            f.write('\nMAILADDR root')
 
     makedirs(mount_at)
-    mntunit_bn = out('systemd-escape -p --suffix=mount {}'.format(mount_at))
-    mntunit = Path('/etc/systemd/system/{}'.format(mntunit_bn))
-    if mntunit.exists():
-        print('mount unit {} already exists'.format(mntunit))
-        sys.exit(1)
 
     uuid = out(f'blkid -s UUID -o value {fsdev}')
+    after = 'local-fs.target'
+    if raid:
+        after += ' mdmonitor.service'
     unit_data = f'''
 [Unit]
 Description=Scylla data directory
 Before=scylla-server.service
-After=local-fs.target
+After={after}
 
 [Mount]
 What=UUID={uuid}
@@ -154,6 +159,9 @@ WantedBy=multi-user.target
             f.write(f'RequiresMountsFor={mount_at}\n')
 
     systemd_unit.reload()
+    mdmonitor = systemd_unit('mdmonitor.service')
+    mdmonitor.enable()
+    mdmonitor.start()
     mount = systemd_unit(mntunit_bn)
     mount.start()
     if args.enable_on_nextboot:

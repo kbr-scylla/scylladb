@@ -233,7 +233,7 @@ public:
     virtual reader_concurrency_semaphore& semaphore() override {
         const auto shard = this_shard_id();
         if (!_semaphores[shard]) {
-            _semaphores[shard] = &_db.local().make_query_class_config().semaphore;
+            _semaphores[shard] = &_db.local().get_reader_concurrency_semaphore();
         }
         return *_semaphores[shard];
     }
@@ -289,10 +289,9 @@ flat_mutation_reader read_context::create_reader(
     }
 
     auto& table = _db.local().find_column_family(schema);
-    auto class_config = _db.local().make_query_class_config();
 
     if (!rm.rparts) {
-        rm.rparts = make_foreign(std::make_unique<reader_meta::remote_parts>(class_config.semaphore));
+        rm.rparts = make_foreign(std::make_unique<reader_meta::remote_parts>(semaphore()));
     }
 
     rm.rparts->range = std::make_unique<const dht::partition_range>(pr);
@@ -502,18 +501,28 @@ future<> read_context::lookup_readers() {
     }
 
     return parallel_for_each(boost::irange(0u, smp::count), [this] (shard_id shard) {
-        return _db.invoke_on(shard, [shard, cmd = &_cmd, ranges = &_ranges, gs = global_schema_ptr(_schema),
+        return _db.invoke_on(shard, [this, shard, cmd = &_cmd, ranges = &_ranges, gs = global_schema_ptr(_schema),
                 gts = tracing::global_trace_state_ptr(_trace_state)] (database& db) mutable {
             auto schema = gs.get();
             auto querier_opt = db.get_querier_cache().lookup_shard_mutation_querier(cmd->query_uuid, *schema, *ranges, cmd->slice, gts.get());
             auto& table = db.find_column_family(schema);
-            auto& semaphore = db.make_query_class_config().semaphore;
+            auto& semaphore = this->semaphore();
 
             if (!querier_opt) {
                 return reader_meta(reader_state::inexistent, reader_meta::remote_parts(semaphore));
             }
 
             auto& q = *querier_opt;
+
+            if (&q.permit().semaphore() != &semaphore) {
+                on_internal_error(mmq_log, format("looked-up reader belongs to different semaphore than the one appropriate for this query class: "
+                        "looked-up reader belongs to {} (0x{:x}) the query class appropriate is {} (0x{:x})",
+                        q.permit().semaphore().name(),
+                        reinterpret_cast<uintptr_t>(&q.permit().semaphore()),
+                        semaphore.name(),
+                        reinterpret_cast<uintptr_t>(&semaphore)));
+            }
+
             auto handle = pause(semaphore, std::move(q).reader());
             return reader_meta(
                     reader_state::successful_lookup,
@@ -598,18 +607,17 @@ static future<reconcilable_result> do_query_mutations(
                     mutation_reader::forwarding fwd_mr) {
                 return make_multishard_combining_reader(ctx, std::move(s), pr, ps, pc, std::move(trace_state), fwd_mr);
             });
-            auto class_config = ctx->db().local().make_query_class_config();
-            auto reader = make_flat_multi_range_reader(s, class_config.semaphore.make_permit(), std::move(ms), ranges, cmd.slice,
-                    service::get_local_sstable_query_read_priority(), trace_state, mutation_reader::forwarding::no);
+            auto reader = make_flat_multi_range_reader(s, ctx->db().local().get_reader_concurrency_semaphore().make_permit(), std::move(ms), ranges,
+                    cmd.slice, service::get_local_sstable_query_read_priority(), trace_state, mutation_reader::forwarding::no);
 
             auto compaction_state = make_lw_shared<compact_for_mutation_query_state>(*s, cmd.timestamp, cmd.slice, cmd.row_limit,
                     cmd.partition_limit);
 
-            return do_with(std::move(reader), std::move(compaction_state), [&, class_config, accounter = std::move(accounter), timeout] (
+            return do_with(std::move(reader), std::move(compaction_state), [&, accounter = std::move(accounter), timeout] (
                         flat_mutation_reader& reader, lw_shared_ptr<compact_for_mutation_query_state>& compaction_state) mutable {
                 auto rrb = reconcilable_result_builder(*reader.schema(), cmd.slice, std::move(accounter));
                 return query::consume_page(reader, compaction_state, cmd.slice, std::move(rrb), cmd.row_limit, cmd.partition_limit, cmd.timestamp,
-                        timeout, class_config.max_memory_for_unlimited_query).then([&] (consume_result&& result) mutable {
+                        timeout, *cmd.max_result_size).then([&] (consume_result&& result) mutable {
                     return make_ready_future<page_consume_result>(page_consume_result(std::move(result), reader.detach_buffer(), std::move(compaction_state)));
                 });
             }).then_wrapped([&ctx] (future<page_consume_result>&& result_fut) {
@@ -639,7 +647,6 @@ future<std::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_tempera
         const query::read_command& cmd,
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
-        uint64_t max_size,
         db::timeout_clock::time_point timeout) {
     if (cmd.row_limit == 0 || cmd.slice.partition_row_limit() == 0 || cmd.partition_limit == 0) {
         return make_ready_future<std::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>>(
@@ -648,8 +655,9 @@ future<std::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_tempera
                 db.local().find_column_family(s).get_global_cache_hit_rate()));
     }
 
-    return db.local().get_result_memory_limiter().new_mutation_read(max_size).then([&, s = std::move(s), trace_state = std::move(trace_state),
-            timeout] (query::result_memory_accounter accounter) mutable {
+    const auto short_read_allwoed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
+    return db.local().get_result_memory_limiter().new_mutation_read(*cmd.max_result_size, short_read_allwoed).then([&, s = std::move(s),
+            trace_state = std::move(trace_state), timeout] (query::result_memory_accounter accounter) mutable {
         return do_query_mutations(db, s, cmd, ranges, std::move(trace_state), timeout, std::move(accounter)).then_wrapped(
                     [&db, s = std::move(s)] (future<reconcilable_result>&& f) {
             auto& local_db = db.local();
