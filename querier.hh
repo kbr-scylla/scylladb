@@ -68,7 +68,7 @@ auto consume_page(flat_mutation_reader& reader,
         lw_shared_ptr<compact_for_query_state<OnlyLive>> compaction_state,
         const query::partition_slice& slice,
         Consumer&& consumer,
-        uint32_t row_limit,
+        uint64_t row_limit,
         uint32_t partition_limit,
         gc_clock::time_point query_time,
         db::timeout_clock::time_point timeout,
@@ -208,7 +208,7 @@ public:
     template <typename Consumer>
     requires CompactedFragmentsConsumer<Consumer>
     auto consume_page(Consumer&& consumer,
-            uint32_t row_limit,
+            uint64_t row_limit,
             uint32_t partition_limit,
             gc_clock::time_point query_time,
             db::timeout_clock::time_point timeout,
