@@ -77,7 +77,7 @@ namespace raw {
 
 namespace {
 
-using namespace restrictions;
+using namespace expr;
 
 /// If oper.lhs is a single column, returns it; otherwise, returns null.
 const column_definition* single_column(const binary_operator& oper) {
@@ -89,45 +89,68 @@ const column_definition* single_column(const binary_operator& oper) {
 
 /// True iff expr bounds clustering key from both above and below OR it has no clustering-key bounds at all.
 /// See #6493.
-bool bounded_ck(const expression& expr) {
-    return std::visit(overloaded_functor{
-            [] (bool b) { return true; }, // false means empty, true means no bounds at all; both fit the condition.
-            [] (const binary_operator& oper) {
-                return *oper.op == operator_type::EQ; // Without EQ, one side must be unbounded.
-            },
-            [] (const conjunction& conj) {
-                using bounds_bitvector = int; // Combined using binary OR.
-                static constexpr bounds_bitvector UPPER=1, LOWER=2;
-                std::unordered_map<const column_definition*, bounds_bitvector> found_bounds;
-                for (const auto& child : conj.children) {
-                    std::visit(overloaded_functor{
-                            [&] (const binary_operator& oper) {
-                                if (std::holds_alternative<token>(oper.lhs)) {
-                                    return;
-                                }
-                                // The rules of multi-column comparison imply that any multi-column
-                                // expression sets a bound for the entire clustering key.  Therefore, we
-                                // represent any such expression with special pointer value nullptr.
-                                auto col = single_column(oper);
-                                if (col && !col->is_clustering_key()) {
-                                    return;
-                                }
-                                if (*oper.op == operator_type::EQ) {
-                                    found_bounds[col] = UPPER | LOWER;
-                                } else if (*oper.op == operator_type::LT || *oper.op == operator_type::LTE) {
-                                    found_bounds[col] |= UPPER;
-                                } else if (*oper.op == operator_type::GTE || *oper.op == operator_type::GT) {
-                                    found_bounds[col] |= LOWER;
-                                }
-                            },
-                            [] (const auto& default_case) {}, // Assumes conjunctions are flattened.
-                        }, child);
+bool bounds_ck_symmetrically(const expression& expr) {
+    /// A visitor to find out if CK boundedness is symmetric.
+    class boundedness_tracker {
+        using boundedness_bitvector = int; // Combined using binary OR.
+        const boundedness_bitvector UPPER=1, LOWER=2;
+        /// Individual bounds collected from the visiting expression.  May have a nullptr entry, which
+        /// represents multi-column bounds encountered.
+        std::unordered_map<const column_definition*, boundedness_bitvector> _found_bounds;
+
+        bool _shortcircuit = false; ///< When true, cease all further visiting and declare boundedness symmetric.
+
+      public:
+        /// True iff the nodes visited so far do bound the CK symmetrically.
+        bool result() const {
+            return _shortcircuit ||
+                    // Since multi-column comparisons can't be mixed with single-column ones, _found_bounds will
+                    // either have a single entry with key nullptr or one entry per restricted column.
+                    boost::algorithm::all_of_equal(_found_bounds | boost::adaptors::map_values, UPPER | LOWER);
+        }
+
+        /// Updates state for a boolean expression.
+        void operator()(bool b) {
+            // b==true doesn't change the current state; b==false shortcircuits the entire expression to empty set.
+            if (!b) {
+                _shortcircuit = true;
+            }
+        }
+
+        /// Updates state for a binary-operator expression.
+        void operator()(const binary_operator& oper) {
+            if (std::holds_alternative<token>(oper.lhs)) {
+                return;
+            }
+            // The rules of multi-column comparison imply that any multi-column expression sets a bound for the
+            // entire clustering key.  Therefore, we represent any such expression with special pointer value
+            // nullptr.
+            auto col = single_column(oper);
+            if (col && !col->is_clustering_key()) {
+                return;
+            }
+            if (*oper.op == operator_type::EQ) {
+                _found_bounds[col] = UPPER | LOWER;
+            } else if (*oper.op == operator_type::LT || *oper.op == operator_type::LTE) {
+                _found_bounds[col] |= UPPER;
+            } else if (*oper.op == operator_type::GTE || *oper.op == operator_type::GT) {
+                _found_bounds[col] |= LOWER;
+            }
+        }
+
+        /// Updates state for a conjunction.
+        void operator()(const conjunction& conj) {
+            for (const auto& child : conj.children) {
+                std::visit(*this, child);
+                if (_shortcircuit) {
+                    break;
                 }
-                // Since multi-column comparisons can't be mixed with single-column ones, found_bounds will
-                // either have a single entry with key nullptr or one entry per restricted column.
-                return boost::algorithm::all_of_equal(found_bounds | boost::adaptors::map_values, UPPER | LOWER);
-            },
-        }, expr);
+            }
+        }
+    } tracker;
+
+    std::visit(tracker, expr);
+    return tracker.result();
 }
 
 } // anonymous namespace
@@ -157,7 +180,7 @@ delete_statement::prepare_internal(database& db, schema_ptr schema, variable_spe
     prepare_conditions(db, *schema, bound_names, *stmt);
     stmt->process_where_clause(db, _where_clause, bound_names);
     if (!db.supports_infinite_bound_range_deletions() &&
-        !bounded_ck(stmt->restrictions().get_clustering_columns_restrictions()->expression)) {
+        !bounds_ck_symmetrically(stmt->restrictions().get_clustering_columns_restrictions()->expression)) {
         throw exceptions::invalid_request_exception(
                 "A range deletion operation needs to specify both bounds for clusters without sstable mc format support");
     }
