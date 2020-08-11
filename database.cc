@@ -33,7 +33,6 @@
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include "sstables/compaction.hh"
-#include "sstables/remove.hh"
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/adaptor/map.hpp>
 #include "locator/simple_snitch.hh"
@@ -532,6 +531,16 @@ database::setup_metrics() {
 void database::set_format(sstables::sstable_version_types format) {
     get_user_sstables_manager().set_format(format);
     get_system_sstables_manager().set_format(format);
+}
+
+void database::set_format_by_config() {
+    if (_cfg.enable_sstables_md_format()) {
+        set_format(sstables::sstable_version_types::md);
+    } else if (_cfg.enable_sstables_mc_format()) {
+        set_format(sstables::sstable_version_types::mc);
+    } else {
+        set_format(sstables::sstable_version_types::la);
+    }
 }
 
 database::~database() {
@@ -1091,8 +1100,7 @@ database::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
 
 future<>
 database::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, bool is_bootstrap) {
-    auto i = _keyspaces.find(ksm->name());
-    if (i != _keyspaces.end()) {
+    if (_keyspaces.contains(ksm->name())) {
         return make_ready_future<>();
     }
 
@@ -1831,7 +1839,11 @@ future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_fun
                             // TODO: indexes.
                             // Note: since discard_sstables was changed to only count tables owned by this shard,
                             // we can get zero rp back. Changed assert, and ensure we save at least low_mark.
-                            assert(low_mark <= rp || rp == db::replay_position());
+                            // #6995 - the assert below was broken in c2c6c71 and remained so for many years. 
+                            // We nowadays do not flush tables with sstables but autosnapshot=false. This means
+                            // the low_mark assertion does not hold, because we maybe/probably never got around to 
+                            // creating the sstables that would create them.
+                            assert(!should_flush || low_mark <= rp || rp == db::replay_position());
                             rp = std::max(low_mark, rp);
                             return truncate_views(cf, truncated_at, should_flush).then([&cf, truncated_at, rp] {
                                 // save_truncation_record() may actually fail after we cached the truncation time
@@ -1892,7 +1904,7 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
         // if specific keyspaces names were given - filter only these keyspaces directories
         if (!ks_names_set.empty()) {
             filter = std::make_unique<lister::filter_type>([ks_names_set = std::move(ks_names_set)] (const fs::path& parent_dir, const directory_entry& dir_entry) {
-                return ks_names_set.find(dir_entry.name) != ks_names_set.end();
+                return ks_names_set.contains(dir_entry.name);
             });
         }
 

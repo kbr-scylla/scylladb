@@ -283,8 +283,8 @@ private:
         }
 
         if (!_consumer.is_mutation_end()) {
-            // FIXME: give more details from _context
-            throw malformed_sstable_exception("consumer not at partition boundary", _sst->get_filename());
+            throw malformed_sstable_exception(format("consumer not at partition boundary, position: {}",
+                    position_in_partition_view::printer(*_schema, _consumer.position())), _sst->get_filename());
         }
 
         // It's better to obtain partition information from the index if we already have it.
@@ -469,7 +469,7 @@ void mp_row_consumer_reader::on_next_partition(dht::decorated_key key, tombstone
 flat_mutation_reader sstable::read_rows_flat(schema_ptr schema, reader_permit permit, const io_priority_class& pc,
         streamed_mutation::forwarding fwd) {
     get_stats().on_sstable_partition_read();
-    if (_version == version_types::mc) {
+    if (_version >= version_types::mc) {
         return make_flat_mutation_reader<sstable_mutation_reader<data_consume_rows_context_m, mp_row_consumer_m>>(
             shared_from_this(), std::move(schema), std::move(permit), pc, tracing::trace_state_ptr(), fwd, default_read_monitor());
     }
@@ -488,7 +488,7 @@ sstables::sstable::read_row_flat(schema_ptr schema,
                                  read_monitor& mon)
 {
     get_stats().on_single_partition_read();
-    if (_version == version_types::mc) {
+    if (_version >= version_types::mc) {
         return make_flat_mutation_reader<sstable_mutation_reader<data_consume_rows_context_m, mp_row_consumer_m>>(
             shared_from_this(), std::move(schema), std::move(permit), std::move(key), slice, pc,
             std::move(trace_state), fwd, mutation_reader::forwarding::no, mon);
@@ -508,7 +508,7 @@ sstable::read_range_rows_flat(schema_ptr schema,
                          mutation_reader::forwarding fwd_mr,
                          read_monitor& mon) {
     get_stats().on_range_partition_read();
-    if (_version == version_types::mc) {
+    if (_version >= version_types::mc) {
         return make_flat_mutation_reader<sstable_mutation_reader<data_consume_rows_context_m, mp_row_consumer_m>>(
             shared_from_this(), std::move(schema), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon);
     }

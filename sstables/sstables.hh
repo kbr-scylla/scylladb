@@ -50,6 +50,7 @@
 #include "utils/observable.hh"
 #include "sstables/shareable_components.hh"
 #include "sstables/open_info.hh"
+#include "query-request.hh"
 
 #include <seastar/util/optimized_optional.hh>
 #include <boost/intrusive/list.hpp>
@@ -174,12 +175,12 @@ public:
                                                  version_types v, format_types f);
 
     // load sstable using components shared by a shard
-    future<> load(foreign_sstable_open_info info);
+    future<> load(foreign_sstable_open_info info) noexcept;
     // load all components from disk
     // this variant will be useful for testing purposes and also when loading
     // a new sstable from scratch for sharing its components.
-    future<> load(const io_priority_class& pc = default_priority_class());
-    future<> open_data();
+    future<> load(const io_priority_class& pc = default_priority_class()) noexcept;
+    future<> open_data() noexcept;
     future<> update_info_for_opened_data();
 
     future<> set_generation(int64_t generation);
@@ -294,7 +295,7 @@ public:
     }
 
     void add_ancestor(int64_t generation) {
-        _collector.add_ancestor(generation);
+        _collector->add_ancestor(generation);
     }
 
     // Returns true iff this sstable contains data which belongs to many shards.
@@ -397,8 +398,15 @@ public:
 
     bool requires_view_building() const;
 
+    bool has_metadata_collector() const {
+        return _collector.has_value();
+    }
+
     metadata_collector& get_metadata_collector() {
-        return _collector;
+        if (!_collector.has_value()) {
+            on_internal_error(sstlog, "No metadata collector");
+        }
+        return *_collector;
     }
 
     std::vector<std::pair<component_type, sstring>> all_components() const;
@@ -433,12 +441,13 @@ public:
     }
 
     template<typename Func, typename... Args>
-    auto sstable_write_io_check(Func&& func, Args&&... args) const {
-        return do_io_check(_write_error_handler, func, std::forward<Args>(args)...);
+    requires std::is_nothrow_move_constructible_v<Func>
+    auto sstable_write_io_check(Func&& func, Args&&... args) const noexcept {
+        return do_io_check(_write_error_handler, std::forward<Func>(func), std::forward<Args>(args)...);
     }
 
     // required since touch_directory has an optional parameter
-    auto sstable_touch_directory_io_check(sstring name) const {
+    auto sstable_touch_directory_io_check(sstring name) const noexcept {
         return do_io_check(_write_error_handler, [name = std::move(name)] () mutable {
             return touch_directory(std::move(name));
         });
@@ -457,7 +466,7 @@ private:
     bool _open = false;
     // NOTE: _collector and _c_stats are used to generation of statistics file
     // when writing a new sstable.
-    metadata_collector _collector;
+    std::optional<metadata_collector> _collector;
     column_stats _c_stats;
     file _index_file;
     file _data_file;
@@ -466,7 +475,7 @@ private:
     uint64_t _filter_file_size = 0;
     uint64_t _bytes_on_disk = 0;
     db_clock::time_point _data_file_write_time;
-    std::vector<nonwrapping_range<bytes_view>> _clustering_components_ranges;
+    position_range _position_range = position_range::all_clustered_rows();
     std::vector<unsigned> _shards;
     std::optional<dht::decorated_key> _first;
     std::optional<dht::decorated_key> _last;
@@ -536,7 +545,7 @@ private:
 public:
     const bool has_component(component_type f) const;
 private:
-    future<file> open_file(component_type, open_flags, file_open_options = {});
+    future<file> open_file(component_type, open_flags, file_open_options = {}) noexcept;
 
     template <component_type Type, typename T>
     future<> read_simple(T& comp, const io_priority_class& pc);
@@ -549,8 +558,11 @@ private:
     void write_crc(const checksum& c);
     void write_digest(uint32_t full_checksum);
 
-    future<file> rename_new_sstable_component_file(sstring from_file, sstring to_file, file fd);
-    future<file> new_sstable_component_file(const io_error_handler& error_handler, component_type f, open_flags flags, file_open_options options = {});
+    future<> rename_new_sstable_component_file(sstring from_file, sstring to_file);
+    future<file> new_sstable_component_file(const io_error_handler& error_handler, component_type f, open_flags flags, file_open_options options = {}) noexcept;
+
+    future<file_writer> make_component_file_writer(component_type c, file_output_stream_options options,
+            open_flags oflags = open_flags::wo | open_flags::create | open_flags::exclusive) noexcept;
 
     future<> touch_temp_dir();
     future<> remove_temp_dir();
@@ -562,14 +574,14 @@ private:
     future<> read_compression(const io_priority_class& pc);
     void write_compression(const io_priority_class& pc);
 
-    future<> read_scylla_metadata(const io_priority_class& pc);
+    future<> read_scylla_metadata(const io_priority_class& pc) noexcept;
     void write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, run_identifier identifier);
 
     future<> read_filter(const io_priority_class& pc);
 
     void write_filter(const io_priority_class& pc);
 
-    future<> read_summary(const io_priority_class& pc);
+    future<> read_summary(const io_priority_class& pc) noexcept;
 
     void write_summary(const io_priority_class& pc) {
         write_simple<component_type::Summary>(_components->summary, pc);
@@ -597,13 +609,12 @@ private:
 
     void set_first_and_last_keys();
 
-    // Create one range for each clustering component of this sstable.
-    // Each range stores min and max value for that specific component.
+    // Create a position range based on the min/max_column_names metadata of this sstable.
     // It does nothing if schema defines no clustering key, and it's supposed
     // to be called when loading an existing sstable or after writing a new one.
-    void set_clustering_components_ranges();
+    void set_position_range();
 
-    future<> create_data();
+    future<> create_data() noexcept;
 
     // Return an input_stream which reads exactly the specified byte range
     // from the data file (after uncompression, if the file is compressed).
@@ -664,8 +675,12 @@ private:
         serialization_header& s = *static_cast<serialization_header *>(p.get());
         return s;
     }
+
+    future<> open_or_create_data(open_flags oflags, file_open_options options = {}) noexcept;
+
+    void make_metadata_collector();
 public:
-    future<> read_toc();
+    future<> read_toc() noexcept;
 
     shareable_components& get_shared_components() const {
         return *_components;
@@ -702,7 +717,7 @@ public:
     }
 
     bool has_correct_max_deletion_time() const {
-        return (_version == sstable_version_types::mc) || has_scylla_component();
+        return (_version >= sstable_version_types::mc) || has_scylla_component();
     }
 
     bool filter_has_key(const key& key) const {
@@ -804,8 +819,6 @@ public:
         return _components->summary;
     }
 
-    const std::vector<nonwrapping_range<bytes_view>>& clustering_components_ranges() const;
-
     // Gets ratio of droppable tombstone. A tombstone is considered droppable here
     // for cells expired before gc_before and regular tombstones older than gc_before.
     double estimate_droppable_tombstone_ratio(gc_clock::time_point gc_before) const;
@@ -820,6 +833,13 @@ public:
 
     void update_stats_on_end_of_stream();
 
+    bool has_correct_min_max_column_names() const noexcept {
+        return _version >= sstable_version_types::md;
+    }
+
+    // Return true if this sstable possibly stores clustering row(s) specified by ranges.
+    bool may_contain_rows(const query::clustering_row_ranges& ranges) const;
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
@@ -829,6 +849,8 @@ public:
     friend class sstable_writer_k_l;
     friend class mc::writer;
     friend class index_reader;
+    friend class sstable_writer;
+    friend class compaction;
     template <typename DataConsumeRowsContext>
     friend data_consume_context<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range, uint64_t);

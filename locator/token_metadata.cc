@@ -2007,8 +2007,7 @@ void topology::remove_endpoint(inet_address ep)
 
 bool topology::has_endpoint(inet_address ep) const
 {
-    auto i = _current_locations.find(ep);
-    return i != _current_locations.end();
+    return _current_locations.contains(ep);
 }
 
 const endpoint_dc_rack& topology::get_location(const inet_address& ep) const {

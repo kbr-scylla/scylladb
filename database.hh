@@ -1523,6 +1523,7 @@ public:
     }
 
     void set_format(sstables::sstable_version_types format);
+    void set_format_by_config();
 
     future<> flush_all_memtables();
 

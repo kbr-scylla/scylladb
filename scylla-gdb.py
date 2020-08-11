@@ -15,7 +15,6 @@ import bisect
 import os
 import subprocess
 import time
-import html
 
 
 def template_arguments(gdb_type):
@@ -717,7 +716,7 @@ class histogram:
         h.add('item2') # Equivalent to h['item2'] += 1
         h.add('item2')
         h.add('item3')
-        h.print()
+        h.print_to_console()
 
     Would print:
         4 item1 ++++++++++++++++++++++++++++++++++++++++
@@ -799,7 +798,7 @@ class histogram:
     def __repr__(self):
         return 'histogram({})'.format(self._counts)
 
-    def print(self):
+    def print_to_console(self):
         gdb.write(str(self) + '\n')
 
 
@@ -1781,7 +1780,7 @@ class pointer_metadata(object):
         if self.is_live:
             msg += ', live (0x%x +%d)' % (self.obj_ptr, self.offset_in_object)
         else:
-            msg += ', free'
+            msg += ', free (0x%x +%d)' % (self.obj_ptr, self.offset_in_object)
 
         if self.is_lsa:
             msg += ', LSA-managed'
@@ -1859,11 +1858,8 @@ class scylla_ptr(gdb.Command):
                         free = True
                         break
                     next_free = next_free.reinterpret_cast(free_object_ptr).dereference()
-            if free:
-                ptr_meta.is_live = False
-            else:
-                ptr_meta.is_live = True
-                ptr_meta.offset_in_object = offset_in_object
+            ptr_meta.offset_in_object = offset_in_object
+            ptr_meta.is_live = not free
         else:
             ptr_meta.is_small = False
             ptr_meta.is_live = not span.is_free()
@@ -2736,11 +2732,11 @@ class scylla_fiber(gdb.Command):
             return
 
 
-def find_in_live(mem_start, mem_size, value, size_selector='g'):
+def find_objects(mem_start, mem_size, value, size_selector='g', only_live=True):
     for line in gdb.execute("find/%s 0x%x, +0x%x, 0x%x" % (size_selector, mem_start, mem_size, value), to_string=True).split('\n'):
         if line.startswith('0x'):
             ptr_meta = scylla_ptr.analyze(int(line, base=16))
-            if ptr_meta.is_live:
+            if not only_live or ptr_meta.is_live:
                 yield ptr_meta
 
 
@@ -2768,11 +2764,11 @@ class scylla_find(gdb.Command):
         gdb.Command.__init__(self, 'scylla find', gdb.COMMAND_USER, gdb.COMPLETE_NONE, True)
 
     @staticmethod
-    def find(value, size_selector='g', value_range=0, find_all=False):
+    def find(value, size_selector='g', value_range=0, find_all=False, only_live=True):
         step = int(scylla_find._size_char_to_size[size_selector] / 8)
         offset = 0
         mem_start, mem_size = get_seastar_memory_start_and_size()
-        it = iter(find_in_live(mem_start, mem_size, value, size_selector))
+        it = iter(find_objects(mem_start, mem_size, value, size_selector, only_live))
 
         # Find the first value in the range for which the search has results.
         while offset < value_range:
@@ -2782,7 +2778,7 @@ class scylla_find(gdb.Command):
                     break
             except StopIteration:
                 offset += step
-                it = iter(find_in_live(mem_start, mem_size, value + offset, size_selector))
+                it = iter(find_objects(mem_start, mem_size, value + offset, size_selector, only_live))
 
         # List the rest of the results for value.
         try:
@@ -2809,6 +2805,7 @@ class scylla_find(gdb.Command):
                 " By default only VALUE is searched.")
         parser.add_argument("-a", "--find-all", action="store_true",
                 help="Find all references, don't stop at the first offset which has usages. See --value-range.")
+        parser.add_argument("-f", "--include-free", action="store_true", help="Include freed object in the result.")
         parser.add_argument("value", action="store", help="The value to be searched.")
 
         try:
@@ -2829,7 +2826,8 @@ class scylla_find(gdb.Command):
 
         size_char = size_arg_to_size_char[args.size]
 
-        for ptr_meta, offset in scylla_find.find(int(gdb.parse_and_eval(args.value)), size_char, args.value_range, find_all=args.find_all):
+        for ptr_meta, offset in scylla_find.find(int(gdb.parse_and_eval(args.value)), size_char, args.value_range, find_all=args.find_all,
+                only_live=(not args.include_free)):
             if args.value_range and offset:
                 formatted_offset = "+{}; ".format(offset)
             else:
@@ -3081,6 +3079,10 @@ class scylla_memtables(gdb.Command):
                 gdb.write('  (memtable*) 0x%x: total=%d, used=%d, free=%d, flushed=%d\n' % (mt, reg.total(), reg.used(), reg.free(), mt['_flushed_memory']))
 
 
+def escape_html(s):
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 class scylla_generate_object_graph(gdb.Command):
     """Generate an object graph for an object.
 
@@ -3184,7 +3186,7 @@ class scylla_generate_object_graph(gdb.Command):
             if vtable_symbol_name:
                 symbol_name = vtable_symbol_name[prefix_len:] if len(vtable_symbol_name) > prefix_len else vtable_symbol_name
                 output_file.write('{} [label=<{} ({}, {})<br/>{}>]; // {}\n'.format(addr, addr_str, size, state,
-                    html.escape(symbol_name[:32]), vtable_symbol_name))
+                    escape_html(symbol_name[:32]), vtable_symbol_name))
             else:
                 output_file.write('{} [label=<{} ({}, {})>];\n'.format(addr, addr_str, size, state, ptr_meta))
 
@@ -3697,6 +3699,7 @@ class scylla_features(gdb.Command):
     "ROLES": true
     "LA_SSTABLE_FORMAT": true
     "MC_SSTABLE_FORMAT": true
+    "MD_SSTABLE_FORMAT": true
     "STREAM_WITH_RPC_STREAM": true
     "ROW_LEVEL_REPAIR": true
     "TRUNCATION_TABLE": true

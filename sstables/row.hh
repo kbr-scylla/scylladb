@@ -117,6 +117,8 @@ public:
     // Called when the reader is fast forwarded to given element.
     virtual void reset(sstables::indexable_element) = 0;
 
+    virtual position_in_partition_view position() = 0;
+
     // Under which priority class to place I/O coming from this consumer
     const io_priority_class& io_priority() const {
         return _pc;
@@ -210,6 +212,8 @@ public:
 
     // Called when the reader is fast forwarded to given element.
     virtual void reset(sstables::indexable_element) = 0;
+
+    virtual position_in_partition_view position() = 0;
 
     // Under which priority class to place I/O coming from this consumer
     const io_priority_class& io_priority() const {

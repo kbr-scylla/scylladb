@@ -19,7 +19,6 @@
 #include "sstables/compaction_manager.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
-#include "sstables/remove.hh"
 #include "sstables/sstable_directory.hh"
 #include "service/priority_manager.hh"
 #include "auth/common.hh"
@@ -47,7 +46,7 @@ void distributed_loader::mark_keyspace_as_load_prio(const sstring& ks) {
 }
 
 bool is_system_keyspace(const sstring& name) {
-    return system_keyspaces.find(name) != system_keyspaces.end();
+    return system_keyspaces.contains(name);
 }
 
 static const std::unordered_set<sstring> internal_keyspaces = {
@@ -59,7 +58,7 @@ static const std::unordered_set<sstring> internal_keyspaces = {
 };
 
 bool is_internal_keyspace(const sstring& name) {
-    return internal_keyspaces.find(name) != internal_keyspaces.end();
+    return internal_keyspaces.contains(name);
 }
 
 static io_error_handler error_handler_for_upload_dir() {
