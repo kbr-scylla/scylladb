@@ -25,7 +25,7 @@
 #include "cell_locking.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "service/storage_proxy.hh"
-#include "sstable_run_based_compaction_strategy_for_tests.hh"
+#include "test/lib/sstable_run_based_compaction_strategy_for_tests.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/murmur3_partitioner.hh"
 #include "db/large_data_handler.hh"
