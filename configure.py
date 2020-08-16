@@ -253,6 +253,7 @@ modes = {
 ldap_tests = set([
     'test/ldap/ldap_connection_test',
     'test/ldap/role_manager_test',
+    'test/ldap/saslauthd_authenticator_test'
 ])
 
 scylla_tests = set([
@@ -793,6 +794,7 @@ scylla_core = (['database.cc',
                 'auth/authentication_options.cc',
                 'auth/role_or_anonymous.cc',
                 'auth/sasl_challenge.cc',
+                'auth/saslauthd_authenticator.cc',
                 'tracing/tracing.cc',
                 'tracing/trace_keyspace_helper.cc',
                 'tracing/trace_state.cc',

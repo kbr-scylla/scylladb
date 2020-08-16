@@ -108,6 +108,7 @@ fedora_packages=(
     openldap-servers
     openldap-devel
     toxiproxy
+    cyrus-sasl
 )
 
 centos_packages=(
