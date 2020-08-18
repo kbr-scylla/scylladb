@@ -180,7 +180,7 @@ future<> db::commitlog_replayer::impl::init() {
         // have data for it, assume we must set global pos to zero.
         for (auto&p : _db.local().get_column_families()) {
             for (auto&p1 : _rpm) { // for each shard
-                if (!p1.second.count(p.first)) {
+                if (!p1.second.contains(p.first)) {
                     _min_pos[p1.first] = replay_position();
                 }
             }
@@ -285,10 +285,7 @@ future<> db::commitlog_replayer::impl::process(stats* s, commitlog::buffer_and_r
             // lower than anything the new session will produce.
             if (cf.schema()->version() != fm.schema_version()) {
                 auto& local_cm = _column_mappings.local().map;
-                auto cm_it = local_cm.find(fm.schema_version());
-                if (cm_it == local_cm.end()) {
-                    cm_it = local_cm.emplace(fm.schema_version(), src_cm).first;
-                }
+                auto cm_it = local_cm.try_emplace(fm.schema_version(), src_cm).first;
                 const column_mapping& cm = cm_it->second;
                 mutation m(cf.schema(), fm.decorated_key(*cf.schema()));
                 converting_mutation_partition_applier v(cm, *cf.schema(), m.partition());

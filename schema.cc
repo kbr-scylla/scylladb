@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/on_internal_error.hh>
 #include <map>
 #include "utils/UUID_gen.hh"
 #include "cql3/column_identifier.hh"
@@ -28,8 +29,11 @@
 #include "dht/i_partitioner.hh"
 #include "dht/token-sharding.hh"
 #include "cdc/cdc_extension.hh"
+#include "db/paxos_grace_seconds_extension.hh"
 
 constexpr int32_t schema::NAME_LENGTH;
+
+extern logging::logger dblog;
 
 sstring to_sstring(column_kind k) {
     switch (k) {
@@ -475,6 +479,7 @@ bool operator==(const schema& x, const schema& y)
         && x._raw._is_compound == y._raw._is_compound
         && x._raw._type == y._raw._type
         && x._raw._gc_grace_seconds == y._raw._gc_grace_seconds
+        && x.paxos_grace_seconds() == y.paxos_grace_seconds()
         && x._raw._dc_local_read_repair_chance == y._raw._dc_local_read_repair_chance
         && x._raw._read_repair_chance == y._raw._read_repair_chance
         && x._raw._min_compaction_threshold == y._raw._min_compaction_threshold
@@ -1166,6 +1171,13 @@ schema_ptr schema_builder::build() {
     }
 
     prepare_dense_schema(new_raw);
+
+    // cache `paxos_grace_seconds` value for fast access through the schema object, which is immutable
+    if (auto it = new_raw._extensions.find(db::paxos_grace_seconds_extension::NAME); it != new_raw._extensions.end()) {
+        new_raw._paxos_grace_seconds =
+            dynamic_pointer_cast<db::paxos_grace_seconds_extension>(it->second)->get_paxos_grace_seconds();
+    }
+
     return make_lw_shared<schema>(schema(new_raw, _view_info));
 }
 
@@ -1182,6 +1194,19 @@ const cdc::options& schema::cdc_options() const {
 schema_builder& schema_builder::with_cdc_options(const cdc::options& opts) {
     add_extension(cdc::cdc_extension::NAME, ::make_shared<cdc::cdc_extension>(opts));
     return *this;
+}
+
+schema_builder& schema_builder::set_paxos_grace_seconds(int32_t seconds) {
+    add_extension(db::paxos_grace_seconds_extension::NAME, ::make_shared<db::paxos_grace_seconds_extension>(seconds));
+    return *this;
+}
+
+gc_clock::duration schema::paxos_grace_seconds() const {
+    return std::chrono::duration_cast<gc_clock::duration>(
+        std::chrono::seconds(
+            _raw._paxos_grace_seconds ? *_raw._paxos_grace_seconds : DEFAULT_GC_GRACE_SECONDS
+        )
+    );
 }
 
 schema_ptr schema_builder::build(compact_storage cp) {
@@ -1358,8 +1383,9 @@ schema::column_name_type(const column_definition& def) const {
 
 const column_definition&
 schema::regular_column_at(column_id id) const {
-    if (id > regular_columns_count()) {
-        throw std::out_of_range("column_id");
+    if (id >= regular_columns_count()) {
+        on_internal_error(dblog, format("{}.{}@{}: regular column id {:d} >= {:d}",
+            ks_name(), cf_name(), version(), id, regular_columns_count()));
     }
     return _raw._columns.at(column_offset(column_kind::regular_column) + id);
 }
@@ -1367,15 +1393,17 @@ schema::regular_column_at(column_id id) const {
 const column_definition&
 schema::clustering_column_at(column_id id) const {
     if (id >= clustering_key_size()) {
-        throw std::out_of_range(format("clustering column id {:d} >= {:d}", id, clustering_key_size()));
+        on_internal_error(dblog, format("{}.{}@{}: clustering column id {:d} >= {:d}",
+            ks_name(), cf_name(), version(), id, clustering_key_size()));
     }
     return _raw._columns.at(column_offset(column_kind::clustering_key) + id);
 }
 
 const column_definition&
 schema::static_column_at(column_id id) const {
-    if (id > static_columns_count()) {
-        throw std::out_of_range("column_id");
+    if (id >= static_columns_count()) {
+        on_internal_error(dblog, format("{}.{}@{}: static column id {:d} >= {:d}",
+            ks_name(), cf_name(), version(), id, static_columns_count()));
     }
     return _raw._columns.at(column_offset(column_kind::static_column) + id);
 }
@@ -1495,7 +1523,7 @@ const std::unordered_map<sstring, index_metadata>& schema::all_indices() const {
 }
 
 bool schema::has_index(const sstring& index_name) const {
-    return _raw._indices_by_name.count(index_name) > 0;
+    return _raw._indices_by_name.contains(index_name);
 }
 
 std::vector<sstring> schema::index_names() const {

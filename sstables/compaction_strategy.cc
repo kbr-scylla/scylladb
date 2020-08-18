@@ -138,7 +138,7 @@ sstable_set::select(const dht::partition_range& range) const {
 }
 
 std::vector<sstable_run>
-sstable_set::select(const std::vector<shared_sstable>& sstables) const {
+sstable_set::select_sstable_runs(const std::vector<shared_sstable>& sstables) const {
     auto run_ids = boost::copy_range<std::unordered_set<utils::UUID>>(sstables | boost::adaptors::transformed(std::mem_fn(&sstable::run_identifier)));
     return boost::copy_range<std::vector<sstable_run>>(run_ids | boost::adaptors::transformed([this] (utils::UUID run_id) {
         return _all_runs.at(run_id);
@@ -758,7 +758,7 @@ time_window_compaction_strategy::time_window_compaction_strategy(const std::map<
     , _stcs_options(options)
     , _backlog_tracker(std::make_unique<time_window_backlog_tracker>(_options))
 {
-    if (!options.count(TOMBSTONE_COMPACTION_INTERVAL_OPTION) && !options.count(TOMBSTONE_THRESHOLD_OPTION)) {
+    if (!options.contains(TOMBSTONE_COMPACTION_INTERVAL_OPTION) && !options.contains(TOMBSTONE_THRESHOLD_OPTION)) {
         _disable_tombstone_compaction = true;
         clogger.debug("Disabling tombstone compactions for TWCS");
     } else {
@@ -897,7 +897,7 @@ date_tiered_compaction_strategy::date_tiered_compaction_strategy(const std::map<
     // - with time series workloads, it's usually better to wait for whole sstable to be expired rather than
     // compacting a single sstable when it's more than 20% (default value) expired.
     // For more details, see CASSANDRA-9234
-    if (!options.count(TOMBSTONE_COMPACTION_INTERVAL_OPTION) && !options.count(TOMBSTONE_THRESHOLD_OPTION)) {
+    if (!options.contains(TOMBSTONE_COMPACTION_INTERVAL_OPTION) && !options.contains(TOMBSTONE_THRESHOLD_OPTION)) {
         _disable_tombstone_compaction = true;
         date_tiered_manifest::logger.debug("Disabling tombstone compactions for DTCS");
     } else {
@@ -1011,7 +1011,7 @@ bool compaction_strategy::use_interposer_consumer() const {
 compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, const std::map<sstring, sstring>& options) {
     ::shared_ptr<compaction_strategy_impl> impl;
 
-    switch(strategy) {
+    switch (strategy) {
     case compaction_strategy_type::null:
         impl = ::make_shared<null_compaction_strategy>();
         break;

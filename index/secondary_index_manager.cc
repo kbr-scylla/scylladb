@@ -53,8 +53,8 @@ bool index::depends_on(const column_definition& cdef) const {
     return cdef.name_as_text() == _target_column;
 }
 
-bool index::supports_expression(const column_definition& cdef, const cql3::operator_type& op) const {
-    return cdef.name_as_text() == _target_column && op == cql3::operator_type::EQ;
+bool index::supports_expression(const column_definition& cdef, const cql3::expr::oper_t op) const {
+    return cdef.name_as_text() == _target_column && op == cql3::expr::oper_t::EQ;
 }
 
 const index_metadata& index::metadata() const {
@@ -70,7 +70,7 @@ void secondary_index_manager::reload() {
     auto it = _indices.begin();
     while (it != _indices.end()) {
         auto index_name = it->first;
-        if (table_indices.count(index_name) == 0) {
+        if (!table_indices.contains(index_name)) {
             it = _indices.erase(it);
         } else {
             ++it;

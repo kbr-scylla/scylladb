@@ -39,26 +39,24 @@ property_definitions::property_definitions()
 { }
 
 void property_definitions::add_property(const sstring& name, sstring value) {
-    if (_properties.contains(name)) {
+    if (auto [ignored, added] = _properties.try_emplace(name, value); !added) {
         throw exceptions::syntax_exception(format("Multiple definition for property '{}'", name));
     }
-    _properties.emplace(name, value);
 }
 
 void property_definitions::add_property(const sstring& name, const std::map<sstring, sstring>& value) {
-    if (_properties.contains(name)) {
+    if (auto [ignored, added] = _properties.try_emplace(name, value); !added) {
         throw exceptions::syntax_exception(format("Multiple definition for property '{}'", name));
     }
-    _properties.emplace(name, value);
 }
 
 void property_definitions::validate(const std::set<sstring>& keywords, const std::set<sstring>& exts, const std::set<sstring>& obsolete) const {
     for (auto&& kv : _properties) {
         auto&& name = kv.first;
-        if (keywords.count(name) || exts.count(name)) {
+        if (keywords.contains(name) || exts.contains(name)) {
             continue;
         }
-        if (obsolete.count(name)) {
+        if (obsolete.contains(name)) {
 #if 0
             logger.warn("Ignoring obsolete property {}", name);
 #endif

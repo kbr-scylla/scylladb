@@ -1417,7 +1417,7 @@ SEASTAR_TEST_CASE(test_3362_with_ttls) {
 enum class collection_kind { set, list, map };
 void do_test_3362_no_ttls_with_collections(cql_test_env& e, collection_kind t) {
     sstring type, pref, suf;
-    switch(t) {
+    switch (t) {
     case collection_kind::set:
         type = "set<int>";
         pref = "{";
@@ -1490,7 +1490,7 @@ SEASTAR_TEST_CASE(test_3362_no_ttls_with_map) {
 
 void do_test_3362_with_ttls_with_collections(cql_test_env& e, collection_kind t) {
     sstring type, pref, suf;
-    switch(t) {
+    switch (t) {
     case collection_kind::set:
         type = "set<int>";
         pref = "{";

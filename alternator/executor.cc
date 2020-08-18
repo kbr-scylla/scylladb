@@ -610,7 +610,7 @@ static void validate_tags(const std::map<sstring, sstring>& tags) {
     auto it = tags.find(rmw_operation::WRITE_ISOLATION_TAG_KEY);
     if (it != tags.end()) {
         std::string_view value = it->second;
-        if (allowed_write_isolation_values.count(value) == 0) {
+        if (!allowed_write_isolation_values.contains(value)) {
             throw api_error::validation(
                     format("Incorrect write isolation tag {}. Allowed values: {}", value, allowed_write_isolation_values));
         }
@@ -646,7 +646,7 @@ void rmw_operation::set_default_write_isolation(std::string_view value) {
                 "'--alternator-write-isolation' option. "
                 "See docs/alternator/alternator.md for instructions.");
     }
-    if (allowed_write_isolation_values.count(value) == 0) {
+    if (!allowed_write_isolation_values.contains(value)) {
         throw std::runtime_error(format("Invalid --alternator-write-isolation "
                 "setting '{}'. Allowed values: {}.",
                 value, allowed_write_isolation_values));
@@ -918,10 +918,22 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             view_builders.emplace_back(std::move(view_builder));
         }
     }
-    if (rjson::find(request, "SSESpecification")) {
-        return make_ready_future<request_return_type>(api_error::validation("SSESpecification: configuring encryption-at-rest is not yet supported."));
+
+    // We don't yet support configuring server-side encryption (SSE) via the
+    // SSESpecifiction attribute, but an SSESpecification with Enabled=false
+    // is simply the default, and should be accepted:
+    rjson::value* sse_specification = rjson::find(request, "SSESpecification");
+    if (sse_specification && sse_specification->IsObject()) {
+        rjson::value* enabled = rjson::find(*sse_specification, "Enabled");
+        if (!enabled || !enabled->IsBool()) {
+            return make_ready_future<request_return_type>(api_error("ValidationException", "SSESpecification needs boolean Enabled"));
+        }
+        if (enabled->GetBool()) {
+            // TODO: full support for SSESpecification
+            return make_ready_future<request_return_type>(api_error("ValidationException", "SSESpecification: configuring encryption-at-rest is not yet supported."));
+        }
     }
-    
+
     rjson::value* stream_specification = rjson::find(request, "StreamSpecification");
     if (stream_specification && stream_specification->IsObject()) {
         add_stream_options(*stream_specification, builder);
@@ -1442,7 +1454,7 @@ static void verify_all_are_used(const rjson::value& req, const char* field,
         return;
     }
     for (auto it = attribute_names->MemberBegin(); it != attribute_names->MemberEnd(); ++it) {
-        if (!used.count(it->name.GetString())) {
+        if (!used.contains(it->name.GetString())) {
             throw api_error::validation(
                 format("{} has spurious '{}', not used in {}",
                        field, it->name.GetString(), operation));
@@ -1737,12 +1749,8 @@ static future<> do_batch_write(service::storage_proxy& proxy,
             key_builders(1, schema_decorated_key_hash{}, schema_decorated_key_equal{});
         for (auto& b : mutation_builders) {
             auto dk = dht::decorate_key(*b.first, b.second.pk());
-            auto it = key_builders.find({b.first, dk});
-            if (it == key_builders.end()) {
-                key_builders.emplace(schema_decorated_key{b.first, dk}, std::vector<put_or_delete_item>{std::move(b.second)});
-            } else {
-                it->second.push_back(std::move(b.second));
-            }
+            auto [it, added] = key_builders.try_emplace(schema_decorated_key{b.first, dk});
+            it->second.push_back(std::move(b.second));
         }
         return parallel_for_each(std::move(key_builders), [&proxy, &client_state, &stats, trace_state, ssg, permit = std::move(permit)] (auto& e) {
             stats.write_using_lwt++;
@@ -1800,7 +1808,7 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
                 mutation_builders.emplace_back(schema, put_or_delete_item(
                         item, schema, put_or_delete_item::put_item{}));
                 auto mut_key = std::make_pair(mutation_builders.back().second.pk(), mutation_builders.back().second.ck());
-                if (used_keys.count(mut_key) > 0) {
+                if (used_keys.contains(mut_key)) {
                     return make_ready_future<request_return_type>(api_error::validation("Provided list of item keys contains duplicates"));
                 }
                 used_keys.insert(std::move(mut_key));
@@ -1810,7 +1818,7 @@ future<executor::request_return_type> executor::batch_write_item(client_state& c
                         key, schema, put_or_delete_item::delete_item{}));
                 auto mut_key = std::make_pair(mutation_builders.back().second.pk(),
                         mutation_builders.back().second.ck());
-                if (used_keys.count(mut_key) > 0) {
+                if (used_keys.contains(mut_key)) {
                     return make_ready_future<request_return_type>(api_error::validation("Provided list of item keys contains duplicates"));
                 }
                 used_keys.insert(std::move(mut_key));
@@ -1919,7 +1927,7 @@ void executor::describe_single_item(const cql3::selection::selection& selection,
     for (const bytes_opt& cell : result_row) {
         std::string column_name = (*column_it)->name_as_text();
         if (cell && column_name != executor::ATTRS_COLUMN_NAME) {
-            if (attrs_to_get.empty() || attrs_to_get.count(column_name) > 0) {
+            if (attrs_to_get.empty() || attrs_to_get.contains(column_name)) {
                 rjson::set_with_string_name(item, column_name, rjson::empty_object());
                 rjson::value& field = item[column_name.c_str()];
                 rjson::set_with_string_name(field, type_to_string((*column_it)->type), json_key_column_value(*cell, **column_it));
@@ -1929,7 +1937,7 @@ void executor::describe_single_item(const cql3::selection::selection& selection,
             auto keys_and_values = value_cast<map_type_impl::native_type>(deserialized);
             for (auto entry : keys_and_values) {
                 std::string attr_name = value_cast<sstring>(entry.first);
-                if (include_all_embedded_attributes || attrs_to_get.empty() || attrs_to_get.count(attr_name) > 0) {
+                if (include_all_embedded_attributes || attrs_to_get.empty() || attrs_to_get.contains(attr_name)) {
                     bytes value = value_cast<bytes>(entry.second);
                     rjson::set_with_string_name(item, attr_name, deserialize_item(value));
                 }
@@ -2643,7 +2651,7 @@ public:
         result_bytes_view->with_linearized([this] (bytes_view bv) {
             std::string column_name = (*_column_it)->name_as_text();
             if (column_name != executor::ATTRS_COLUMN_NAME) {
-                if (_attrs_to_get.empty() || _attrs_to_get.count(column_name) > 0) {
+                if (_attrs_to_get.empty() || _attrs_to_get.contains(column_name)) {
                     if (!_item.HasMember(column_name.c_str())) {
                         rjson::set_with_string_name(_item, column_name, rjson::empty_object());
                     }
@@ -2655,7 +2663,7 @@ public:
                 auto keys_and_values = value_cast<map_type_impl::native_type>(deserialized);
                 for (auto entry : keys_and_values) {
                     std::string attr_name = value_cast<sstring>(entry.first);
-                    if (_attrs_to_get.empty() || _attrs_to_get.count(attr_name) > 0) {
+                    if (_attrs_to_get.empty() || _attrs_to_get.contains(attr_name)) {
                         bytes value = value_cast<bytes>(entry.second);
                         rjson::set_with_string_name(_item, attr_name, deserialize_item(value));
                     }

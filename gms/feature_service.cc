@@ -293,7 +293,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_workload_prioritization),
     })
     {
-        if (list.count(f.name())) {
+        if (list.contains(f.name())) {
             f.enable();
         }
     }

@@ -135,7 +135,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
     size_t min_threshold = cf.schema()->min_compaction_threshold();
     size_t max_threshold = cf.schema()->max_compaction_threshold();
 
-    auto buckets = get_buckets(cf.get_sstable_set().select(candidates));
+    auto buckets = get_buckets(cf.get_sstable_set().select_sstable_runs(candidates));
 
     auto get_all = [](std::vector<sstables::sstable_run> runs) mutable {
         return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>&& v, const sstable_run& run) {
@@ -176,7 +176,7 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(column_fa
         sstables.push_back(entry);
     }
 
-    for (auto& bucket : get_buckets(cf.get_sstable_set().select(sstables))) {
+    for (auto& bucket : get_buckets(cf.get_sstable_set().select_sstable_runs(sstables))) {
         if (bucket.size() >= min_threshold) {
             n += (bucket.size() + max_threshold - 1) / max_threshold;
         }

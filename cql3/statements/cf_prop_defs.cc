@@ -46,6 +46,7 @@ const sstring cf_prop_defs::KW_COMMENT = "comment";
 const sstring cf_prop_defs::KW_READREPAIRCHANCE = "read_repair_chance";
 const sstring cf_prop_defs::KW_DCLOCALREADREPAIRCHANCE = "dclocal_read_repair_chance";
 const sstring cf_prop_defs::KW_GCGRACESECONDS = "gc_grace_seconds";
+const sstring cf_prop_defs::KW_PAXOSGRACESECONDS = "paxos_grace_seconds";
 const sstring cf_prop_defs::KW_MINCOMPACTIONTHRESHOLD = "min_threshold";
 const sstring cf_prop_defs::KW_MAXCOMPACTIONTHRESHOLD = "max_threshold";
 const sstring cf_prop_defs::KW_CACHING = "caching";
@@ -96,7 +97,7 @@ void cf_prop_defs::validate(const database& db, const schema::extensions_map& sc
         KW_GCGRACESECONDS, KW_CACHING, KW_DEFAULT_TIME_TO_LIVE,
         KW_MIN_INDEX_INTERVAL, KW_MAX_INDEX_INTERVAL, KW_SPECULATIVE_RETRY,
         KW_BF_FP_CHANCE, KW_MEMTABLE_FLUSH_PERIOD, KW_COMPACTION,
-        KW_COMPRESSION, KW_CRC_CHECK_CHANCE, KW_ID
+        KW_COMPRESSION, KW_CRC_CHECK_CHANCE, KW_ID, KW_PAXOSGRACESECONDS
         , KW_IN_MEMORY
     });
     static std::set<sstring> obsolete_keywords({
@@ -187,6 +188,10 @@ int32_t cf_prop_defs::get_gc_grace_seconds() const
     return get_int(KW_GCGRACESECONDS, DEFAULT_GC_GRACE_SECONDS);
 }
 
+int32_t cf_prop_defs::get_paxos_grace_seconds() const {
+    return get_int(KW_PAXOSGRACESECONDS, DEFAULT_GC_GRACE_SECONDS);
+}
+
 std::optional<utils::UUID> cf_prop_defs::get_id() const {
     auto id = get_simple(KW_ID);
     if (id) {
@@ -238,9 +243,13 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_
         builder.set_gc_grace_seconds(get_int(KW_GCGRACESECONDS, builder.get_gc_grace_seconds()));
     }
 
+    if (has_property(KW_PAXOSGRACESECONDS)) {
+        builder.set_paxos_grace_seconds(get_paxos_grace_seconds());
+    }
+
     std::optional<sstring> tmp_value = {};
     if (has_property(KW_COMPACTION)) {
-        if (get_compaction_options().count(KW_MINCOMPACTIONTHRESHOLD)) {
+        if (get_compaction_options().contains(KW_MINCOMPACTIONTHRESHOLD)) {
             tmp_value = get_compaction_options().at(KW_MINCOMPACTIONTHRESHOLD);
         }
     }
@@ -248,7 +257,7 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_
 
     tmp_value = {};
     if (has_property(KW_COMPACTION)) {
-        if (get_compaction_options().count(KW_MAXCOMPACTIONTHRESHOLD)) {
+        if (get_compaction_options().contains(KW_MAXCOMPACTIONTHRESHOLD)) {
             tmp_value = get_compaction_options().at(KW_MAXCOMPACTIONTHRESHOLD);
         }
     }
@@ -260,7 +269,7 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_
     builder.set_max_compaction_threshold(max_compaction_threshold);
 
     if (has_property(KW_COMPACTION)) {
-        if (get_compaction_options().count(COMPACTION_ENABLED_KEY)) {
+        if (get_compaction_options().contains(COMPACTION_ENABLED_KEY)) {
             auto enabled = boost::algorithm::iequals(get_compaction_options().at(COMPACTION_ENABLED_KEY), "true");
             builder.set_compaction_enabled(enabled);
         }

@@ -50,7 +50,7 @@ enum class bound_weight : int8_t {
 
 inline
 bound_weight position_weight(bound_kind k) {
-    switch(k) {
+    switch (k) {
     case bound_kind::excl_end:
     case bound_kind::incl_start:
         return bound_weight::before_all_prefixed;

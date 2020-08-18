@@ -848,7 +848,7 @@ table::reshuffle_sstables(std::set<int64_t> all_generations, int64_t start) {
                 return make_ready_future<>();
             }
             // Skip generations that were already loaded by Scylla at a previous stage.
-            if (work.all_generations.count(comps.generation) != 0) {
+            if (work.all_generations.contains(comps.generation)) {
                 return make_ready_future<>();
             }
             return make_exception_future<>(std::runtime_error("Loading SSTables from the main SSTable directory is unsafe and no longer supported."
@@ -939,7 +939,7 @@ table::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sst
     // making the two ranges compatible when compiling with boost 1.55.
     // Noone is actually moving anything...
     for (auto&& tab : boost::range::join(new_sstables, std::move(*current_sstables->all()))) {
-        if (!s.count(tab)) {
+        if (!s.contains(tab)) {
             new_sstable_list.insert(tab);
         }
     }
@@ -1009,8 +1009,8 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
     // opened and disk space not being released until shutdown.
     std::unordered_set<sstables::shared_sstable> s(
            desc.old_sstables.begin(), desc.old_sstables.end());
-    auto e = boost::range::remove_if(_sstables_compacted_but_not_deleted, [&] (sstables::shared_sstable sst) -> bool {
-        return s.count(sst);
+    auto e = boost::range::remove_if(_sstables_compacted_but_not_deleted, [&] (sstables::shared_sstable sst) {
+        return s.contains(sst);
     });
     _sstables_compacted_but_not_deleted.erase(e, _sstables_compacted_but_not_deleted.end());
     rebuild_statistics();
@@ -1140,7 +1140,7 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
             [this] (std::unordered_set<sstring>& filenames, lw_shared_ptr<sstables::sstable_set::incremental_selector>& sel, partition_key& pk) {
         return do_with(dht::decorated_key(dht::decorate_key(*_schema, pk)),
                 [this, &filenames, &sel, &pk](dht::decorated_key& dk) mutable {
-            auto sst = sel->select(dk).sstables;
+            const auto& sst = sel->select(dk).sstables;
             auto hk = sstables::sstable::make_hashed_key(*_schema, dk.key());
 
             return do_for_each(sst, [this, &filenames, &dk, hk = std::move(hk)] (std::vector<sstables::shared_sstable>::const_iterator::reference s) mutable {
@@ -1169,10 +1169,10 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
     return _sstables->select(range);
 }
 
-std::vector<sstables::shared_sstable> table::candidates_for_compaction() const {
+std::vector<sstables::shared_sstable> table::non_staging_sstables() const {
     return boost::copy_range<std::vector<sstables::shared_sstable>>(*get_sstables()
             | boost::adaptors::filtered([this] (auto& sst) {
-        return !_sstables_staging.count(sst->generation());
+        return !_sstables_staging.contains(sst->generation());
     }));
 }
 
@@ -1414,7 +1414,7 @@ future<> table::snapshot(database& db, sstring name) {
                 return smp::submit_to(shard, [requester = this_shard_id(), &jsondir, this, &db,
                                               tables = std::move(table_names), datadir = _config.datadir] {
 
-                    if (pending_snapshots.count(jsondir) == 0) {
+                    if (!pending_snapshots.contains(jsondir)) {
                         pending_snapshots.emplace(jsondir, make_lw_shared<snapshot_manager>());
                     }
                     auto snapshot = pending_snapshots.at(jsondir);

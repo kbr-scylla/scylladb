@@ -31,13 +31,16 @@
 #include "compaction_strategy_type.hh"
 #include "caching_options.hh"
 #include "column_computation.hh"
-#include "cdc/cdc_options.hh"
 
 namespace dht {
 
 class i_partitioner;
 class sharder;
 
+}
+
+namespace cdc {
+class options;
 }
 
 class database;
@@ -610,6 +613,7 @@ private:
         bool _is_counter = false;
         cf_type _type = cf_type::standard;
         int32_t _gc_grace_seconds = DEFAULT_GC_GRACE_SECONDS;
+        std::optional<int32_t> _paxos_grace_seconds;
         double _dc_local_read_repair_chance = 0.0;
         double _read_repair_chance = 0.0;
         double _crc_check_chance = 1;
@@ -757,6 +761,8 @@ public:
         auto seconds = std::chrono::seconds(_raw._gc_grace_seconds);
         return std::chrono::duration_cast<gc_clock::duration>(seconds);
     }
+
+    gc_clock::duration paxos_grace_seconds() const;
 
     double dc_local_read_repair_chance() const {
         return _raw._dc_local_read_repair_chance;

@@ -75,6 +75,9 @@ class intrusive_list:
     def __bool__(self):
         return self.__nonzero__()
 
+    def __len__(self):
+        return len(list(self))
+
 
 class std_optional:
     def __init__(self, ref):
@@ -94,6 +97,29 @@ class std_optional:
             return bool(self.ref['_M_payload']['_M_engaged'])
         except gdb.error:
             return bool(self.ref['_M_engaged']) # Scylla 3.0 compatibility
+
+
+class std_tuple:
+    def __init__(self, ref):
+        self.ref = ref
+        self.members = []
+
+        t = self.ref[self.ref.type.fields()[0]]
+        while len(t.type.fields()) == 2:
+            tail, head = t.type.fields()
+            self.members.append(t[head]['_M_head_impl'])
+            t = t[tail]
+
+        self.members.append(t[t.type.fields()[0]]['_M_head_impl'])
+
+    def __len__(self):
+        return len(self.members)
+
+    def __iter__(self):
+        return iter(self.members)
+
+    def __getitem__(self, item):
+        return self.members[item]
 
 
 class intrusive_set:
@@ -605,6 +631,12 @@ class uuid_printer(gdb.printing.PrettyPrinter):
     def display_hint(self):
         return 'string'
 
+class boost_intrusive_list_printer(gdb.printing.PrettyPrinter):
+    def __init__(self, val):
+        self.val = intrusive_list(val)
+    def to_string(self):
+        items = [str(v) for v in self.val]
+        return 'boost::intrusive::list of size {} = [{}]'.format(len(items), ', '.join(items))
 
 def build_pretty_printer():
     pp = gdb.printing.RegexpCollectionPrettyPrinter('scylla')
@@ -615,6 +647,7 @@ def build_pretty_printer():
     pp.add_printer('row', r'^row$', row_printer)
     pp.add_printer('managed_vector', r'^managed_vector<.*>$', managed_vector_printer)
     pp.add_printer('uuid', r'^utils::UUID$', uuid_printer)
+    pp.add_printer('b0ost_intrusive_list', r'^boost::intrusive::list<.*>$', boost_intrusive_list_printer)
     return pp
 
 
@@ -2560,7 +2593,9 @@ class scylla_fiber(gdb.Command):
         # We can't just merge them as `info symbol` might return mangled names too.
         self._whitelist = scylla_fiber._make_symbol_matchers([
                 ("seastar", "continuation"),
-                ("seastar", "future", "thread_wake_task"),
+                ("seastar", "future", "thread_wake_task"), # backward compatibility with older versions
+                ("seastar", "(anonymous namespace)", "thread_wake_task"),
+                ("seastar", "thread_context"),
                 ("seastar", "internal", "do_until_state"),
                 ("seastar", "internal", "do_with_state"),
                 ("seastar", "internal", "do_for_each_state"),
@@ -2887,7 +2922,7 @@ class scylla_netw(gdb.Command):
         ms = sharded(gdb.parse_and_eval('netw::_the_messaging_service')).local()
         gdb.write('Dropped messages: %s\n' % ms['_dropped_messages'])
         gdb.write('Outgoing connections:\n')
-        for (addr, shard_info) in list_unordered_map(ms['_clients']['_M_elems'][0]):
+        for (addr, shard_info) in list_unordered_map(std_vector(ms['_clients'])[0]):
             ip = ip_to_str(int(addr['addr']['_addr']['ip']['raw']), byteorder=sys.byteorder)
             client = shard_info['rpc_client']['_p']
             rpc_client = std_unique_ptr(client['_p'])
@@ -2903,7 +2938,7 @@ class scylla_netw(gdb.Command):
             if srv:
                 gdb.write('Server: resources=%s\n' % srv['_resources_available'])
                 gdb.write('Incoming connections:\n')
-                for clnt in list_unordered_set(srv['_conns']):
+                for clnt in list_unordered_map(srv['_conns']):
                     conn = clnt['_p'].cast(clnt.type.template_argument(0).pointer())
                     ip = ip_to_str(int(conn['_info']['addr']['u']['in']['sin_addr']['s_addr']), byteorder='big')
                     port = int(conn['_info']['addr']['u']['in']['sin_port'])
@@ -3743,6 +3778,8 @@ class scylla_gdb_func_collection_element(gdb.Function):
             typ = typ.target().strip_typedefs()
         if typ.name.startswith('std::vector<'):
             return std_vector(collection)[int(key)]
+        elif typ.name.startswith('std::tuple<'):
+            return std_tuple(collection)[int(key)]
         elif typ.name.startswith('std::__cxx11::list<'):
             return std_list(collection)[int(key)]
         elif typ.name.startswith('seastar::circular_buffer<'):

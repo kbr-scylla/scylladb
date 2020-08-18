@@ -101,6 +101,7 @@ options {
 #include "cql3/ut_name.hh"
 #include "cql3/functions/function_name.hh"
 #include "cql3/functions/function_call.hh"
+#include "cql3/expr/expression.hh"
 #include <seastar/core/sstring.hh>
 #include "CqlLexer.hpp"
 
@@ -1587,13 +1588,13 @@ udtColumnOperation[operations_type& operations,
 columnCondition[conditions_type& conditions]
     // Note: we'll reject duplicates later
     : key=cident
-        ( op=relationType t=term { conditions.emplace_back(key, cql3::column_condition::raw::simple_condition(t, {}, *op)); }
+        ( op=relationType t=term { conditions.emplace_back(key, cql3::column_condition::raw::simple_condition(t, {}, op)); }
         | K_IN
             ( values=singleColumnInValues { conditions.emplace_back(key, cql3::column_condition::raw::in_condition({}, {}, values)); }
             | marker=inMarker { conditions.emplace_back(key, cql3::column_condition::raw::in_condition({}, marker, {})); }
             )
         | '[' element=term ']'
-            ( op=relationType t=term { conditions.emplace_back(key, cql3::column_condition::raw::simple_condition(t, element, *op)); }
+            ( op=relationType t=term { conditions.emplace_back(key, cql3::column_condition::raw::simple_condition(t, element, op)); }
             | K_IN
                 ( values=singleColumnInValues { conditions.emplace_back(key, cql3::column_condition::raw::in_condition(element, {}, values)); }
                 | marker=inMarker { conditions.emplace_back(key, cql3::column_condition::raw::in_condition(element, marker, {})); }
@@ -1616,31 +1617,31 @@ propertyValue returns [sstring str]
     | u=unreserved_keyword { $str = u; }
     ;
 
-relationType returns [const cql3::operator_type* op = nullptr]
-    : '='  { $op = &cql3::operator_type::EQ; }
-    | '<'  { $op = &cql3::operator_type::LT; }
-    | '<=' { $op = &cql3::operator_type::LTE; }
-    | '>'  { $op = &cql3::operator_type::GT; }
-    | '>=' { $op = &cql3::operator_type::GTE; }
-    | '!=' { $op = &cql3::operator_type::NEQ; }
-    | K_LIKE { $op = &cql3::operator_type::LIKE; }
+relationType returns [cql3::expr::oper_t op]
+    : '='  { $op = cql3::expr::oper_t::EQ; }
+    | '<'  { $op = cql3::expr::oper_t::LT; }
+    | '<=' { $op = cql3::expr::oper_t::LTE; }
+    | '>'  { $op = cql3::expr::oper_t::GT; }
+    | '>=' { $op = cql3::expr::oper_t::GTE; }
+    | '!=' { $op = cql3::expr::oper_t::NEQ; }
+    | K_LIKE { $op = cql3::expr::oper_t::LIKE; }
     ;
 
 relation[std::vector<cql3::relation_ptr>& clauses]
-    @init{ const cql3::operator_type* rt = nullptr; }
-    : name=cident type=relationType t=term { $clauses.emplace_back(::make_shared<cql3::single_column_relation>(std::move(name), *type, std::move(t))); }
+    @init{ cql3::expr::oper_t rt; }
+    : name=cident type=relationType t=term { $clauses.emplace_back(::make_shared<cql3::single_column_relation>(std::move(name), type, std::move(t))); }
 
     | K_TOKEN l=tupleOfIdentifiers type=relationType t=term
-        { $clauses.emplace_back(::make_shared<cql3::token_relation>(std::move(l), *type, std::move(t))); }
+        { $clauses.emplace_back(::make_shared<cql3::token_relation>(std::move(l), type, std::move(t))); }
     | name=cident K_IS K_NOT K_NULL {
-          $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), cql3::operator_type::IS_NOT, cql3::constants::NULL_LITERAL)); }
+          $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), cql3::expr::oper_t::IS_NOT, cql3::constants::NULL_LITERAL)); }
     | name=cident K_IN marker=inMarker
-        { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), cql3::operator_type::IN, std::move(marker))); }
+        { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), cql3::expr::oper_t::IN, std::move(marker))); }
     | name=cident K_IN in_values=singleColumnInValues
         { $clauses.emplace_back(cql3::single_column_relation::create_in_relation(std::move(name), std::move(in_values))); }
-    | name=cident K_CONTAINS { rt = &cql3::operator_type::CONTAINS; } (K_KEY { rt = &cql3::operator_type::CONTAINS_KEY; })?
-        t=term { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), *rt, std::move(t))); }
-    | name=cident '[' key=term ']' type=relationType t=term { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), std::move(key), *type, std::move(t))); }
+    | name=cident K_CONTAINS { rt = cql3::expr::oper_t::CONTAINS; } (K_KEY { rt = cql3::expr::oper_t::CONTAINS_KEY; })?
+        t=term { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), rt, std::move(t))); }
+    | name=cident '[' key=term ']' type=relationType t=term { $clauses.emplace_back(make_shared<cql3::single_column_relation>(std::move(name), std::move(key), type, std::move(t))); }
     | ids=tupleOfIdentifiers
       ( K_IN
           ( '(' ')'
@@ -1656,10 +1657,10 @@ relation[std::vector<cql3::relation_ptr>& clauses]
           )
       | type=relationType literal=tupleLiteral /* (a, b, c) > (1, 2, 3) or (a, b, c) > (?, ?, ?) */
           {
-              $clauses.emplace_back(cql3::multi_column_relation::create_non_in_relation(ids, *type, literal));
+              $clauses.emplace_back(cql3::multi_column_relation::create_non_in_relation(ids, type, literal));
           }
       | type=relationType tupleMarker=markerForTuple /* (a, b, c) >= ? */
-          { $clauses.emplace_back(cql3::multi_column_relation::create_non_in_relation(ids, *type, tupleMarker)); }
+          { $clauses.emplace_back(cql3::multi_column_relation::create_non_in_relation(ids, type, tupleMarker)); }
       )
     | '(' relation[$clauses] ')'
     ;
@@ -1807,7 +1808,7 @@ username returns [sstring str]
 // Basically the same as cident, but we need to exlude existing CQL3 types
 // (which for some reason are not reserved otherwise)
 non_type_ident returns [shared_ptr<cql3::column_identifier> id]
-    : t=IDENT                    { if (_reserved_type_names().count($t.text)) { add_recognition_error("Invalid (reserved) user type name " + $t.text); } $id = ::make_shared<cql3::column_identifier>($t.text, false); }
+    : t=IDENT                    { if (_reserved_type_names().contains($t.text)) { add_recognition_error("Invalid (reserved) user type name " + $t.text); } $id = ::make_shared<cql3::column_identifier>($t.text, false); }
     | t=QUOTED_NAME              { $id = ::make_shared<cql3::column_identifier>($t.text, true); }
     | k=basic_unreserved_keyword { $id = ::make_shared<cql3::column_identifier>(k, false); }
     | kk=K_KEY                   { $id = ::make_shared<cql3::column_identifier>($kk.text, false); }

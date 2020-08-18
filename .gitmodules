@@ -21,3 +21,6 @@
 [submodule "scylla-tools"]
 	path = tools/java
 	url = ../scylla-enterprise-tools-java
+[submodule "scylla-python3"]
+	path = tools/python3
+	url = ../scylla-python3
