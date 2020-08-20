@@ -46,13 +46,15 @@
 class canonical_mutation;
 class frozen_mutation;
 namespace cql3 { namespace functions { class user_function; }}
+namespace netw { class messaging_service; }
 
 namespace service {
 
 template<typename M>
 concept MergeableMutation = std::is_same<M, canonical_mutation>::value || std::is_same<M, frozen_mutation>::value;
 
-class migration_manager : public seastar::async_sharded_service<migration_manager> {
+class migration_manager : public seastar::async_sharded_service<migration_manager>,
+                            public seastar::peering_sharded_service<migration_manager> {
 private:
     migration_notifier& _notifier;
 
@@ -61,11 +63,12 @@ private:
     seastar::gate _background_tasks;
     static const std::chrono::milliseconds migration_delay;
     gms::feature_service& _feat;
+    netw::messaging_service& _messaging;
     seastar::abort_source _as;
     bool _cluster_upgraded = false;
     seastar::condition_variable _wait_cluster_upgraded;
 public:
-    migration_manager(migration_notifier&, gms::feature_service&);
+    migration_manager(migration_notifier&, gms::feature_service&, netw::messaging_service& ms);
 
     migration_notifier& get_notifier() { return _notifier; }
     const migration_notifier& get_notifier() const { return _notifier; }
@@ -146,8 +149,6 @@ public:
 
     static future<> announce(std::vector<mutation> mutations, bool announce_locally);
 
-    static future<> push_schema_mutation(const gms::inet_address& endpoint, const std::vector<mutation>& schema);
-
     // Returns a future on the local application of the schema
     static future<> announce(std::vector<mutation> schema);
 
@@ -169,6 +170,8 @@ private:
 
     static future<> do_announce_new_type(user_type new_type, bool announce_locally);
 
+    future<> push_schema_mutation(const gms::inet_address& endpoint, const std::vector<mutation>& schema);
+
     future<> validate(schema_ptr);
 };
 
@@ -184,16 +187,16 @@ inline migration_manager& get_local_migration_manager() {
 
 // Returns schema of given version, either from cache or from remote node identified by 'from'.
 // Doesn't affect current node's schema in any way.
-future<schema_ptr> get_schema_definition(table_schema_version, netw::msg_addr from);
+future<schema_ptr> get_schema_definition(table_schema_version, netw::msg_addr from, netw::messaging_service& ms);
 
 // Returns schema of given version, either from cache or from remote node identified by 'from'.
 // The returned schema may not be synchronized. See schema::is_synced().
 // Intended to be used in the read path.
-future<schema_ptr> get_schema_for_read(table_schema_version, netw::msg_addr from);
+future<schema_ptr> get_schema_for_read(table_schema_version, netw::msg_addr from, netw::messaging_service& ms);
 
 // Returns schema of given version, either from cache or from remote node identified by 'from'.
 // Ensures that this node is synchronized with the returned schema. See schema::is_synced().
 // Intended to be used in the write path, which relies on synchronized schema.
-future<schema_ptr> get_schema_for_write(table_schema_version, netw::msg_addr from);
+future<schema_ptr> get_schema_for_write(table_schema_version, netw::msg_addr from, netw::messaging_service& ms);
 
 }

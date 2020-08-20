@@ -15,8 +15,31 @@
 
 namespace sstables {
 
+size_tiered_compaction_strategy_options::size_tiered_compaction_strategy_options(const std::map<sstring, sstring>& options) {
+    using namespace cql3::statements;
+
+    auto tmp_value = compaction_strategy_impl::get_value(options, MIN_SSTABLE_SIZE_KEY);
+    min_sstable_size = property_definitions::to_long(MIN_SSTABLE_SIZE_KEY, tmp_value, DEFAULT_MIN_SSTABLE_SIZE);
+
+    tmp_value = compaction_strategy_impl::get_value(options, BUCKET_LOW_KEY);
+    bucket_low = property_definitions::to_double(BUCKET_LOW_KEY, tmp_value, DEFAULT_BUCKET_LOW);
+
+    tmp_value = compaction_strategy_impl::get_value(options, BUCKET_HIGH_KEY);
+    bucket_high = property_definitions::to_double(BUCKET_HIGH_KEY, tmp_value, DEFAULT_BUCKET_HIGH);
+
+    tmp_value = compaction_strategy_impl::get_value(options, COLD_READS_TO_OMIT_KEY);
+    cold_reads_to_omit = property_definitions::to_double(COLD_READS_TO_OMIT_KEY, tmp_value, DEFAULT_COLD_READS_TO_OMIT);
+}
+
+size_tiered_compaction_strategy_options::size_tiered_compaction_strategy_options() {
+    min_sstable_size = DEFAULT_MIN_SSTABLE_SIZE;
+    bucket_low = DEFAULT_BUCKET_LOW;
+    bucket_high = DEFAULT_BUCKET_HIGH;
+    cold_reads_to_omit = DEFAULT_COLD_READS_TO_OMIT;
+}
+
 std::vector<std::pair<sstables::shared_sstable, uint64_t>>
-size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables) const {
+size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables) {
 
     std::vector<std::pair<sstables::shared_sstable, uint64_t>> sstable_length_pairs;
     sstable_length_pairs.reserve(sstables.size());
@@ -32,7 +55,7 @@ size_tiered_compaction_strategy::create_sstable_and_length_pairs(const std::vect
 }
 
 std::vector<std::vector<sstables::shared_sstable>>
-size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_sstable>& sstables) const {
+size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_sstable>& sstables, size_tiered_compaction_strategy_options options) {
     // sstables sorted by size of its data file.
     auto sorted_sstables = create_sstable_and_length_pairs(sstables);
 
@@ -53,8 +76,8 @@ size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_
         for (auto it = buckets.begin(); it != buckets.end(); it++) {
             size_t old_average_size = it->first;
 
-            if ((size > (old_average_size * _options.bucket_low) && size < (old_average_size * _options.bucket_high)) ||
-                    (size < _options.min_sstable_size && old_average_size < _options.min_sstable_size)) {
+            if ((size > (old_average_size * options.bucket_low) && size < (old_average_size * options.bucket_high)) ||
+                    (size < options.min_sstable_size && old_average_size < options.min_sstable_size)) {
                 auto bucket = std::move(it->second);
                 size_t total_size = bucket.size() * old_average_size;
                 size_t new_average_size = (total_size + size) / (bucket.size() + 1);
@@ -84,6 +107,11 @@ size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_
     }
 
     return bucket_list;
+}
+
+std::vector<std::vector<sstables::shared_sstable>>
+size_tiered_compaction_strategy::get_buckets(const std::vector<sstables::shared_sstable>& sstables) const {
+    return get_buckets(sstables, _options);
 }
 
 std::vector<sstables::shared_sstable>
@@ -165,23 +193,28 @@ size_tiered_compaction_strategy::get_sstables_for_compaction(column_family& cfs,
     return sstables::compaction_descriptor();
 }
 
+int64_t size_tiered_compaction_strategy::estimated_pending_compactions(const std::vector<sstables::shared_sstable>& sstables,
+        int min_threshold, int max_threshold, size_tiered_compaction_strategy_options options) {
+    int64_t n = 0;
+    for (auto& bucket : get_buckets(sstables, options)) {
+        if (bucket.size() >= size_t(min_threshold)) {
+            n += std::ceil(double(bucket.size()) / max_threshold);
+        }
+    }
+    return n;
+}
+
 int64_t size_tiered_compaction_strategy::estimated_pending_compactions(column_family& cf) const {
     int min_threshold = cf.min_compaction_threshold();
     int max_threshold = cf.schema()->max_compaction_threshold();
     std::vector<sstables::shared_sstable> sstables;
-    int64_t n = 0;
 
     sstables.reserve(cf.sstables_count());
     for (auto& entry : *cf.get_sstables()) {
         sstables.push_back(entry);
     }
 
-    for (auto& bucket : get_buckets(sstables)) {
-        if (bucket.size() >= size_t(min_threshold)) {
-            n += std::ceil(double(bucket.size()) / max_threshold);
-        }
-    }
-    return n;
+    return estimated_pending_compactions(sstables, min_threshold, max_threshold, _options);
 }
 
 std::vector<sstables::shared_sstable>

@@ -52,6 +52,10 @@ class storage_service;
 
 }
 
+namespace netw {
+    class messaging_service;
+}
+
 namespace cql3 {
     class query_processor;
 }
@@ -161,7 +165,8 @@ future<> init_local_cache();
 future<> deinit_local_cache();
 future<> setup(distributed<database>& db,
                distributed<cql3::query_processor>& qp,
-               distributed<gms::feature_service>& feat);
+               distributed<gms::feature_service>& feat,
+               sharded<netw::messaging_service>& ms);
 future<> update_schema_version(utils::UUID version);
 
 /*

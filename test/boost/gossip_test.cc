@@ -45,6 +45,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         utils::fb_utilities::set_broadcast_address(gms::inet_address("127.0.0.1"));
         sharded<gms::feature_service> feature_service;
         sharded<locator::token_metadata> token_metadata;
+        sharded<netw::messaging_service> _messaging;
         sharded<auth::service> auth_service;
 
         token_metadata.start().get();
@@ -66,16 +67,16 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         locator::i_endpoint_snitch::create_snitch("SimpleSnitch").get();
         auto stop_snitch = defer([&] { locator::i_endpoint_snitch::stop_snitch().get(); });
 
-        netw::get_messaging_service().start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
-        auto stop_messaging_service = defer([&] { netw::get_messaging_service().stop().get(); });
+        _messaging.start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
+        auto stop_messaging_service = defer([&] { _messaging.stop().get(); });
 
-        gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(*cfg)).get();
+        gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(_messaging), std::ref(*cfg)).get();
         auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
 
         service::storage_service_config sscfg;
         sscfg.available_memory =  memory::stats().total_memory();
 
-        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(token_metadata), std::ref(sl_controller), true).get();
+        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(token_metadata), std::ref(_messaging), std::ref(sl_controller), true).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources)).get();

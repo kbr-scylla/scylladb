@@ -70,6 +70,7 @@ int main(int ac, char ** av) {
             sharded<abort_source> abort_sources;
             sharded<service::migration_notifier> mnotif;
             sharded<locator::token_metadata> token_metadata;
+            sharded<netw::messaging_service> messaging;
             sharded<auth::service> auth_service;
 
             abort_sources.start().get();
@@ -82,10 +83,10 @@ int main(int ac, char ** av) {
             sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(*cfg)).get();
-            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, token_metadata, sl_controller).get();
-            netw::get_messaging_service().start(std::ref(sl_controller), listen).get();
-            auto& server = netw::get_local_messaging_service();
+            messaging.start(std::ref(sl_controller), listen).get();
+            gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(messaging), std::ref(*cfg)).get();
+            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, token_metadata, messaging, sl_controller).get();
+            auto& server = messaging.local();
             auto port = server.port();
             auto msg_listen = server.listen_address();
             fmt::print("Messaging server listening on ip {} port {:d} ...\n", msg_listen, port);

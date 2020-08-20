@@ -15,6 +15,7 @@
 #include <cassert>
 #include <exception>
 #include <seastar/core/seastar.hh>
+#include <seastar/core/when_all.hh>
 #include <seastar/util/log.hh>
 #include <seastar/util/defer.hh>
 #include <set>

@@ -19,6 +19,8 @@
 #include <string>
 
 #include <seastar/core/seastar.hh>
+#include <seastar/core/when_all.hh>
+#include <seastar/util/later.hh>
 #include <seastar/util/log.hh>
 
 #include "seastarx.hh"

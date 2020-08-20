@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/seastar.hh>
 #include "init.hh"
 #include "supervisor.hh"
 #include "directories.hh"
