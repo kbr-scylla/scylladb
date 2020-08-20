@@ -434,16 +434,11 @@ class LdapTest(BoostTest):
         slapd_proc = subprocess.Popen(['slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
         saslauthd_conf_path = make_saslauthd_conf(port, instance_path)
         saslauthd_proc = subprocess.Popen(
-            ['saslauthd', '-n', '1', '-a', 'ldap', '-O', saslauthd_conf_path, '-m', instance_path])
+            ['saslauthd', '-d', '-n', '1', '-a', 'ldap', '-O', saslauthd_conf_path, '-m', instance_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         def finalize():
             slapd_proc.terminate()
-            saslauthd_proc.terminate()
-            # saslauthd unconditionally spawns a child process; there is no good way to find its pid/gpid directly.
-            for cmdf in glob.glob('/proc/[0-9]*/cmdline'):
-                with open(cmdf) as f:
-                    contents = f.read()
-                if (saslauthd_conf_path in contents):
-                    os.kill(int(cmdf[6:-8]), signal.SIGTERM)
+            saslauthd_proc.kill() # Somehow, invoking terminate() here also terminates toxiproxy-server. o_O
             shutil.rmtree(instance_path, ignore_errors=True)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
         if not try_something_backoff(can_connect_to_slapd):
