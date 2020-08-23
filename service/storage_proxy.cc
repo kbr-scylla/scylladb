@@ -1271,7 +1271,7 @@ bool paxos_response_handler::learned(gms::inet_address ep) {
 }
 
 static std::vector<gms::inet_address>
-replica_ids_to_endpoints(locator::token_metadata& tm, const std::vector<utils::UUID>& replica_ids) {
+replica_ids_to_endpoints(const locator::token_metadata& tm, const std::vector<utils::UUID>& replica_ids) {
     std::vector<gms::inet_address> endpoints;
     endpoints.reserve(replica_ids.size());
 
@@ -1285,7 +1285,7 @@ replica_ids_to_endpoints(locator::token_metadata& tm, const std::vector<utils::U
 }
 
 static std::vector<utils::UUID>
-endpoints_to_replica_ids(locator::token_metadata& tm, const std::vector<gms::inet_address>& endpoints) {
+endpoints_to_replica_ids(const locator::token_metadata& tm, const std::vector<gms::inet_address>& endpoints) {
     std::vector<utils::UUID> replica_ids;
     replica_ids.reserve(endpoints.size());
 
@@ -1763,7 +1763,7 @@ using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog,
-        scheduling_group_key stats_key, gms::feature_service& feat, locator::token_metadata& tm, netw::messaging_service& ms)
+        scheduling_group_key stats_key, gms::feature_service& feat, const locator::token_metadata& tm, netw::messaging_service& ms)
     : _db(db)
     , _token_metadata(tm)
     , _read_smp_service_group(cfg.read_smp_service_group)
@@ -2573,14 +2573,13 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
 }
 
 future<> storage_proxy::send_hint_to_all_replicas(frozen_mutation_and_schema fm_a_s) {
-    const auto timeout = db::timeout_clock::now() + 1h;
     if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
         std::array<mutation, 1> ms{fm_a_s.fm.unfreeze(fm_a_s.s)};
-        return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit(), timeout);
+        return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit());
     }
 
     std::array<hint_wrapper, 1> ms{hint_wrapper { std::move(fm_a_s.fm.unfreeze(fm_a_s.s)) }};
-    return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit(), timeout);
+    return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit());
 }
 
 /**
@@ -4586,7 +4585,7 @@ std::vector<gms::inet_address> storage_proxy::intersection(const std::vector<gms
     return inter;
 }
 
-query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(locator::token_metadata& tm, schema_ptr s, dht::partition_range_vector ranges, bool local) :
+query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(const locator::token_metadata& tm, schema_ptr s, dht::partition_range_vector ranges, bool local) :
         _s(s), _ranges(std::move(ranges)), _i(_ranges.begin()), _local(local), _tm(tm) {}
 
 dht::partition_range_vector query_ranges_to_vnodes_generator::operator()(size_t n) {
