@@ -438,8 +438,9 @@ class LdapTest(BoostTest):
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         def finalize():
             slapd_proc.terminate()
+            slapd_proc.wait() # Wait for slapd to remove slapd.pid, so it doesn't race with rmtree below.
             saslauthd_proc.kill() # Somehow, invoking terminate() here also terminates toxiproxy-server. o_O
-            shutil.rmtree(instance_path, ignore_errors=True)
+            shutil.rmtree(instance_path)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
         if not try_something_backoff(can_connect_to_slapd):
             finalize()
