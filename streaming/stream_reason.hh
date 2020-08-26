@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <ostream>
 
 namespace streaming {
 
@@ -23,5 +24,7 @@ enum class stream_reason : uint8_t {
     repair,
     replace,
 };
+
+std::ostream& operator<<(std::ostream& out, stream_reason r);
 
 }

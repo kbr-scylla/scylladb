@@ -481,6 +481,8 @@ arg_parser.add_argument('--split-dwarf', dest='split_dwarf', action='store_true'
                         help='use of split dwarf (https://gcc.gnu.org/wiki/DebugFission) to speed up linking')
 arg_parser.add_argument('--enable-alloc-failure-injector', dest='alloc_failure_injector', action='store_true', default=False,
                         help='enable allocation failure injection')
+arg_parser.add_argument('--enable-seastar-debug-allocations', dest='seastar_debug_allocations', action='store_true', default=False,
+                        help='enable seastar debug allocations')
 arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', default=None,
                         help='path to antlr3 executable')
 arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', default='ragel',
@@ -488,6 +490,9 @@ arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', defau
 add_tristate(arg_parser, name='stack-guards', dest='stack_guards', help='Use stack guards')
 arg_parser.add_argument('--verbose', dest='verbose', action='store_true',
                         help='Make configure.py output more verbose (useful for debugging the build process itself)')
+arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', type=str, default='1',
+                         help='Set number of times to repeat each unittest.')
+arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -578,6 +583,7 @@ scylla_core = (['database.cc',
                 'cql3/sets.cc',
                 'cql3/tuples.cc',
                 'cql3/maps.cc',
+                'cql3/values.cc',
                 'cql3/expr/expression.cc',
                 'cql3/functions/user_function.cc',
                 'cql3/functions/functions.cc',
@@ -769,6 +775,7 @@ scylla_core = (['database.cc',
                 'streaming/stream_manager.cc',
                 'streaming/stream_result_future.cc',
                 'streaming/stream_session_state.cc',
+                'streaming/stream_reason.cc',
                 'clocks-impl.cc',
                 'partition_slice_builder.cc',
                 'init.cc',
@@ -1290,6 +1297,8 @@ def configure_seastar(build_dir, mode):
         seastar_cmake_args += ['-DSeastar_SPLIT_DWARF=ON']
     if args.alloc_failure_injector:
         seastar_cmake_args += ['-DSeastar_ALLOC_FAILURE_INJECTION=ON']
+    if args.seastar_debug_allocations:
+        seastar_cmake_args += ['-DSeastar_DEBUG_ALLOCATIONS=ON']
 
     seastar_cmd = ['cmake', '-G', 'Ninja', os.path.relpath(args.seastar_path, seastar_build_dir)] + seastar_cmake_args
     cmake_dir = seastar_build_dir
@@ -1555,10 +1564,10 @@ with open(buildfile_tmp, 'w') as f:
               description = CHECKHH $in
               depfile = $out.d
             rule test.{mode}
-              command = ./test.py --mode={mode}
+              command = ./test.py --mode={mode} --repeat={test_repeat} --timeout={test_timeout}
               pool = console
               description = TEST {mode}
-            ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, **modeval))
+            ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, test_repeat=test_repeat, test_timeout=test_timeout, **modeval))
         f.write(
             'build {mode}-build: phony {artifacts}\n'.format(
                 mode=mode,

@@ -1191,7 +1191,7 @@ void storage_service::handle_state_normal(inet_address endpoint) {
         remove_endpoint(ep);
     }
     slogger.debug("handle_state_normal: endpoint={} owned_tokens = {}", endpoint, owned_tokens);
-    if (!owned_tokens.empty()) {
+    if (!owned_tokens.empty() && !endpoints_to_remove.count(endpoint)) {
         db::system_keyspace::update_tokens(endpoint, owned_tokens).then_wrapped([endpoint] (auto&& f) {
             try {
                 f.get();
@@ -2331,7 +2331,7 @@ future<> storage_service::rebuild(sstring source_dc) {
             }
             auto keyspaces = make_lw_shared<std::vector<sstring>>(ss._db.local().get_non_system_keyspaces());
             return do_for_each(*keyspaces, [keyspaces, streamer, &ss] (sstring& keyspace_name) {
-                return streamer->add_ranges(keyspace_name, ss.get_local_ranges(keyspace_name));
+                return streamer->add_ranges(keyspace_name, ss.get_ranges_for_endpoint(keyspace_name, utils::fb_utilities::get_broadcast_address()));
             }).then([streamer] {
                 return streamer->stream_async().then([streamer] {
                     slogger.info("Streaming for rebuild successful");
