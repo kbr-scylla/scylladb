@@ -40,10 +40,10 @@ public:
     static constexpr auto SERVICE_LEVELS = "service_levels";
 
     /* Nodes use this table to communicate new CDC stream generations to other nodes. */
-    static constexpr auto CDC_TOPOLOGY_DESCRIPTION = "cdc_generations";
+    static constexpr auto CDC_TOPOLOGY_DESCRIPTION = "cdc_generation_descriptions";
 
     /* This table is used by CDC clients to learn about avaliable CDC streams. */
-    static constexpr auto CDC_DESC = "cdc_streams";
+    static constexpr auto CDC_DESC = "cdc_streams_descriptions";
 
     /* Information required to modify/query some system_distributed tables, passed from the caller. */
     struct context {

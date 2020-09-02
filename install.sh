@@ -31,8 +31,6 @@ EOF
 
 root=/
 housekeeping=false
-python3=/opt/scylladb/python3/bin/python3
-sysconfdir=/etc/sysconfig
 nonroot=false
 packaging=false
 upgrade=false
@@ -168,6 +166,20 @@ if [ -z "$prefix" ]; then
 fi
 
 rprefix=$(realpath -m "$root/$prefix")
+
+if [ -f "/etc/os-release" ]; then
+    . /etc/os-release
+fi
+
+if [ -z "$sysconfdir" ]; then
+    sysconfdir=/etc/sysconfig
+    if ! $nonroot; then
+        if [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
+            sysconfdir=/etc/default
+        fi
+    fi
+fi
+
 if [ -z "$python3" ]; then
     python3=$prefix/python3/bin/python3
 fi
@@ -195,6 +207,7 @@ grep -v api_ui_dir conf/scylla.yaml | grep -v api_doc_dir > /tmp/scylla.yaml
 echo "api_ui_dir: /opt/scylladb/swagger-ui/dist/" >> /tmp/scylla.yaml
 echo "api_doc_dir: /opt/scylladb/api/api-doc/" >> /tmp/scylla.yaml
 installconfig 644 /tmp/scylla.yaml "$retc"/scylla
+rm -f /tmp/scylla.yaml
 installconfig 644 conf/cassandra-rackdc.properties "$retc"/scylla
 if $housekeeping; then
     installconfig 644 conf/housekeeping.cfg "$retc"/scylla.d

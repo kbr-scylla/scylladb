@@ -17,7 +17,6 @@
 namespace cdc {
 
 enum class delta_mode : uint8_t {
-    off,
     keys,
     full,
 };

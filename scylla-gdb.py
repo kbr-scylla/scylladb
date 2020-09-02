@@ -1423,24 +1423,30 @@ class scylla_memory(gdb.Command):
     def print_replica_stats():
         db = sharded(gdb.parse_and_eval('::debug::db')).local()
 
+        try:
+            mem_stats = dict()
+            for key, sem in [('user_mem_str', db['_read_concurrency_sem']), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]:
+                mem_stats[key] = '{:>13}/{:>13} B'.format(int(sem['_initial_resources']['memory'] - sem['_resources']['memory']), int(sem['_initial_resources']['memory']))
+        except gdb.error: # <= 4.2 compatibility
+            for key, sem in [('user_mem_str', db['_read_concurrency_sem']), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]:
+                mem_stats[key] = 'remaining mem: {:>13} B'.format(int(sem['_resources']['memory']))
+
         gdb.write('Replica:\n')
         gdb.write('  Read Concurrency Semaphores:\n'
-                '    user sstable reads:      {user_sst_rd_count:>3}/{user_sst_rd_max_count:>3}, remaining mem: {user_sst_rd_mem:>13} B, queued: {user_sst_rd_queued}\n'
-                '    streaming sstable reads: {streaming_sst_rd_count:>3}/{streaming_sst_rd_max_count:>3}, remaining mem: {system_sst_rd_mem:>13} B, queued: {streaming_sst_rd_queued}\n'
-                '    system sstable reads:    {system_sst_rd_count:>3}/{system_sst_rd_max_count:>3}, remaining mem: {system_sst_rd_mem:>13} B, queued: {system_sst_rd_queued}\n'
+                '    user sstable reads:      {user_sst_rd_count:>3}/{user_sst_rd_max_count:>3}, {user_mem_str}, queued: {user_sst_rd_queued}\n'
+                '    streaming sstable reads: {streaming_sst_rd_count:>3}/{streaming_sst_rd_max_count:>3}, {streaming_mem_str}, queued: {streaming_sst_rd_queued}\n'
+                '    system sstable reads:    {system_sst_rd_count:>3}/{system_sst_rd_max_count:>3}, {system_mem_str}, queued: {system_sst_rd_queued}\n'
                 .format(
                         user_sst_rd_count=int(gdb.parse_and_eval('database::max_count_concurrent_reads')) - int(db['_read_concurrency_sem']['_resources']['count']),
                         user_sst_rd_max_count=int(gdb.parse_and_eval('database::max_count_concurrent_reads')),
-                        user_sst_rd_mem=int(db['_read_concurrency_sem']['_resources']['memory']),
                         user_sst_rd_queued=int(db['_read_concurrency_sem']['_wait_list']['_size']),
                         streaming_sst_rd_count=int(gdb.parse_and_eval('database::max_count_streaming_concurrent_reads')) - int(db['_streaming_concurrency_sem']['_resources']['count']),
                         streaming_sst_rd_max_count=int(gdb.parse_and_eval('database::max_count_streaming_concurrent_reads')),
-                        streaming_sst_rd_mem=int(db['_streaming_concurrency_sem']['_resources']['memory']),
                         streaming_sst_rd_queued=int(db['_streaming_concurrency_sem']['_wait_list']['_size']),
                         system_sst_rd_count=int(gdb.parse_and_eval('database::max_count_system_concurrent_reads')) - int(db['_system_read_concurrency_sem']['_resources']['count']),
                         system_sst_rd_max_count=int(gdb.parse_and_eval('database::max_count_system_concurrent_reads')),
-                        system_sst_rd_mem=int(db['_system_read_concurrency_sem']['_resources']['memory']),
-                        system_sst_rd_queued=int(db['_system_read_concurrency_sem']['_wait_list']['_size'])))
+                        system_sst_rd_queued=int(db['_system_read_concurrency_sem']['_wait_list']['_size']),
+                        **mem_stats))
 
         gdb.write('  Execution Stages:\n')
         for es_path in [('_data_query_stage',), ('_mutation_query_stage', '_execution_stage'), ('_apply_stage',)]:
@@ -3059,10 +3065,11 @@ class scylla_sstables(gdb.Command):
 
         Should mirror `sstables::sstable::component_basename()`.
         """
-        version_to_str = ['ka', 'la', 'mc']
+        version_to_str = ['ka', 'la', 'mc', 'md']
         format_to_str = ['big']
         formats = [
                 '{keyspace}-{table}-{version}-{generation}-Data.db',
+                '{version}-{generation}-{format}-Data.db',
                 '{version}-{generation}-{format}-Data.db',
                 '{version}-{generation}-{format}-Data.db',
             ]
@@ -3079,6 +3086,7 @@ class scylla_sstables(gdb.Command):
     def invoke(self, arg, from_tty):
         parser = argparse.ArgumentParser(description="scylla sstables")
         parser.add_argument("-t", "--tables", action="store_true", help="Only consider sstables attached to tables")
+        parser.add_argument("--histogram", action="store_true", help="Instead of printing all sstables, print a histogram of the number of sstables per table")
         try:
             args = parser.parse_args(arg.split())
         except SystemExit:
@@ -3091,6 +3099,7 @@ class scylla_sstables(gdb.Command):
         count = 0
 
         sstable_generator = find_sstables_attached_to_tables if args.tables else find_sstables
+        sstable_histogram = histogram(print_indicators=False)
 
         for sst in sstable_generator():
             if not sst['_open']:
@@ -3131,12 +3140,18 @@ class scylla_sstables(gdb.Command):
 
             data_file_size = sst['_data_file_size']
             schema = schema_ptr(sst['_schema'])
-            gdb.write('(sstables::sstable*) 0x%x: local=%d data_file=%d, in_memory=%d (bf=%d, summary=%d, sm=%d) %s filename=%s\n'
-                      % (int(sst), local, data_file_size, size, bf_size, summary_size, sm_size, schema.table_name(), scylla_sstables.filename(sst)))
+            if args.histogram:
+                sstable_histogram.add(schema.table_name())
+            else:
+                gdb.write('(sstables::sstable*) 0x%x: local=%d data_file=%d, in_memory=%d (bf=%d, summary=%d, sm=%d) %s filename=%s\n'
+                          % (int(sst), local, data_file_size, size, bf_size, summary_size, sm_size, schema.table_name(), scylla_sstables.filename(sst)))
 
             if local:
                 total_size += size
                 total_on_disk_size += data_file_size
+
+        if args.histogram:
+           sstable_histogram.print_to_console()
 
         gdb.write('total (shard-local): count=%d, data_file=%d, in_memory=%d\n' % (count, total_on_disk_size, total_size))
 
@@ -3652,6 +3667,51 @@ class scylla_small_objects(gdb.Command):
             gdb.write("[{}] 0x{:x} {}\n".format(offset + i, obj, sym_text))
 
 
+class scylla_compaction_tasks(gdb.Command):
+    """Summarize the compaction_manager::task instances.
+
+    The summary is created based on compaction_manager::_tasks and it takes the
+    form of a histogram with the compaction type and compaction running and
+    table name as keys. Example:
+
+	(gdb) scylla compaction-task
+	     2116 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_postimage_scylla_cdc_log"
+	      769 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_scylla_cdc_log"
+	      750 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_preimage_postimage_scylla_cdc_log"
+	      731 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_preimage_scylla_cdc_log"
+	      293 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table"
+	      286 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_preimage"
+	      230 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_postimage"
+	       58 type=sstables::compaction_type::Compaction, running=false, "cdc_test"."test_table_preimage_postimage"
+		4 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_postimage_scylla_cdc_log"
+		2 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table"
+		2 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_preimage_postimage_scylla_cdc_log"
+		2 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_preimage"
+		1 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_preimage_postimage"
+		1 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_scylla_cdc_log"
+		1 type=sstables::compaction_type::Compaction, running=true , "cdc_test"."test_table_preimage_scylla_cdc_log"
+	Total: 5246 instances of compaction_manager::task
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla compaction-tasks', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def invoke(self, arg, from_tty):
+        db = find_db()
+        cm = std_unique_ptr(db['_compaction_manager']).get().dereference()
+        task_hist = histogram(print_indicators=False)
+
+        task_list = list(std_list(cm['_tasks']))
+        for task in task_list:
+            task = seastar_lw_shared_ptr(task).get().dereference()
+            schema = schema_ptr(task['compacting_cf'].dereference()['_schema'])
+            key = 'type={}, running={:5}, {}'.format(task['type'], str(task['compaction_running']), schema.table_name())
+            task_hist.add(key)
+
+        task_hist.print_to_console()
+        gdb.write('Total: {} instances of compaction_manager::task\n'.format(len(task_list)))
+
+
 class scylla_gdb_func_dereference_smart_ptr(gdb.Function):
     """Dereference the pointer guarded by the smart pointer instance.
 
@@ -3934,6 +3994,7 @@ scylla_smp_queues()
 scylla_features()
 scylla_repairs()
 scylla_small_objects()
+scylla_compaction_tasks()
 
 
 # Convenience functions

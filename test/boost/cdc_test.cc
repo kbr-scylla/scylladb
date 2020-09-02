@@ -272,8 +272,8 @@ SEASTAR_THREAD_TEST_CASE(test_permissions_of_cdc_description) {
             assert_unauthorized(format("DROP TABLE {}", full_name));
         };
 
-        test_table("cdc_streams");
-        test_table("cdc_generations");
+        test_table("cdc_streams_descriptions");
+        test_table("cdc_generation_descriptions");
     }, mk_cdc_test_config()).get();
 }
 
@@ -514,7 +514,7 @@ SEASTAR_THREAD_TEST_CASE(test_pre_post_image_logging) {
 
             auto rows = select_log(e, "tbl");
 
-            BOOST_REQUIRE_EQUAL(pre_enabled == cdc::image_mode::off, to_bytes_filtered(*rows, cdc::operation::pre_image).empty());
+            BOOST_REQUIRE(to_bytes_filtered(*rows, cdc::operation::pre_image).empty());
             BOOST_REQUIRE_EQUAL(!post_enabled, to_bytes_filtered(*rows, cdc::operation::post_image).empty());
 
             auto first = to_bytes_filtered(*rows, cdc::operation::update);
@@ -553,7 +553,7 @@ SEASTAR_THREAD_TEST_CASE(test_pre_post_image_logging) {
                 sort_by_time(*rows, post_image);
 
                 if (pre_enabled != cdc::image_mode::off) {
-                    BOOST_REQUIRE_EQUAL(pre_image.size(), i + 2);
+                    BOOST_REQUIRE_EQUAL(pre_image.size(), i + 1);
 
                     val = *pre_image.back()[val_index];
                     // note: no val2 in pre-image, because we are not modifying it. 
@@ -609,7 +609,7 @@ SEASTAR_THREAD_TEST_CASE(test_pre_post_image_logging_static_row) {
 
             auto rows = select_log(e, "tbl");
 
-            BOOST_REQUIRE(to_bytes_filtered(*rows, cdc::operation::pre_image).empty() == !enabled);
+            BOOST_REQUIRE(to_bytes_filtered(*rows, cdc::operation::pre_image).empty());
             BOOST_REQUIRE(to_bytes_filtered(*rows, cdc::operation::post_image).empty() == !enabled);
 
             auto first = to_bytes_filtered(*rows, cdc::operation::update);
@@ -645,7 +645,7 @@ SEASTAR_THREAD_TEST_CASE(test_pre_post_image_logging_static_row) {
                     sort_by_time(*rows, second);
                     sort_by_time(*rows, pre_image);
                     sort_by_time(*rows, post_image);
-                    BOOST_REQUIRE_EQUAL(pre_image.size(), i + 2);
+                    BOOST_REQUIRE_EQUAL(pre_image.size(), i + 1);
 
                     s = *pre_image.back()[s_index];
                     BOOST_REQUIRE_EQUAL(data_value(last), s_type->deserialize(bytes_view(s)));
@@ -1592,8 +1592,6 @@ SEASTAR_THREAD_TEST_CASE(test_batch_with_row_delete) {
         auto set_null = data_value::make_null(s_type);
 
         const std::vector<std::vector<data_value>> expected = {
-            // Preimage for (0)
-            {int_null, udt_null, map_null, set_null, oper_ut(cdc::operation::pre_image)},
             // Update (0)
             {int32_t(1), make_user_value(udt_type, {1,2}), make_map_value(m_type, {{1,2},{3,4}}), make_set_value(s_type, {1,2,3}), oper_ut(cdc::operation::insert)},
             // Preimage for (1)
@@ -1769,10 +1767,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {"ck", "v1"},
                 {
                     {
-                        .preimage = {
-                            {int32_t(1), int_null},
-                            {int32_t(2), int_null}
-                        },
                         .postimage = {
                             {int32_t(1), int32_t(10)},
                             {int32_t(2), int32_t(20)}
@@ -1820,10 +1814,6 @@ void test_batch_images(bool preimage, bool postimage) {
                             {int32_t(1), int32_t(11), int_null},
                             {int32_t(2), int32_t(20), int32_t(22)}
                         },
-                        .postimage = {
-                            {int32_t(1), int_null, int_null},
-                            {int32_t(2), int_null, int_null}
-                        }
                     }
                 }
             },
@@ -1838,10 +1828,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {"ck", "s", "v1"},
                 {
                     {
-                        .preimage = {
-                            {int_null, int_null, int_null},
-                            {int32_t(1), int_null, int_null}
-                        },
                         .postimage = {
                             {int_null, int32_t(5), int_null},
                             {int32_t(1), int_null, int32_t(10)}
@@ -1860,9 +1846,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {"ck", "v1", "v2"},
                 {
                     {
-                        .preimage = {
-                            {int32_t(0), int_null, int_null}
-                        },
                         .postimage = {
                             {int32_t(0), int32_t(10), int32_t(20)}
                         }
@@ -1880,9 +1863,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {"ck", "vm"},
                 {
                     {
-                        .preimage = {
-                            {int32_t(0), map_null}
-                        },
                         .postimage = {
                             {int32_t(0), ::make_map_value(map_type, {{1,2},{3,4}})}
                         }
@@ -1902,9 +1882,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {
                     // First timestamp
                     {
-                        .preimage = {
-                            {int32_t(0), map_null}
-                        },
                         .postimage = {
                             {int32_t(0), ::make_map_value(map_type, {{1,2}})}
                         }
@@ -1934,9 +1911,6 @@ void test_batch_images(bool preimage, bool postimage) {
                 {
                     // Non-batch UPDATE
                     {
-                        .preimage = {
-                            {int32_t(1), map_null}
-                        },
                         .postimage = {
                             {int32_t(1), ::make_map_value(map_type, {{1,2}})}
                         }
@@ -1944,7 +1918,6 @@ void test_batch_images(bool preimage, bool postimage) {
                     // Batch
                     {
                         .preimage = {
-                            {int32_t(0), map_null},
                             {int32_t(1), ::make_map_value(map_type, {{1,2}})}
                         },
                         .postimage = {

@@ -40,8 +40,6 @@ EOF
 
 root=/
 housekeeping=false
-python3=/opt/scylladb/python3/bin/python3
-sysconfdir=/etc/sysconfig
 nonroot=false
 
 while [ $# -gt 0 ]; do
@@ -87,6 +85,24 @@ if [ -z "$prefix" ]; then
         prefix=/opt/scylladb
     fi
 fi
+rprefix=$(realpath -m "$root/$prefix")
+
+if [ -f "/etc/os-release" ]; then
+    . /etc/os-release
+fi
+
+if [ -z "$sysconfdir" ]; then
+    sysconfdir=/etc/sysconfig
+    if ! $nonroot; then
+        if [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
+            sysconfdir=/etc/default
+        fi
+    fi
+fi
+
+if [ -z "$python3" ]; then
+    python3=$prefix/python3/bin/python3
+fi
 
 scylla_args=()
 args=()
@@ -106,3 +122,5 @@ fi
 (cd $(readlink -f scylla-jmx); ./install.sh --root "$root" --prefix "$prefix"  --sysconfdir "$sysconfdir" ${args[@]})
 
 (cd $(readlink -f scylla-tools); ./install.sh --root "$root" --prefix "$prefix" ${args[@]})
+
+install -m755 uninstall.sh -Dt "$rprefix"
