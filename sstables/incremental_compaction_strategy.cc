@@ -132,7 +132,7 @@ incremental_compaction_strategy::most_interesting_bucket(std::vector<std::vector
 compaction_descriptor
 incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
     // make local copies so they can't be changed out from under us mid-method
-    size_t min_threshold = cf.schema()->min_compaction_threshold();
+    size_t min_threshold = cf.min_compaction_threshold();
     size_t max_threshold = cf.schema()->max_compaction_threshold();
 
     auto buckets = get_buckets(cf.get_sstable_set().select_sstable_runs(candidates));
