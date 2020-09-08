@@ -150,14 +150,14 @@ SEASTAR_THREAD_TEST_CASE(multiple_outstanding_operations) {
         for (size_t i = 0; i < 30; ++i) {
             mylog.trace("multiple_outstanding_operations: invoking search base #{}", i);
             results_base.push_back(search(c, base_dn));
-            mylog.trace("multiple_outstanding_operations: search base #{} got future {}", i, &results_base.back());
+            mylog.trace("multiple_outstanding_operations: search base #{} got future {}", i, static_cast<const void*>(&results_base.back()));
         }
 
         std::vector<future<ldap_msg_ptr>> results_jsmith;
         for (size_t i = 0; i < 30; ++i) {
             mylog.trace("multiple_outstanding_operations: invoking search jsmith #{}", i);
             results_jsmith.push_back(search(c, "uid=jsmith,ou=People,dc=example,dc=com"));
-            mylog.trace("multiple_outstanding_operations: search jsmith #{} got future {}", i, &results_jsmith.back());
+            mylog.trace("multiple_outstanding_operations: search jsmith #{} got future {}", i, static_cast<const void*>(&results_jsmith.back()));
         }
 
         using boost::test_tools::per_element;

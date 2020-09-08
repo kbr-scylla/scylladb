@@ -1465,7 +1465,7 @@ void gossiper::real_mark_alive(inet_address addr, endpoint_state& local_state) {
 
     _subscribers.for_each([addr, local_state] (shared_ptr<i_endpoint_state_change_subscriber> subscriber) {
         subscriber->on_alive(addr, local_state);
-        logger.trace("Notified {}", subscriber.get());
+        logger.trace("Notified {}", fmt::ptr(subscriber.get()));
     });
 }
 
@@ -1478,7 +1478,7 @@ void gossiper::mark_dead(inet_address addr, endpoint_state& local_state) {
     logger.info("InetAddress {} is now DOWN, status = {}", addr, get_gossip_status(local_state));
     _subscribers.for_each([addr, local_state] (shared_ptr<i_endpoint_state_change_subscriber> subscriber) {
         subscriber->on_dead(addr, local_state);
-        logger.trace("Notified {}", subscriber.get());
+        logger.trace("Notified {}", fmt::ptr(subscriber.get()));
     });
 }
 

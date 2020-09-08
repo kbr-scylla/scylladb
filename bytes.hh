@@ -28,6 +28,10 @@ inline sstring_view to_sstring_view(bytes_view view) {
     return {reinterpret_cast<const char*>(view.data()), view.size()};
 }
 
+inline bytes_view to_bytes_view(sstring_view view) {
+    return {reinterpret_cast<const int8_t*>(view.data()), view.size()};
+}
+
 namespace std {
 
 template <>
@@ -38,6 +42,12 @@ struct hash<bytes_view> {
 };
 
 }
+
+struct fmt_hex {
+    bytes_view& v;
+};
+
+std::ostream& operator<<(std::ostream& os, const fmt_hex& hex);
 
 bytes from_hex(sstring_view s);
 sstring to_hex(bytes_view b);

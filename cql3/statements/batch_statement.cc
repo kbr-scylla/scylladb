@@ -76,12 +76,6 @@ batch_statement::batch_statement(type type_,
 {
 }
 
-bool batch_statement::uses_function(const sstring& ks_name, const sstring& function_name) const
-{
-    return _attrs->uses_function(ks_name, function_name)
-            || boost::algorithm::any_of(_statements, [&] (auto&& s) { return s.statement->uses_function(ks_name, function_name); });
-}
-
 bool batch_statement::depends_on_keyspace(const sstring& ks_name) const
 {
     return false;
@@ -377,7 +371,7 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::exe
     return proxy.cas(schema, request, request->read_command(proxy), request->key(),
             {read_timeout, qs.get_permit(), qs.get_client_state(), qs.get_trace_state()},
             cl_for_paxos, cl_for_learn, batch_timeout, cas_timeout).then([this, request] (bool is_applied) {
-        return modification_statement::build_cas_result_set(_metadata, _columns_of_cas_result_set, is_applied, request->rows());
+        return request->build_cas_result_set(_metadata, _columns_of_cas_result_set, is_applied);
     });
 }
 

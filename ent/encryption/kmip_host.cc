@@ -386,7 +386,7 @@ int kmip_host::impl::connection::io_callback(KMIP *kmip, void *cb_arg, int op, v
 }
 
 void kmip_host::impl::connection::attach(KMIP_CMD* cmd) {
-    kmip_log.trace("{} Attach: {}", *this, cmd);
+    kmip_log.trace("{} Attach: {}", *this, reinterpret_cast<void*>(cmd));
     if (cmd == nullptr) {
         return;
     }

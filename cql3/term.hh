@@ -90,8 +90,6 @@ public:
      */
     virtual bool contains_bind_marker() const = 0;
 
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const = 0;
-
     virtual sstring to_string() const {
         return format("term@{:p}", static_cast<const void*>(this));
     }
@@ -163,10 +161,6 @@ public:
         return static_pointer_cast<terminal>(this->shared_from_this());
     }
 
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return false;
-    }
-
     // While some NonTerminal may not have bind markers, no Term can be Terminal
     // with a bind marker
     virtual bool contains_bind_marker() const override {
@@ -209,10 +203,6 @@ public:
  */
 class non_terminal : public term {
 public:
-    virtual bool uses_function(const sstring& ks_name, const sstring& function_name) const override {
-        return false;
-    }
-
     virtual cql3::raw_value_view bind_and_get(const query_options& options) override {
         auto t = bind(options);
         if (t) {

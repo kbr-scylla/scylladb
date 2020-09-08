@@ -61,9 +61,18 @@ void on_types_internal_error(std::exception_ptr ex) {
 template<typename T>
 sstring time_point_to_string(const T& tp)
 {
-    auto timestamp = tp.time_since_epoch().count();
-    auto time = boost::posix_time::from_time_t(0) + boost::posix_time::milliseconds(timestamp);
+    auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(tp.time_since_epoch()).count();
+    auto time = boost::posix_time::from_time_t(0);
+#ifdef BOOST_DATE_TIME_HAS_NANOSECONDS
+    time += boost::posix_time::nanoseconds(nanos);
+#else
+    time += boost::posix_time::microseconds(nanos / 1000);
+#endif
+  try {
     return boost::posix_time::to_iso_extended_string(time);
+  } catch (const std::exception& e) {
+    return format("{} nanoseconds ({})", nanos, e.what());
+  }
 }
 
 sstring simple_date_to_string(const uint32_t days_count) {
@@ -1411,8 +1420,9 @@ struct validate_visitor {
         }
     }
     void operator()(const utf8_type_impl&) {
-        if (!utils::utf8::validate(v)) {
-            throw marshal_exception("Validation failed - non-UTF8 character in a UTF8 string");
+        auto error_pos = utils::utf8::validate_with_error_position(v);
+        if (error_pos) {
+            throw marshal_exception(format("Validation failed - non-UTF8 character in a UTF8 string, at byte offset {}", *error_pos));
         }
     }
     void operator()(const bytes_type_impl& t) {}

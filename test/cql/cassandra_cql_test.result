@@ -1096,6 +1096,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "true"
+		},
+		{
+			"[applied]" : "true"
 		}
 	]
 }
@@ -1119,6 +1122,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "true"
+		},
 		{
 			"[applied]" : "true"
 		}
@@ -1525,6 +1531,11 @@ APPLY BATCH;
 			"[applied]" : "true",
 			"a" : "2",
 			"b" : "2"
+		},
+		{
+			"[applied]" : "true",
+			"a" : "2",
+			"b" : "2"
 		}
 	]
 }
@@ -1549,6 +1560,11 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "true",
+			"a" : "4",
+			"b" : "4"
+		},
 		{
 			"[applied]" : "true",
 			"a" : "4",
@@ -1581,6 +1597,11 @@ APPLY BATCH;
 			"[applied]" : "true",
 			"a" : "5",
 			"b" : "5"
+		},
+		{
+			"[applied]" : "true",
+			"a" : "5",
+			"b" : "5"
 		}
 	]
 }
@@ -1605,6 +1626,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "true"
+		},
 		{
 			"[applied]" : "true"
 		}
@@ -1635,6 +1659,11 @@ APPLY BATCH;
 			"[applied]" : "false",
 			"a" : "3",
 			"b" : "3"
+		},
+		{
+			"[applied]" : "false",
+			"a" : "3",
+			"b" : "3"
 		}
 	]
 }
@@ -1645,6 +1674,11 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "false",
+			"a" : "3",
+			"b" : "3"
+		},
 		{
 			"[applied]" : "false",
 			"a" : "3",
@@ -1663,6 +1697,11 @@ APPLY BATCH;
 			"[applied]" : "false",
 			"a" : "3",
 			"b" : "3"
+		},
+		{
+			"[applied]" : "false",
+			"a" : "3",
+			"b" : "3"
 		}
 	]
 }
@@ -1677,6 +1716,11 @@ APPLY BATCH;
 			"[applied]" : "false",
 			"a" : "3",
 			"b" : "3"
+		},
+		{
+			"[applied]" : "false",
+			"a" : "3",
+			"b" : "3"
 		}
 	]
 }
@@ -1687,6 +1731,11 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "false",
+			"a" : "3",
+			"b" : "3"
+		},
 		{
 			"[applied]" : "false",
 			"a" : "3",
@@ -1713,6 +1762,11 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "false",
+			"a" : "6",
+			"b" : "6"
+		},
 		{
 			"[applied]" : "false",
 			"a" : "6",
@@ -1961,6 +2015,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "true"
+		},
+		{
+			"[applied]" : "true"
 		}
 	]
 }
@@ -1986,6 +2043,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "false"
+		},
+		{
+			"[applied]" : "false"
 		}
 	]
 }
@@ -2000,6 +2060,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "false"
+		},
 		{
 			"[applied]" : "false"
 		}
@@ -2018,6 +2081,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "false"
+		},
+		{
+			"[applied]" : "false"
 		}
 	]
 }
@@ -2034,6 +2100,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "false"
+		},
+		{
+			"[applied]" : "false"
 		}
 	]
 }
@@ -2048,6 +2117,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "false"
+		},
 		{
 			"[applied]" : "false"
 		}
@@ -2068,6 +2140,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "false"
+		},
+		{
+			"[applied]" : "false"
 		}
 	]
 }
@@ -2082,6 +2157,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "true"
+		},
 		{
 			"[applied]" : "true"
 		}
@@ -2108,6 +2186,9 @@ APPLY BATCH;
 	[
 		{
 			"[applied]" : "true"
+		},
+		{
+			"[applied]" : "true"
 		}
 	]
 }
@@ -2130,6 +2211,9 @@ APPLY BATCH;
 {
 	"rows" : 
 	[
+		{
+			"[applied]" : "true"
+		},
 		{
 			"[applied]" : "true"
 		}
