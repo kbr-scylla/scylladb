@@ -16,6 +16,7 @@
 #include <seastar/core/distributed.hh>
 #include <seastar/testing/test_case.hh>
 #include "sstables/sstables.hh"
+#include "sstables/incremental_compaction_strategy.hh"
 #include "schema.hh"
 #include "database.hh"
 #include "sstables/compaction_manager.hh"
@@ -173,3 +174,95 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
     });
 }
 
+SEASTAR_TEST_CASE(incremental_compaction_sag_test) {
+    auto builder = schema_builder("tests", "incremental_compaction_test")
+        .with_column("id", utf8_type, column_kind::partition_key)
+        .with_column("value", int32_type);
+    auto s = builder.build();
+
+    struct sag_test {
+        test_env _env;
+        compaction_manager _cm;
+        cell_locker_stats _cl_stats;
+        cache_tracker _tracker;
+        lw_shared_ptr<column_family> _cf;
+        incremental_compaction_strategy _ics;
+        const unsigned min_threshold = 4;
+        const size_t data_set_size = 1'000'000'000;
+
+        static incremental_compaction_strategy make_ics(double space_amplification_goal) {
+            std::map<sstring, sstring> options;
+            options.emplace(sstring("space_amplification_goal"), sstring(std::to_string(space_amplification_goal)));
+            return incremental_compaction_strategy(options);
+        }
+        static column_family::config make_table_config() {
+            auto config = column_family_test_config();
+            config.compaction_enforce_min_threshold = true;
+            return config;
+        }
+
+        sag_test(schema_ptr s, double space_amplification_goal)
+            : _cf(make_lw_shared<column_family>(s, make_table_config(), column_family::no_commitlog(), _cm, _cl_stats, _tracker))
+            , _ics(make_ics(space_amplification_goal))
+        {
+        }
+
+        double space_amplification() const {
+            auto sstables = _cf->get_sstables();
+            auto total = boost::accumulate(*sstables | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
+            return double(total) / data_set_size;
+        }
+
+        shared_sstable make_sstable_with_size(size_t sstable_data_size) {
+            static thread_local unsigned gen = 0;
+            auto sst = _env.make_sstable(_cf->schema(), "", gen++, la, big);
+            sstables::test(sst).set_data_file_size(sstable_data_size);
+            sstables::test(sst).set_values("a", "z", stats_metadata{});
+            return sst;
+        }
+
+        void populate(double target_space_amplification) {
+            auto add_sstable = [this] (unsigned sst_data_size) {
+                auto sst = make_sstable_with_size(sst_data_size);
+                column_family_test(_cf).add_sstable(sst);
+            };
+
+            add_sstable(data_set_size);
+            while (space_amplification() < target_space_amplification) {
+                add_sstable(data_set_size / min_threshold);
+            }
+        }
+
+        void run() {
+            for (;;) {
+                auto desc = _ics.get_sstables_for_compaction(*_cf, _cf->non_staging_sstables());
+                // no more jobs, bailing out...
+                if (desc.sstables.empty()) {
+                    break;
+                }
+                auto total = boost::accumulate(desc.sstables | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
+                std::vector<shared_sstable> new_ssts = { make_sstable_with_size(std::min(total, data_set_size)) };
+                column_family_test(_cf).rebuild_sstable_list(new_ssts, desc.sstables);
+            }
+        }
+    };
+
+    using SAG = double;
+    using TABLE_INITIAL_SA = double;
+
+    auto with_sag_test = [&] (SAG sag, TABLE_INITIAL_SA initial_sa) {
+        sag_test test(s, sag);
+        test.populate(initial_sa);
+        BOOST_REQUIRE(test.space_amplification() >= initial_sa);
+        test.run();
+        BOOST_REQUIRE(test.space_amplification() <= sag);
+    };
+
+    with_sag_test(SAG(1.25), TABLE_INITIAL_SA(1.5));
+    with_sag_test(SAG(2), TABLE_INITIAL_SA(1.5));
+    with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1.75));
+    with_sag_test(SAG(1.01), TABLE_INITIAL_SA(1.5));
+    with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1));
+
+    return make_ready_future<>();
+}
