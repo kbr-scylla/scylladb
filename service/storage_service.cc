@@ -347,6 +347,9 @@ void storage_service::prepare_to_join(
         app_states.emplace(gms::application_state::CDC_STREAMS_TIMESTAMP, versioned_value::cdc_streams_timestamp(_cdc_streams_ts));
         app_states.emplace(gms::application_state::STATUS, versioned_value::normal(my_tokens));
     }
+    if (replacing_a_node_with_same_ip || replacing_a_node_with_diff_ip) {
+        app_states.emplace(gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens));
+    }
     slogger.info("Starting up server gossip");
 
     auto generation_number = db::system_keyspace::increment_and_get_generation().get0();
@@ -873,12 +876,14 @@ future<> storage_service::check_and_repair_cdc_streams() {
             cdc_log.error("Aborting CDC generation repair due to missing STATUS");
             return;
         }
+        // Update _cdc_streams_ts first, so that do_handle_cdc_generation (which will get called due to the status update)
+        // won't try to update the gossiper, which would result in a deadlock inside add_local_application_state
+        _cdc_streams_ts = new_streams_ts;
         _gossiper.add_local_application_state({
                 { gms::application_state::CDC_STREAMS_TIMESTAMP, versioned_value::cdc_streams_timestamp(new_streams_ts) },
                 { gms::application_state::STATUS, *status }
         }).get();
         db::system_keyspace::update_cdc_streams_timestamp(new_streams_ts).get();
-        _cdc_streams_ts = new_streams_ts;
     });
 }
 
@@ -1886,9 +1891,11 @@ future<std::map<gms::inet_address, float>> storage_service::effective_ownership(
         return do_with(dht::token::describe_ownership(ss._token_metadata.sorted_tokens()),
                 ss._token_metadata.get_topology().get_datacenter_endpoints(),
                 std::map<gms::inet_address, float>(),
-                [&ss, keyspace_name](const std::map<token, float>& token_ownership, std::unordered_map<sstring,
+                std::move(keyspace_name),
+                [&ss](const std::map<token, float>& token_ownership, std::unordered_map<sstring,
                         std::unordered_set<gms::inet_address>>& datacenter_endpoints,
-                        std::map<gms::inet_address, float>& final_ownership) {
+                        std::map<gms::inet_address, float>& final_ownership,
+                        sstring& keyspace_name) {
             return do_for_each(datacenter_endpoints, [&ss, &keyspace_name, &final_ownership, &token_ownership](std::pair<sstring,std::unordered_set<inet_address>>&& endpoints) mutable {
                 return do_with(std::unordered_set<inet_address>(endpoints.second), [&ss, &keyspace_name, &final_ownership, &token_ownership](const std::unordered_set<inet_address>& endpoints_map) mutable {
                     return do_for_each(endpoints_map, [&ss, &keyspace_name, &final_ownership, &token_ownership](const gms::inet_address& endpoint) mutable {

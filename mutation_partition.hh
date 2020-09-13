@@ -38,7 +38,6 @@
 #include "utils/managed_ref.hh"
 
 class mutation_fragment;
-class clustering_row;
 
 struct cell_hash {
     using size_type = uint64_t;
@@ -638,6 +637,22 @@ public:
     };
 };
 
+// Used to return the timestamp of the latest update to the row
+struct max_timestamp {
+    api::timestamp_type max = api::missing_timestamp;
+
+    void update(api::timestamp_type ts) {
+        max = std::max(max, ts);
+    }
+};
+
+template<>
+struct appending_hash<row> {
+    static constexpr int null_hash_value = 0xbeefcafe;
+    template<typename Hasher>
+    void operator()(Hasher& h, const row& cells, const schema& s, column_kind kind, const query::column_id_vector& columns, max_timestamp& max_ts) const;
+};
+
 class row_marker;
 int compare_row_marker_for_merge(const row_marker& left, const row_marker& right) noexcept;
 
@@ -747,8 +762,6 @@ struct appending_hash<row_marker> {
         m.feed_hash(h);
     }
 };
-
-class clustering_row;
 
 class shadowable_tombstone {
     tombstone _tomb;
@@ -931,7 +944,6 @@ class deletable_row final {
     row _cells;
 public:
     deletable_row() {}
-    explicit deletable_row(clustering_row&&);
     deletable_row(const schema& s, const deletable_row& other)
         : _deleted_at(other._deleted_at)
         , _marker(other._marker)
@@ -940,8 +952,9 @@ public:
     deletable_row(const schema& s, row_tombstone tomb, const row_marker& marker, const row& cells)
         : _deleted_at(tomb), _marker(marker), _cells(s, column_kind::regular_column, cells)
     {}
-
-    void apply(const schema&, clustering_row);
+    deletable_row(row_tombstone&& tomb, row_marker&& marker, row&& cells)
+        : _deleted_at(std::move(tomb)), _marker(std::move(marker)), _cells(std::move(cells))
+    {}
 
     void apply(tombstone deleted_at) {
         _deleted_at.apply(deleted_at);
@@ -957,11 +970,15 @@ public:
 
     void apply(const row_marker& rm) {
         _marker.apply(rm);
-        _deleted_at.maybe_shadow(_marker);
+        maybe_shadow();
     }
 
     void remove_tombstone() {
         _deleted_at = {};
+    }
+
+    void maybe_shadow() {
+        _deleted_at.maybe_shadow(_marker);
     }
 
     // Weak exception guarantees. After exception, both src and this will commute to the same value as

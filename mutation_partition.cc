@@ -282,15 +282,9 @@ struct mutation_fragment_applier {
     void operator()(const clustering_row& cr) {
         auto temp = clustering_row(_s, cr);
         auto& dr = _mp.clustered_row(_s, std::move(temp.key()));
-        dr.apply(_s, std::move(temp));
+        dr.apply(_s, std::move(temp).as_deletable_row());
     }
 };
-
-void deletable_row::apply(const schema& s, clustering_row cr) {
-    apply(cr.tomb());
-    apply(cr.marker());
-    cells().apply(s, column_kind::regular_column, std::move(cr.cells()));
-}
 
 void
 mutation_partition::apply(const schema& s, const mutation_fragment& mf) {
@@ -723,56 +717,78 @@ void write_counter_cell(RowWriter& w, const query::partition_slice& slice, ::ato
   });
 }
 
-// Used to return the timestamp of the latest update to the row
-struct max_timestamp {
-    api::timestamp_type max = api::missing_timestamp;
-
-    void update(api::timestamp_type ts) {
-        max = std::max(max, ts);
-    }
-};
-
-template<>
-struct appending_hash<row> {
-    template<typename Hasher>
-    void operator()(Hasher& h, const row& cells, const schema& s, column_kind kind, const query::column_id_vector& columns, max_timestamp& max_ts) const {
-        for (auto id : columns) {
-            const cell_and_hash* cell_and_hash = cells.find_cell_and_hash(id);
-            if (!cell_and_hash) {
-                return;
-            }
-            auto&& def = s.column_at(kind, id);
-            if (def.is_atomic()) {
-                max_ts.update(cell_and_hash->cell.as_atomic_cell(def).timestamp());
-                if constexpr (query::using_hash_of_hash_v<Hasher>) {
-                    if (cell_and_hash->hash) {
-                        feed_hash(h, *cell_and_hash->hash);
-                    } else {
-                        query::default_hasher cellh;
-                        feed_hash(cellh, cell_and_hash->cell.as_atomic_cell(def), def);
-                        feed_hash(h, cellh.finalize_uint64());
-                    }
+template<typename Hasher>
+void appending_hash<row>::operator()(Hasher& h, const row& cells, const schema& s, column_kind kind, const query::column_id_vector& columns, max_timestamp& max_ts) const {
+    for (auto id : columns) {
+        const cell_and_hash* cell_and_hash = cells.find_cell_and_hash(id);
+        if (!cell_and_hash) {
+            feed_hash(h, appending_hash<row>::null_hash_value);
+            continue;
+        }
+        auto&& def = s.column_at(kind, id);
+        if (def.is_atomic()) {
+            max_ts.update(cell_and_hash->cell.as_atomic_cell(def).timestamp());
+            if constexpr (query::using_hash_of_hash_v<Hasher>) {
+                if (cell_and_hash->hash) {
+                    feed_hash(h, *cell_and_hash->hash);
                 } else {
-                    feed_hash(h, cell_and_hash->cell.as_atomic_cell(def), def);
+                    query::default_hasher cellh;
+                    feed_hash(cellh, cell_and_hash->cell.as_atomic_cell(def), def);
+                    feed_hash(h, cellh.finalize_uint64());
                 }
             } else {
-                auto cm = cell_and_hash->cell.as_collection_mutation();
-                max_ts.update(cm.last_update(*def.type));
-                if constexpr (query::using_hash_of_hash_v<Hasher>) {
-                    if (cell_and_hash->hash) {
-                        feed_hash(h, *cell_and_hash->hash);
-                    } else {
-                        query::default_hasher cellh;
-                        feed_hash(cellh, cm, def);
-                        feed_hash(h, cellh.finalize_uint64());
-                    }
+                feed_hash(h, cell_and_hash->cell.as_atomic_cell(def), def);
+            }
+        } else {
+            auto cm = cell_and_hash->cell.as_collection_mutation();
+            max_ts.update(cm.last_update(*def.type));
+            if constexpr (query::using_hash_of_hash_v<Hasher>) {
+                if (cell_and_hash->hash) {
+                    feed_hash(h, *cell_and_hash->hash);
                 } else {
-                    feed_hash(h, cm, def);
+                    query::default_hasher cellh;
+                    feed_hash(cellh, cm, def);
+                    feed_hash(h, cellh.finalize_uint64());
                 }
+            } else {
+                feed_hash(h, cm, def);
             }
         }
     }
-};
+}
+// Instantiation for mutation_test.cc
+template void appending_hash<row>::operator()<xx_hasher>(xx_hasher& h, const row& cells, const schema& s, column_kind kind, const query::column_id_vector& columns, max_timestamp& max_ts) const;
+
+template<>
+void appending_hash<row>::operator()<legacy_xx_hasher_without_null_digest>(legacy_xx_hasher_without_null_digest& h, const row& cells, const schema& s, column_kind kind, const query::column_id_vector& columns, max_timestamp& max_ts) const {
+    for (auto id : columns) {
+        const cell_and_hash* cell_and_hash = cells.find_cell_and_hash(id);
+        if (!cell_and_hash) {
+            return;
+        }
+        auto&& def = s.column_at(kind, id);
+        if (def.is_atomic()) {
+            max_ts.update(cell_and_hash->cell.as_atomic_cell(def).timestamp());
+            if (cell_and_hash->hash) {
+                feed_hash(h, *cell_and_hash->hash);
+            } else {
+                query::default_hasher cellh;
+                feed_hash(cellh, cell_and_hash->cell.as_atomic_cell(def), def);
+                feed_hash(h, cellh.finalize_uint64());
+            }
+        } else {
+            auto cm = cell_and_hash->cell.as_collection_mutation();
+            max_ts.update(cm.last_update(*def.type));
+            if (cell_and_hash->hash) {
+                feed_hash(h, *cell_and_hash->hash);
+            } else {
+                query::default_hasher cellh;
+                feed_hash(cellh, cm, def);
+                feed_hash(h, cellh.finalize_uint64());
+            }
+        }
+    }
+}
 
 cell_hash_opt row::cell_hash_for(column_id id) const {
     if (_type == storage_type::vector) {
@@ -2365,12 +2381,6 @@ mutation_query(schema_ptr s,
             row_limit, partition_limit, query_time, timeout, class_config, std::move(accounter), std::move(trace_ptr), std::move(cache_ctx));
 }
 
-deletable_row::deletable_row(clustering_row&& cr)
-    : _deleted_at(cr.tomb())
-    , _marker(std::move(cr.marker()))
-    , _cells(std::move(cr.cells()))
-{ }
-
 class counter_write_query_result_builder {
     const schema& _schema;
     mutation_opt _mutation;
@@ -2385,7 +2395,7 @@ public:
         return stop_iteration::no;
     }
     stop_iteration consume(clustering_row&& cr, row_tombstone,  bool) {
-        _mutation->partition().insert_row(_schema, cr.key(), deletable_row(std::move(cr)));
+        _mutation->partition().insert_row(_schema, cr.key(), std::move(cr).as_deletable_row());
         return stop_iteration::no;
     }
     stop_iteration consume(range_tombstone&& rt) {
