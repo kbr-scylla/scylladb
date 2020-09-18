@@ -251,7 +251,7 @@ public:
         }
     }
     shared_ptr<key_provider> get_cached_provider(const sstring& id) const override {
-        auto& cache = _per_thread_provider_cache[engine().cpu_id()];
+        auto& cache = _per_thread_provider_cache[this_shard_id()];
         auto i = cache.find(id);
         if (i != cache.end()) {
             return i->second;
@@ -259,11 +259,11 @@ public:
         return {};
     }
     void cache_provider(const sstring& id, shared_ptr<key_provider> p) override {
-        _per_thread_provider_cache[engine().cpu_id()][id] = std::move(p);
+        _per_thread_provider_cache[this_shard_id()][id] = std::move(p);
     }
 
     shared_ptr<system_key> get_system_key(const sstring& name) override {
-        auto& cache = _per_thread_system_key_cache[engine().cpu_id()];
+        auto& cache = _per_thread_system_key_cache[this_shard_id()];
         auto i = cache.find(name);
         if (i != cache.end()) {
             return i->second;
@@ -285,7 +285,7 @@ public:
     }
 
     shared_ptr<kmip_host> get_kmip_host(const sstring& host) override {
-        auto& cache = _per_thread_kmip_host_cache[engine().cpu_id()];
+        auto& cache = _per_thread_kmip_host_cache[this_shard_id()];
         auto i = cache.find(host);
         if (i != cache.end()) {
             return i->second;

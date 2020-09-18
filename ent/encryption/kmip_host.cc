@@ -709,7 +709,7 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
 }
 
 future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_key_info& info) {
-    if (engine().cpu_id() == 0) {
+    if (this_shard_id() == 0) {
         // #1039 First try looking for existing keys on server
         return find_matching_keys(info, 1).then([this, info](std::vector<id_type> ids) {
             if (!ids.empty()) {
@@ -830,7 +830,7 @@ future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(cons
 }
 
 future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
-    if (engine().cpu_id() == 0) {
+    if (this_shard_id() == 0) {
         kmip_cmd cmd;
         KMIP_CMD_set_ctx(cmd, const_cast<char *>("Find key"));
 

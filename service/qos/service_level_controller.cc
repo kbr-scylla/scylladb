@@ -23,7 +23,7 @@ service_level_controller::service_level_controller(sharded<auth::service>& auth_
         : _sl_data_accessor(nullptr)
         , _auth_service(auth_service)
 {
-    if (engine().cpu_id() == global_controller) {
+    if (this_shard_id() == global_controller) {
         _global_controller_db = std::make_unique<global_controller_data>();
         _global_controller_db->default_service_level_config = default_service_level_config;
     }
@@ -46,7 +46,7 @@ future<>  service_level_controller::remove_service_level(sstring name, bool remo
 }
 
 future<> service_level_controller::start() {
-    if (engine().cpu_id() != global_controller) {
+    if (this_shard_id() != global_controller) {
         return make_ready_future();
     }
     return with_semaphore(_global_controller_db->notifications_serializer, 1, [this] () {
@@ -79,7 +79,7 @@ future<> service_level_controller::stop() {
     _sl_data_accessor = nullptr;
     //unregister from the priority manager
     service::get_local_priority_manager().set_service_level_controller(nullptr);
-    if (engine().cpu_id() == global_controller) {
+    if (this_shard_id() == global_controller) {
         // abort the loop of the distributed data checking if it is running
         _global_controller_db->dist_data_update_aborter.request_abort();
         _global_controller_db->notifications_serializer.broken();
@@ -256,7 +256,7 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         unsigned sl_idx = internal::scheduling_group_index(sl_it->second.sg);
         _sl_lookup[sl_idx].first = nullptr;
         _sl_lookup[sl_idx].second = nullptr;
-        if (engine().cpu_id() == global_controller) {
+        if (this_shard_id() == global_controller) {
             _global_controller_db->deleted_scheduling_groups.emplace(sl_it->second.sg);
             _global_controller_db->deleted_priority_classes.emplace(sl_it->second.pc);
         }
