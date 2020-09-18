@@ -62,9 +62,6 @@ future<> migration_manager::stop()
 {
     mlogger.info("stopping migration service");
     _as.request_abort();
-    if (!_cluster_upgraded) {
-        _wait_cluster_upgraded.broken();
-    }
 
   return uninit_messaging_service().then([this] {
     return parallel_for_each(_schema_pulls.begin(), _schema_pulls.end(), [] (auto&& e) {
@@ -82,7 +79,7 @@ void migration_manager::init_messaging_service()
         //FIXME: future discarded.
         (void)with_gate(_background_tasks, [this] {
             mlogger.debug("features changed, recalculating schema version");
-            return update_schema_version_and_announce(get_storage_proxy(), _feat.cluster_schema_features());
+            return db::schema_tables::recalculate_schema_version(get_storage_proxy(), _feat);
         });
     };
 
@@ -92,13 +89,7 @@ void migration_manager::init_messaging_service()
         _feature_listeners.push_back(_feat.cluster_supports_cdc().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_per_table_partitioners().when_enabled(update_schema));
         _feature_listeners.push_back(_feat.cluster_supports_in_memory_tables().when_enabled(update_schema));
-        _feature_listeners.push_back(_feat.cluster_supports_xxhash_digest_algorithm().when_enabled(update_schema));
-        _feature_listeners.push_back(_feat.cluster_supports_range_tombstones().when_enabled(update_schema));
     }
-    _feature_listeners.push_back(_feat.cluster_supports_schema_tables_v3().when_enabled([this] {
-        _cluster_upgraded = true;
-        _wait_cluster_upgraded.broadcast();
-    }));
 
     _messaging.register_definitions_update([this] (const rpc::client_info& cinfo, std::vector<frozen_mutation> fm, rpc::optional<std::vector<canonical_mutation>> cm) {
         auto src = netw::messaging_service::get_source(cinfo);
@@ -233,15 +224,6 @@ future<> migration_manager::maybe_schedule_schema_pull(const utils::UUID& their_
     if (db.get_version() == their_version || !should_pull_schema_from(endpoint)) {
         mlogger.debug("Not pulling schema because versions match or shouldPullSchemaFrom returned false");
         return make_ready_future<>();
-    }
-
-    // Disable pulls during rolling upgrade from 1.7 to 2.0 to avoid
-    // schema version inconsistency. See https://github.com/scylladb/scylla/issues/2802.
-    if (!_cluster_upgraded) {
-        mlogger.debug("Delaying pull with {} until cluster upgrade is complete", endpoint);
-        return _wait_cluster_upgraded.wait().then([this, their_version, endpoint] {
-            return maybe_schedule_schema_pull(their_version, endpoint);
-        }).finally([me = shared_from_this()] {});
     }
 
     if (db.get_version() == database::empty_version || runtime::get_uptime() < migration_delay) {

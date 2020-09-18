@@ -552,21 +552,19 @@ class managed_bytes_printer(gdb.printing.PrettyPrinter):
         self.val = val
 
     def bytes(self):
-        def signed_chr(c):
-            return int(c).to_bytes(1, byteorder='little', signed=True)
+        inf = gdb.selected_inferior()
+        def to_hex(data, size):
+            return bytes(inf.read_memory(data, size)).hex()
+
         if self.val['_u']['small']['size'] >= 0:
-            array = self.val['_u']['small']['data']
-            len = int(self.val['_u']['small']['size'])
-            return b''.join([signed_chr(array[x]) for x in range(len)])
+            return to_hex(self.val['_u']['small']['data'], int(self.val['_u']['small']['size']))
         else:
             ref = self.val['_u']['ptr']
             chunks = list()
             while ref['ptr']:
-                array = ref['ptr']['data']
-                len = int(ref['ptr']['frag_size'])
+                chunks.append(to_hex(ref['ptr']['data'], int(ref['ptr']['frag_size'])))
                 ref = ref['ptr']['next']
-                chunks.append(b''.join([signed_chr(array[x]) for x in range(len)]))
-            return b''.join(chunks)
+            return ''.join(chunks)
 
     def to_string(self):
         return str(self.bytes())
@@ -787,7 +785,7 @@ class histogram:
     """
     _column_count = 40
 
-    def __init__(self, counts = defaultdict(int), print_indicators = True, formatter=None):
+    def __init__(self, counts = None, print_indicators = True, formatter=None):
         """Constructor.
 
         Params:
@@ -799,7 +797,10 @@ class histogram:
             expected to return the string to be printed in the second column.
             By default, items are printed verbatim.
         """
-        self._counts = counts
+        if counts is None:
+            self._counts = defaultdict(int)
+        else:
+            self._counts = counts
         self._print_indicators = print_indicators
 
         def default_formatter(value):
@@ -2437,7 +2438,7 @@ class circular_buffer(object):
         self.ref = ref
 
     def _mask(self, i):
-        return i & (int(self['_impl']['capacity']) - 1)
+        return i & (int(self.ref['_impl']['capacity']) - 1)
 
     def __iter__(self):
         impl = self.ref['_impl']

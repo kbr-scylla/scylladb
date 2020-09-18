@@ -72,9 +72,15 @@ public:
     const unsigned murmur3_partitioner_ignore_msb_bits() const {
         return _murmur3_partitioner_ignore_msb_bits;
     }
+
+    uint32_t schema_registry_grace_period() const {
+        return _schema_registry_grace_period;
+    }
+
 private:
     const db::extensions& _extensions;
     const unsigned _murmur3_partitioner_ignore_msb_bits;
+    const uint32_t _schema_registry_grace_period;
 };
 
 namespace schema_tables {
@@ -158,6 +164,13 @@ future<mutation> read_keyspace_mutation(distributed<service::storage_proxy>&, co
 future<> merge_schema(distributed<service::storage_proxy>& proxy, gms::feature_service& feat, std::vector<mutation> mutations);
 
 future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush);
+
+// Recalculates the local schema version.
+//
+// It is safe to call concurrently with recalculate_schema_version() and merge_schema() in which case it
+// is guaranteed that the schema version we end up with after all calls will reflect the most recent state
+// of feature_service and schema tables.
+future<> recalculate_schema_version(distributed<service::storage_proxy>& proxy, gms::feature_service& feat);
 
 future<std::set<sstring>> merge_keyspaces(distributed<service::storage_proxy>& proxy, schema_result&& before, schema_result&& after);
 

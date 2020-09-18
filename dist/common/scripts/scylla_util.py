@@ -79,30 +79,34 @@ def datadir():
 def scyllabindir():
     return str(scyllabindir_p())
 
+
 # @param headers dict of k:v
-def curl(url, byte=False, headers={}):
-    max_retries = 5
+def curl(url, headers=None, byte=False, timeout=3, max_retries=5):
     retries = 0
     while True:
         try:
-            req = urllib.request.Request(url,headers=headers)
-            with urllib.request.urlopen(req) as res:
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=timeout) as res:
                 if byte:
                     return res.read()
                 else:
                     return res.read().decode('utf-8')
         except urllib.error.HTTPError:
-            logging.warn("Failed to grab %s..." % url)
+            logging.warning("Failed to grab %s..." % url)
             time.sleep(5)
             retries += 1
-            if (retries >= max_retries):
+            if retries >= max_retries:
                 raise
+
 
 class gcp_instance:
     """Describe several aspects of the current GCP instance"""
 
     EPHEMERAL = "ephemeral"
     ROOT = "root"
+    GETTING_STARTED_URL = "http://www.scylladb.com/doc/getting-started-google/"
+    META_DATA_BASE_URL = "http://metadata.google.internal/computeMetadata/v1/instance/"
+    ENDPOINT_SNITCH = "GoogleCloudSnitch"
 
     def __init__(self):
         self.__type = None
@@ -128,10 +132,9 @@ class gcp_instance:
                     return True
         return False
 
-    def __instance_metadata(self, path):
-        """query GCP metadata server, recursively!"""
-        return curl("http://169.254.169.254/computeMetadata/v1/instance/" + path+"?recursive=true", headers={"Metadata-Flavor": "Google"})
-        #169.254.169.254 is metadata.google.internal
+    def __instance_metadata(self, path, recursive=False):
+        return curl(self.META_DATA_BASE_URL + path + "?recursive=%s" % str(recursive).lower(),
+                    headers={"Metadata-Flavor": "Google"})
 
     def _non_root_nvmes(self):
         """get list of nvme disks from os, filter away if one of them is root"""
@@ -234,7 +237,7 @@ class gcp_instance:
 
     m1supported="m1-megamem-96" #this is the only exception of supported m1 as per https://cloud.google.com/compute/docs/machine-types#m1_machine_types
 
-    def is_unsupported_instance(self):
+    def is_unsupported_instance_class(self):
         """Returns if this instance type belongs to unsupported ones for nvmes"""
         if self.instancetype == self.m1supported:
             return False
@@ -242,7 +245,7 @@ class gcp_instance:
             return True
         return False
 
-    def is_supported_instance(self):
+    def is_supported_instance_class(self):
         """Returns if this instance type belongs to supported ones for nvmes"""
         if self.instancetype == self.m1supported:
             return True
@@ -284,7 +287,7 @@ class gcp_instance:
         return self.__firstNvmeSize
 
     def is_recommended_instance(self):
-        if self.is_recommended_instance_size() and not self.is_unsupported_instance() and self.is_supported_instance():
+        if self.is_recommended_instance_size() and not self.is_unsupported_instance_class() and self.is_supported_instance_class():
             # at least 1:2GB cpu:ram ratio , GCP is at 1:4, so this should be fine
             if self.cpu/self.memoryGB < 0.5:
               # 30:1 Disk/RAM ratio must be kept at least(AWS), we relax this a little bit
@@ -302,15 +305,37 @@ class gcp_instance:
                   return True
         return False
 
+    def private_ipv4(self):
+        return self.__instance_metadata("network-interfaces/0/ip")
+
+    @staticmethod
+    def check():
+        pass
+
+    @staticmethod
+    def io_setup():
+        return run('/opt/scylladb/scripts/scylla_io_setup')
+
+    @property
+    def user_data(self):
+        try:
+            return self.__instance_metadata("attributes/user-data")
+        except urllib.error.HTTPError:  # empty user-data
+            return ""
+
+
 class aws_instance:
     """Describe several aspects of the current AWS instance"""
+    GETTING_STARTED_URL = "http://www.scylladb.com/doc/getting-started-amazon/"
+    META_DATA_BASE_URL = "http://169.254.169.254/latest/meta-data/"
+    ENDPOINT_SNITCH = "Ec2Snitch"
 
     def __disk_name(self, dev):
         name = re.compile(r"(?:/dev/)?(?P<devname>[a-zA-Z]+)\d*")
         return name.search(dev).group("devname")
 
     def __instance_metadata(self, path):
-        return curl("http://169.254.169.254/latest/meta-data/" + path)
+        return curl(self.META_DATA_BASE_URL + path)
 
     def __device_exists(self, dev):
         if dev[0:4] != "/dev":
@@ -357,6 +382,15 @@ class aws_instance:
     def __init__(self):
         self._type = self.__instance_metadata("instance-type")
         self.__populate_disks()
+
+    @classmethod
+    def is_aws_instance(cls):
+        """Check if it's AWS instance via query to metadata server."""
+        try:
+            curl(cls.META_DATA_BASE_URL, max_retries=2)
+            return True
+        except (urllib.error.URLError, urllib.error.HTTPError):
+            return False
 
     def instance(self):
         """Returns which instance we are running in. i.e.: i3.16xlarge"""
@@ -431,6 +465,19 @@ class aws_instance:
         mac = self.__mac_address(nic)
         mac_stat = self.__instance_metadata('network/interfaces/macs/{}'.format(mac))
         return True if re.search(r'^vpc-id$', mac_stat, flags=re.MULTILINE) else False
+
+    @staticmethod
+    def check():
+        return run('/opt/scylladb/scripts/scylla_ec2_check --nic eth0', exception=False)
+
+    @staticmethod
+    def io_setup():
+        return run('/opt/scylladb/scripts/scylla_io_setup --ami')
+
+    @property
+    def user_data(self):
+        return self.__instance_metadata("user-data")
+
 
 
 # Regular expression helpers
@@ -528,6 +575,7 @@ class scylla_cpuinfo:
 # When a CLI tool is not installed, use relocatable CLI tool provided by Scylla
 scylla_env = os.environ.copy()
 scylla_env['PATH'] =  '{}:{}'.format(scyllabindir(), scylla_env['PATH'])
+scylla_env['DEBIAN_FRONTEND'] = 'noninteractive'
 
 def run(cmd, shell=False, silent=False, exception=True):
     stdout = subprocess.DEVNULL if silent else None
@@ -566,16 +614,35 @@ def is_gentoo_variant():
 def redhat_version():
     return distro.version()
 
-def is_ec2():
-    if os.path.exists('/sys/hypervisor/uuid'):
-        with open('/sys/hypervisor/uuid') as f:
-            s = f.read()
-        return True if re.match(r'^ec2.*', s, flags=re.IGNORECASE) else False
-    elif os.path.exists('/sys/class/dmi/id/board_vendor'):
-        with open('/sys/class/dmi/id/board_vendor') as f:
-            s = f.read()
-        return True if re.match(r'^Amazon EC2$', s) else False
+
+def get_text_from_path(fpath):
+    board_vendor_path = Path(fpath)
+    if board_vendor_path.exists():
+        return board_vendor_path.read_text().strip()
+    return ""
+
+def match_patterns_in_files(list_of_patterns_files):
+    for pattern, fpath in list_of_patterns_files:
+        if re.match(pattern, get_text_from_path(fpath), flags=re.IGNORECASE):
+            return True
     return False
+
+
+def is_ec2():
+    return aws_instance.is_aws_instance()
+
+
+def is_gce():
+    return gcp_instance.is_gce_instance()
+
+
+def get_cloud_instance():
+    if is_ec2():
+        return aws_instance()
+    elif is_gce():
+        return gcp_instance()
+    else:
+        raise Exception("Unknown cloud provider! Only AWS/GCP supported.")
 
 
 def is_systemd():
@@ -809,6 +876,54 @@ def get_set_nic_and_disks_config_value(cfg):
 def swap_exists():
     swaps = out('swapon --noheadings --raw')
     return True if swaps != '' else False
+
+def pkg_error_exit(pkg):
+    print(f'Package "{pkg}" required.')
+    sys.exit(1)
+
+def yum_install(pkg):
+    if is_offline():
+        pkg_error_exit(pkg)
+    return run(f'yum install -y {pkg}')
+
+def apt_install(pkg):
+    if is_offline():
+        pkg_error_exit(pkg)
+    return run(f'apt-get install -y {pkg}')
+
+def emerge_install(pkg):
+    if is_offline():
+        pkg_error_exit(pkg)
+    return run(f'emerge -uq {pkg}')
+
+def pkg_install(pkg):
+    if is_redhat_variant():
+        return yum_install(pkg)
+    elif is_debian_variant():
+        return apt_install(pkg)
+    elif is_gentoo_variant():
+        return emerge_install(pkg)
+    else:
+        pkg_error_exit(pkg)
+
+def yum_uninstall(pkg):
+    return run(f'yum remove -y {pkg}')
+
+def apt_uninstall(pkg):
+    return run(f'apt-get remove -y {pkg}')
+
+def emerge_uninstall(pkg):
+    return run(f'emerge --deselect {pkg}')
+
+def pkg_uninstall(pkg):
+    if is_redhat_variant():
+        return yum_uninstall(pkg)
+    elif is_debian_variant():
+        return apt_uninstall(pkg)
+    elif is_gentoo_variant():
+        return emerge_uninstall(pkg)
+    else:
+        print(f'WARNING: Package "{pkg}" should be removed.')
 
 class SystemdException(Exception):
     pass

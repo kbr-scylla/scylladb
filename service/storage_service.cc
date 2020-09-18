@@ -104,7 +104,8 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
         , _replicate_action([this] { return do_replicate_to_all_cores(); })
         , _update_pending_ranges_action([this] { return do_update_pending_ranges(); })
         , _sys_dist_ks(sys_dist_ks)
-        , _view_update_generator(view_update_generator) {
+        , _view_update_generator(view_update_generator)
+        , _schema_version_publisher([this] { return publish_schema_version(); }) {
     register_metrics();
     sstable_read_error.connect([this] { do_isolate_on_error(disk_error::regular); });
     sstable_write_error.connect([this] { do_isolate_on_error(disk_error::regular); });
@@ -225,6 +226,16 @@ bool storage_service::should_bootstrap() {
     return !db::system_keyspace::bootstrap_complete() && !is_first_node();
 }
 
+void storage_service::install_schema_version_change_listener() {
+    _listeners.emplace_back(make_lw_shared(_db.local().observable_schema_version().observe([this] (utils::UUID schema_version) {
+        (void)_schema_version_publisher.trigger();
+    })));
+}
+
+future<> storage_service::publish_schema_version() {
+    return get_local_migration_manager().passive_announce(_db.local().get_version());
+}
+
 // Runs inside seastar::async context
 void storage_service::prepare_to_join(
         std::unordered_set<gms::inet_address> initial_contact_nodes,
@@ -329,7 +340,7 @@ void storage_service::prepare_to_join(
     auto broadcast_rpc_address = utils::fb_utilities::get_broadcast_rpc_address();
     auto& proxy = service::get_storage_proxy();
     // Ensure we know our own actual Schema UUID in preparation for updates
-    auto schema_version = update_schema_version(proxy, _feature_service.cluster_schema_features()).get0();
+    db::schema_tables::recalculate_schema_version(proxy, _feature_service).get0();
     app_states.emplace(gms::application_state::NET_VERSION, versioned_value::network_version());
     app_states.emplace(gms::application_state::HOST_ID, versioned_value::host_id(local_host_id));
     app_states.emplace(gms::application_state::RPC_ADDRESS, versioned_value::rpcaddress(broadcast_rpc_address));
@@ -339,7 +350,7 @@ void storage_service::prepare_to_join(
     app_states.emplace(gms::application_state::SCHEMA_TABLES_VERSION, versioned_value(db::schema_tables::version));
     app_states.emplace(gms::application_state::RPC_READY, versioned_value::cql_ready(false));
     app_states.emplace(gms::application_state::VIEW_BACKLOG, versioned_value(""));
-    app_states.emplace(gms::application_state::SCHEMA, versioned_value::schema(schema_version));
+    app_states.emplace(gms::application_state::SCHEMA, versioned_value::schema(_db.local().get_version()));
     if (restarting_normal_node) {
         // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.
         // Exception: there might be no CDC streams timestamp proposed by us if we're upgrading from a non-CDC version.
@@ -354,6 +365,8 @@ void storage_service::prepare_to_join(
 
     auto generation_number = db::system_keyspace::increment_and_get_generation().get0();
     _gossiper.start_gossiping(generation_number, app_states, gms::bind_messaging_port(bool(do_bind))).get();
+
+    install_schema_version_change_listener();
 
     // gossip snitch infos (local DC and rack)
     gossip_snitch_info().get();
@@ -1620,6 +1633,10 @@ future<> storage_service::init_messaging_service_part() {
     return get_storage_service().invoke_on_all(&service::storage_service::init_messaging_service);
 }
 
+future<> storage_service::uninit_messaging_service_part() {
+    return get_storage_service().invoke_on_all(&service::storage_service::uninit_messaging_service);
+}
+
 future<> storage_service::init_server(bind_messaging_port do_bind) {
     return seastar::async([this, do_bind] {
         _initialized = true;
@@ -1733,8 +1750,10 @@ future<> storage_service::gossip_sharder() {
 }
 
 future<> storage_service::stop() {
-    return uninit_messaging_service().then([this] {
-        return _service_memory_limiter.wait(_service_memory_total); // make sure nobody uses the semaphore
+    // make sure nobody uses the semaphore
+    return _service_memory_limiter.wait(_service_memory_total).finally([this] {
+        _listeners.clear();
+        return _schema_version_publisher.join();
     });
 }
 
@@ -2111,7 +2130,7 @@ future<> storage_service::decommission() {
 
             auto non_system_keyspaces = db.get_non_system_keyspaces();
             for (const auto& keyspace_name : non_system_keyspaces) {
-                if (tm.get_pending_ranges(keyspace_name, ss.get_broadcast_address()).size() > 0) {
+                if (tm.has_pending_ranges(keyspace_name, ss.get_broadcast_address())) {
                     throw std::runtime_error("data is currently moving to this node; unable to leave the ring");
                 }
             }
@@ -2669,20 +2688,24 @@ void storage_service::shutdown_client_servers() {
 
 future<>
 storage_service::set_tables_autocompaction(const sstring &keyspace, std::vector<sstring> tables, bool enabled) {
-    slogger.debug("set_tables_autocompaction: enabled={} keyspace={} tables={}", enabled, keyspace, tables);
-    if (!_initialized) {
-        return make_exception_future<>(std::runtime_error("Too early: storage service not initialized yet"));
-    }
-
-    return _db.invoke_on_all([keyspace, tables, enabled] (database& db) {
-        return parallel_for_each(tables, [&db, keyspace, enabled](const sstring& table) mutable {
-            column_family& cf = db.find_column_family(keyspace, table);
-            if (enabled) {
-                cf.enable_auto_compaction();
-            } else {
-                cf.disable_auto_compaction();
+    slogger.info("set_tables_autocompaction: enabled={} keyspace={} tables={}", enabled, keyspace, tables);
+    return do_with(keyspace, std::move(tables), [this, enabled] (const sstring &keyspace, const std::vector<sstring>& tables) {
+        return run_with_api_lock(sstring("set_tables_autocompaction"), [&keyspace, &tables, enabled] (auto&& ss) {
+            if (!ss._initialized) {
+                return make_exception_future<>(std::runtime_error("Too early: storage service not initialized yet"));
             }
-            return make_ready_future<>();
+
+            return ss._db.invoke_on_all([&keyspace, &tables, enabled] (database& db) {
+                return parallel_for_each(tables, [&db, &keyspace, enabled] (const sstring& table) {
+                    column_family& cf = db.find_column_family(keyspace, table);
+                    if (enabled) {
+                        cf.enable_auto_compaction();
+                    } else {
+                        cf.disable_auto_compaction();
+                    }
+                    return make_ready_future<>();
+                });
+            });
         });
     });
 }
@@ -3132,11 +3155,11 @@ void storage_service::notify_cql_change(inet_address endpoint, bool ready)
 future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
     return get_storage_service().invoke_on(0, [keyspace = std::move(keyspace)] (storage_service& ss) {
         auto my_address = ss.get_broadcast_address();
-        auto pending_ranges = ss.get_token_metadata().get_pending_ranges(keyspace, my_address).size();
+        auto pending_ranges = ss.get_token_metadata().has_pending_ranges(keyspace, my_address);
         bool is_bootstrap_mode = ss._is_bootstrap_mode;
         slogger.debug("is_cleanup_allowed: keyspace={}, is_bootstrap_mode={}, pending_ranges={}",
                 keyspace, is_bootstrap_mode, pending_ranges);
-        return !is_bootstrap_mode && pending_ranges == 0;
+        return !is_bootstrap_mode && !pending_ranges;
     });
 }
 

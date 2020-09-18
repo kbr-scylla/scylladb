@@ -17,33 +17,33 @@ namespace redis {
 
 static logging::logger logging("command_factory");
 
-shared_ptr<abstract_command> command_factory::create(service::storage_proxy& proxy, request&& req)
+future<redis_message> command_factory::create_execute(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit)
 {
-    static thread_local std::unordered_map<bytes, std::function<shared_ptr<abstract_command> (service::storage_proxy& proxy, request&& req)>> _commands =
+    static thread_local std::unordered_map<bytes, std::function<future<redis_message> (service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit)>> _commands =
     { 
-        { "ping",  [] (service::storage_proxy& proxy, request&& req) { return commands::ping::prepare(proxy, std::move(req)); } }, 
-        { "select",  [] (service::storage_proxy& proxy, request&& req) { return commands::select::prepare(proxy, std::move(req)); } }, 
-        { "get",  [] (service::storage_proxy& proxy, request&& req) { return commands::get::prepare(proxy, std::move(req)); } }, 
-        { "exists", [] (service::storage_proxy& proxy, request&& req) { return commands::exists::prepare(proxy, std::move(req)); } },
-        { "ttl", [] (service::storage_proxy& proxy, request&& req) { return commands::ttl::prepare(proxy, std::move(req)); } },
-        { "strlen", [] (service::storage_proxy& proxy, request&& req) { return commands::strlen::prepare(proxy, std::move(req)); } },
-        { "set",  [] (service::storage_proxy& proxy, request&& req) { return commands::set::prepare(proxy, std::move(req)); } }, 
-        { "setex",  [] (service::storage_proxy& proxy, request&& req) { return commands::setex::prepare(proxy, std::move(req)); } },
-        { "del",  [] (service::storage_proxy& proxy, request&& req) { return commands::del::prepare(proxy, std::move(req)); } }, 
-        { "echo",  [] (service::storage_proxy& proxy, request&& req) { return commands::echo::prepare(proxy, std::move(req)); } },
-        { "lolwut", [] (service::storage_proxy& proxy, request&& req) { return commands::lolwut::prepare(proxy, std::move(req)); } },
-        { "hget", [] (service::storage_proxy& proxy, request&& req) { return commands::hget::prepare(proxy, std::move(req)); } },
-        { "hset", [] (service::storage_proxy& proxy, request&& req) { return commands::hset::prepare(proxy, std::move(req)); } },
-        { "hgetall", [] (service::storage_proxy& proxy, request&& req) { return commands::hgetall::prepare(proxy, std::move(req)); } },
-        { "hdel", [] (service::storage_proxy& proxy, request&& req) { return commands::hdel::prepare(proxy, std::move(req)); } },
+        { "ping", commands::ping },
+        { "select", commands::select },
+        { "get", commands::get },
+        { "exists", commands::exists },
+        { "ttl", commands::ttl },
+        { "strlen", commands::strlen },
+        { "set", commands::set },
+        { "setex", commands::setex },
+        { "del", commands::del },
+        { "echo", commands::echo },
+        { "lolwut", commands::lolwut },
+        { "hget", commands::hget },
+        { "hset", commands::hset },
+        { "hgetall", commands::hgetall },
+        { "hdel", commands::hdel },
     };
     auto&& command = _commands.find(req._command);
     if (command != _commands.end()) {
-        return (command->second)(proxy, std::move(req));
+        return (command->second)(proxy, std::move(req), options, permit);
     }
     auto& b = req._command;
     logging.error("receive unknown command = {}", sstring(reinterpret_cast<const char*>(b.data()), b.size()));
-    return commands::unknown::prepare(proxy, std::move(req));
+    return commands::unknown(proxy, std::move(req), options, permit);
 }
 
 }

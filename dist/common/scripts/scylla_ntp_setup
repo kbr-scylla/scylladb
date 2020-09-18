@@ -15,6 +15,7 @@ import argparse
 import subprocess
 import re
 import distro
+import shutil
 
 from scylla_util import *
 
@@ -30,8 +31,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if is_debian_variant():
-        if not os.path.exists('/usr/sbin/ntpd') or not os.path.exists('/usr/sbin/ntpdate'):
-            run('apt-get install -y ntp ntpdate')
+        if not shutil.which('ntpd') or not shutil.which('ntpdate'):
+            apt_install('ntp ntpdate')
         with open('/etc/ntp.conf') as f:
             conf = f.read()
         if not re.match(r'^server ', conf, flags=re.MULTILINE):
@@ -46,8 +47,8 @@ if __name__ == '__main__':
         ntp.start()
 
     if is_gentoo_variant():
-        if not os.path.exists('/usr/sbin/ntpd'):
-            run('emerge -uq net-misc/ntp')
+        if not shutil.which('ntpd'):
+            emerge_install('net-misc/ntp')
         with open('/etc/ntp.conf') as f:
             conf = f.read()
         match = re.search(r'^server\s+(\S*)(\s+\S+)?', conf, flags=re.MULTILINE)
@@ -67,8 +68,8 @@ if __name__ == '__main__':
 
     if is_redhat_variant():
         if int(distro.major_version()) >= 8:
-            if not os.path.exists('/usr/sbin/chronyd'):
-                run('dnf install -y chrony')
+            if not shutil.which('chronyd'):
+                yum_install('chrony')
             with open('/etc/chrony.conf') as f:
                 conf = f.read()
             if args.subdomain:
@@ -81,8 +82,8 @@ if __name__ == '__main__':
             chronyd.restart()
             run('chronyc makestep')
         else:
-            if not os.path.exists('/usr/sbin/ntpd') or not os.path.exists('/usr/sbin/ntpdate'):
-                run('yum install -y ntp ntpdate')
+            if not shutil.which('ntpd') or not shutil.which('ntpdate'):
+                yum_install('ntp ntpdate')
             with open('/etc/ntp.conf') as f:
                 conf = f.read()
             if args.subdomain:

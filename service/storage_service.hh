@@ -138,6 +138,7 @@ private:
     semaphore _service_memory_limiter;
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<std::pair<std::string, client_shutdown_hook>> _client_shutdown_hooks;
+    std::vector<std::any> _listeners;
     gms::feature::listener_registration _workload_prioritization_registration;
 
     /* For unit tests only.
@@ -159,7 +160,8 @@ public:
 private:
     future<> do_update_pending_ranges();
     void register_metrics();
-
+    future<> publish_schema_version();
+    void install_schema_version_change_listener();
 public:
     future<> keyspace_changed(const sstring& ks_name);
     future<> update_pending_ranges();
@@ -316,6 +318,10 @@ public:
      * \see init_server_without_the_messaging_service_part
      */
     future<> init_messaging_service_part();
+    /*!
+     * \brief Uninit the messaging service part of the service.
+     */
+    future<> uninit_messaging_service_part();
 
     /*!
      * \brief complete the server initialization
@@ -525,6 +531,7 @@ private:
     serialized_action _update_pending_ranges_action;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     sharded<db::view::view_update_generator>& _view_update_generator;
+    serialized_action _schema_version_publisher;
 private:
     /**
      * Replicates token_metadata contents on shard0 instance to other shards.
