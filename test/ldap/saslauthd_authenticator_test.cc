@@ -14,6 +14,7 @@
 
 #include "auth/saslauthd_authenticator.hh"
 #include "db/config.hh"
+#include "test/ldap/ldap_common.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/exception_utils.hh"
 
@@ -33,6 +34,52 @@ SEASTAR_THREAD_TEST_CASE(simple_password_checking) {
 }
 
 namespace {
+
+void fail_test(std::exception_ptr ex) {
+    BOOST_FAIL(format("{}", ex));
+}
+
+/// Creates a network response that saslauthd would send to convey this payload.  If lie_size is provided,
+/// force-write it into the response's first two bytes, even if that results in an invalid response.
+temporary_buffer<char> make_saslauthd_response(sstring_view payload, std::optional<uint16_t> lie_size = std::nullopt) {
+    const uint16_t sz = payload.size();
+    temporary_buffer<char> resp(sz + 2);
+    auto p = resp.get_write();
+    produce_be(p, lie_size.value_or(sz));
+    std::copy_n(payload.begin(), sz, p);
+    return resp;
+}
+
+/// Invokes authenticate_with_saslauthd against a mock saslauthd instance that sends this response through this
+/// domain socket.
+///
+/// authenticate_with_saslauthd is invoked with correct credentials, and its result is returned.
+///
+/// Must be invoked inside a Seastar thread.
+bool authorize_against_this_response(temporary_buffer<char> resp, sstring socket_path) {
+    using std::move;
+    auto socket = seastar::listen(socket_address(unix_domain_addr(socket_path)));
+    auto [result, closing] = when_all(
+            auth::authenticate_with_saslauthd(socket_path, {"jdoe", "pa55w0rd", "", ""}),
+            socket.accept().then([resp = move(resp), socket_path] (accept_result ar) mutable {
+                return do_with(
+                        ar.connection.input(), ar.connection.output(), socket_path,
+                        [resp = move(resp)] (input_stream<char>& in, output_stream<char>& out, sstring& socket_path) mutable {
+                            return in.read().then(
+                                    [&in, &out, &socket_path, resp=move(resp)] (temporary_buffer<char>) mutable {
+                                        return out.write(move(resp)).finally([&out] { return out.close(); });
+                                    }).handle_exception(fail_test).finally([&] {
+                                        return in.close().finally([&] { return remove_file(socket_path); });
+                                    });
+                        });
+            })).get0();
+    return result.get0();
+}
+
+/// Temp file name unique to this test run and this suffix.
+sstring tmpfile(const sstring& suffix) {
+    return format("saslauthd_authenticator_test.tmpfile.{}.{}", ldap_port, suffix);
+}
 
 shared_ptr<db::config> make_config() {
     auto p = make_shared<db::config>();
@@ -54,6 +101,44 @@ future<> do_with_authenticator_thread(std::function<void(const auth::authenticat
 }
 
 } // anonymous namespace
+
+SEASTAR_THREAD_TEST_CASE(empty_response) {
+    BOOST_REQUIRE_EXCEPTION(authorize_against_this_response(temporary_buffer<char>(0), tmpfile("0")),
+                            authentication_exception, message_contains("closed connection"));
+}
+
+SEASTAR_THREAD_TEST_CASE(single_byte_response) {
+    BOOST_REQUIRE_EXCEPTION(
+            authorize_against_this_response(temporary_buffer<char>(1), tmpfile("1")),
+            authentication_exception, message_contains("closed connection"));
+}
+
+SEASTAR_THREAD_TEST_CASE(two_byte_response) {
+    BOOST_REQUIRE(!authorize_against_this_response(make_saslauthd_response(""), tmpfile("2")));
+    BOOST_REQUIRE_EXCEPTION(
+            authorize_against_this_response(make_saslauthd_response("", 1), tmpfile("2")),
+            authentication_exception, message_contains("response length different"));
+    BOOST_REQUIRE_EXCEPTION(
+            authorize_against_this_response(make_saslauthd_response("", 100), tmpfile("2")),
+            authentication_exception, message_contains("response length different"));
+}
+
+SEASTAR_THREAD_TEST_CASE(three_byte_response) {
+    BOOST_REQUIRE(!authorize_against_this_response(make_saslauthd_response("O"), tmpfile("3")));
+    // If advertised size is 0, the payload isn't read even if sent.  No exception is expected:
+    BOOST_REQUIRE(!authorize_against_this_response(make_saslauthd_response("O", 0), tmpfile("3")));
+    BOOST_REQUIRE_EXCEPTION(
+            authorize_against_this_response(make_saslauthd_response("O", 100), tmpfile("3")),
+            authentication_exception, message_contains("response length different"));
+}
+
+SEASTAR_THREAD_TEST_CASE(ok_response_wrong_length) {
+    BOOST_REQUIRE_EXCEPTION(
+            authorize_against_this_response(make_saslauthd_response("OK", 100), tmpfile("3")),
+            authentication_exception, message_contains("response length different"));
+    // Extra payload beyond advertised size is not read.  No exception is expected:
+    BOOST_REQUIRE(!authorize_against_this_response(make_saslauthd_response("OK", 1), tmpfile("3")));
+}
 
 SEASTAR_TEST_CASE(require_authentication) {
     return do_with_authenticator_thread([] (const auth::authenticator& authr) {

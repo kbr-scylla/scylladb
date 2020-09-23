@@ -103,12 +103,27 @@ future<bool> authenticate_with_saslauthd(sstring saslauthd_socket_path, const sa
                 [creds = move(creds)] (input_stream<char>& in, output_stream<char>& out) {
                     return out.write(make_saslauthd_message(creds)).then([&in, &out] () mutable {
                         return out.flush().then([&in] () mutable {
-                            return in.read().then([&in] (temporary_buffer<char> rbuf) mutable {
-                                bool ok = (rbuf.size() >= 4 && rbuf[2] == 'O' && rbuf[3] == 'K');
-                                return make_ready_future<bool>(ok);
-                            }).handle_exception(as_authentication_exception).finally([&in] () mutable{
-                                return in.close();
-                            });
+                            return in.read_exactly(2).then([&in] (temporary_buffer<char> len) mutable {
+                                if (len.size() < 2) {
+                                    return make_exception_future<bool>(
+                                            exceptions::authentication_exception(
+                                                    "saslauthd closed connection before completing response"));
+                                }
+                                const auto paylen = read_be<uint16_t>(len.get());
+                                return in.read_exactly(paylen).then([paylen] (temporary_buffer<char> resp) {
+                                    mylog.debug("saslauthd response: {}", sstring_view(resp.get(), resp.size()));
+                                    if (resp.size() != paylen) {
+                                        return make_exception_future<bool>(
+                                            exceptions::authentication_exception(
+                                                    // We say "different" here, though we could just as well say
+                                                    // "shorter".  A longer response is cut to size by
+                                                    // read_exactly().
+                                                    "saslauthd response length different than promised"));
+                                    }
+                                    bool ok = (resp.size() >= 2 && resp[0] == 'O' && resp[1] == 'K');
+                                    return make_ready_future<bool>(ok);
+                                });
+                            }).finally([&in] () mutable { return in.close(); });
                         }).handle_exception(as_authentication_exception).finally([&out] () mutable {
                             return out.close();
                         });
