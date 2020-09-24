@@ -15,6 +15,7 @@
 #include <seastar/core/do_with.hh>
 #include <seastar/core/distributed.hh>
 #include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include "sstables/sstables.hh"
 #include "sstables/incremental_compaction_strategy.hh"
 #include "schema.hh"
@@ -60,7 +61,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto cm = make_lw_shared<compaction_manager>();
         auto tracker = make_lw_shared<cache_tracker>();
-        auto cf = make_lw_shared<column_family>(s, column_family_test_config(), column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        auto cf = make_lw_shared<column_family>(s, column_family_test_config(env.manager()), column_family::no_commitlog(), *cm, cl_stats, *tracker);
         cf->mark_ready_for_writes();
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
@@ -174,14 +175,14 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
     });
 }
 
-SEASTAR_TEST_CASE(incremental_compaction_sag_test) {
+SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
     auto builder = schema_builder("tests", "incremental_compaction_test")
         .with_column("id", utf8_type, column_kind::partition_key)
         .with_column("value", int32_type);
     auto s = builder.build();
 
     struct sag_test {
-        test_env _env;
+        test_env& _env;
         compaction_manager _cm;
         cell_locker_stats _cl_stats;
         cache_tracker _tracker;
@@ -195,14 +196,15 @@ SEASTAR_TEST_CASE(incremental_compaction_sag_test) {
             options.emplace(sstring("space_amplification_goal"), sstring(std::to_string(space_amplification_goal)));
             return incremental_compaction_strategy(options);
         }
-        static column_family::config make_table_config() {
-            auto config = column_family_test_config();
+        static column_family::config make_table_config(test_env& env) {
+            auto config = column_family_test_config(env.manager());
             config.compaction_enforce_min_threshold = true;
             return config;
         }
 
-        sag_test(schema_ptr s, double space_amplification_goal)
-            : _cf(make_lw_shared<column_family>(s, make_table_config(), column_family::no_commitlog(), _cm, _cl_stats, _tracker))
+        sag_test(test_env& env, schema_ptr s, double space_amplification_goal)
+            : _env(env)
+            , _cf(make_lw_shared<column_family>(s, make_table_config(_env), column_family::no_commitlog(), _cm, _cl_stats, _tracker))
             , _ics(make_ics(space_amplification_goal))
         {
         }
@@ -251,11 +253,13 @@ SEASTAR_TEST_CASE(incremental_compaction_sag_test) {
     using TABLE_INITIAL_SA = double;
 
     auto with_sag_test = [&] (SAG sag, TABLE_INITIAL_SA initial_sa) {
-        sag_test test(s, sag);
+      test_env::do_with_async([&] (test_env& env) {
+        sag_test test(env, s, sag);
         test.populate(initial_sa);
         BOOST_REQUIRE(test.space_amplification() >= initial_sa);
         test.run();
         BOOST_REQUIRE(test.space_amplification() <= sag);
+      }).get();
     };
 
     with_sag_test(SAG(1.25), TABLE_INITIAL_SA(1.5));
@@ -263,6 +267,4 @@ SEASTAR_TEST_CASE(incremental_compaction_sag_test) {
     with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1.75));
     with_sag_test(SAG(1.01), TABLE_INITIAL_SA(1.5));
     with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1));
-
-    return make_ready_future<>();
 }
