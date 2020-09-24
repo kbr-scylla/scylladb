@@ -7,6 +7,35 @@ ScyllaDB is released under the GNU Affero General Public License version 3 and t
 
 ![logo](http://www.scylladb.com/wp-content/uploads/mascot_medium.png)
 
+# Quick start
+
+To startup a Scylla single-node cluster in developer mode execute:
+
+```console
+$ docker run --name some-scylla --hostname some-scylla -d scylladb/scylla --smp 1
+```
+
+This command will start a Scylla single-node cluster in developer mode
+(see `--developer-mode 1`) limited by a single CPU core (see `--smp`).
+Production grade configuration requires tuning a few kernel parameters
+such that limiting number of available cores (with `--smp 1`) is
+the simplest way to go.
+
+Multiple cores requires setting a proper value to the `/proc/sys/fs/aio-max-nr`.
+On many non production systems it will be equal to 65K. The formula
+to calculate proper value is:
+
+    Available AIO on the system - (request AIO per-cpu * ncpus) =
+    aio_max_nr - aio_nr < (reactor::max_aio + detect_aio_poll + reactor_backend_aio::max_polls) * cpu_cores =
+    aio_max_nr - aio_nr < (1024 + 2 + 10000) * cpu_cores =
+    aio_max_nr - aio_nr < 11026 * cpu_cores
+
+    where
+
+    reactor::max_aio = max_aio_per_queue * max_queues,
+    max_aio_per_queue = 128,
+    max_queues = 8.
+
 # How to use this image
 
 ## Start a `scylla` server instance
@@ -311,6 +340,88 @@ The `--authenticator` command lines option allows to provide the authenticator c
 The `--authorizer` command lines option allows to provide the authorizer class Scylla will use. By default Scylla uses the `AllowAllAuthorizer` which allows any action to any user. The second option is using the `CassandraAuthorizer` parameter, which stores permissions in `system_auth.permissions` table.
 
 **Since: 2.3**
+
+## JMX parameters
+
+JMX Scylla service is initialized from the `/scylla-jmx-service.sh` on
+container startup. By default the script uses `/etc/sysconfig/scylla-jmx`
+to read default configuration. It then can be overridden by setting
+an environmental parameters.
+
+An example:
+
+    docker run -d -e "SCYLLA_JMX_ADDR=-ja 0.0.0.0" -e SCYLLA_JMX_REMOTE=-r --publish 7199:7199 scylladb/scylla
+
+### SCYLLA_JMX_PORT
+
+Scylla JMX listening port.
+
+Default value:
+
+    SCYLLA_JMX_PORT="-jp 7199"
+
+### SCYLLA_API_PORT
+
+Scylla API port for JMX to connect to.
+
+Default value:
+
+    SCYLLA_API_PORT="-p 10000"
+
+### SCYLLA_API_ADDR
+
+Scylla API address for JMX to connect to.
+
+Default value:
+
+    SCYLLA_API_ADDR="-a localhost"
+
+### SCYLLA_JMX_ADDR
+
+JMX address to bind on.
+
+Default value:
+
+    SCYLLA_JMX_ADDR="-ja localhost"
+
+For example, it is possible to make JMX available to the outer world
+by changing its bind address to `0.0.0.0`:
+
+    docker run -d -e "SCYLLA_JMX_ADDR=-ja 0.0.0.0" -e SCYLLA_JMX_REMOTE=-r --publish 7199:7199 scylladb/scylla
+
+`cassandra-stress` requires direct access to the JMX.
+
+### SCYLLA_JMX_FILE
+
+A JMX service configuration file path.
+
+Example value:
+
+    SCYLLA_JMX_FILE="-cf /etc/scylla.d/scylla-user.cfg"
+
+### SCYLLA_JMX_LOCAL
+
+The location of the JMX executable.
+
+Example value:
+
+    SCYLLA_JMX_LOCAL="-l /opt/scylladb/jmx
+
+### SCYLLA_JMX_REMOTE
+
+Allow JMX to run remotely.
+
+Example value:
+
+    SCYLLA_JMX_REMOTE="-r"
+
+### SCYLLA_JMX_DEBUG
+
+Enable debugger.
+
+Example value:
+
+    SCYLLA_JMX_DEBUG="-d"
 
 ## Related Links
 

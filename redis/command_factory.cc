@@ -36,6 +36,7 @@ future<redis_message> command_factory::create_execute(service::storage_proxy& pr
         { "hset", commands::hset },
         { "hgetall", commands::hgetall },
         { "hdel", commands::hdel },
+        { "hexists", commands::hexists },
     };
     auto&& command = _commands.find(req._command);
     if (command != _commands.end()) {
