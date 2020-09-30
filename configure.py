@@ -1281,7 +1281,7 @@ def configure_seastar(build_dir, mode):
         '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']).replace(' ', ';')),
         '-DSeastar_LD_FLAGS={}'.format(seastar_ldflags),
         '-DSeastar_CXX_DIALECT=gnu++20',
-        '-DSeastar_API_LEVEL=4',
+        '-DSeastar_API_LEVEL=5',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
     ]
 
@@ -1766,6 +1766,10 @@ with open(buildfile_tmp, 'w') as f:
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
         f.write(f'build dist-server-{mode}: phony $builddir/dist/{mode}/redhat $builddir/dist/{mode}/debian\n')
+        f.write(f'build dist-jmx-{mode}: phony $builddir/{mode}/dist/tar/scylla-jmx-package.tar.gz dist-jmx-rpm dist-jmx-deb\n')
+        f.write(f'build dist-tools-{mode}: phony $builddir/{mode}/dist/tar/scylla-tools-package.tar.gz dist-tools-rpm dist-tools-deb\n')
+        f.write(f'build dist-python3-{mode}: phony dist-python3-tar dist-python3-rpm dist-python3-deb compat-python3-rpm compat-python3-deb\n')
+        f.write(f'build dist-unified-{mode}: phony $builddir/{mode}/dist/tar/scylla-unified-package.tar.gz\n')
         f.write(f'build $builddir/{mode}/scylla-unified-package.tar.gz: copy $builddir/{mode}/dist/tar/scylla-unified-package.tar.gz\n')
         f.write(f'build $builddir/{mode}/dist/tar/scylla-unified-package.tar.gz: unified $builddir/{mode}/dist/tar/scylla-package.tar.gz $builddir/{mode}/dist/tar/scylla-python3-package.tar.gz $builddir/{mode}/dist/tar/scylla-jmx-package.tar.gz $builddir/{mode}/dist/tar/scylla-tools-package.tar.gz | always\n')
         f.write(f'  pool = submodule_pool\n')
@@ -1877,7 +1881,7 @@ with open(buildfile_tmp, 'w') as f:
         build $builddir/{mode}/dist/tar/scylla-tools-package.tar.gz: copy tools/java/build/scylla-tools-package.tar.gz
         build $builddir/{mode}/dist/tar/scylla-jmx-package.tar.gz: copy tools/jmx/build/scylla-jmx-package.tar.gz
 
-        build dist-{mode}: phony dist-server-{mode} dist-python3 dist-tools dist-jmx
+        build dist-{mode}: phony dist-server-{mode} dist-python3-{mode} dist-tools-{mode} dist-jmx-{mode} dist-unified-{mode}
         build dist-check-{mode}: dist-check
           mode = {mode}
             '''))

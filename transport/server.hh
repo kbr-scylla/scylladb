@@ -28,6 +28,7 @@
 #include "utils/fragmented_temporary_buffer.hh"
 #include "service_permit.hh"
 #include <seastar/core/sharded.hh>
+#include "utils/updateable_value.hh"
 #include "service/qos/service_level_controller.hh"
 
 namespace scollectd {
@@ -94,6 +95,7 @@ struct cql_query_state {
 struct cql_server_config {
     ::timeout_config timeout_config;
     size_t max_request_size;
+    utils::updateable_value<uint32_t> max_concurrent_requests;
     std::function<semaphore& ()> get_service_memory_limiter_semaphore;
     sstring partitioner_name;
     unsigned sharding_ignore_msb;
