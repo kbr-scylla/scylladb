@@ -95,7 +95,7 @@ struct cql_query_state {
 struct cql_server_config {
     ::timeout_config timeout_config;
     size_t max_request_size;
-    utils::updateable_value<uint32_t> max_concurrent_requests;
+    std::function<utils::updateable_value<uint32_t> ()> get_max_concurrent_requests_updateable_value;
     std::function<semaphore& ()> get_service_memory_limiter_semaphore;
     sstring partitioner_name;
     unsigned sharding_ignore_msb;
@@ -115,6 +115,7 @@ private:
     distributed<cql3::query_processor>& _query_processor;
     cql_server_config _config;
     size_t _max_request_size;
+    utils::updateable_value<uint32_t> _max_concurrent_requests;
     semaphore& _memory_available;
     seastar::metrics::metric_groups _metrics;
     std::unique_ptr<event_notifier> _notifier;
@@ -122,8 +123,9 @@ private:
     uint64_t _connects = 0;
     uint64_t _connections = 0;
     uint64_t _requests_served = 0;
-    uint64_t _requests_serving = 0;
+    uint32_t _requests_serving = 0;
     uint64_t _requests_blocked_memory = 0;
+    uint64_t _requests_shed = 0;
     auth::service& _auth_service;
     qos::service_level_controller& _sl_controller;
 public:
