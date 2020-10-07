@@ -617,9 +617,6 @@ void storage_service::join_token_ring(int delay) {
 
     // Retrieve the latest CDC generation seen in gossip (if any).
     scan_cdc_generations();
-
-    supervisor::notify("starting tracing");
-    tracing::tracing::start_tracing().get();
 }
 
 void storage_service::mark_existing_views_as_built() {

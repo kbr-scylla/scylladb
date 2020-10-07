@@ -25,7 +25,7 @@ namespace redis {
 
 namespace commands {
 
-future<redis_message> get(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> get(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
@@ -38,11 +38,11 @@ future<redis_message> get(service::storage_proxy& proxy, request&& req, redis::r
     });
 }
 
-future<redis_message> exists(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> exists(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() < 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
-    return do_with(size_t(0), [&proxy, &options, permit, req] (size_t& count) {
+    return do_with(size_t(0), [&proxy, &options, permit, &req] (size_t& count) {
         return seastar::do_for_each(req._args, [&proxy, &options, permit, &count] (auto& key) {
             return redis::read_strings(proxy, options, key, permit).then([&count] (lw_shared_ptr<strings_result> result) {
                 if (result->has_result()) {
@@ -55,7 +55,7 @@ future<redis_message> exists(service::storage_proxy& proxy, request&& req, redis
     });
 }
 
-future<redis_message> ttl(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> ttl(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
@@ -71,7 +71,7 @@ future<redis_message> ttl(service::storage_proxy& proxy, request&& req, redis::r
     });
 }
 
-future<redis_message> strlen(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> strlen(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
@@ -84,7 +84,7 @@ future<redis_message> strlen(service::storage_proxy& proxy, request&& req, redis
     });
 }
 
-future<redis_message> hgetall(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> hgetall(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 1) {
         throw wrong_number_of_arguments_exception(req._command);
     }
@@ -97,7 +97,7 @@ future<redis_message> hgetall(service::storage_proxy& proxy, request&& req, redi
     });
 }
 
-future<redis_message> hget(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> hget(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 2) {
         throw wrong_arguments_exception(2, req.arguments_size(), req._command);
     }
@@ -111,7 +111,7 @@ future<redis_message> hget(service::storage_proxy& proxy, request&& req, redis::
     });
 }
 
-future<redis_message> hset(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> hset(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 3) {
         throw wrong_number_of_arguments_exception(req._command);
     }
@@ -120,7 +120,7 @@ future<redis_message> hset(service::storage_proxy& proxy, request&& req, redis::
     });
 }
 
-future<redis_message> hdel(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> hdel(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() < 2) {
         throw wrong_number_of_arguments_exception(req._command);
     }
@@ -132,7 +132,7 @@ future<redis_message> hdel(service::storage_proxy& proxy, request&& req, redis::
     });
 }
 
-future<redis_message> hexists(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> hexists(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 2) {
         throw wrong_arguments_exception(2, req.arguments_size(), req._command);
     }
@@ -141,7 +141,7 @@ future<redis_message> hexists(service::storage_proxy& proxy, request&& req, redi
     });
 }
 
-future<redis_message> set(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> set(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 2 && req.arguments_size() != 4) {
         throw invalid_arguments_exception(req._command);
     }
@@ -164,7 +164,7 @@ future<redis_message> set(service::storage_proxy& proxy, request&& req, redis::r
     });
 }
 
-future<redis_message> setex(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> setex(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() != 3) {
         throw wrong_arguments_exception(3, req.arguments_size(), req._command);
     }
@@ -174,7 +174,7 @@ future<redis_message> setex(service::storage_proxy& proxy, request&& req, redis:
     });
 }
 
-future<redis_message> del(service::storage_proxy& proxy, request&& req, redis::redis_options& options, service_permit permit) {
+future<redis_message> del(service::storage_proxy& proxy, request& req, redis::redis_options& options, service_permit permit) {
     if (req.arguments_size() == 0) {
         throw wrong_number_of_arguments_exception(req._command);
     }
@@ -186,7 +186,7 @@ future<redis_message> del(service::storage_proxy& proxy, request&& req, redis::r
     });
 }
 
-future<redis_message> select(service::storage_proxy&, request&& req, redis::redis_options& options, service_permit) {
+future<redis_message> select(service::storage_proxy&, request& req, redis::redis_options& options, service_permit) {
     if (req.arguments_size() != 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
@@ -204,22 +204,22 @@ future<redis_message> select(service::storage_proxy&, request&& req, redis::redi
     return redis_message::ok();
 }
 
-future<redis_message> unknown(service::storage_proxy&, request&& req, redis::redis_options&, service_permit) {
+future<redis_message> unknown(service::storage_proxy&, request& req, redis::redis_options&, service_permit) {
     return redis_message::unknown(std::move(req._command));
 }
 
-future<redis_message> ping(service::storage_proxy&, request&& req, redis::redis_options&, service_permit) {
+future<redis_message> ping(service::storage_proxy&, request& req, redis::redis_options&, service_permit) {
     return redis_message::pong();
 }
 
-future<redis_message> echo(service::storage_proxy&, request&& req, redis::redis_options&, service_permit) {
+future<redis_message> echo(service::storage_proxy&, request& req, redis::redis_options&, service_permit) {
     if (req.arguments_size() != 1) {
         throw wrong_arguments_exception(1, req.arguments_size(), req._command);
     }
     return redis_message::make_strings_result(req._args[0]);
 }
 
-future<redis_message> lolwut(service::storage_proxy&, request&& req, redis::redis_options& options, service_permit) {
+future<redis_message> lolwut(service::storage_proxy&, request& req, redis::redis_options& options, service_permit) {
     int cols = 66;
     int squares_per_row = 8;
     int squares_per_col = 12;

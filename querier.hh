@@ -159,7 +159,7 @@ public:
     }
 
     size_t memory_usage() const {
-        return _reader.buffer_size();
+        return _permit.consumed_resources().memory;
     }
 };
 

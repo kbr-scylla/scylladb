@@ -1074,6 +1074,16 @@ int main(int ac, char** av) {
             sst_format_selector.sync();
             ss.join_cluster().get();
 
+            supervisor::notify("starting tracing");
+            tracing::tracing::start_tracing(qp).get();
+            /*
+             * FIXME -- tracing is stopped inside drain_on_shutdown, which
+             * is deferred later on. If the start aborts before it, the
+             * tracing will remain started and will continue referencing
+             * the query processor. Nowadays the latter is not stopped
+             * either, but when it will, this place shold be fixed too.
+             */
+
             startlog.info("SSTable data integrity checker is {}.",
                     cfg->enable_sstable_data_integrity_check() ? "enabled" : "disabled");
 
@@ -1174,7 +1184,7 @@ int main(int ac, char** av) {
                 db.revert_initial_system_read_concurrency_boost();
             }).get();
 
-            audit::audit::start_audit(*cfg).get();
+            audit::audit::start_audit(*cfg, qp).get();
 
             cql_transport::controller cql_server_ctl(db, auth_service, mm_notifier, gossiper.local(), sl_controller);
 
