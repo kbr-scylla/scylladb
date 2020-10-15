@@ -495,6 +495,7 @@ int main(int ac, char** av) {
     sharded<gms::feature_service> feature_service;
     sharded<db::snapshot_ctl> snapshot_ctl;
     sharded<netw::messaging_service> messaging;
+    sharded<semaphore> sst_dir_semaphore;
 
     return app.run(ac, av, [&] () -> future<int> {
 
@@ -523,7 +524,7 @@ int main(int ac, char** av) {
 
         return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
-                &token_metadata, &snapshot_ctl, &messaging] {
+                &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore] {
           try {
             ::stop_signal stop_signal; // we can move this earlier to support SIGINT during initialization
             read_config(opts, *cfg).get();
@@ -817,7 +818,12 @@ int main(int ac, char** av) {
             service::init_storage_service(stop_signal.as_sharded_abort_source(), db, gossiper, sys_dist_ks, view_update_generator, feature_service, sscfg, mm_notifier, token_metadata, messaging, sl_controller).get();
             supervisor::notify("starting per-shard database core");
 
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata), std::ref(stop_signal.as_sharded_abort_source())).get();
+            sst_dir_semaphore.start(cfg->initial_sstable_loading_concurrency()).get();
+            auto stop_sst_dir_sem = defer_verbose_shutdown("sst_dir_semaphore", [&sst_dir_semaphore] {
+                sst_dir_semaphore.stop().get();
+            });
+
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata), std::ref(stop_signal.as_sharded_abort_source()), std::ref(sst_dir_semaphore)).get();
             start_large_data_handler(db).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
@@ -1259,21 +1265,29 @@ int main(int ac, char** av) {
                 std::optional<uint16_t> alternator_https_port;
                 std::optional<tls::credentials_builder> creds;
                 if (cfg->alternator_https_port()) {
-                    creds.emplace();
                     alternator_https_port = cfg->alternator_https_port();
-                    creds->set_dh_level(tls::dh_params::level::MEDIUM);
-                    creds->set_x509_key_file(cert, key, tls::x509_crt_format::PEM).get();
-                    if (trust_store.empty()) {
-                        creds->set_system_trust().get();
-                    } else {
-                        creds->set_x509_trust_file(trust_store, tls::x509_crt_format::PEM).get();
+                    creds.emplace();
+                    auto opts = cfg->alternator_encryption_options();
+                    if (opts.empty()) {
+                        // Earlier versions mistakenly configured Alternator's
+                        // HTTPS parameters via the "server_encryption_option"
+                        // configuration parameter. We *temporarily* continue
+                        // to allow this, for backward compatibility.
+                        opts = cfg->server_encryption_options();
+                        if (!opts.empty()) {
+                            startlog.warn("Setting server_encryption_options to configure "
+                                    "Alternator's HTTPS encryption is deprecated. Please "
+                                    "switch to setting alternator_encryption_options instead.");
+                        }
                     }
+                    creds->set_dh_level(tls::dh_params::level::MEDIUM);
+                    auto cert = get_or_default(opts, "certificate", db::config::get_conf_sub("scylla.crt").string());
+                    auto key = get_or_default(opts, "keyfile", db::config::get_conf_sub("scylla.key").string());
+                    creds->set_x509_key_file(cert, key, tls::x509_crt_format::PEM).get();
+                    auto prio = get_or_default(opts, "priority_string", sstring());
                     creds->set_priority_string(db::config::default_tls_priority);
                     if (!prio.empty()) {
                         creds->set_priority_string(prio);
-                    }
-                    if (clauth) {
-                        creds->set_client_auth(seastar::tls::client_auth::REQUIRE);
                     }
                 }
                 bool alternator_enforce_authorization = cfg->alternator_enforce_authorization();

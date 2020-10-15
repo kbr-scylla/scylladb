@@ -93,16 +93,21 @@ protocol. Scylla supports several Scylla-only extensions to this protocol,
 described in [protocol-extensions.md](protocol-extensions.md).
 
 By default, Scylla listens to the CQL protocol on port 9042, which can be
-configured via the `native_transport_port` configuration option. Scylla also
-supports the CQL protocol via TLS/SSL encryption, which can be enabled via the
-`native_transport_port_ssl` configuration option (default port is 9142). Users
+configured via the `native_transport_port` configuration option.
+
+Scylla also supports the CQL protocol via TLS/SSL encryption which is
+disabled by default and can be enabled via the `native_transport_port_ssl`
+configuration option (the traditional choice is port 9142). Users
 that want to only support the encrypted CQL protocol can disable the
 unencrypted default CQL protocol by setting the `native_transport_port` to 0.
+
 The CQL protocol support can be disabled altogether by setting the
-`start_native_transport` option to `false`. These option names were chosen for
-backward-compatibility with Cassandra configuration files: They refers to CQL
-as the "native transport", to contrast with the older Thrift protocol
-(described below) which wasn't native to Cassandra.
+`start_native_transport` option to `false`.
+
+These option names were chosen for backward-compatibility with Cassandra
+configuration files: They refers to CQL as the "native transport", to
+contrast with the older Thrift protocol (described below) which wasn't
+native to Cassandra.
 
 There is also a `rpc_address` configuration option to set the IP address
 (and therefore network interface) on which Scylla should listen for the
@@ -111,7 +116,6 @@ a one-node test, should be overriden. Note that the same option `rpc_address`
 applies to both CQL and Thrift protocols.
 
 TODO: there is also `rpc_interface` option... Which wins? What's the default?
-TODO: again mention SSL, and `native_transport_port_ssl` (default 9142).
 
 # Thrift client protocol
 
@@ -122,7 +126,7 @@ but was recently dropped in Cassandra (version 4.0) and is likely to be
 dropped by Scylla in the future as well, so it is not recommended for new
 applications.
 
-By default scylla listens to the Thirft protocol on port 9160, which can be
+By default scylla listens to the Thrift protocol on port 9160, which can be
 configured via the `rpc_port` configuration option. Again, this confusing name
 was used for backward-compatibility with Cassandra's configuration files.
 Cassandra used the term "rpc" because Apache Thrift is a remote procedure
@@ -141,11 +145,10 @@ TODO: is there an SSL version of Thrift?
 
 # DynamoDB client protocol
 
-Scylla also supports, as an experimental feature, Amazon's DynamoDB API.
-The DynamoDB API is a JSON over HTTP (unencrypted) or HTTPS (encrypted)
-protocol. Because Scylla's support for this protocol is experimental,
-it is not turned on by default, and must be turned on manually by setting
-the `alternator_port` and/or `alternator_https_port` configuration option.
+Scylla also supports Amazon's DynamoDB API. The DynamoDB API is a JSON over
+HTTP (unencrypted) or HTTPS (encrypted) protocol. Support for this protocol
+is not turned on by default, and must be turned on manually by setting
+the `alternator_port` and/or `alternator_https_port` configuration options.
 "Alternator" is the codename of Scylla's DynamoDB API support, and is
 documented in more detail in [alternator.md](alternator/alternator.md).
 
@@ -157,10 +160,17 @@ There is also an `alternator_address` configuration option to set the IP
 address (and therefore network interface) on which Scylla should listen
 for the DynamoDB protocol. This address defaults to 0.0.0.0.
 
+When the HTTPS-based protocol is enabled, the server also needs to know
+the certificate and key files to use. The default locations of these files
+are `/etc/scylla/scylla.crt` and `/etc/scylla/scylla.key` respectively, but
+can be overridden by specifying in `alternator_encryption_options` the
+`keyfile` and `certificate` options. For example,
+`--alternator-encryption-options keyfile="..."`.
+
 # Redis client protocol
 
 Scylla also has partial and experimental support for the Redis API.
-Again, because this support is experimental, it is not turned on by
+Because this support is experimental, it is not turned on by
 default, and must be turned on manually by setting the `redis_port`
 and/or `redis_ssl_port` configuration option.
 

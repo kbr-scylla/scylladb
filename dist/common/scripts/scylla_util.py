@@ -327,7 +327,7 @@ class gcp_instance:
 class aws_instance:
     """Describe several aspects of the current AWS instance"""
     GETTING_STARTED_URL = "http://www.scylladb.com/doc/getting-started-amazon/"
-    META_DATA_BASE_URL = "http://169.254.169.254/latest/meta-data/"
+    META_DATA_BASE_URL = "http://169.254.169.254/latest/"
     ENDPOINT_SNITCH = "Ec2Snitch"
 
     def __disk_name(self, dev):
@@ -335,7 +335,7 @@ class aws_instance:
         return name.search(dev).group("devname")
 
     def __instance_metadata(self, path):
-        return curl(self.META_DATA_BASE_URL + path)
+        return curl(self.META_DATA_BASE_URL + "meta-data/" + path)
 
     def __device_exists(self, dev):
         if dev[0:4] != "/dev":
@@ -476,8 +476,7 @@ class aws_instance:
 
     @property
     def user_data(self):
-        return self.__instance_metadata("user-data")
-
+        return curl(self.META_DATA_BASE_URL + "user-data")
 
 
 # When a CLI tool is not installed, use relocatable CLI tool provided by Scylla

@@ -429,7 +429,7 @@ sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<s
 flat_mutation_reader
 table::make_streaming_reader(schema_ptr s,
                            const dht::partition_range_vector& ranges) const {
-    auto permit = _config.streaming_read_concurrency_semaphore->make_permit();
+    auto permit = _config.streaming_read_concurrency_semaphore->make_permit(s.get(), "stream-ranges");
     auto& slice = s->full_slice();
     auto& pc = service::get_local_streaming_priority();
 
@@ -449,7 +449,7 @@ table::make_streaming_reader(schema_ptr s,
 
 flat_mutation_reader table::make_streaming_reader(schema_ptr schema, const dht::partition_range& range,
         const query::partition_slice& slice, mutation_reader::forwarding fwd_mr) const {
-    auto permit = _config.streaming_read_concurrency_semaphore->make_permit();
+    auto permit = _config.streaming_read_concurrency_semaphore->make_permit(schema.get(), "stream-range");
     const auto& pc = service::get_local_streaming_priority();
     auto trace_state = tracing::trace_state_ptr();
     const auto fwd = streamed_mutation::forwarding::no;
@@ -1400,11 +1400,13 @@ future<> table::snapshot(database& db, sstring name) {
         }
         auto jsondir = _config.datadir + "/snapshots/" + name;
         return do_with(std::move(tables), std::move(jsondir), [this, &db] (std::vector<sstables::shared_sstable>& tables, const sstring& jsondir) {
-            return io_check([&jsondir] { return recursive_touch_directory(jsondir); }).then([this, &jsondir, &tables] {
-                return parallel_for_each(tables, [&jsondir] (sstables::shared_sstable sstable) {
+            return io_check([&jsondir] { return recursive_touch_directory(jsondir); }).then([this, &db, &jsondir, &tables] {
+                return max_concurrent_for_each(tables, db.get_config().initial_sstable_loading_concurrency(), [&db, &jsondir] (sstables::shared_sstable sstable) {
+                  return with_semaphore(db.get_sharded_sst_dir_semaphore().local(), 1, [&jsondir, sstable] {
                     return io_check([sstable, &dir = jsondir] {
                         return sstable->create_links(dir);
                     });
+                  });
                 });
             }).then([&jsondir, &tables] {
                 return io_check(sync_directory, jsondir);
@@ -2149,7 +2151,7 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(const schema
     auto cr_ranges = db::view::calculate_affected_clustering_ranges(*base, m.decorated_key(), m.partition(), views, now);
     if (cr_ranges.empty()) {
         tracing::trace(tr_state, "View updates do not require read-before-write");
-        return generate_and_propagate_view_updates(base, sem.make_permit(), std::move(views), std::move(m), { }, std::move(tr_state), now).then([] {
+        return generate_and_propagate_view_updates(base, sem.make_permit(s.get(), "push-view-updates-1"), std::move(views), std::move(m), { }, std::move(tr_state), now).then([] {
                 // In this case we are not doing a read-before-write, just a
                 // write, so no lock is needed.
                 return make_ready_future<row_locker::lock_holder>();
@@ -2180,7 +2182,7 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(const schema
         std::move(slice),
         std::move(m),
         [base, views = std::move(views), lock = std::move(lock), this, timeout, now, source = std::move(source), &sem, &io_priority, tr_state = std::move(tr_state)] (auto& pk, auto& slice, auto& m) mutable {
-            auto permit = sem.make_permit();
+            auto permit = sem.make_permit(base.get(), "push-view-updates-2");
             auto reader = source.make_reader(base, permit, pk, slice, io_priority, tr_state, streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
             return this->generate_and_propagate_view_updates(base, std::move(permit), std::move(views), std::move(m), std::move(reader), tr_state, now)
                     .then([base, tr_state = std::move(tr_state), lock = std::move(lock)] () mutable {

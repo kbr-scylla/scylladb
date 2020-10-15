@@ -37,6 +37,11 @@ struct fsm_output {
     std::vector<log_entry_ptr> committed;
 };
 
+struct fsm_config {
+    // max size of appended entries in bytes
+    size_t append_request_threshold;
+};
+
 // 3.4 Leader election
 // If a follower receives no communication over a period of
 // time called the election timeout, then it assumes there is
@@ -112,6 +117,8 @@ class fsm {
     log _log;
     // A possibly shared server failure detector.
     failure_detector& _failure_detector;
+    // fsm configuration
+    fsm_config _config;
 
     // Stores the last state observed by get_output().
     // Is updated with the actual state of the FSM after
@@ -173,11 +180,6 @@ class fsm {
     bool is_past_election_timeout() const {
         return _clock.now() - _last_election_time >= _randomized_election_timeout;
     }
-    // How much time has passed since last election or last
-    // time we heard from a valid leader.
-    logical_clock::duration election_elapsed() const {
-        return _clock.now() - _last_election_time;
-    }
 
     // A helper to send any kind of RPC message.
     template <typename Message>
@@ -237,7 +239,7 @@ class fsm {
     }
 public:
     explicit fsm(server_id id, term_t current_term, server_id voted_for, log log,
-            failure_detector& failure_detector);
+            failure_detector& failure_detector, fsm_config conf);
 
     bool is_leader() const {
         return std::holds_alternative<leader>(_state);
@@ -282,6 +284,12 @@ public:
     // @sa can_read()
     term_t get_current_term() const {
         return _current_term;
+    }
+
+    // How much time has passed since last election or last
+    // time we heard from a valid leader.
+    logical_clock::duration election_elapsed() const {
+        return _clock.now() - _last_election_time;
     }
 
     // Should be called on leader only, throws otherwise.

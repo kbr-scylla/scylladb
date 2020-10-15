@@ -119,7 +119,7 @@ SEASTAR_TEST_CASE(test_querying_with_limits) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source) {
-    do_with_cql_env([] (cql_test_env& e) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
         run_mutation_source_tests([&] (schema_ptr s, const std::vector<mutation>& partitions) -> mutation_source {
             try {
                 e.local_db().find_column_family(s->ks_name(), s->cf_name());
@@ -145,7 +145,6 @@ SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_sourc
                 return cf.make_reader(s, tests::make_permit(), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
             });
         });
-        return make_ready_future<>();
     }).get();
 }
 
@@ -192,14 +191,12 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_incomplete_sstables) {
     temp_file_name = sst::filename(sst_dir, ks, cf, sst::version_types::mc, 4, sst::format_types::big, component_type::Data);
     touch_file(temp_file_name);
 
-    do_with_cql_env([&sst_dir, &ks, &cf, &require_exist] (cql_test_env& e) {
+    do_with_cql_env_thread([&sst_dir, &ks, &cf, &require_exist] (cql_test_env& e) {
         require_exist(sst::temp_sst_dir(sst_dir, 2), false);
         require_exist(sst::temp_sst_dir(sst_dir, 3), false);
 
         require_exist(sst::filename(sst_dir, ks, cf, sst::version_types::mc, 4, sst::format_types::big, component_type::TemporaryTOC), false);
         require_exist(sst::filename(sst_dir, ks, cf, sst::version_types::mc, 4, sst::format_types::big, component_type::Data), false);
-
-        return make_ready_future<>();
     }, db_cfg_ptr).get();
 }
 
@@ -293,7 +290,7 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_pending_delete) {
                component_basename(7, component_type::TOC) + "\n" +
                component_basename(8, component_type::TOC) + "\n");
 
-    do_with_cql_env([&] (cql_test_env& e) {
+    do_with_cql_env_thread([&] (cql_test_env& e) {
         // Empty log file
         require_exist(pending_delete_dir + "/sstables-0-0.log", false);
 
@@ -320,8 +317,6 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_pending_delete) {
         require_exist(gen_filename(6, component_type::Data), false);
         require_exist(gen_filename(7, component_type::TemporaryTOC), false);
         require_exist(pending_delete_dir + "/sstables-6-8.log", false);
-
-        return make_ready_future<>();
     }, db_cfg_ptr).get();
 }
 
@@ -465,7 +460,7 @@ SEASTAR_TEST_CASE(toppartitions_cross_shard_schema_ptr) {
 }
 
 SEASTAR_THREAD_TEST_CASE(read_max_size) {
-    do_with_cql_env([] (cql_test_env& e) {
+    do_with_cql_env_thread([] (cql_test_env& e) {
         e.execute_cql("CREATE TABLE test (pk text, ck int, v text, PRIMARY KEY (pk, ck));").get();
         auto id = e.prepare("INSERT INTO test (pk, ck, v) VALUES (?, ?, ?);").get0();
 
@@ -542,7 +537,5 @@ SEASTAR_THREAD_TEST_CASE(read_max_size) {
                 }
             }
         }
-
-        return make_ready_future<>();
     }).get();
 }

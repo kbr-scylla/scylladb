@@ -395,7 +395,11 @@ int64_t time_type_impl::from_sstring(sstring_view s) {
     int64_t nanoseconds = 0;
     if (seconds_end < s.length()) {
         nanoseconds = std::stol(sstring(s.substr(seconds_end + 1)));
-        nanoseconds *= std::pow(10, 9 - (s.length() - (seconds_end + 1)));
+        auto nano_digits = s.length() - (seconds_end + 1);
+        if (nano_digits > 9) {
+            throw marshal_exception(format("more than 9 nanosecond digits: {}", s));
+        }
+        nanoseconds *= std::pow(10, 9 - nano_digits);
         if (nanoseconds < 0 || nanoseconds >= 1000 * 1000 * 1000) {
             throw marshal_exception(format("Nanosecond out of bounds ({:d}).", nanoseconds));
         }
@@ -1415,11 +1419,12 @@ struct validate_visitor {
         }
     }
     void operator()(const ascii_type_impl&) {
-        with_linearized(v, [this] (bytes_view bv) {
-            if (!utils::ascii::validate(bv)) {
+        // ASCII can be validated without linearization
+        for (auto& frag : v) {
+            if (!utils::ascii::validate(frag)) {
                 throw marshal_exception("Validation failed - non-ASCII character in an ASCII string");
             }
-        });
+        }
     }
     void operator()(const utf8_type_impl&) {
         auto error_pos = with_linearized(v, [this] (bytes_view bv) {
@@ -2657,6 +2662,12 @@ user_type_impl::idx_of_field(const bytes& name) const {
         }
     }
     return {};
+}
+
+shared_ptr<const user_type_impl>
+user_type_impl::get_instance(sstring keyspace, bytes name,
+        std::vector<bytes> field_names, std::vector<data_type> field_types, bool multi_cell) {
+    return intern::get_instance(std::move(keyspace), std::move(name), std::move(field_names), std::move(field_types), multi_cell);
 }
 
 sstring

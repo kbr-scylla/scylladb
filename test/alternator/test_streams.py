@@ -243,6 +243,9 @@ def test_get_shard_iterator(dynamodb, dynamodbstreams):
         shard_id = desc['StreamDescription']['Shards'][0]['ShardId'];
         seq = desc['StreamDescription']['Shards'][0]['SequenceNumberRange']['StartingSequenceNumber'];
 
+        # spec says shard_id must be 65 chars or less
+        assert len(shard_id) <= 65
+
         for type in ['AT_SEQUENCE_NUMBER', 'AFTER_SEQUENCE_NUMBER']: 
             iter = dynamodbstreams.get_shard_iterator(
                 StreamArn=arn, ShardId=shard_id, ShardIteratorType=type, SequenceNumber=seq
@@ -481,11 +484,25 @@ def list_shards(dynamodbstreams, arn):
     assert len(response['Shards']) <= limit
     shards = [x['ShardId'] for x in response['Shards']]
     while 'LastEvaluatedShardId' in response:
+        # 7409 kinesis ignores LastEvaluatedShardId and just looks at last shard
+        assert shards[-1] == response['LastEvaluatedShardId']
         response = dynamodbstreams.describe_stream(StreamArn=arn, Limit=limit,
             ExclusiveStartShardId=response['LastEvaluatedShardId'])['StreamDescription']
         assert len(response['Shards']) <= limit
         shards.extend([x['ShardId'] for x in response['Shards']])
+
     print('Number of shards in stream: {}'.format(len(shards)))
+    assert len(set(shards)) == len(shards)
+    # 7409 - kinesis required shards to be in lexical order.
+    # verify.
+    assert shards == sorted(shards)
+
+    # special test: ensure we get nothing more if we ask for starting at the last
+    # of the last
+    response = dynamodbstreams.describe_stream(StreamArn=arn,
+        ExclusiveStartShardId=shards[-1])['StreamDescription']
+    assert len(response['Shards']) == 0
+
     return shards
 
 # Utility function for getting shard iterators starting at "LATEST" for
@@ -495,6 +512,7 @@ def latest_iterators(dynamodbstreams, arn):
     for shard_id in list_shards(dynamodbstreams, arn):
         iterators.append(dynamodbstreams.get_shard_iterator(StreamArn=arn,
             ShardId=shard_id, ShardIteratorType='LATEST')['ShardIterator'])
+    assert len(set(iterators)) == len(iterators)
     return iterators
 
 # Utility function for fetching more content from the stream (given its
@@ -510,6 +528,7 @@ def fetch_more(dynamodbstreams, iterators, output):
         if 'NextShardIterator' in response:
             new_iterators.append(response['NextShardIterator'])
         output.extend(response['Records'])
+    assert len(set(new_iterators)) == len(new_iterators)
     return new_iterators
 
 # Utility function for comparing "output" as fetched by fetch_more(), to a list
@@ -845,9 +864,11 @@ def test_streams_no_records(test_table_ss_keys_only, dynamodbstreams):
     table, arn = test_table_ss_keys_only
     # Get just one shard - any shard - and its LATEST iterator. Because it's
     # LATEST, there will be no data to read from this iterator.
-    shard_id = dynamodbstreams.describe_stream(StreamArn=arn, Limit=1)['StreamDescription']['Shards'][0]['ShardId']
+    shard = dynamodbstreams.describe_stream(StreamArn=arn, Limit=1)['StreamDescription']['Shards'][0]
+    shard_id = shard['ShardId']
     iter = dynamodbstreams.get_shard_iterator(StreamArn=arn, ShardId=shard_id, ShardIteratorType='LATEST')['ShardIterator']
     response = dynamodbstreams.get_records(ShardIterator=iter)
+    assert 'NextShardIterator' in response or 'EndingSequenceNumber' in shard['SequenceNumberRange']
     assert 'Records' in response
     # We expect Records to be empty - there is no data at the LATEST iterator.
     assert response['Records'] == []
@@ -1007,6 +1028,11 @@ def test_streams_after_sequence_number(test_table_ss_keys_only, dynamodbstreams)
                 assert response['Records'][1]['dynamodb']['Keys'] == {'p': {'S': p}, 'c': {'S': c}}
                 sequence_number_1 = response['Records'][0]['dynamodb']['SequenceNumber']
                 sequence_number_2 = response['Records'][1]['dynamodb']['SequenceNumber']
+
+                # #7424 - AWS sdk assumes sequence numbers can be compared
+                # as bigints, and are monotonically growing.
+                assert int(sequence_number_1) < int(sequence_number_2)
+
                 # If we use the SequenceNumber of the first event to create an
                 # AFTER_SEQUENCE_NUMBER iterator, we can read the second event
                 # (only) again. We don't need a loop and a timeout, because this
