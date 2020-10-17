@@ -285,6 +285,7 @@ scylla_tests = set([
     'test/boost/checksum_utils_test',
     'test/boost/chunked_vector_test',
     'test/boost/clustering_ranges_walker_test',
+    'test/boost/column_mapping_test',
     'test/boost/commitlog_test',
     'test/boost/compound_test',
     'test/boost/compress_test',
@@ -573,6 +574,7 @@ scylla_core = (['database.cc',
                 'sstables/sstables.cc',
                 'sstables/sstables_manager.cc',
                 'sstables/mx/writer.cc',
+                'sstables/kl/writer.cc',
                 'sstables/sstable_version.cc',
                 'sstables/compress.cc',
                 'sstables/partition.cc',
@@ -588,6 +590,7 @@ scylla_core = (['database.cc',
                 'sstables/sstable_directory.cc',
                 'sstables/random_access_reader.cc',
                 'sstables/metadata_collector.cc',
+                'sstables/writer.cc',
                 'sstables/incremental_compaction_strategy.cc',
                 'transport/cql_protocol_extension.cc',
                 'transport/event.cc',
@@ -1180,7 +1183,8 @@ warnings = [w
 warnings = ' '.join(warnings + ['-Wno-error=deprecated-declarations'])
 
 optimization_flags = [
-    '--param inline-unit-growth=300',
+    '--param inline-unit-growth=300', # gcc
+    '-mllvm -inline-threshold=2500',  # clang
 ]
 optimization_flags = [o
                       for o in optimization_flags

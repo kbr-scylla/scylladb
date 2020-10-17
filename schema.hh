@@ -436,6 +436,9 @@ public:
     bool is_atomic() const { return _is_atomic; }
 };
 
+bool operator==(const column_mapping_entry& lhs, const column_mapping_entry& rhs);
+bool operator!=(const column_mapping_entry& lhs, const column_mapping_entry& rhs);
+
 // Encapsulates information needed for converting mutations between different schema versions.
 //
 // Unsafe to access across shards.
@@ -474,6 +477,8 @@ public:
     }
     friend std::ostream& operator<<(std::ostream& out, const column_mapping& cm);
 };
+
+bool operator==(const column_mapping& lhs, const column_mapping& rhs);
 
 /**
  * Augments a schema with fields related to materialized views.
