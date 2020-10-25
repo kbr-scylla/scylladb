@@ -118,11 +118,6 @@ void migration_manager::init_messaging_service()
         using canonical_mutations = std::vector<canonical_mutation>;
         const auto cm_retval_supported = options && options->remote_supports_canonical_mutation_retval;
 
-        auto src = netw::messaging_service::get_source(cinfo);
-        if (!has_compatible_schema_tables_version(src.addr)) {
-            mlogger.debug("Ignoring schema request from incompatible node: {}", src);
-            return make_ready_future<rpc::tuple<frozen_mutations, canonical_mutations>>(rpc::tuple(frozen_mutations{}, canonical_mutations{}));
-        }
         auto features = _feat.cluster_schema_features();
         auto& proxy = get_storage_proxy();
         return db::schema_tables::convert_schema_to_mutations(proxy, features).then([&proxy, cm_retval_supported] (std::vector<canonical_mutation>&& cm) {
@@ -1106,6 +1101,20 @@ future<schema_ptr> get_schema_definition(table_schema_version v, netw::messaging
                 return s;
             });
         });
+    }).then([] (schema_ptr s) {
+        // If this is a view so this schema also needs a reference to the base
+        // table.
+        if (s->is_view()) {
+            if (!s->view_info()->base_info()) {
+                auto& db = service::get_local_storage_proxy().get_db().local();
+                // This line might throw a no_such_column_family
+                // It should be fine since if we tried to register a view for which
+                // we don't know the base table, our registry is broken.
+                schema_ptr base_schema = db.find_schema(s->view_info()->base_id());
+                s->view_info()->set_base_info(s->view_info()->make_base_dependent_view_info(*base_schema));
+            }
+        }
+        return s;
     });
 }
 
