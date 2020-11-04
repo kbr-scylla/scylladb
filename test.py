@@ -22,6 +22,7 @@ import logging
 import multiprocessing
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import signal
@@ -205,6 +206,9 @@ class TestSuite(ABC):
             if shortname in disable_tests or (mode not in ["release", "dev"] and shortname in skip_tests):
                 continue
             t = os.path.join(self.name, shortname)
+            # Skip tests which are not configured, and hence are not built
+            if os.path.join("test", t) not in options.tests:
+                continue
             patterns = options.name if options.name else [t]
             if options.skip_pattern and options.skip_pattern in t:
                 continue
@@ -696,7 +700,7 @@ def parse_cmd_line():
     """ Print usage and process command line options. """
     all_modes = ['debug', 'release', 'dev', 'sanitize']
     sysmem = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-    testmem = 2e9
+    testmem = 6e9
     cpus_per_test_job = 1
     default_num_jobs_mem = ((sysmem - 4e9) // testmem)
     default_num_jobs_cpu = multiprocessing.cpu_count() // cpus_per_test_job
@@ -725,7 +729,7 @@ def parse_cmd_line():
                         help="Run only tests for given build mode(s)")
     parser.add_argument('--repeat', action="store", default="1", type=int,
                         help="number of times to repeat test execution")
-    parser.add_argument('--timeout', action="store", default="3000", type=int,
+    parser.add_argument('--timeout', action="store", default="12000", type=int,
                         help="timeout value for test execution")
     parser.add_argument('--verbose', '-v', action='store_true', default=False,
                         help='Verbose reporting')
@@ -749,10 +753,14 @@ def parse_cmd_line():
         args.verbose = True
 
     if not args.modes:
-        out = subprocess.Popen(['ninja', 'mode_list'], stdout=subprocess.PIPE).communicate()[0].decode()
-        # [1/1] List configured modes
-        # debug release dev
-        args.modes = out.split('\n')[1].split(' ')
+        try:
+            out = subprocess.Popen(['ninja', 'mode_list'], stdout=subprocess.PIPE).communicate()[0].decode()
+            # [1/1] List configured modes
+            # debug release dev
+            args.modes= re.sub(r'.* List configured modes\n(.*)\n', r'\1', out, 1, re.DOTALL).split("\n")[-1].split(' ')
+        except Exception as e:
+            print(palette.fail("Failed to read output of `ninja mode_list`: please run ./configure.py first"))
+            raise
 
     def prepare_dir(dirname, pattern):
         # Ensure the dir exists
@@ -769,6 +777,15 @@ def parse_cmd_line():
         prepare_dir(os.path.join(args.tmpdir, mode), "*.reject")
         prepare_dir(os.path.join(args.tmpdir, mode, "xml"), "*.xml")
 
+    # Get the list of tests configured by configure.py
+    try:
+        out = subprocess.Popen(['ninja', 'unit_test_list'], stdout=subprocess.PIPE).communicate()[0].decode()
+        # [1/1] List configured unit tests
+        args.tests = set(re.sub(r'.* List configured unit tests\n(.*)\n', r'\1', out, 1, re.DOTALL).split("\n"))
+    except Exception as e:
+        print(palette.fail("Failed to read output of `ninja unit_test_list`: please run ./configure.py first"))
+        raise
+
     return args
 
 
@@ -781,8 +798,12 @@ def find_tests(options):
                 suite.add_test_list(mode, options)
 
     if not TestSuite.test_count():
-        print("Test {} not found".format(palette.path(options.name[0])))
-        sys.exit(1)
+        if len(options.name):
+            print("Test {} not found".format(palette.path(options.name[0])))
+            sys.exit(1)
+        else:
+            print(palette.warn("No tests found. Please enable tests in ./configure.py first."))
+            sys.exit(0)
 
     logging.info("Found %d tests, repeat count is %d, starting %d concurrent jobs",
                  TestSuite.test_count(), options.repeat, options.jobs)
@@ -846,9 +867,10 @@ def print_summary(failed_tests):
     if failed_tests:
         print("The following test(s) have failed: {}".format(
             palette.path(" ".join([t.name for t in failed_tests]))))
-        for test in failed_tests:
-            test.print_summary()
-            print("-"*78)
+        if not output_is_a_tty:
+            for test in failed_tests:
+                test.print_summary()
+                print("-"*78)
         print("Summary: {} of the total {} tests failed".format(
             len(failed_tests), TestSuite.test_count()))
 

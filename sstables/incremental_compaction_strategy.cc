@@ -246,7 +246,7 @@ incremental_compaction_strategy::incremental_compaction_strategy(const std::map<
     }
     _fragment_size = fragment_size_in_mb*1024*1024;
 
-    if (option_value = compaction_strategy_impl::get_value(options, SPACE_AMPLIFICATION_GOAL_OPTION)) {
+    if ((option_value = compaction_strategy_impl::get_value(options, SPACE_AMPLIFICATION_GOAL_OPTION))) {
         _space_amplification_goal = property_definitions::to_double(SPACE_AMPLIFICATION_GOAL_OPTION, option_value, 0.0);
         if (_space_amplification_goal <= 1.0) {
             throw exceptions::configuration_exception("Incremental Compaction Strategy - " \

@@ -633,7 +633,8 @@ public:
             auto provider = _ctxt->get_provider(_opts);
 
             return provider->key(get_key_info(_opts)).then([f, this, cfg_file, filename, &provider = *provider](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k_id) {
-                auto&& [k, id] = k_id;
+                auto&& k = std::get<0>(k_id);
+                auto&& id = std::get<1>(k_id);
                 std::ostringstream ss;
                 for (auto&p : _opts) {
                     ss << p.first << "=" << p.second << std::endl;

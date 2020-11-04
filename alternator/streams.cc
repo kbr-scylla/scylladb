@@ -290,7 +290,9 @@ struct sequence_number {
 sequence_number::sequence_number(std::string_view v) 
     : uuid([&] {
         using namespace boost::multiprecision;
-        uint128_t tmp{v};
+        // workaround for weird clang 10 bug when calling constructor with
+        // view directly.
+        uint128_t tmp{std::string(v)};
         // see above
         return utils::UUID_gen::get_time_UUID_raw(uint64_t(tmp >> 64), uint64_t(tmp & std::numeric_limits<uint64_t>::max()));
     }())
@@ -475,6 +477,8 @@ future<executor::request_return_type> executor::describe_stream(client_state& cl
             status = "ENABLED";
         }
     } 
+
+    auto ttl = std::chrono::seconds(opts.ttl());
     
     rjson::set(stream_desc, "StreamStatus", rjson::from_string(status));
 
@@ -498,10 +502,10 @@ future<executor::request_return_type> executor::describe_stream(client_state& cl
     // cannot really "resume" query, must iterate all data. because we cannot query neither "time" (pk) > something,
     // or on expired...
     // TODO: maybe add secondary index to topology table to enable this?
-    return _sdks.cdc_get_versioned_streams({ tm.count_normal_token_owners() }).then([this, &db, schema, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc)](std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
+    return _sdks.cdc_get_versioned_streams({ tm.count_normal_token_owners() }).then([this, &db, schema, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc), ttl](std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
 
-        // filter out cdc generations older than the table or now() - dynamodb_streams_max_window (24h)
-        auto low_ts = std::max(as_timepoint(schema->id()), db_clock::now() - dynamodb_streams_max_window);
+        // filter out cdc generations older than the table or now() - cdc::ttl (typically dynamodb_streams_max_window - 24h)
+        auto low_ts = std::max(as_timepoint(schema->id()), db_clock::now() - ttl);
 
         auto i = topologies.lower_bound(low_ts);
         // need first gen _intersecting_ the timestamp.
@@ -849,6 +853,7 @@ future<executor::request_return_type> executor::get_records(client_state& client
 
     static const bytes timestamp_column_name = cdc::log_meta_column_name_bytes("time");
     static const bytes op_column_name = cdc::log_meta_column_name_bytes("operation");
+    static const bytes eor_column_name = cdc::log_meta_column_name_bytes("end_of_batch");
 
     auto key_names = boost::copy_range<std::unordered_set<std::string>>(
         boost::range::join(std::move(base->partition_key_columns()), std::move(base->clustering_key_columns()))
@@ -872,7 +877,7 @@ future<executor::request_return_type> executor::get_records(client_state& client
     std::transform(cks.begin(), cks.end(), std::back_inserter(columns), [](auto& c) { return &c; });
 
     auto regular_columns = boost::copy_range<query::column_id_vector>(schema->regular_columns() 
-        | boost::adaptors::filtered([](const column_definition& cdef) { return cdef.name() == op_column_name || !cdc::is_cdc_metacolumn_name(cdef.name_as_text()); })
+        | boost::adaptors::filtered([](const column_definition& cdef) { return cdef.name() == op_column_name || cdef.name() == eor_column_name || !cdc::is_cdc_metacolumn_name(cdef.name_as_text()); })
         | boost::adaptors::transformed([&] (const column_definition& cdef) { columns.emplace_back(&cdef); return cdef.id; })
     );
 
@@ -882,8 +887,17 @@ future<executor::request_return_type> executor::get_records(client_state& client
     auto partition_slice = query::partition_slice(
         std::move(bounds)
         , {}, std::move(regular_columns), selection->get_query_options());
+
+	auto& opts = base->cdc_options();
+	auto mul = 2; // key-only, allow for delete + insert
+    if (opts.preimage()) {
+        ++mul;
+    }
+    if (opts.postimage()) {
+        ++mul;
+    }
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice, _proxy.get_max_result_size(partition_slice),
-            query::row_limit(limit * 4));
+            query::row_limit(limit * mul));
 
     return _proxy.query(schema, std::move(command), std::move(partition_ranges), cl, service::storage_proxy::coordinator_query_options(default_timeout(), std::move(permit), client_state)).then(
             [this, schema, partition_slice = std::move(partition_slice), selection = std::move(selection), start_time = std::move(start_time), limit, key_names = std::move(key_names), attr_names = std::move(attr_names), type, iter, high_ts] (service::storage_proxy::coordinator_query_result qr) mutable {       
@@ -903,6 +917,11 @@ future<executor::request_return_type> executor::get_records(client_state& client
         auto ts_index = std::distance(metadata.get_names().begin(), 
             std::find_if(metadata.get_names().begin(), metadata.get_names().end(), [](const lw_shared_ptr<cql3::column_specification>& cdef) {
                 return cdef->name->name() == timestamp_column_name;
+            })
+        );
+        auto eor_index = std::distance(metadata.get_names().begin(), 
+            std::find_if(metadata.get_names().begin(), metadata.get_names().end(), [](const lw_shared_ptr<cql3::column_specification>& cdef) {
+                return cdef->name->name() == eor_column_name;
             })
         );
 
@@ -930,15 +949,7 @@ future<executor::request_return_type> executor::get_records(client_state& client
         for (auto& row : result_set->rows()) {
             auto op = static_cast<cdc::operation>(value_cast<op_utype>(data_type_for<op_utype>()->deserialize(*row[op_index])));
             auto ts = value_cast<utils::UUID>(data_type_for<utils::UUID>()->deserialize(*row[ts_index]));
-
-            if (timestamp && timestamp != ts) {
-                maybe_add_record();
-                if (limit == 0) {
-                    break;
-                }
-            }
-
-            timestamp = ts;
+            auto eor = row[eor_index].has_value() ? value_cast<bool>(boolean_type->deserialize(*row[eor_index])) : false;
 
             if (!dynamodb.HasMember("Keys")) {
                 auto keys = rjson::empty_object();
@@ -991,9 +1002,13 @@ future<executor::request_return_type> executor::get_records(client_state& client
                 rjson::set(record, "eventName", "REMOVE");
                 break;
             }
-        }
-        if (limit > 0 && timestamp) {
-            maybe_add_record();
+            if (eor) {
+                maybe_add_record();
+                timestamp = ts;
+                if (limit == 0) {
+                    break;
+                }
+            }
         }
 
         auto ret = rjson::empty_object();

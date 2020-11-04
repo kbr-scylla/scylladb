@@ -57,6 +57,22 @@ public:
 template <typename T>
 extern config_type config_type_for;
 
+template<>
+extern config_type config_type_for<uint32_t>;
+
+template<>
+extern config_type config_type_for<sstring>;
+
+template<>
+extern config_type config_type_for<bool>;
+
+template<>
+extern config_type config_type_for<std::unordered_map<sstring, sstring>>;
+
+template<>
+extern config_type config_type_for<std::unordered_map<sstring, std::unordered_map<sstring, sstring>>>;
+
+
 class config_file {
     static thread_local unsigned s_shard_id;
     struct any_value {

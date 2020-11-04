@@ -109,9 +109,9 @@ have_gnutls = any([lib.startswith('libgnutls.so')
 gzip_process = subprocess.Popen("pigz > "+output, shell=True, stdin=subprocess.PIPE)
 
 ar = tarfile.open(fileobj=gzip_process.stdin, mode='w|')
-# relocatable package format version = 2
+# relocatable package format version = 2.1
 with open('build/.relocatable_package_version', 'w') as f:
-    f.write('2\n')
+    f.write('2.1\n')
 ar.add('build/.relocatable_package_version', arcname='.relocatable_package_version')
 
 for exe in executables:
@@ -143,7 +143,9 @@ ar.reloc_add('licenses')
 ar.reloc_add('swagger-ui')
 ar.reloc_add('api')
 def exclude_submodules(tarinfo):
-    if tarinfo.name in ('scylla/tools/jmx', 'scylla/tools/java'):
+    if tarinfo.name in ('scylla/tools/jmx',
+                        'scylla/tools/java',
+                        'scylla/tools/python3'):
         return None
     return tarinfo
 ar.reloc_add('tools', filter=exclude_submodules)

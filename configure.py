@@ -239,18 +239,18 @@ modes = {
         'stack-usage-threshold': 1024*40,
     },
     'release': {
-        'cxxflags': '',
-        'cxx_ld_flags': '-O3 -ffunction-sections -fdata-sections -Wl,--gc-sections',
+        'cxxflags': '-O3 -ffunction-sections -fdata-sections ',
+        'cxx_ld_flags': '-Wl,--gc-sections',
         'stack-usage-threshold': 1024*13,
     },
     'dev': {
-        'cxxflags': '-DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
-        'cxx_ld_flags': '-O1',
+        'cxxflags': '-O1 -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
+        'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*21,
     },
     'sanitize': {
-        'cxxflags': '-DDEBUG -DSANITIZE -DDEBUG_LSA_SANITIZER -DSCYLLA_ENABLE_ERROR_INJECTION',
-        'cxx_ld_flags': '-Os',
+        'cxxflags': '-Os -DDEBUG -DSANITIZE -DDEBUG_LSA_SANITIZER -DSCYLLA_ENABLE_ERROR_INJECTION',
+        'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*50,
     }
 }
@@ -302,6 +302,7 @@ scylla_tests = set([
     'test/boost/crc_test',
     'test/boost/data_listeners_test',
     'test/boost/database_test',
+    'test/boost/double_decker_test',
     'test/boost/duration_test',
     'test/boost/dynamic_bitset_test',
     'test/boost/enum_option_test',
@@ -317,6 +318,7 @@ scylla_tests = set([
     'test/boost/gossiping_property_file_snitch_test',
     'test/boost/hash_test',
     'test/boost/idl_test',
+    'test/boost/imr_test',
     'test/boost/input_stream_test',
     'test/boost/json_cql_query_test',
     'test/boost/json_test',
@@ -407,7 +409,7 @@ scylla_tests = set([
     'test/perf/perf_fast_forward',
     'test/perf/perf_hash',
     'test/perf/perf_mutation',
-    'test/perf/perf_bptree',
+    'test/perf/perf_collection',
     'test/perf/perf_row_cache_update',
     'test/perf/perf_simple_query',
     'test/perf/perf_sstable',
@@ -466,9 +468,9 @@ arg_parser.add_argument('--ldflags', action='store', dest='user_ldflags', defaul
                         help='Extra flags for the linker')
 arg_parser.add_argument('--target', action='store', dest='target', default=default_target_arch(),
                         help='Target architecture (-march)')
-arg_parser.add_argument('--compiler', action='store', dest='cxx', default='g++',
+arg_parser.add_argument('--compiler', action='store', dest='cxx', default='clang++',
                         help='C++ compiler path')
-arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='gcc',
+arg_parser.add_argument('--c-compiler', action='store', dest='cc', default='clang',
                         help='C compiler path')
 add_tristate(arg_parser, name='dpdk', dest='dpdk',
                         help='Use dpdk (from seastar dpdk sources) (default=True for release builds)')
@@ -1058,7 +1060,7 @@ tests_not_using_seastar_test_framework = set([
     'test/perf/perf_cql_parser',
     'test/perf/perf_hash',
     'test/perf/perf_mutation',
-    'test/perf/perf_bptree',
+    'test/perf/perf_collection',
     'test/perf/perf_row_cache_update',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
@@ -1174,6 +1176,8 @@ warnings = [
     '-Wno-implicit-int-float-conversion',
     '-Wno-delete-abstract-non-virtual-dtor',
     '-Wno-uninitialized-const-reference',
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=77728
+    '-Wno-psabi',
 ]
 
 warnings = [w
@@ -1189,11 +1193,11 @@ optimization_flags = [
 optimization_flags = [o
                       for o in optimization_flags
                       if flag_supported(flag=o, compiler=args.cxx)]
-modes['release']['cxx_ld_flags'] += ' ' + ' '.join(optimization_flags)
+modes['release']['cxxflags'] += ' ' + ' '.join(optimization_flags)
 
 if flag_supported(flag='-Wstack-usage=4096', compiler=args.cxx):
     for mode in modes:
-        modes[mode]['cxx_ld_flags'] += f' -Wstack-usage={modes[mode]["stack-usage-threshold"]} -Wno-error=stack-usage='
+        modes[mode]['cxxflags'] += f' -Wstack-usage={modes[mode]["stack-usage-threshold"]} -Wno-error=stack-usage='
 
 linker_flags = linker_flags(compiler=args.cxx)
 
@@ -1360,6 +1364,13 @@ libdeflate_cflags = seastar_cflags
 
 MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev', 'sanitize' : 'Sanitize' }
 
+# cmake likes to separate things with semicolons
+def semicolon_separated(*flags):
+    # original flags may be space separated, so convert to string still
+    # using spaces
+    f = ' '.join(flags)
+    return re.sub(' +', ';', f)
+
 def configure_seastar(build_dir, mode):
     seastar_build_dir = os.path.join(build_dir, mode, 'seastar')
 
@@ -1368,8 +1379,8 @@ def configure_seastar(build_dir, mode):
         '-DCMAKE_C_COMPILER={}'.format(args.cc),
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON',
-        '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']).replace(' ', ';')),
-        '-DSeastar_LD_FLAGS={}'.format(seastar_ldflags),
+        '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags).replace(' ', ';')),
+        '-DSeastar_LD_FLAGS={}'.format(semicolon_separated(seastar_ldflags, modes[mode]['cxx_ld_flags'])),
         '-DSeastar_CXX_DIALECT=gnu++20',
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
@@ -1462,7 +1473,6 @@ abseil_libs = ['absl/' + lib for lib in [
     'base/libabsl_malloc_internal.a',
     'base/libabsl_spinlock_wait.a',
     'base/libabsl_base.a',
-    'base/libabsl_dynamic_annotations.a',
     'base/libabsl_raw_logging_internal.a',
     'base/libabsl_exponential_biased.a',
     'base/libabsl_throw_delegate.a']]
@@ -1998,6 +2008,13 @@ with open(buildfile_tmp, 'w') as f:
         build mode_list: mode_list
         default {modes_list}
         ''').format(modes_list=' '.join(default_modes), **globals()))
+    unit_test_list = set(test for test in build_artifacts if test in set(tests))
+    f.write(textwrap.dedent('''\
+        rule unit_test_list
+            command = /usr/bin/env echo -e '{unit_test_list}'
+            description = List configured unit tests
+        build unit_test_list: unit_test_list
+        ''').format(unit_test_list="\\n".join(unit_test_list)))
     f.write(textwrap.dedent('''\
         build always: phony
         rule scylla_version_gen
@@ -2006,6 +2023,6 @@ with open(buildfile_tmp, 'w') as f:
         rule debian_files_gen
             command = ./dist/debian/debian_files_gen.py
         build $builddir/debian/debian: debian_files_gen | always
-        ''').format(modes_list=' '.join(build_modes), **globals()))
+        ''').format(**globals()))
 
 os.rename(buildfile_tmp, buildfile)

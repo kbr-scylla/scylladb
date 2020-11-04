@@ -721,7 +721,9 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
 
             kmip_log.debug("{}: Creating key {}", _name, info);
 
-            auto [kdl_attrs, crypt_alg] = make_attributes(info);
+            auto kdl_attrs_crypt_alg = make_attributes(info);
+            auto&& kdl_attrs = std::get<0>(kdl_attrs_crypt_alg);
+            auto&& crypt_alg = std::get<1>(kdl_attrs_crypt_alg);
 
             // TODO: this is inefficient. We can probably put this in a single batch.
             kmip_cmd cmd;

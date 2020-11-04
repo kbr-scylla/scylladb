@@ -164,14 +164,19 @@ public:
 
 static thread_local const sstring UNCOMPRESSED_FILTERING_AND_FORWARDING_PATH =
     "test/resource/sstables/3.x/uncompressed/filtering_and_forwarding";
-static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_filtering_and_forwarding_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("s", int32_type, column_kind::static_column)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_SCHEMA =
+        make_uncompressed_filtering_and_forwarding_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -412,14 +417,19 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
 
 static thread_local const sstring UNCOMPRESSED_SKIP_USING_INDEX_ROWS_PATH =
     "test/resource/sstables/3.x/uncompressed/skip_using_index_rows";
-static thread_local const schema_ptr UNCOMPRESSED_SKIP_USING_INDEX_ROWS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_skip_using_index_rows_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("st", int32_type, column_kind::static_column)
         .with_column("rc", utf8_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_SKIP_USING_INDEX_ROWS_SCHEMA =
+        make_uncompressed_skip_using_index_rows_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_skip_using_index_rows) {
   test_env::do_with_async([] (test_env& env) {
@@ -655,8 +665,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_skip_using_index_rows) {
  */
 static thread_local const sstring UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_PATH =
     "test/resource/sstables/3.x/uncompressed/filtering_and_forwarding_range_tombstones";
-static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_filtering_and_forwarding_range_tombstones_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck1", int32_type, column_kind::clustering_key)
         .with_column("ck2", int32_type, column_kind::clustering_key)
@@ -664,6 +675,10 @@ static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE
         .with_column("rc", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_FILTERING_AND_FORWARDING_RANGE_TOMBSTONES_SCHEMA =
+        make_uncompressed_filtering_and_forwarding_range_tombstones_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_range_tombstones_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -984,8 +999,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_range_tombst
  */
 static thread_local const sstring UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_PATH =
     "test/resource/sstables/3.x/uncompressed/slicing_interleaved_rows_and_rts";
-static thread_local const schema_ptr UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_slicing_interleaved_rows_and_rts_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck1", int32_type, column_kind::clustering_key)
         .with_column("ck2", int32_type, column_kind::clustering_key)
@@ -993,6 +1009,10 @@ static thread_local const schema_ptr UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_R
         .with_column("rc", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_SLICING_INTERLEAVED_ROWS_AND_RTS_SCHEMA =
+        make_uncompressed_slicing_interleaved_rows_and_rts_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_slicing_interleaved_rows_and_rts_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -1189,14 +1209,19 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_slicing_interleaved_rows_and_rts_read
 
 static thread_local const sstring UNCOMPRESSED_STATIC_ROW_PATH =
     "test/resource/sstables/3.x/uncompressed/static_row";
-static thread_local const schema_ptr UNCOMPRESSED_STATIC_ROW_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_static_row_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("s", int32_type, column_kind::static_column)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_STATIC_ROW_SCHEMA =
+        make_uncompressed_static_row_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_static_row_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -1313,8 +1338,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_random_partitioner) {
 
 static thread_local const sstring UNCOMPRESSED_COMPOUND_STATIC_ROW_PATH =
     "test/resource/sstables/3.x/uncompressed/compound_static_row";
-static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_STATIC_ROW_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_compound_static_row_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("s_int", int32_type, column_kind::static_column)
@@ -1323,6 +1349,10 @@ static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_STATIC_ROW_SCHEMA =
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_STATIC_ROW_SCHEMA =
+        make_uncompressed_compound_static_row_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_compound_static_row_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -1405,11 +1435,16 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_compound_static_row_read) {
 
 static thread_local const sstring UNCOMPRESSED_PARTITION_KEY_ONLY_PATH =
     "test/resource/sstables/3.x/uncompressed/partition_key_only";
-static thread_local const schema_ptr UNCOMPRESSED_PARTITION_KEY_ONLY_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_partition_key_only_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_PARTITION_KEY_ONLY_SCHEMA =
+        make_uncompressed_partition_key_only_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_partition_key_only_load) {
   test_env::do_with_async([] (test_env& env) {
@@ -1463,12 +1498,17 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_partition_key_only_read) {
 
 static thread_local const sstring UNCOMPRESSED_PARTITION_KEY_WITH_VALUE_PATH =
     "test/resource/sstables/3.x/uncompressed/partition_key_with_value";
-static thread_local const schema_ptr UNCOMPRESSED_PARTITION_KEY_WITH_VALUE_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_partition_key_with_value_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_PARTITION_KEY_WITH_VALUE_SCHEMA =
+        make_uncompressed_partition_key_with_value_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_partition_key_with_value_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -1526,6 +1566,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_partition_key_with_value_read) {
 
 static thread_local const sstring UNCOMPRESSED_COUNTERS_PATH =
     "test/resource/sstables/3.x/uncompressed/counters";
+
 static thread_local const schema_ptr UNCOMPRESSED_COUNTERS_SCHEMA =
     schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
@@ -1643,8 +1684,9 @@ static const sstring DEFLATE_PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_TYPES_PATH =
     "test/resource/sstables/3.x/deflate/partition_key_with_values_of_different_types";
 static const sstring ZSTD_PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_TYPES_PATH =
     "test/resource/sstables/3.x/zstd/partition_key_with_values_of_different_types";
-static thread_local const schema_builder PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_TYPES_SCHEMA_BUILDER =
-    schema_builder("test_ks", "test_table")
+
+static schema_builder make_partition_key_with_values_of_different_types_schema_builder() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("bool_val", boolean_type)
         .with_column("double_val", double_type)
@@ -1655,6 +1697,10 @@ static thread_local const schema_builder PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_
         .with_column("timeuuid_val", timeuuid_type)
         .with_column("uuid_val", uuid_type)
         .with_column("text_val", utf8_type);
+}
+
+static thread_local const schema_builder PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_TYPES_SCHEMA_BUILDER =
+        make_partition_key_with_values_of_different_types_schema_builder();
 
 static void test_partition_key_with_values_of_different_types_read(const sstring& path, compression_parameters cp) {
   test_env::do_with_async([path, cp] (test_env& env) {
@@ -1792,8 +1838,9 @@ SEASTAR_THREAD_TEST_CASE(test_zstd_partition_key_with_values_of_different_types_
 
 static thread_local const sstring ZSTD_MULTIPLE_CHUNKS_PATH =
     "test/resource/sstables/3.x/zstd/multiple_chunks";
-static thread_local const schema_ptr ZSTD_MULTIPLE_CHUNKS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_zstd_multiple_chunks_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("val1", int32_type, column_kind::partition_key)
         .with_column("val2", int32_type, column_kind::clustering_key)
         .set_compressor_params(compression_parameters{compressor::create({
@@ -1801,6 +1848,10 @@ static thread_local const schema_ptr ZSTD_MULTIPLE_CHUNKS_SCHEMA =
             {"compression_level", "5"},
             {"chunk_length_in_kb", "4"}})})
         .build();
+}
+
+static thread_local const schema_ptr ZSTD_MULTIPLE_CHUNKS_SCHEMA =
+        make_zstd_multiple_chunks_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_zstd_compression) {
   test_env::do_with_async([] (test_env& env) {
@@ -1859,8 +1910,9 @@ SEASTAR_THREAD_TEST_CASE(test_zstd_compression) {
 
 static thread_local const sstring UNCOMPRESSED_SUBSET_OF_COLUMNS_PATH =
     "test/resource/sstables/3.x/uncompressed/subset_of_columns";
-static thread_local const schema_ptr UNCOMPRESSED_SUBSET_OF_COLUMNS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_subset_of_columns_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("bool_val", boolean_type)
         .with_column("double_val", double_type)
@@ -1873,6 +1925,10 @@ static thread_local const schema_ptr UNCOMPRESSED_SUBSET_OF_COLUMNS_SCHEMA =
         .with_column("text_val", utf8_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_SUBSET_OF_COLUMNS_SCHEMA =
+        make_uncompressed_subset_of_columns_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_subset_of_columns_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2031,8 +2087,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_subset_of_columns_read) {
 
 static thread_local const sstring UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE_PATH =
     "test/resource/sstables/3.x/uncompressed/large_subset_of_columns_sparse";
-static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_large_subset_of_columns_sparse_schema() {
+  return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("val1", int32_type)
         .with_column("val2", int32_type)
@@ -2100,6 +2157,10 @@ static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE
         .with_column("val64", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_SPARSE_SCHEMA =
+        make_uncompressed_large_subset_of_columns_sparse_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_sparse_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2244,8 +2305,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_sparse_read) 
 
 static thread_local const sstring UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_PATH =
     "test/resource/sstables/3.x/uncompressed/large_subset_of_columns_dense";
-static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_large_subset_of_columns_dense_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("val1", int32_type)
         .with_column("val2", int32_type)
@@ -2313,6 +2375,10 @@ static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_
         .with_column("val64", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_LARGE_SUBSET_OF_COLUMNS_DENSE_SCHEMA =
+        make_uncompressed_large_subset_of_columns_dense_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_dense_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2410,13 +2476,18 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_large_subset_of_columns_dense_read) {
 // DELETE val FROM test_ks.test_table WHERE pk = 1 AND ck = 104;
 
 static thread_local const sstring UNCOMPRESSED_DELETED_CELLS_PATH = "test/resource/sstables/3.x/uncompressed/deleted_cells";
-static thread_local const schema_ptr UNCOMPRESSED_DELETED_CELLS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_deleted_cells_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_DELETED_CELLS_SCHEMA =
+        make_uncompressed_deleted_cells_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_deleted_cells_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2493,13 +2564,18 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_deleted_cells_read) {
 // DELETE FROM test_ks.test_table WHERE pk = 1 AND ck > 108;
 
 static thread_local const sstring UNCOMPRESSED_RANGE_TOMBSTONES_SIMPLE_PATH = "test/resource/sstables/3.x/uncompressed/range_tombstones_simple";
-static thread_local const schema_ptr UNCOMPRESSED_RANGE_TOMBSTONES_SIMPLE_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_range_tombstones_simple_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_RANGE_TOMBSTONES_SIMPLE_SCHEMA =
+        make_uncompressed_range_tombstones_simple_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_range_tombstones_simple_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2565,13 +2641,18 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_range_tombstones_simple_read) {
 // DELETE FROM test_ks.test_table WHERE pk = 1 AND ck1 > 3;
 
 static thread_local const sstring UNCOMPRESSED_RANGE_TOMBSTONES_PARTIAL_PATH = "test/resource/sstables/3.x/uncompressed/range_tombstones_partial";
-static thread_local const schema_ptr UNCOMPRESSED_RANGE_TOMBSTONES_PARTIAL_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static  schema_ptr make_uncompressed_range_tombstones_partial_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck1", int32_type, column_kind::clustering_key)
         .with_column("ck2", int32_type, column_kind::clustering_key)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_RANGE_TOMBSTONES_PARTIAL_SCHEMA =
+        make_uncompressed_range_tombstones_partial_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_range_tombstones_partial_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2639,13 +2720,18 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_range_tombstones_partial_read) {
 // INSERT INTO test_ks.test_table(pk, ck, val) VALUES(5, 105, 1005);
 
 static thread_local const sstring UNCOMPRESSED_SIMPLE_PATH = "test/resource/sstables/3.x/uncompressed/simple";
-static thread_local const schema_ptr UNCOMPRESSED_SIMPLE_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_simple_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck", int32_type, column_kind::clustering_key)
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_SIMPLE_SCHEMA =
+        make_uncompressed_simple_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_simple_read_toc) {
   test_env::do_with_async([] (test_env& env) {
@@ -2774,8 +2860,9 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_simple_read) {
 //        VALUES(5, 105, 'This is a string for 5',  f1badb6f-80a0-4eef-90df-b3651d9a5578, '10.0.0.5', 1005);
 
 static thread_local const sstring UNCOMPRESSED_COMPOUND_CK_PATH = "test/resource/sstables/3.x/uncompressed/compound_ck";
-static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_CK_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_compound_ck_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("ck_int", int32_type, column_kind::clustering_key)
         .with_column("ck_text", utf8_type, column_kind::clustering_key)
@@ -2784,6 +2871,10 @@ static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_CK_SCHEMA =
         .with_column("val", int32_type)
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_COMPOUND_CK_SCHEMA =
+        make_uncompressed_compound_ck_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_compound_ck_read) {
   test_env::do_with_async([] (test_env& env) {
@@ -2872,14 +2963,19 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_compound_ck_read) {
 
 static thread_local const sstring UNCOMPRESSED_COLLECTIONS_PATH =
     "test/resource/sstables/3.x/uncompressed/collections";
-static thread_local const schema_ptr UNCOMPRESSED_COLLECTIONS_SCHEMA =
-    schema_builder("test_ks", "test_table")
+
+static schema_ptr make_uncompressed_collections_schema() {
+    return schema_builder("test_ks", "test_table")
         .with_column("pk", int32_type, column_kind::partition_key)
         .with_column("set_val", set_type_impl::get_instance(int32_type, true))
         .with_column("list_val", list_type_impl::get_instance(utf8_type, true))
         .with_column("map_val", map_type_impl::get_instance(int32_type, utf8_type, true))
         .set_compressor_params(compression_parameters::no_compression())
         .build();
+}
+
+static thread_local const schema_ptr UNCOMPRESSED_COLLECTIONS_SCHEMA =
+        make_uncompressed_collections_schema();
 
 SEASTAR_THREAD_TEST_CASE(test_uncompressed_collections_read) {
   test_env::do_with_async([] (test_env& env) {

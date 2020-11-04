@@ -28,6 +28,7 @@ else
 fi
 
 debian_base_packages=(
+    clang
     liblua5.3-dev
     python3-pyparsing
     python3-colorama
@@ -46,6 +47,7 @@ debian_base_packages=(
 )
 
 fedora_packages=(
+    clang
     lua-devel
     yaml-cpp-devel
     thrift-devel
@@ -59,6 +61,7 @@ fedora_packages=(
     python
     sudo
     java-1.8.0-openjdk-headless
+    java-1.8.0-openjdk-devel
     ant
     ant-junit
     maven

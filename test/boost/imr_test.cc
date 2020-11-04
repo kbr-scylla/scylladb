@@ -7,8 +7,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#define BOOST_TEST_MODULE imr
-#include <boost/test/unit_test.hpp>
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 
 #include <algorithm>
 #include <random>
@@ -47,7 +47,7 @@ struct generate_flags_type<std::index_sequence<IdxAB...>, std::index_sequence<Id
                             B, std::integral_constant<ssize_t, IdxBC>..., C>;
 };
 
-BOOST_AUTO_TEST_CASE(test_flags) {
+SEASTAR_THREAD_TEST_CASE(test_flags) {
     using flags_type = generate_flags_type<std::make_index_sequence<7>, std::make_index_sequence<8>>::type;
     static constexpr size_t expected_size = 3;
 
@@ -101,7 +101,7 @@ struct test_pod_type {
     }
 };
 
-BOOST_AUTO_TEST_CASE(test_pod) {
+SEASTAR_THREAD_TEST_CASE(test_pod) {
     auto generate_object = [] {
         std::uniform_int_distribution<decltype(test_pod_type::x)> dist_x;
         std::uniform_int_distribution<decltype(test_pod_type::y)> dist_y;
@@ -149,7 +149,7 @@ size_t test_buffer_context::size_of<A>() const noexcept {
     return _size;
 }
 
-BOOST_AUTO_TEST_CASE(test_buffer) {
+SEASTAR_THREAD_TEST_CASE(test_buffer) {
     using buffer_type = imr::buffer<A>;
 
     auto test = [] (auto serialize) {
@@ -205,7 +205,7 @@ bool test_optional_context::is_present<B>() const noexcept {
     return false;
 }
 
-BOOST_AUTO_TEST_CASE(test_optional) {
+SEASTAR_THREAD_TEST_CASE(test_optional) {
     using optional_type1 = imr::optional<A, imr::pod<uint32_t>>;
     using optional_type2 = imr::optional<B, imr::pod<uint32_t>>;
 
@@ -266,7 +266,7 @@ auto test_variant_context::active_alternative_of<A>() const noexcept {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_variant) {
+SEASTAR_THREAD_TEST_CASE(test_variant) {
     for (auto i = 0; i < random_test_iteration_count; i++) {
         unsigned alternative_idx = tests::random::get_int<unsigned>(2);
 
@@ -327,7 +327,7 @@ BOOST_AUTO_TEST_CASE(test_variant) {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_structure_with_fixed) {
+SEASTAR_THREAD_TEST_CASE(test_structure_with_fixed) {
     using S = imr::structure<imr::member<A, imr::pod<uint8_t>>,
                              imr::member<B, imr::pod<int64_t>>,
                              imr::member<C, imr::pod<uint32_t>>>;
@@ -403,7 +403,7 @@ size_t test_structure_context::size_of<C>() const noexcept {
     return _c_size_of;
 }
 
-BOOST_AUTO_TEST_CASE(test_structure_with_context) {
+SEASTAR_THREAD_TEST_CASE(test_structure_with_context) {
     using S = imr::structure<imr::member<A, imr::flags<B, C>>,
                              imr::optional_member<B, imr::pod<uint16_t>>,
                              imr::member<C, imr::buffer<C>>>;
@@ -445,7 +445,7 @@ BOOST_AUTO_TEST_CASE(test_structure_with_context) {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_structure_get_element_without_view) {
+SEASTAR_THREAD_TEST_CASE(test_structure_get_element_without_view) {
     using S = imr::structure<imr::member<A, imr::flags<B, C>>,
                              imr::member<B, imr::pod<uint64_t>>,
                              imr::optional_member<C, imr::pod<uint16_t>>>;
@@ -476,7 +476,7 @@ BOOST_AUTO_TEST_CASE(test_structure_get_element_without_view) {
     // FIXME test offset
 }
 
-BOOST_AUTO_TEST_CASE(test_nested_structure) {
+SEASTAR_THREAD_TEST_CASE(test_nested_structure) {
     using S1 = imr::structure<imr::optional_member<B, imr::pod<uint16_t>>,
                               imr::member<C, imr::buffer<C>>,
                               imr::member<A, imr::pod<uint8_t>>>;
@@ -570,7 +570,7 @@ struct destructor<pod<object_with_destructor>> {
 
 BOOST_AUTO_TEST_SUITE(methods);
 
-BOOST_AUTO_TEST_CASE(test_simple_destructor) {
+SEASTAR_THREAD_TEST_CASE(test_simple_destructor) {
     object_with_destructor::reset();
 
     using O1 = imr::pod<object_with_destructor>;
@@ -593,7 +593,7 @@ BOOST_AUTO_TEST_CASE(test_simple_destructor) {
     BOOST_CHECK_EQUAL(object_with_destructor::last_destroyed_one, value);
 }
 
-BOOST_AUTO_TEST_CASE(test_structure_destructor) {
+SEASTAR_THREAD_TEST_CASE(test_structure_destructor) {
     object_with_destructor::reset();
 
     using S = imr::structure<imr::member<A, imr::pod<object_with_destructor>>,
@@ -631,7 +631,7 @@ BOOST_AUTO_TEST_CASE(test_structure_destructor) {
     BOOST_CHECK_EQUAL(object_with_destructor::last_destroyed_one, c);
 }
 
-BOOST_AUTO_TEST_CASE(test_optional_destructor) {
+SEASTAR_THREAD_TEST_CASE(test_optional_destructor) {
     object_with_destructor::reset();
 
     using O1 = imr::optional<A, imr::pod<object_with_destructor>>;
@@ -685,7 +685,7 @@ auto test_variant_context::active_alternative_of<A>() const noexcept {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_variant_destructor) {
+SEASTAR_THREAD_TEST_CASE(test_variant_destructor) {
     object_with_destructor::reset();
 
     using V1 = imr::variant<A, imr::member<B, imr::pod<object_without_destructor>>>;
@@ -777,7 +777,7 @@ struct destructor<imr::tagged_type<C, imr::pod<void*>>> {
 
 }
 
-BOOST_AUTO_TEST_CASE(test_object_exception_safety) {
+SEASTAR_THREAD_TEST_CASE(test_object_exception_safety) {
     using namespace object_exception_safety;
 
     using context_factory_for_structure = imr::alloc::context_factory<imr::utils::object_context<structue_context>>;
