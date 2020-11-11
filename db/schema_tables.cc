@@ -3063,7 +3063,7 @@ future<> maybe_update_legacy_secondary_index_mv_schema(service::migration_manage
     // and as such it must be recreated properly.
     if (!base_schema->columns_by_name().contains(first_view_ck.name())) {
         schema_builder builder{schema_ptr(v)};
-        builder.mark_column_computed(first_view_ck.name(), std::make_unique<token_column_computation>());
+        builder.mark_column_computed(first_view_ck.name(), std::make_unique<legacy_token_column_computation>());
         return mm.announce_view_update(view_ptr(builder.build()), true);
     }
     return make_ready_future<>();
@@ -3097,7 +3097,7 @@ static auto GET_COLUMN_MAPPING_QUERY = format("SELECT column_name, clustering_or
     db::schema_tables::SCYLLA_TABLE_SCHEMA_HISTORY);
 
 future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_version version) {
-    auto cm_fut = cql3::get_local_query_processor().execute_internal(
+    auto cm_fut = qctx->qp().execute_internal(
         GET_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
         infinite_timeout_config,
@@ -3140,7 +3140,7 @@ future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_ver
 }
 
 future<bool> column_mapping_exists(utils::UUID table_id, table_schema_version version) {
-    return cql3::get_local_query_processor().execute_internal(
+    return qctx->qp().execute_internal(
         GET_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
         infinite_timeout_config,
@@ -3154,7 +3154,7 @@ future<> drop_column_mapping(utils::UUID table_id, table_schema_version version)
     const static sstring DEL_COLUMN_MAPPING_QUERY =
         format("DELETE FROM system.{} WHERE cf_id = ? and schema_version = ?",
             db::schema_tables::SCYLLA_TABLE_SCHEMA_HISTORY);
-    return cql3::get_local_query_processor().execute_internal(
+    return qctx->qp().execute_internal(
         DEL_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
         infinite_timeout_config,

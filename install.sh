@@ -98,6 +98,7 @@ adjust_bin() {
 [[ -z "\$LD_PRELOAD" ]] || { echo "\$0: not compatible with LD_PRELOAD" >&2; exit 110; }
 export GNUTLS_SYSTEM_PRIORITY_FILE="\${GNUTLS_SYSTEM_PRIORITY_FILE-$prefix/libreloc/gnutls.config}"
 export LD_LIBRARY_PATH="$prefix/libreloc"
+export UBSAN_OPTIONS="${UBSAN_OPTIONS:+$UBSAN_OPTIONS:}suppressions=$prefix/libexec/ubsan-suppressions.supp"
 exec -a "\$0" "$prefix/libexec/$bin" "\$@"
 EOF
     chmod +x "$root/$prefix/bin/$bin"
@@ -133,7 +134,7 @@ DEBIAN_SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
 if [ -f "\${DEBIAN_SSL_CERT_FILE}" ]; then
   c=\${DEBIAN_SSL_CERT_FILE}
 fi
-PYTHONPATH="\${d}:\${d}/libexec:\$PYTHONPATH" PATH="\${d}/$pythonpath:\${PATH}" SSL_CERT_FILE="\${c}" exec -a "\$0" "\${d}/libexec/\${b}" "\$@"
+PYTHONPATH="\${d}:\${d}/libexec:\$PYTHONPATH" PATH="\${d}/../bin:\${d}/$pythonpath:\${PATH}" SSL_CERT_FILE="\${c}" exec -a "\$0" "\${d}/libexec/\${b}" "\$@"
 EOF
     chmod +x "$install"
 }
@@ -155,6 +156,11 @@ installconfig() {
     else
         install "-m$perm" "$src" -Dt "$dest"
     fi
+}
+
+check_usermode_support() {
+    user=$(systemctl --help|grep -e '--user')
+    [ -n "$user" ]
 }
 
 # change directory to the package's root directory
@@ -245,6 +251,7 @@ install -m755 libexec/* -Dt "$rprefix/libexec"
 for bin in libexec/*; do
 	adjust_bin "${bin#libexec/}"
 done
+install -m644 ubsan-suppressions.supp -Dt "$rprefix/libexec"
 
 install -d -m755 "$rdoc"/scylla
 install -m644 README.md -Dt "$rdoc"/scylla/
@@ -382,7 +389,7 @@ if $nonroot; then
     # nonroot install is also 'offline install'
     touch $rprefix/SCYLLA-OFFLINE-FILE
     touch $rprefix/SCYLLA-NONROOT-FILE
-    if ! $packaging; then
+    if ! $packaging && check_usermode_support; then
         systemctl --user daemon-reload
     fi
     echo "Scylla non-root install completed."

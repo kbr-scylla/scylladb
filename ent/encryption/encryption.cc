@@ -56,6 +56,8 @@
 
 static seastar::logger logg{"encryption"};
 
+sharded<cql3::query_processor>* hack_query_processor_for_encryption;
+
 namespace encryption {
 
 static const std::set<sstring> keywords = { KEY_PROVIDER,
@@ -313,7 +315,7 @@ public:
         });
     }
     distributed<cql3::query_processor>& get_query_processor() const override {
-        return cql3::get_query_processor();
+        return *hack_query_processor_for_encryption;
     }
     distributed<service::storage_service>& get_storage_service() const override {
         return service::get_storage_service();

@@ -20,8 +20,11 @@
  */
 #include "server.hh"
 
+#include <boost/range/adaptor/filtered.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/range/adaptor/map.hpp>
+#include <boost/range/algorithm/copy.hpp>
 #include <map>
-#include <ranges>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/coroutine.hh>
@@ -100,6 +103,9 @@ private:
 
     // Called to commit entries (on a leader or otherwise).
     void notify_waiters(std::map<index_t, op_status>& waiters, const std::vector<log_entry_ptr>& entries);
+
+    // Drop waiter that we lost track of, can happen due to snapshot transfere
+    void drop_waiters(std::map<index_t, op_status>& waiters, index_t idx);
 
     // This fiber process fsm output, by doing the following steps in that order:
     //  - persists current term and voter
@@ -236,6 +242,18 @@ void server_impl::notify_waiters(std::map<index_t, op_status>& waiters,
     }
 }
 
+void server_impl::drop_waiters(std::map<index_t, op_status>& waiters, index_t idx) {
+    while (waiters.size() != 0) {
+        auto it = waiters.begin();
+        if (it->first > idx) {
+            break;
+        }
+        auto [entry_idx, status] = std::move(*it);
+        waiters.erase(it);
+        status.done.set_exception(commit_status_unknown());
+    }
+}
+
 template <typename Message>
 future<> server_impl::send_message(server_id id, Message m) {
     return std::visit([this, id] (auto&& m) {
@@ -259,7 +277,7 @@ future<> server_impl::send_message(server_id id, Message m) {
             _snapshot_application_done = std::nullopt;
             return make_ready_future<>();
         } else {
-            static_assert(!sizeof(Message*), "not all message types are handled");
+            static_assert(!sizeof(T*), "not all message types are handled");
             return make_ready_future<>();
         }
     }, std::move(m));
@@ -290,6 +308,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
                     logger.trace("[{}] io_fiber applying snapshot {}", _id, batch.snp->id);
                     co_await _state_machine->load_snapshot(batch.snp->id);
                     _state_machine->drop_snapshot(_last_loaded_snapshot_id);
+                    drop_waiters(_awaited_commits, batch.snp->idx);
                     _last_loaded_snapshot_id = batch.snp->id;
                 }
             }
@@ -376,10 +395,10 @@ future<> server_impl::applier_fiber() {
 
             index_t last_idx = opt_batch->back()->idx;
 
-            std::ranges::copy(
+            boost::range::copy(
                     *opt_batch |
-                    std::views::filter([] (log_entry_ptr& entry) { return std::holds_alternative<command>(entry->data); }) |
-                    std::views::transform([] (log_entry_ptr& entry) { return std::cref(std::get<command>(entry->data)); }),
+                    boost::adaptors::filtered([] (log_entry_ptr& entry) { return std::holds_alternative<command>(entry->data); }) |
+                    boost::adaptors::transformed([] (log_entry_ptr& entry) { return std::cref(std::get<command>(entry->data)); }),
                     std::back_inserter(commands));
 
             co_await _state_machine->apply(std::move(commands));
@@ -436,11 +455,8 @@ future<> server_impl::abort() {
         _snapshot_application_done->set_exception(std::runtime_error("Snapshot application aborted"));
     }
 
-    auto snp_futures = std::views::values(_snapshot_transfers);
-    // For c++20 ranges iterator to an end is of a different type, so adaptor is needed
-    // since seastar primitives are not c++20 ready.
-    using CI = std::common_iterator<decltype(snp_futures.begin()), decltype(snp_futures.end())>;
-    auto snapshots = seastar::when_all_succeed(CI(snp_futures.begin()), CI(snp_futures.end()));
+    auto snp_futures = _snapshot_transfers | boost::adaptors::map_values;
+    auto snapshots = seastar::when_all_succeed(snp_futures.begin(), snp_futures.end());
 
     return seastar::when_all_succeed(std::move(_io_status), std::move(_applier_status),
             _rpc->abort(), _state_machine->abort(), _storage->abort(), std::move(snapshots)).discard_result();
