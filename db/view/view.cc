@@ -182,7 +182,7 @@ db::view::base_info_ptr view_info::make_base_dependent_view_info(const schema& b
             vlogger.error("Column {} in view {}.{} was not found in the base table {}.{}",
                     to_sstring_view(view_col_name), _schema.ks_name(), _schema.cf_name(), base.ks_name(), base.cf_name());
             if (to_sstring_view(view_col_name) == "idx_token") {
-                vlogger.error("Missing idx_token column is caused by an incorrect upgrade of a secondary index. "
+                vlogger.warn("Missing idx_token column is caused by an incorrect upgrade of a secondary index. "
                         "Please recreate index {}.{} to avoid future issues.", _schema.ks_name(), _schema.cf_name());
             }
             // If we didn't find the column in the base column then it must have been deleted
@@ -1227,6 +1227,14 @@ future<> mutate_MV(
                 } else {
                     std::swap(*target_endpoint, *remote_it);
                 }
+            }
+        }
+        // It's still possible that a target endpoint is dupliated in the remote endpoints list,
+        // so let's get rid of the duplicate if it exists
+        if (target_endpoint) {
+            auto remote_it = std::find(remote_endpoints.begin(), remote_endpoints.end(), *target_endpoint);
+            if (remote_it != remote_endpoints.end()) {
+                remote_endpoints.erase(remote_it);
             }
         }
 

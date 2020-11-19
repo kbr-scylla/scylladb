@@ -54,23 +54,78 @@ int rand() {
 
 bool drop_replication = false;
 
-class hasher_int : public xx_hasher {
+class sm_value_impl {
+public:
+    sm_value_impl() {};
+    virtual ~sm_value_impl() {}
+    virtual void update(int val) noexcept = 0;
+    virtual int64_t get_value() noexcept = 0;
+    virtual std::unique_ptr<sm_value_impl> copy() const = 0;
+};
+
+class sm_value {
+    std::unique_ptr<sm_value_impl> _impl;
+public:
+    sm_value() {}
+    sm_value(std::unique_ptr<sm_value_impl> impl) : _impl(std::move(impl)) {}
+    sm_value(sm_value&& o) : _impl(std::move(o._impl)) {}
+    sm_value(const sm_value& o) : _impl(o._impl ? o._impl->copy() : nullptr) {}
+
+    void update(int val) {
+        _impl->update(val);
+    }
+    int64_t get_value() {
+        return _impl->get_value();
+    }
+    sm_value& operator=(const sm_value& o) {
+        if (o._impl) {
+            _impl = o._impl->copy();
+        }
+        return *this;
+    }
+};
+
+class hasher_int : public xx_hasher, public sm_value_impl {
 public:
     using xx_hasher::xx_hasher;
-    void update(const int val) noexcept {
+    void update(int val) noexcept override {
         xx_hasher::update(reinterpret_cast<const char *>(&val), sizeof(val));
     }
-    static hasher_int hash_range(const int max) {
+    static sm_value value_for(int max) {
         hasher_int h;
         for (int i = 0; i < max; ++i) {
             h.update(i);
         }
-        return h;
+        return sm_value(std::make_unique<hasher_int>(std::move(h)));
+    }
+    int64_t get_value() noexcept override {
+        return int64_t(finalize_uint64());
+    }
+    std::unique_ptr<sm_value_impl> copy() const override {
+        return std::make_unique<hasher_int>(*this);
+    }
+};
+
+class sum_sm : public sm_value_impl {
+    int64_t _sum ;
+public:
+    sum_sm(int64_t sum = 0) : _sum(sum) {}
+    void update(int val) noexcept override {
+        _sum += val;
+    }
+    static sm_value value_for(int max) {
+        return sm_value(std::make_unique<sum_sm>(((max - 1) * max)/2));
+    }
+    int64_t get_value() noexcept override {
+        return _sum;
+    }
+    std::unique_ptr<sm_value_impl> copy() const override {
+        return std::make_unique<sum_sm>(_sum);
     }
 };
 
 struct snapshot_value {
-    hasher_int hasher;
+    sm_value value;
 };
 
 // Lets assume one snapshot per server
@@ -79,8 +134,7 @@ std::unordered_map<raft::server_id, std::pair<raft::snapshot, snapshot_value>> p
 
 class state_machine : public raft::state_machine {
 public:
-    using apply_fn = std::function<void(raft::server_id id,
-            const std::vector<raft::command_cref>& commands, seastar::shared_ptr<hasher_int> hasher)>;
+    using apply_fn = std::function<void(raft::server_id id, const std::vector<raft::command_cref>& commands, sm_value& value)>;
 private:
     raft::server_id _id;
     apply_fn _apply;
@@ -88,30 +142,31 @@ private:
     size_t _seen = 0;
     promise<> _done;
 public:
-    seastar::shared_ptr<hasher_int> hasher;
-    state_machine(raft::server_id id, apply_fn apply, size_t apply_entries) :
+    sm_value value;
+    state_machine(raft::server_id id, apply_fn apply, sm_value value_, size_t apply_entries) :
         _id(id), _apply(std::move(apply)), _apply_entries(apply_entries),
-        hasher(seastar::make_shared<hasher_int>()) {}
+        value(std::move(value_)) {}
     future<> apply(const std::vector<raft::command_cref> commands) override {
-        _apply(_id, commands, hasher);
+        _apply(_id, commands, value);
         _seen += commands.size();
         if (_seen >= _apply_entries) {
             _done.set_value();
         }
+        tlogger.debug("sm::apply[{}] got {}/{} entries", _id, _seen, _apply_entries);
         return make_ready_future<>();
     }
 
     future<raft::snapshot_id> take_snapshot() override {
-        snapshots[_id].hasher = *hasher;
-        tlogger.debug("sm[{}] takes snapshot {}", _id, snapshots[_id].hasher.finalize_uint64());
+        snapshots[_id].value = value;
+        tlogger.debug("sm[{}] takes snapshot {}", _id, snapshots[_id].value.get_value());
         return make_ready_future<raft::snapshot_id>(raft::snapshot_id{utils::make_random_uuid()});
     }
     void drop_snapshot(raft::snapshot_id id) override {
         snapshots.erase(_id);
     }
     future<> load_snapshot(raft::snapshot_id id) override {
-        hasher = seastar::make_shared<hasher_int>(snapshots[_id].hasher);
-        tlogger.debug("sm[{}] loads snapshot {}", _id, snapshots[_id].hasher.finalize_uint64());
+        value = snapshots[_id].value;
+        tlogger.debug("sm[{}] loads snapshot {}", _id, snapshots[_id].value.get_value());
         return make_ready_future<>();
     };
     future<> abort() override { return make_ready_future<>(); }
@@ -145,7 +200,7 @@ public:
     }
     virtual future<> store_snapshot(const raft::snapshot& snap, size_t preserve_log_entries) {
         persisted_snapshots[_id] = std::make_pair(snap, snapshots[_id]);
-        tlogger.debug("sm[{}] persists snapshot {}", _id, snapshots[_id].hasher.finalize_uint64());
+        tlogger.debug("sm[{}] persists snapshot {}", _id, snapshots[_id].value.get_value());
         return make_ready_future<>();
     }
     future<raft::snapshot> load_snapshot() override {
@@ -163,6 +218,17 @@ public:
     virtual future<> abort() { return make_ready_future<>(); }
 };
 
+std::unordered_set<raft::server_id> server_disconnected;
+bool is_disconnected(raft::server_id id) {
+    return server_disconnected.find(id) != server_disconnected.end();
+}
+
+class failure_detector : public raft::failure_detector {
+    bool is_alive(raft::server_id server) override {
+        return !is_disconnected(server);
+    }
+};
+
 class rpc : public raft::rpc {
     static std::unordered_map<raft::server_id, rpc*> net;
     raft::server_id _id;
@@ -171,11 +237,14 @@ public:
         net[_id] = this;
     }
     virtual future<> send_snapshot(raft::server_id id, const raft::install_snapshot& snap) {
+        if (is_disconnected(id) || is_disconnected(_id)) {
+            return make_ready_future<>();
+        }
         snapshots[id] = snapshots[_id];
         return net[id]->_client->apply_snapshot(_id, std::move(snap));
     }
     virtual future<> send_append_entries(raft::server_id id, const raft::append_request_send& append_request) {
-        if (drop_replication && !(rand() % 5)) {
+        if (is_disconnected(id) || is_disconnected(_id) || (drop_replication && !(rand() % 5))) {
             return make_ready_future<>();
         }
         raft::append_request_recv req;
@@ -185,24 +254,30 @@ public:
         req.prev_log_term = append_request.prev_log_term;
         req.leader_commit_idx = append_request.leader_commit_idx;
         for (auto&& e: append_request.entries) {
-            req.entries.push_back(e);
+            req.entries.push_back(*e);
         }
         net[id]->_client->append_entries(_id, std::move(req));
         //co_return seastar::sleep(1us);
         return make_ready_future<>();
     }
     virtual future<> send_append_entries_reply(raft::server_id id, const raft::append_reply& reply) {
-        if (drop_replication && !(rand() % 5)) {
+        if (is_disconnected(id) || is_disconnected(_id) || (drop_replication && !(rand() % 5))) {
             return make_ready_future<>();
         }
         net[id]->_client->append_entries_reply(_id, std::move(reply));
         return make_ready_future<>();
     }
     virtual future<> send_vote_request(raft::server_id id, const raft::vote_request& vote_request) {
+        if (is_disconnected(id) || is_disconnected(_id)) {
+            return make_ready_future<>();
+        }
         net[id]->_client->request_vote(_id, std::move(vote_request));
         return make_ready_future<>();
     }
     virtual future<> send_vote_reply(raft::server_id id, const raft::vote_reply& vote_reply) {
+        if (is_disconnected(id) || is_disconnected(_id)) {
+            return make_ready_future<>();
+        }
         net[id]->_client->request_vote_reply(_id, std::move(vote_reply));
         return make_ready_future<>();
     }
@@ -211,20 +286,19 @@ public:
     virtual future<> abort() { return make_ready_future<>(); }
 };
 
-std::unordered_set<raft::server_id> SERVER_DISCONNECTED;
-class failure_detector : public raft::failure_detector {
-    bool is_alive(raft::server_id server) override {
-        return SERVER_DISCONNECTED.find(server) == SERVER_DISCONNECTED.end();
-    }
-};
-
 std::unordered_map<raft::server_id, rpc*> rpc::net;
+
+enum class sm_type {
+    HASH,
+    SUM
+};
 
 std::pair<std::unique_ptr<raft::server>, state_machine*>
 create_raft_server(raft::server_id uuid, state_machine::apply_fn apply, initial_state state,
-        size_t apply_entries) {
+        size_t apply_entries, sm_type type) {
+    sm_value val = (type == sm_type::HASH) ? sm_value(std::make_unique<hasher_int>()) : sm_value(std::make_unique<sum_sm>());
 
-    auto sm = std::make_unique<state_machine>(uuid, std::move(apply), apply_entries);
+    auto sm = std::make_unique<state_machine>(uuid, std::move(apply), std::move(val), apply_entries);
     auto& rsm = *sm;
     auto mrpc = std::make_unique<rpc>(uuid);
     auto mstorage = std::make_unique<storage>(uuid, state);
@@ -236,7 +310,7 @@ create_raft_server(raft::server_id uuid, state_machine::apply_fn apply, initial_
     return std::make_pair(std::move(raft), &rsm);
 }
 
-future<std::vector<std::pair<std::unique_ptr<raft::server>, state_machine*>>> create_cluster(std::vector<initial_state> states, state_machine::apply_fn apply, size_t apply_entries) {
+future<std::vector<std::pair<std::unique_ptr<raft::server>, state_machine*>>> create_cluster(std::vector<initial_state> states, state_machine::apply_fn apply, size_t apply_entries, sm_type type) {
     raft::configuration config;
     std::vector<std::pair<std::unique_ptr<raft::server>, state_machine*>> rafts;
 
@@ -249,7 +323,7 @@ future<std::vector<std::pair<std::unique_ptr<raft::server>, state_machine*>>> cr
         auto& s = config.servers[i];
         states[i].snapshot.config = config;
         snapshots[s.id] = states[i].snp_value;
-        auto& raft = *rafts.emplace_back(create_raft_server(s.id, apply, states[i], apply_entries)).first;
+        auto& raft = *rafts.emplace_back(create_raft_server(s.id, apply, states[i], apply_entries, type)).first;
         co_await raft.start();
     }
 
@@ -288,14 +362,13 @@ std::vector<raft::command> create_commands(std::vector<T> list) {
     return commands;
 }
 
-void apply_changes(raft::server_id id, const std::vector<raft::command_cref>& commands,
-        seastar::shared_ptr<hasher_int> hasher) {
+void apply_changes(raft::server_id id, const std::vector<raft::command_cref>& commands, sm_value& value) {
     tlogger.debug("sm::apply_changes[{}] got {} entries", id, commands.size());
 
     for (auto&& d : commands) {
         auto is = ser::as_input_stream(d);
         int n = ser::deserialize(is, boost::type<int>());
-        hasher->update(n);      // running hash (values and snapshots)
+        value.update(n);      // running hash (values and snapshots)
         tlogger.debug("{}: apply_changes {}", id, n);
     }
 };
@@ -306,8 +379,9 @@ void apply_changes(raft::server_id id, const std::vector<raft::command_cref>& co
 //  - Configuration change
 using entries = unsigned;
 using new_leader = int;
+using partition = std::vector<size_t>;
 // TODO: config change
-using update = std::variant<entries, new_leader>;
+using update = std::variant<entries, new_leader, partition>;
 
 struct initial_log {
     std::vector<log_entry> le;
@@ -319,6 +393,7 @@ struct initial_snapshot {
 
 struct test_case {
     const std::string name;
+    const sm_type type = sm_type::HASH;
     const size_t nodes;
     const size_t total_values = 100;
     uint64_t initial_term = 1;
@@ -354,12 +429,16 @@ future<int> run_test(test_case test) {
 
     unsigned apply_entries = test.total_values - leader_snap_skipped;
 
+    auto sm_value_for = [&] (int max) {
+        return test.type == sm_type::HASH ? hasher_int::value_for(max) : sum_sm::value_for(max);
+    };
+
     // Server initial logs, etc
     for (size_t i = 0; i < states.size(); ++i) {
         size_t start_idx = 1;
         if (i < test.initial_snapshots.size()) {
             states[i].snapshot = test.initial_snapshots[i].snap;
-            states[i].snp_value.hasher = hasher_int::hash_range(test.initial_snapshots[i].snap.idx);
+            states[i].snp_value.value = sm_value_for(test.initial_snapshots[i].snap.idx);
             start_idx = states[i].snapshot.idx + 1;
         }
         if (i < test.initial_states.size()) {
@@ -373,7 +452,7 @@ future<int> run_test(test_case test) {
         }
     }
 
-    auto rafts = co_await create_cluster(states, apply_changes, apply_entries);
+    auto rafts = co_await create_cluster(states, apply_changes, apply_entries, test.type);
 
     co_await rafts[leader].first->elect_me_leader();
     // Process all updates in order
@@ -392,18 +471,43 @@ future<int> run_test(test_case test) {
         } else if (std::holds_alternative<new_leader>(update)) {
             unsigned next_leader = std::get<new_leader>(update);
             assert(next_leader < rafts.size());
-            SERVER_DISCONNECTED.insert(raft::server_id{utils::UUID(0, leader + 1)});
+            server_disconnected.insert(raft::server_id{utils::UUID(0, leader + 1)});
             for (size_t s = 0; s < test.nodes; ++s) {
                 if (s != leader) {
                     rafts[s].first->elapse_election();
                 }
             }
             co_await rafts[next_leader].first->elect_me_leader();
-            SERVER_DISCONNECTED.erase(raft::server_id{utils::UUID(0, leader + 1)});
+            server_disconnected.erase(raft::server_id{utils::UUID(0, leader + 1)});
             tlogger.debug("confirmed leader on {}", next_leader);
             leader = next_leader;
+        } else if (std::holds_alternative<partition>(update)) {
+            auto p = std::get<partition>(update);
+            std::unordered_set<size_t> connected_servers(p.begin(), p.end());
+            for (size_t s = 0; s < test.nodes; ++s) {
+                if (connected_servers.find(s) == connected_servers.end()) {
+                    // Disconnect servers not in main partition
+                    server_disconnected.insert(raft::server_id{utils::UUID(0, s + 1)});
+                }
+            }
+            for (auto s: p) {
+                // Re connect servers in live partition
+                server_disconnected.erase(raft::server_id{utils::UUID(0, s + 1)});
+            }
+            if (connected_servers.find(leader) == connected_servers.end() && p.size() > 0) {
+                // Old leader disconnected, new leader is first server specified in partition
+                auto next_leader = p[0];
+                for (auto s: p) {
+                    rafts[s].first->elapse_election();
+                }
+                co_await rafts[next_leader].first->elect_me_leader();
+                leader = next_leader;
+                tlogger.debug("confirmed new leader on {}", next_leader);
+            }
         }
     }
+
+    server_disconnected.clear();    // Re-connect all servers
 
     if (next_val < test.total_values) {
         // Send remaining updates
@@ -428,9 +532,9 @@ future<int> run_test(test_case test) {
     int fail = 0;
 
     // Verify hash matches expected (snapshot and apply calls)
-    static const auto expected = hasher_int::hash_range(test.total_values).finalize_uint64();
+    auto expected = sm_value_for(test.total_values).get_value();
     for (size_t i = 0; i < rafts.size(); ++i) {
-        auto digest = rafts[i].second->hasher->finalize_uint64();
+        auto digest = rafts[i].second->value.get_value();
         if (digest != expected) {
             tlogger.debug("Digest doesn't match for server [{}]: {} != {}", i, digest, expected);
             fail = -1;  // Fail
@@ -441,8 +545,8 @@ future<int> run_test(test_case test) {
     // TODO: check that snapshot is taken when it should be
     for (auto& s : persisted_snapshots) {
         auto& [snp, val] = s.second;
-        auto digest = val.hasher.finalize_uint64();
-        auto expected = hasher_int::hash_range(snp.idx).finalize_uint64();
+        auto digest = val.value.get_value();
+        expected = sm_value_for(snp.idx).get_value();
         if (digest != expected) {
             tlogger.debug("Persisted snapshot {} doesn't match {} != {}", snp.id, digest, expected);
             fail = -1;
@@ -551,6 +655,16 @@ int main(int argc, char* argv[]) {
         {.name = "take_snapshot", .nodes = 2,
          .config = {{.snapshot_threshold = 10, .snapshot_trailing = 5}, {.snapshot_threshold = 20, .snapshot_trailing = 10}},
          .updates = {entries{100}}},
+        // 2 nodes doing simple replication/snapshoting while leader's log size is limited
+        {.name = "backpressure", .type = sm_type::SUM, .nodes = 2,
+         .config = {{.snapshot_threshold = 10, .snapshot_trailing = 5, .max_log_length = 20}, {.snapshot_threshold = 20, .snapshot_trailing = 10}},
+         .updates = {entries{100}}},
+        // 3 nodes, add entries, drop leader 0, add entries [implicit re-join all]
+        {.name = "drops_01", .nodes = 3,
+         .updates = {entries{4},partition{1,2},entries{4}}},
+        // 3 nodes, add entries, drop follower 1, add entries [implicit re-join all]
+        {.name = "drops_02", .nodes = 3,
+         .updates = {entries{4},partition{0,2},entries{4},partition{2,1}}},
     };
 
     return app.run(argc, argv, [&replication_tests, &app] () -> future<int> {

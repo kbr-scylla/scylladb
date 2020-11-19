@@ -498,11 +498,11 @@ future<executor::request_return_type> executor::describe_stream(client_state& cl
     // TODO: label
     // TODO: creation time
 
-    const auto& tm = _proxy.get_token_metadata();
+    auto normal_token_owners = _proxy.get_token_metadata_ptr()->count_normal_token_owners();
     // cannot really "resume" query, must iterate all data. because we cannot query neither "time" (pk) > something,
     // or on expired...
     // TODO: maybe add secondary index to topology table to enable this?
-    return _sdks.cdc_get_versioned_streams({ tm.count_normal_token_owners() }).then([this, &db, schema, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc), ttl](std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
+    return _sdks.cdc_get_versioned_streams({ normal_token_owners }).then([this, &db, schema, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc), ttl](std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
 
         // filter out cdc generations older than the table or now() - cdc::ttl (typically dynamodb_streams_max_window - 24h)
         auto low_ts = std::max(as_timepoint(schema->id()), db_clock::now() - ttl);
@@ -1061,6 +1061,9 @@ void executor::add_stream_options(const rjson::value& stream_specification, sche
 
         if (!db.features().cluster_supports_cdc()) {
             throw api_error::validation("StreamSpecification: streams (CDC) feature not enabled in cluster.");
+        }
+        if (!db.features().cluster_supports_alternator_streams()) {
+            throw api_error::validation("StreamSpecification: alternator streams feature not enabled in cluster.");
         }
 
         cdc::options opts;

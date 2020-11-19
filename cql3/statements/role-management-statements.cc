@@ -105,7 +105,7 @@ future<> create_role_statement::check_access(service::storage_proxy& proxy, cons
     state.ensure_not_anonymous();
 
     return async([this, &state] {
-        state.ensure_has_permission(auth::permission::CREATE, auth::root_role_resource()).get0();
+        state.ensure_has_permission({auth::permission::CREATE, auth::root_role_resource()}).get0();
 
         if (*_options.is_superuser) {
             if (!auth::has_superuser(*state.get_auth_service(), *state.user()).get0()) {
@@ -237,7 +237,7 @@ future<> alter_role_statement::check_access(service::storage_proxy& proxy, const
         }
 
         if (*user.name != _role) {
-            state.ensure_has_permission(auth::permission::ALTER, auth::make_role_resource(_role)).get0();
+            state.ensure_has_permission({auth::permission::ALTER, auth::make_role_resource(_role)}).get0();
         } else {
             const auto alterable_options = state.get_auth_service()->underlying_authenticator().alterable_options();
 
@@ -312,7 +312,7 @@ future<> drop_role_statement::check_access(service::storage_proxy& proxy, const 
     state.ensure_not_anonymous();
 
     return async([this, &state] {
-        state.ensure_has_permission(auth::permission::DROP, auth::make_role_resource(_role)).get0();
+        state.ensure_has_permission({auth::permission::DROP, auth::make_role_resource(_role)}).get0();
 
         auto& as = *state.get_auth_service();
 
@@ -361,7 +361,7 @@ future<> list_roles_statement::check_access(service::storage_proxy& proxy, const
     state.ensure_not_anonymous();
 
     return async([this, &state] {
-        if (state.check_has_permission(auth::permission::DESCRIBE, auth::root_role_resource()).get0()) {
+        if (state.check_has_permission({auth::permission::DESCRIBE, auth::root_role_resource()}).get0()) {
             return;
         }
 
@@ -460,9 +460,9 @@ list_roles_statement::execute(service::storage_proxy&, service::query_state& sta
         if (!_grantee) {
             // A user with DESCRIBE on the root role resource lists all roles in the system. A user without it lists
             // only the roles granted to them.
-            return cs.check_has_permission(
+            return cs.check_has_permission({
                     auth::permission::DESCRIBE,
-                    auth::root_role_resource()).then([&cs, &rm, &a, query_mode](bool has_describe) {
+                    auth::root_role_resource()}).then([&cs, &rm, &a, query_mode](bool has_describe) {
                 if (has_describe) {
                     return rm.query_all().then([&rm, &a](auto&& roles) {
                         return make_results(rm, a, std::move(roles));
@@ -496,7 +496,7 @@ future<> grant_role_statement::check_access(service::storage_proxy& proxy, const
     state.ensure_not_anonymous();
 
     return do_with(auth::make_role_resource(_role), [this, &state](const auto& r) {
-        return state.ensure_has_permission(auth::permission::AUTHORIZE, r);
+        return state.ensure_has_permission({auth::permission::AUTHORIZE, r});
     });
 }
 
@@ -524,7 +524,7 @@ future<> revoke_role_statement::check_access(service::storage_proxy& proxy, cons
     state.ensure_not_anonymous();
 
     return do_with(auth::make_role_resource(_role), [this, &state](const auto& r) {
-        return state.ensure_has_permission(auth::permission::AUTHORIZE, r);
+        return state.ensure_has_permission({auth::permission::AUTHORIZE, r});
     });
 }
 

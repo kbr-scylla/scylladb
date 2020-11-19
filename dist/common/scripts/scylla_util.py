@@ -223,7 +223,8 @@ class gcp_instance:
 
     def instance_size(self):
         """Returns the size of the instance we are running in. i.e.: 2"""
-        return self.instancetype.split("-")[2]
+        instancetypesplit = self.instancetype.split("-")
+        return instancetypesplit[2] if len(instancetypesplit)>2 else 0
 
     def instance_class(self):
         """Returns the class of the instance we are running in. i.e.: n2"""
@@ -285,7 +286,7 @@ class gcp_instance:
         return self.__firstNvmeSize
 
     def is_recommended_instance(self):
-        if self.is_recommended_instance_size() and not self.is_unsupported_instance_class() and self.is_supported_instance_class():
+        if not self.is_unsupported_instance_class() and self.is_supported_instance_class() and self.is_recommended_instance_size():
             # at least 1:2GB cpu:ram ratio , GCP is at 1:4, so this should be fine
             if self.cpu/self.memoryGB < 0.5:
               # 30:1 Disk/RAM ratio must be kept at least(AWS), we relax this a little bit
@@ -477,21 +478,18 @@ class aws_instance:
         return curl(self.META_DATA_BASE_URL + "user-data")
 
 
-scylla_env = os.environ.copy()
-scylla_env['DEBIAN_FRONTEND'] = 'noninteractive'
-
-def run(cmd, shell=False, silent=False, exception=True):
+def run(cmd, shell=False, silent=False, exception=True, env=None):
     stdout = subprocess.DEVNULL if silent else None
     stderr = subprocess.DEVNULL if silent else None
     if not shell:
         cmd = shlex.split(cmd)
-    return subprocess.run(cmd, stdout=stdout, stderr=stderr, shell=shell, check=exception, env=scylla_env).returncode
+    return subprocess.run(cmd, stdout=stdout, stderr=stderr, shell=shell, check=exception, env=env).returncode
 
 
-def out(cmd, shell=False, exception=True, timeout=None):
+def out(cmd, shell=False, exception=True, timeout=None, env=None):
     if not shell:
         cmd = shlex.split(cmd)
-    return subprocess.run(cmd, capture_output=True, shell=shell, timeout=timeout, check=exception, encoding='utf-8', env=scylla_env).stdout.strip()
+    return subprocess.run(cmd, capture_output=True, shell=shell, timeout=timeout, check=exception, encoding='utf-8', env=env).stdout.strip()
 
 
 def get_id_like():
@@ -681,7 +679,9 @@ def yum_install(pkg):
 def apt_install(pkg):
     if is_offline():
         pkg_error_exit(pkg)
-    return run(f'apt-get install -y {pkg}')
+    apt_env = os.environ.copy()
+    apt_env['DEBIAN_FRONTEND'] = 'noninteractive'
+    return run(f'apt-get install -y {pkg}', env=apt_env)
 
 def emerge_install(pkg):
     if is_offline():
@@ -702,7 +702,9 @@ def yum_uninstall(pkg):
     return run(f'yum remove -y {pkg}')
 
 def apt_uninstall(pkg):
-    return run(f'apt-get remove -y {pkg}')
+    apt_env = os.environ.copy()
+    apt_env['DEBIAN_FRONTEND'] = 'noninteractive'
+    return run(f'apt-get remove -y {pkg}', env=apt_env)
 
 def emerge_uninstall(pkg):
     return run(f'emerge --deselect {pkg}')

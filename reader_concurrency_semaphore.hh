@@ -80,6 +80,8 @@ public:
         uint64_t total_successful_reads = 0;
         // Total number of failed reads executed through this semaphore.
         uint64_t total_failed_reads = 0;
+        // Total number of reads rejected because the admission queue reached its max capacity
+        uint64_t total_reads_shed_due_to_overload = 0;
     };
 
     struct permit_list;
@@ -203,6 +205,10 @@ public:
 
     const resources initial_resources() const {
         return _initial_resources;
+    }
+
+    bool is_unlimited() const {
+        return _initial_resources == reader_resources{std::numeric_limits<int>::max(), std::numeric_limits<ssize_t>::max()};
     }
 
     const resources available_resources() const {

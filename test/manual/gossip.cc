@@ -69,7 +69,7 @@ int main(int ac, char ** av) {
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<abort_source> abort_sources;
             sharded<service::migration_notifier> mnotif;
-            sharded<locator::token_metadata> token_metadata;
+            sharded<locator::shared_token_metadata> token_metadata;
             sharded<netw::messaging_service> messaging;
             sharded<auth::service> auth_service;
 

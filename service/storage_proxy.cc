@@ -83,6 +83,7 @@
 #include "utils/histogram_metrics_helper.hh"
 #include "service/paxos/prepare_summary.hh"
 #include "service/paxos/proposal.hh"
+#include "locator/token_metadata.hh"
 
 namespace bi = boost::intrusive;
 
@@ -1495,6 +1496,10 @@ void storage_proxy_stats::write_stats::register_stats() {
                     sm::description("number of CQL read requests which arrived to a non-replica and had to be forwarded to a replica"),
                     {storage_proxy_stats::current_scheduling_group_label()}),
 
+            sm::make_total_operations("writes_failed_due_to_too_many_in_flight_hints", writes_failed_due_to_too_many_in_flight_hints,
+                    sm::description("number of CQL write requests which failed because the hinted handoff mechanism is overloaded "
+                    "and cannot store any more in-flight hints"),
+                    {storage_proxy_stats::current_scheduling_group_label()}),
         });
 }
 
@@ -1763,15 +1768,17 @@ using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog,
-        scheduling_group_key stats_key, gms::feature_service& feat, const locator::token_metadata& tm, netw::messaging_service& ms)
+        scheduling_group_key stats_key, gms::feature_service& feat, const locator::shared_token_metadata& stm, netw::messaging_service& ms)
     : _db(db)
-    , _token_metadata(tm)
+    , _shared_token_metadata(stm)
     , _read_smp_service_group(cfg.read_smp_service_group)
     , _write_smp_service_group(cfg.write_smp_service_group)
     , _hints_write_smp_service_group(cfg.hints_write_smp_service_group)
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
     , _hints_resource_manager(cfg.available_memory / 10)
+    , _hints_manager(_db.local().get_config().hints_directory(), cfg.hinted_handoff_enabled, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_directory_initializer(std::move(cfg.hints_directory_initializer))
     , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _stats_key(stats_key)
     , _features(feat)
@@ -1786,17 +1793,9 @@ storage_proxy::storage_proxy(distributed<database>& db, storage_proxy::config cf
                        sm::description("number of currently throttled write requests")),
     });
 
-    if (cfg.hinted_handoff_enabled) {
-        const db::config& dbcfg = _db.local().get_config();
-        supervisor::notify("creating hints manager");
-        slogger.trace("hinted DCs: {}", *cfg.hinted_handoff_enabled);
-        _hints_manager.emplace(dbcfg.hints_directory(), *cfg.hinted_handoff_enabled, dbcfg.max_hint_window_in_ms(), _hints_resource_manager, _db);
-        _hints_manager->register_metrics("hints_manager");
-        _hints_resource_manager.register_manager(*_hints_manager);
-    }
-
+    slogger.trace("hinted DCs: {}", cfg.hinted_handoff_enabled.to_configuration_string());
+    _hints_manager.register_metrics("hints_manager");
     _hints_for_views_manager.register_metrics("hints_for_views_manager");
-    _hints_resource_manager.register_manager(_hints_for_views_manager);
 }
 
 storage_proxy::unique_response_handler::unique_response_handler(storage_proxy& p_, response_id_type id_) : id(id_), p(p_) {}
@@ -1892,7 +1891,7 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     keyspace& ks = _db.local().find_keyspace(keyspace_name);
     auto& rs = ks.get_replication_strategy();
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints_without_node_being_replaced(token);
-    std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, keyspace_name);
+    std::vector<gms::inet_address> pending_endpoints = get_token_metadata_ptr()->pending_endpoints_for(token, keyspace_name);
 
     slogger.trace("creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints, pending_endpoints);
     tracing::trace(tr_state, "Creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints ,pending_endpoints);
@@ -1917,12 +1916,13 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     auto all = boost::range::join(natural_endpoints, pending_endpoints);
 
     if (cannot_hint(all, type)) {
+        get_stats().writes_failed_due_to_too_many_in_flight_hints++;
         // avoid OOMing due to excess hints.  we need to do this check even for "live" nodes, since we can
         // still generate hints for those if it's overloaded or simply dead but not yet known-to-be-dead.
         // The idea is that if we have over maxHintsInProgress hints in flight, this is probably due to
         // a small number of nodes causing problems, so we should avoid shutting down writes completely to
         // healthy nodes.  Any node with no hintsInProgress is considered healthy.
-        throw overloaded_exception(_hints_manager->size_of_hints_in_progress());
+        throw overloaded_exception(_hints_manager.size_of_hints_in_progress());
     }
 
     // filter live endpoints from dead ones
@@ -2204,7 +2204,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     keyspace& ks = _db.local().find_keyspace(ks_name);
     auto& rs = ks.get_replication_strategy();
     std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints_without_node_being_replaced(token);
-    std::vector<gms::inet_address> pending_endpoints = _token_metadata.pending_endpoints_for(token, ks_name);
+    std::vector<gms::inet_address> pending_endpoints = get_token_metadata_ptr()->pending_endpoints_for(token, ks_name);
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
         auto itend = boost::range::remove_if(natural_endpoints, std::not_fn(std::cref(db::is_local)));
@@ -2356,6 +2356,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
 
     class context {
         storage_proxy& _p;
+        const locator::token_metadata_ptr _tmptr;
         std::vector<mutation> _mutations;
         lw_shared_ptr<cdc::operation_result_tracker> _cdc_tracker;
         db::consistency_level _cl;
@@ -2370,6 +2371,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
     public:
         context(storage_proxy & p, std::vector<mutation>&& mutations, lw_shared_ptr<cdc::operation_result_tracker>&& cdc_tracker, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit)
                 : _p(p)
+                , _tmptr(p.get_token_metadata_ptr())
                 , _mutations(std::move(mutations))
                 , _cdc_tracker(std::move(cdc_tracker))
                 , _cl(cl)
@@ -2381,7 +2383,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                 , _batchlog_endpoints(
                         [this]() -> std::unordered_set<gms::inet_address> {
                             auto local_addr = utils::fb_utilities::get_broadcast_address();
-                            auto& topology = _p._token_metadata.get_topology();
+                            auto& topology = _tmptr->get_topology();
                             auto& local_endpoints = topology.get_datacenter_racks().at(get_local_dc());
                             auto local_rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(local_addr);
                             auto chosen_endpoints = db::get_batchlog_manager().local().endpoint_filter(local_rack, local_endpoints);
@@ -2466,7 +2468,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
 template<typename Range>
 bool storage_proxy::cannot_hint(const Range& targets, db::write_type type) const {
     // if hints are disabled we "can always hint" since there's going to be no hint generated in this case
-    return hints_enabled(type) && boost::algorithm::any_of(targets, std::bind(&db::hints::manager::too_many_in_flight_hints_for, &*_hints_manager, std::placeholders::_1));
+    return hints_enabled(type) && boost::algorithm::any_of(targets, std::bind(&db::hints::manager::too_many_in_flight_hints_for, &_hints_manager, std::placeholders::_1));
 }
 
 future<> storage_proxy::send_to_endpoint(
@@ -3922,6 +3924,7 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
     // not once per partition.
     bool is_read_non_local = false;
 
+    const auto tmptr = get_token_metadata_ptr();
     for (auto&& pr: partition_ranges) {
         if (!pr.is_singular()) {
             throw std::runtime_error("mixed singular and non singular range are not supported");
@@ -3930,7 +3933,7 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
         auto token_range = dht::token_range::make_singular(pr.start()->value().token());
         auto it = query_options.preferred_replicas.find(token_range);
         const auto replicas = it == query_options.preferred_replicas.end()
-            ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(_token_metadata, it->second);
+            ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(*tmptr, it->second);
 
         auto read_executor = get_read_executor(cmd, schema, std::move(pr), cl, repair_decision,
                                                query_options.trace_state, replicas, is_read_non_local,
@@ -3947,16 +3950,16 @@ storage_proxy::query_singular(lw_shared_ptr<query::read_command> cmd,
 
     auto used_replicas = make_lw_shared<replicas_per_token_range>();
 
-    auto f = ::map_reduce(exec.begin(), exec.end(), [p = shared_from_this(), timeout = query_options.timeout(*this), used_replicas] (
+    auto f = ::map_reduce(exec.begin(), exec.end(), [p = shared_from_this(), timeout = query_options.timeout(*this), used_replicas, tmptr] (
                 std::pair<::shared_ptr<abstract_read_executor>, dht::token_range>& executor_and_token_range) {
         auto& rex = std::get<0>(executor_and_token_range);
         auto& token_range = std::get<1>(executor_and_token_range);
         utils::latency_counter lc;
         lc.start();
-        return rex->execute(timeout).then_wrapped([p = std::move(p), lc, rex, used_replicas, token_range = std::move(token_range)] (
+        return rex->execute(timeout).then_wrapped([p = std::move(p), lc, rex, used_replicas, token_range = std::move(token_range), tmptr] (
                     future<foreign_ptr<lw_shared_ptr<query::result>>> f) mutable {
             if (!f.failed()) {
-                used_replicas->emplace(std::move(token_range), endpoints_to_replica_ids(p->_token_metadata, rex->used_targets()));
+                used_replicas->emplace(std::move(token_range), endpoints_to_replica_ids(*tmptr, rex->used_targets()));
             }
             if (lc.is_start()) {
                 rex->get_cf()->add_coordinator_read_latency(lc.stop().latency());
@@ -3998,10 +4001,11 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
     auto& cf= _db.local().find_column_family(schema);
     auto pcf = _db.local().get_config().cache_hit_rate_read_balancing() ? &cf : nullptr;
     std::unordered_map<abstract_read_executor*, std::vector<dht::token_range>> ranges_per_exec;
+    const auto tmptr = get_token_metadata_ptr();
 
-    const auto preferred_replicas_for_range = [this, &preferred_replicas] (const dht::partition_range& r) {
+    const auto preferred_replicas_for_range = [this, &preferred_replicas, tmptr] (const dht::partition_range& r) {
         auto it = preferred_replicas.find(r.transform(std::mem_fn(&dht::ring_position::token)));
-        return it == preferred_replicas.end() ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(_token_metadata, it->second);
+        return it == preferred_replicas.end() ? std::vector<gms::inet_address>{} : replica_ids_to_endpoints(*tmptr, it->second);
     };
     const auto to_token_range = [] (const dht::partition_range& r) { return r.transform(std::mem_fn(&dht::ring_position::token)); };
 
@@ -4106,6 +4110,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
     }, std::move(merger));
 
     return f.then([p,
+            tmptr,
             exec = std::move(exec),
             results = std::move(results),
             ranges_to_vnodes = std::move(ranges_to_vnodes),
@@ -4131,7 +4136,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
                 // 1) The list of replicas is determined for each vnode
                 // separately and thus this makes lookups more convenient.
                 // 2) On the next page the ranges might not be merged.
-                auto replica_ids = endpoints_to_replica_ids(p->_token_metadata, e->used_targets());
+                auto replica_ids = endpoints_to_replica_ids(*tmptr, e->used_targets());
                 for (auto& r : ranges_per_exec[e.get()]) {
                     used_replicas.emplace(std::move(r), replica_ids);
                 }
@@ -4159,7 +4164,7 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
 
     // when dealing with LocalStrategy keyspaces, we can skip the range splitting and merging (which can be
     // expensive in clusters with vnodes)
-    query_ranges_to_vnodes_generator ranges_to_vnodes(_token_metadata, schema, std::move(partition_ranges), ks.get_replication_strategy().get_type() == locator::replication_strategy_type::local);
+    query_ranges_to_vnodes_generator ranges_to_vnodes(get_token_metadata_ptr(), schema, std::move(partition_ranges), ks.get_replication_strategy().get_type() == locator::replication_strategy_type::local);
 
     int result_rows_per_range = 0;
     int concurrency_factor = 1;
@@ -4594,8 +4599,8 @@ std::vector<gms::inet_address> storage_proxy::intersection(const std::vector<gms
     return inter;
 }
 
-query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(const locator::token_metadata& tm, schema_ptr s, dht::partition_range_vector ranges, bool local) :
-        _s(s), _ranges(std::move(ranges)), _i(_ranges.begin()), _local(local), _tm(tm) {}
+query_ranges_to_vnodes_generator::query_ranges_to_vnodes_generator(const locator::token_metadata_ptr tmptr, schema_ptr s, dht::partition_range_vector ranges, bool local) :
+        _s(s), _ranges(std::move(ranges)), _i(_ranges.begin()), _local(local), _tmptr(std::move(tmptr)) {}
 
 dht::partition_range_vector query_ranges_to_vnodes_generator::operator()(size_t n) {
     n = std::min(n, size_t(1024));
@@ -4645,7 +4650,7 @@ void query_ranges_to_vnodes_generator::process_one_range(size_t n, dht::partitio
     }
 
     // divide the queryRange into pieces delimited by the ring
-    auto ring_iter = _tm.ring_range(cr.start(), false);
+    auto ring_iter = _tmptr->ring_range(cr.start(), false);
     for (const dht::token& upper_bound_token : ring_iter) {
         /*
          * remainder can be a range/bounds of token _or_ keys and we want to split it with a token:
@@ -4687,11 +4692,11 @@ void query_ranges_to_vnodes_generator::process_one_range(size_t n, dht::partitio
 }
 
 bool storage_proxy::hints_enabled(db::write_type type) const noexcept {
-    return (bool(_hints_manager) && type != db::write_type::CAS) || type == db::write_type::VIEW;
+    return (!_hints_manager.is_disabled_for_all() && type != db::write_type::CAS) || type == db::write_type::VIEW;
 }
 
 db::hints::manager& storage_proxy::hints_manager_for(db::write_type type) {
-    return type == db::write_type::VIEW ? _hints_for_views_manager : *_hints_manager;
+    return type == db::write_type::VIEW ? _hints_for_views_manager : _hints_manager;
 }
 
 future<> storage_proxy::truncate_blocking(sstring keyspace, sstring cfname) {
@@ -5179,11 +5184,38 @@ storage_proxy::query_nonsingular_mutations_locally(schema_ptr s,
 }
 
 future<> storage_proxy::start_hints_manager(shared_ptr<gms::gossiper> gossiper_ptr, shared_ptr<service::storage_service> ss_ptr) {
-    return _hints_resource_manager.start(shared_from_this(), gossiper_ptr, ss_ptr);
+    future<> f = make_ready_future<>();
+    if (!_hints_manager.is_disabled_for_all()) {
+        f = _hints_resource_manager.register_manager(_hints_manager);
+    }
+    return f.then([this] {
+        return _hints_resource_manager.register_manager(_hints_for_views_manager);
+    }).then([this, gossiper_ptr, ss_ptr] {
+        return _hints_resource_manager.start(shared_from_this(), gossiper_ptr, ss_ptr);
+    });
 }
 
 void storage_proxy::allow_replaying_hints() noexcept {
     return _hints_resource_manager.allow_replaying();
+}
+
+future<> storage_proxy::change_hints_host_filter(db::hints::host_filter new_filter) {
+    if (new_filter == _hints_manager.get_host_filter()) {
+        return make_ready_future<>();
+    }
+
+    return _hints_directory_initializer.ensure_created_and_verified().then([this] {
+        return _hints_directory_initializer.ensure_rebalanced();
+    }).then([this] {
+        // This function is idempotent
+        return _hints_resource_manager.register_manager(_hints_manager);
+    }).then([this, new_filter = std::move(new_filter)] () mutable {
+        return _hints_manager.change_host_filter(std::move(new_filter));
+    });
+}
+
+const db::hints::host_filter& storage_proxy::get_hints_host_filter() const {
+    return _hints_manager.get_host_filter();
 }
 
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
@@ -5192,12 +5224,12 @@ void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {};
 
 void storage_proxy::on_up(const gms::inet_address& endpoint) {};
 
-void storage_proxy::on_down(const gms::inet_address& endpoint) {
+void storage_proxy::retire_view_response_handlers(noncopyable_function<bool(const abstract_write_response_handler&)> filter_fun) {
     assert(thread::running_in_thread());
     auto it = _view_update_handlers_list->begin();
     while (it != _view_update_handlers_list->end()) {
         auto guard = it->shared_from_this();
-        if (it->get_targets().contains(endpoint) && _response_handlers.contains(it->id())) {
+        if (filter_fun(*it) && _response_handlers.contains(it->id())) {
             it->timeout_cb();
         }
         ++it;
@@ -5206,24 +5238,30 @@ void storage_proxy::on_down(const gms::inet_address& endpoint) {
             seastar::thread::yield();
         }
     }
+}
+
+void storage_proxy::on_down(const gms::inet_address& endpoint) {
+    return retire_view_response_handlers([endpoint] (const abstract_write_response_handler& handler) {
+        return handler.get_targets().contains(endpoint);
+    });
 };
 
 future<> storage_proxy::drain_on_shutdown() {
-    return do_with(::shared_ptr<abstract_write_response_handler>(), [this] (::shared_ptr<abstract_write_response_handler>& intrusive_list_guard) {
-        return do_for_each(*_view_update_handlers_list, [this, &intrusive_list_guard] (abstract_write_response_handler& handler) {
-            if (_response_handlers.contains(handler.id())) {
-                intrusive_list_guard = handler.shared_from_this();
-                handler.timeout_cb();
-            }
-        });
-    }).then([this] {
-        return _hints_resource_manager.stop();
+    //NOTE: the thread is spawned here because there are delicate lifetime issues to consider
+    // and writing them down with plain futures is error-prone.
+    return async([this] {
+        retire_view_response_handlers([] (const abstract_write_response_handler&) { return true; });
+        _hints_resource_manager.stop().get();
     });
 }
 
 future<>
 storage_proxy::stop() {
     return make_ready_future<>();
+}
+
+locator::token_metadata_ptr storage_proxy::get_token_metadata_ptr() const noexcept {
+    return _shared_token_metadata.get();
 }
 
 }

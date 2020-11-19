@@ -2272,12 +2272,12 @@ SEASTAR_TEST_CASE(test_exception_safety_of_update_from_memtable) {
         memtable_snapshot_source underlying(s.schema());
         memory::with_allocation_failures([&] {
             for (auto&& m : orig) {
-                memory::disable_failure_guard dfg;
+                memory::scoped_critical_alloc_section dfg;
                 underlying.apply(m);
             }
 
             row_cache cache(s.schema(), snapshot_source([&] {
-                memory::disable_failure_guard dfg;
+                memory::scoped_critical_alloc_section dfg;
                 return underlying();
             }), tracker);
 
@@ -2293,7 +2293,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_update_from_memtable) {
             std::optional<flat_mutation_reader> snap;
 
             auto d = defer([&] {
-                memory::disable_failure_guard dfg;
+                memory::scoped_critical_alloc_section dfg;
                 assert_that(cache.make_reader(cache.schema(), tests::make_permit()))
                     .produces(orig)
                     .produces_end_of_stream();
@@ -2418,7 +2418,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_transitioning_from_underlying_read_to
 
         memory::with_allocation_failures([&] {
             {
-                memory::disable_failure_guard dfg;
+                memory::scoped_critical_alloc_section dfg;
                 cache.evict();
                 populate_range(cache, pr, s.make_ckey_range(6, 10));
             }
@@ -2454,7 +2454,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_partition_scan) {
 
         memory::with_allocation_failures([&] {
             {
-                memory::disable_failure_guard dfg;
+                memory::scoped_critical_alloc_section dfg;
                 cache.evict();
                 populate_range(cache, dht::partition_range::make_singular(pkeys[1]));
                 populate_range(cache, dht::partition_range::make({pkeys[3]}, {pkeys[5]}));

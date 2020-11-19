@@ -103,13 +103,18 @@ struct storage_service_config {
  * This class will also maintain histograms of the load information
  * of other nodes in the cluster.
  */
-class storage_service : public service::migration_listener, public gms::i_endpoint_state_change_subscriber, public seastar::async_sharded_service<storage_service> {
+class storage_service : public service::migration_listener, public gms::i_endpoint_state_change_subscriber,
+        public seastar::async_sharded_service<storage_service>, public seastar::peering_sharded_service<storage_service> {
 private:
     using token = dht::token;
     using token_range_endpoints = dht::token_range_endpoints;
     using endpoint_details = dht::endpoint_details;
     using boot_strapper = dht::boot_strapper;
     using token_metadata = locator::token_metadata;
+    using shared_token_metadata = locator::shared_token_metadata;
+    using token_metadata_ptr = locator::token_metadata_ptr;
+    using mutable_token_metadata_ptr = locator::mutable_token_metadata_ptr;
+    using token_metadata_lock = locator::token_metadata_lock;
     using application_state = gms::application_state;
     using inet_address = gms::inet_address;
     using versioned_value = gms::versioned_value;
@@ -150,7 +155,7 @@ private:
      */
     bool _for_testing;
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::token_metadata& tm, sharded<netw::messaging_service>& ms, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
 
     // Needed by distributed<>
     future<> stop();
@@ -158,21 +163,39 @@ public:
     future<> uninit_messaging_service();
 
 private:
-    future<> do_update_pending_ranges();
+    future<token_metadata_lock> get_token_metadata_lock() noexcept;
+    future<> with_token_metadata_lock(std::function<future<> ()>) noexcept;
+
+    // Acquire the token_metadata lock and get a mutable_token_metadata_ptr.
+    // Pass that ptr to \c func, and when successfully done,
+    // replicate it to all cores.
+    // Note: must be called on shard 0.
+    future<> mutate_token_metadata(std::function<future<> (mutable_token_metadata_ptr)> func) noexcept;
+
+    // Update pending ranges locally and then replicate to all cores.
+    // Should be serialized under token_metadata_lock.
+    // Must be called on shard 0.
+    future<> update_pending_ranges(mutable_token_metadata_ptr tmptr, sstring reason);
+    future<> update_pending_ranges(sstring reason);
+    future<> keyspace_changed(const sstring& ks_name);
     void register_metrics();
     future<> publish_schema_version();
     void install_schema_version_change_listener();
-public:
-    future<> keyspace_changed(const sstring& ks_name);
-    future<> update_pending_ranges();
-    void update_pending_ranges_nowait(inet_address endpoint);
 
-    const locator::token_metadata& get_token_metadata() const {
-        return _token_metadata;
+    future<mutable_token_metadata_ptr> get_mutable_token_metadata_ptr() noexcept {
+        return _shared_token_metadata.get()->clone_async().then([] (token_metadata tm) {
+            return make_ready_future<mutable_token_metadata_ptr>(make_token_metadata_ptr(std::move(tm)));
+        });
+    }
+public:
+    static future<> update_topology(inet_address endpoint);
+
+    token_metadata_ptr get_token_metadata_ptr() const noexcept {
+        return _shared_token_metadata.get();
     }
 
-    locator::token_metadata& get_mutable_token_metadata() {
-        return _token_metadata;
+    const locator::token_metadata& get_token_metadata() const noexcept {
+        return *_shared_token_metadata.get();
     }
 
     cdc::metadata& get_cdc_metadata() {
@@ -207,7 +230,8 @@ private:
         return utils::fb_utilities::get_broadcast_address();
     }
     /* This abstraction maintains the token/endpoint metadata information */
-    token_metadata& _token_metadata;
+    mutable_token_metadata_ptr _pending_token_metadata_ptr;
+    shared_token_metadata& _shared_token_metadata;
 
     // Maintains the set of known CDC generations used to pick streams for log writes (i.e., the partition keys of these log writes).
     // Updated in response to certain gossip events (see the handle_cdc_generation function).
@@ -333,6 +357,9 @@ public:
      *
      * It is safe to start the API after init_messaging_service_part
      * completed
+     *
+     * Must be called on shard 0.
+     *
      * \see init_messaging_service_part
      */
     future<> init_server(bind_messaging_port do_bind = bind_messaging_port::yes);
@@ -525,24 +552,12 @@ private:
 public:
     future<> check_and_repair_cdc_streams();
 private:
-    future<> replicate_to_all_cores();
-    future<> do_replicate_to_all_cores();
-    serialized_action _replicate_action;
-    serialized_action _update_pending_ranges_action;
+    // Should be serialized under token_metadata_lock.
+    future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     sharded<db::view::view_update_generator>& _view_update_generator;
     serialized_action _schema_version_publisher;
 private:
-    /**
-     * Replicates token_metadata contents on shard0 instance to other shards.
-     *
-     * Should be serialized.
-     * Should run on shard 0 only.
-     *
-     * @return a ready future when replication is complete.
-     */
-    future<> replicate_tm_only();
-
     /**
      * Handle node bootstrap
      *
@@ -846,7 +861,7 @@ private:
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::token_metadata>& tm,
+        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::shared_token_metadata>& stm,
         sharded<netw::messaging_service>& ms, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 

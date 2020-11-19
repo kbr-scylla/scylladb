@@ -11,6 +11,7 @@
 #include "storage_service.hh"
 #include "api/api-doc/storage_service.json.hh"
 #include "db/config.hh"
+#include "db/schema_tables.hh"
 #include <optional>
 #include <time.h>
 #include <boost/range/adaptor/map.hpp>
@@ -33,8 +34,13 @@
 #include "db/snapshot-ctl.hh"
 #include "transport/controller.hh"
 #include "thrift/controller.hh"
+#include "locator/token_metadata.hh"
 
 namespace api {
+
+const locator::token_metadata& http_context::get_token_metadata() {
+        return *shared_token_metadata.local().get();
+}
 
 namespace ss = httpd::storage_service_json;
 using namespace json;
@@ -245,14 +251,14 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::get_tokens.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return make_ready_future<json::json_return_type>(stream_range_as_array(ctx.token_metadata.local().sorted_tokens(), [](const dht::token& i) {
+        return make_ready_future<json::json_return_type>(stream_range_as_array(ctx.get_token_metadata().sorted_tokens(), [](const dht::token& i) {
            return boost::lexical_cast<std::string>(i);
         }));
     });
 
     ss::get_node_tokens.set(r, [&ctx] (std::unique_ptr<request> req) {
         gms::inet_address addr(req->param["endpoint"]);
-        return make_ready_future<json::json_return_type>(stream_range_as_array(ctx.token_metadata.local().get_tokens(addr), [](const dht::token& i) {
+        return make_ready_future<json::json_return_type>(stream_range_as_array(ctx.get_token_metadata().get_tokens(addr), [](const dht::token& i) {
            return boost::lexical_cast<std::string>(i);
        }));
     });
@@ -271,7 +277,7 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::get_leaving_nodes.set(r, [&ctx](const_req req) {
-        return container_to_vec(ctx.token_metadata.local().get_leaving_endpoints());
+        return container_to_vec(ctx.get_token_metadata().get_leaving_endpoints());
     });
 
     ss::get_moving_nodes.set(r, [](const_req req) {
@@ -280,7 +286,7 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::get_joining_nodes.set(r, [&ctx](const_req req) {
-        auto points = ctx.token_metadata.local().get_bootstrap_tokens();
+        auto points = ctx.get_token_metadata().get_bootstrap_tokens();
         std::unordered_set<sstring> addr;
         for (auto i: points) {
             addr.insert(boost::lexical_cast<std::string>(i.second));
@@ -349,7 +355,7 @@ void set_storage_service(http_context& ctx, routes& r) {
 
     ss::get_host_id_map.set(r, [&ctx](const_req req) {
         std::vector<ss::mapper> res;
-        return map_to_key_value(ctx.token_metadata.local().get_endpoint_to_host_id_map_for_reading(), res);
+        return map_to_key_value(ctx.get_token_metadata().get_endpoint_to_host_id_map_for_reading(), res);
     });
 
     ss::get_load.set(r, [&ctx](std::unique_ptr<request> req) {
@@ -721,9 +727,12 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::reset_local_schema.set(r, [](std::unique_ptr<request> req) {
-        //TBD
-        unimplemented();
-        return make_ready_future<json::json_return_type>(json_void());
+        // FIXME: We should truncate schema tables if more than one node in the cluster.
+        auto& sp = service::get_storage_proxy();
+        auto& fs = service::get_local_storage_service().features();
+        return db::schema_tables::recalculate_schema_version(sp, fs).then([] {
+            return make_ready_future<json::json_return_type>(json_void());
+        });
     });
 
     ss::set_trace_probability.set(r, [](std::unique_ptr<request> req) {

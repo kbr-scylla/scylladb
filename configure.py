@@ -718,6 +718,7 @@ scylla_core = (['database.cc',
                 'db/data_listeners.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
+                'db/hints/host_filter.cc',
                 'db/config.cc',
                 'db/extensions.cc',
                 'db/heat_load_balance.cc',
@@ -1850,11 +1851,10 @@ with open(buildfile_tmp, 'w') as f:
         f.write('build $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz: package $builddir/{mode}/scylla $builddir/{mode}/iotune $builddir/SCYLLA-RELEASE-FILE $builddir/SCYLLA-VERSION-FILE $builddir/debian/debian | always\n'.format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  mode = {mode}\n'.format(**locals()))
-        f.write(f'build $builddir/{mode}/{scylla_product}-package.tar.gz: copy $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz\n')
-        f.write(f'build $builddir/dist/{mode}/redhat: rpmbuild $builddir/{mode}/{scylla_product}-package.tar.gz\n')
+        f.write(f'build $builddir/dist/{mode}/redhat: rpmbuild $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
-        f.write(f'build $builddir/dist/{mode}/debian: debbuild $builddir/{mode}/{scylla_product}-package.tar.gz\n')
+        f.write(f'build $builddir/dist/{mode}/debian: debbuild $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
         f.write(f'build dist-server-{mode}: phony $builddir/dist/{mode}/redhat $builddir/dist/{mode}/debian\n')
@@ -1862,7 +1862,6 @@ with open(buildfile_tmp, 'w') as f:
         f.write(f'build dist-tools-{mode}: phony $builddir/{mode}/dist/tar/{scylla_product}-tools-package.tar.gz dist-tools-rpm dist-tools-deb\n')
         f.write(f'build dist-python3-{mode}: phony dist-python3-tar dist-python3-rpm dist-python3-deb compat-python3-rpm compat-python3-deb\n')
         f.write(f'build dist-unified-{mode}: phony $builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz\n')
-        f.write(f'build $builddir/{mode}/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz: copy $builddir/{mode}/dist/tar/{scylla_product}-unified-package.tar.gz\n')
         f.write(f'build $builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz: unified $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-python3-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-jmx-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-tools-package.tar.gz | always\n')
         f.write(f'  pool = submodule_pool\n')
         f.write(f'  mode = {mode}\n')
@@ -1891,12 +1890,12 @@ with open(buildfile_tmp, 'w') as f:
     )
 
     f.write(textwrap.dedent(f'''\
-        build dist-unified-tar: phony {' '.join(['$builddir/{mode}/{scylla_product}-unified-package-$scylla_version.$scylla_release.tar.gz'.format(mode=mode, scylla_product=scylla_product) for mode in build_modes])}
+        build dist-unified-tar: phony {' '.join([f'$builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz' for mode in build_modes])}
         build dist-unified: phony dist-unified-tar
 
         build dist-server-deb: phony {' '.join(['$builddir/dist/{mode}/debian'.format(mode=mode) for mode in build_modes])}
         build dist-server-rpm: phony {' '.join(['$builddir/dist/{mode}/redhat'.format(mode=mode) for mode in build_modes])}
-        build dist-server-tar: phony {' '.join(['$builddir/{mode}/{scylla_product}-package.tar.gz'.format(mode=mode, scylla_product=scylla_product) for mode in build_modes])}
+        build dist-server-tar: phony {' '.join(['$builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz'.format(mode=mode, scylla_product=scylla_product) for mode in build_modes])}
         build dist-server: phony dist-server-tar dist-server-rpm dist-server-deb
 
         rule build-submodule-reloc

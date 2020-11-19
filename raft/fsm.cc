@@ -36,6 +36,12 @@ fsm::fsm(server_id id, term_t current_term, server_id voted_for, log log,
     assert(!bool(_current_leader));
 }
 
+future<> fsm::wait() {
+    check_is_leader();
+
+   return _log_limiter_semaphore->sem.wait();
+}
+
 template<typename T>
 const log_entry& fsm::add_entry(T command) {
     // It's only possible to add entries on a leader.
@@ -88,6 +94,8 @@ void fsm::become_leader() {
     _current_leader = _my_id;
     _votes = std::nullopt;
     _tracker.emplace(_my_id);
+    _log_limiter_semaphore.emplace(this);
+    _log_limiter_semaphore->sem.consume(_log.non_snapshoted_length());
     _tracker->set_configuration(_current_config.servers, _log.next_idx());
     _last_election_time = _clock.now();
     replicate();
@@ -97,6 +105,7 @@ void fsm::become_follower(server_id leader) {
     _current_leader = leader;
     _state = follower{};
     _tracker = std::nullopt;
+    _log_limiter_semaphore = std::nullopt;
     _votes = std::nullopt;
     if (_current_leader) {
         _last_election_time = _clock.now();
@@ -106,6 +115,7 @@ void fsm::become_follower(server_id leader) {
 void fsm::become_candidate() {
     _state = candidate{};
     _tracker = std::nullopt;
+    _log_limiter_semaphore = std::nullopt;
     update_current_term(term_t{_current_term + 1});
     // 3.4 Leader election
     // A possible outcome is that a candidate neither wins nor
@@ -530,17 +540,17 @@ void fsm::replicate_to(follower_progress& progress, bool allow_empty) {
                 .prev_log_term = prev_term,
                 .leader_commit_idx = _commit_idx
             },
-            std::vector<log_entry_cref>()
+            std::vector<log_entry_ptr>()
         };
 
         if (next_idx) {
             size_t size = 0;
             while (next_idx <= _log.stable_idx() && size < _config.append_request_threshold) {
-                const log_entry& entry = *_log[next_idx];
-                req.entries.push_back(std::cref(entry));
+                const auto& entry = _log[next_idx];
+                req.entries.push_back(entry);
                 logger.trace("replicate_to[{}->{}]: send entry idx={}, term={}",
-                             _my_id, progress.id, entry.idx, entry.term);
-                size += entry_size(entry);
+                             _my_id, progress.id, entry->idx, entry->term);
+                size += entry_size(*entry);
                 next_idx++;
                 if (progress.state == follower_progress::state::PROBE) {
                     break; // in PROBE mode send only one entry
@@ -615,7 +625,11 @@ void fsm::snapshot_status(server_id id, bool success) {
 }
 
 void fsm::apply_snapshot(snapshot snp, size_t trailing) {
-    _log.apply_snapshot(std::move(snp), trailing);
+    size_t units = _log.apply_snapshot(std::move(snp), trailing);
+    if (is_leader()) {
+        logger.trace("apply_snapshot[{}]: signal {} available units", _my_id, units);
+        _log_limiter_semaphore->sem.signal(units);
+    }
 }
 
 void fsm::stop() {

@@ -29,6 +29,7 @@
 #include "database_fwd.hh"
 #include "db_clock.hh"
 #include "dht/token.hh"
+#include "locator/token_metadata.hh"
 
 namespace seastar {
     class abort_source;
@@ -43,10 +44,6 @@ namespace gms {
     class inet_address;
     class gossiper;
 } // namespace gms
-
-namespace locator {
-    class token_metadata;
-} // namespace locator
 
 namespace cdc {
 
@@ -143,7 +140,7 @@ bool should_propose_first_generation(const gms::inet_address& me, const gms::gos
 future<db_clock::time_point> get_local_streams_timestamp();
 
 /* Generate a new set of CDC streams and insert it into the distributed cdc_generation_descriptions table.
- * Returns the timestamp of this new generation.
+ * Returns the timestamp of this new generation
  *
  * Should be called when starting the node for the first time (i.e., joining the ring).
  *
@@ -157,11 +154,11 @@ future<db_clock::time_point> get_local_streams_timestamp();
 db_clock::time_point make_new_cdc_generation(
         const db::config& cfg,
         const std::unordered_set<dht::token>& bootstrap_tokens,
-        const locator::token_metadata& tm,
+        const locator::token_metadata_ptr tmptr,
         const gms::gossiper& g,
         db::system_distributed_keyspace& sys_dist_ks,
         std::chrono::milliseconds ring_delay,
-        bool for_testing);
+        bool add_delay);
 
 /* Retrieves CDC streams generation timestamp from the given endpoint's application state (broadcasted through gossip).
  * We might be during a rolling upgrade, so the timestamp might not be there (if the other node didn't upgrade yet),

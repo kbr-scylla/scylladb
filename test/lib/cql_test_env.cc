@@ -73,7 +73,7 @@ cql_test_config::~cql_test_config() = default;
 
 static const sstring testing_superuser = "tester";
 
-static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features, sharded<locator::token_metadata>& tm, sharded<netw::messaging_service>& ms, db::config& cfg, db::seed_provider_type seed_provider,
+static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features, sharded<locator::shared_token_metadata>& stm, sharded<netw::messaging_service>& ms, db::config& cfg, db::seed_provider_type seed_provider,
             sharded<abort_source>& abort_sources, sstring cluster_name = "Test Cluster") {
         // Init gossiper
         std::set<gms::inet_address> seeds;
@@ -89,7 +89,7 @@ static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features,
         if (seeds.empty()) {
             seeds.emplace(gms::inet_address("127.0.0.1"));
         }
-        return gms::get_gossiper().start(std::ref(abort_sources), std::ref(features), std::ref(tm), std::ref(ms), std::ref(cfg)).then([seeds, cluster_name] {
+        return gms::get_gossiper().start(std::ref(abort_sources), std::ref(features), std::ref(stm), std::ref(ms), std::ref(cfg)).then([seeds, cluster_name] {
             auto& gossiper = gms::get_local_gossiper();
             gossiper.set_seeds(seeds);
             gossiper.set_cluster_name(cluster_name);
@@ -411,7 +411,7 @@ public:
                 cfg->max_memory_for_unlimited_query_hard_limit.set(uint64_t(query::result_memory_limiter::unlimited_result_size));
             }
 
-            sharded<locator::token_metadata> token_metadata;
+            sharded<locator::shared_token_metadata> token_metadata;
             token_metadata.start().get();
             auto stop_token_metadata = defer([&token_metadata] { token_metadata.stop().get(); });
 
@@ -501,7 +501,9 @@ public:
                 ss.enable_all_features();
             }).get();
 
-            service::storage_proxy::config spcfg;
+            service::storage_proxy::config spcfg {
+                .hints_directory_initializer = db::hints::directory_initializer::make_dummy(),
+            };
             spcfg.available_memory = memory::stats().total_memory();
             db::view::node_update_backlog b(smp::count, 10ms);
             scheduling_group_key_config sg_conf =
@@ -519,7 +521,7 @@ public:
 
             // In main.cc we call db::system_keyspace::setup which calls
             // minimal_setup and init_local_cache
-            db::system_keyspace::minimal_setup(db, qp);
+            db::system_keyspace::minimal_setup(qp);
 
             db::batchlog_manager_config bmcfg;
             bmcfg.replay_rate = 100000000;

@@ -47,6 +47,7 @@
 #include "schema_registry.hh"
 #include "mutation_query.hh"
 #include "system_keyspace.hh"
+#include "system_distributed_keyspace.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/functions/functions.hh"
 #include "cql3/util.hh"
@@ -92,6 +93,11 @@ using namespace std::chrono_literals;
 
 
 static logging::logger diff_logger("schema_diff");
+
+static bool is_extra_durable(const sstring& ks_name, const sstring& cf_name) {
+    return (is_system_keyspace(ks_name) && db::system_keyspace::is_extra_durable(cf_name))
+        || (ks_name == db::system_distributed_keyspace::NAME && db::system_distributed_keyspace::is_extra_durable(cf_name));
+}
 
 
 /** system.schema_* tables used to store keyspace/table/type attributes prior to C* 3.0 */
@@ -209,24 +215,24 @@ using namespace v3;
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
-future<> save_system_schema(const sstring & ksname) {
-    auto& ks = db::qctx->db().find_keyspace(ksname);
+future<> save_system_schema(cql3::query_processor& qp, const sstring & ksname) {
+    auto& ks = qp.db().find_keyspace(ksname);
     auto ksm = ks.metadata();
 
     // delete old, possibly obsolete entries in schema tables
     return parallel_for_each(all_table_names(schema_features::full()), [ksm] (sstring cf) {
         auto deletion_timestamp = schema_creation_timestamp() - 1;
-        return db::execute_cql(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
+        return qctx->execute_cql(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
             deletion_timestamp), ksm->name()).discard_result();
-    }).then([ksm] {
+    }).then([ksm, &qp] {
         auto mvec  = make_create_keyspace_mutations(ksm, schema_creation_timestamp(), true);
-        return qctx->proxy().mutate_locally(std::move(mvec), tracing::trace_state_ptr());
+        return qp.proxy().mutate_locally(std::move(mvec), tracing::trace_state_ptr());
     });
 }
 
 /** add entries to system_schema.* for the hardcoded system definitions */
-future<> save_system_keyspace_schema() {
-    return save_system_schema(NAME);
+future<> save_system_keyspace_schema(cql3::query_processor& qp) {
+    return save_system_schema(qp, NAME);
 }
 
 namespace v3 {
@@ -2512,7 +2518,7 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
         builder.with_sharder(smp::count, ctxt.murmur3_partitioner_ignore_msb_bits());
     }
 
-    if (is_system_keyspace(ks_name) && is_extra_durable(cf_name)) {
+    if (is_extra_durable(ks_name, cf_name)) {
         builder.set_wait_for_sync_to_commitlog(true);
     }
 

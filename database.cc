@@ -46,6 +46,7 @@
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/algorithm/sort.hpp>
 #include <boost/range/adaptor/map.hpp>
+#include <boost/container/static_vector.hpp>
 #include "frozen_mutation.hh"
 #include <seastar/core/do_with.hh>
 #include "service/migration_manager.hh"
@@ -71,6 +72,7 @@
 
 #include "checked-file-impl.hh"
 #include "utils/disk-error-handler.hh"
+#include "utils/human_readable.hh"
 
 #include "db/timeout_clock.hh"
 #include "db/large_data_handler.hh"
@@ -79,6 +81,7 @@
 
 #include "user_types_metadata.hh"
 #include <seastar/core/shared_ptr_incomplete.hh>
+#include <seastar/util/memory_diagnostics.hh>
 
 #include "schema_builder.hh"
 
@@ -154,14 +157,181 @@ bool string_pair_eq::operator()(spair lhs, spair rhs) const {
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
-database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::token_metadata& tm, abort_source& as, sharded<semaphore>& sst_dir_sem)
+namespace {
+
+class memory_diagnostics_line_writer {
+    std::array<char, 4096> _line_buf;
+    memory::memory_diagnostics_writer _wr;
+
+public:
+    memory_diagnostics_line_writer(memory::memory_diagnostics_writer wr) : _wr(std::move(wr)) { }
+    void operator() (const char* fmt) {
+        _wr(fmt);
+    }
+    void operator() (const char* fmt, const auto& param1, const auto&... params) {
+        const auto begin = _line_buf.begin();
+        auto it = fmt::format_to(begin, fmt, param1, params...);
+        _wr(std::string_view(begin, it - begin));
+    }
+};
+
+const boost::container::static_vector<std::pair<size_t, boost::container::static_vector<table*, 16>>, 10>
+phased_barrier_top_10_counts(const std::unordered_map<utils::UUID, lw_shared_ptr<column_family>>& tables, std::function<size_t(table&)> op_count_getter) {
+    using table_list = boost::container::static_vector<table*, 16>;
+    using count_and_tables = std::pair<size_t, table_list>;
+    const auto less = [] (const count_and_tables& a, const count_and_tables& b) {
+        return a.first < b.first;
+    };
+
+    boost::container::static_vector<count_and_tables, 10> res;
+    count_and_tables* min_element = nullptr;
+
+    for (const auto& [tid, table] : tables) {
+        const auto count = op_count_getter(*table);
+        if (!count) {
+            continue;
+        }
+        if (res.size() < res.capacity()) {
+            auto& elem = res.emplace_back(count, table_list({table.get()}));
+            if (!min_element || min_element->first > count) {
+                min_element = &elem;
+            }
+            continue;
+        }
+        if (min_element->first > count) {
+            continue;
+        }
+
+        auto it = boost::find_if(res, [count] (const count_and_tables& x) {
+            return x.first == count;
+        });
+        if (it != res.end()) {
+            it->second.push_back(table.get());
+            continue;
+        }
+
+        // If we are here, min_element->first < count
+        *min_element = {count, table_list({table.get()})};
+        min_element = &*boost::min_element(res, less);
+    }
+
+    boost::sort(res, less);
+
+    return res;
+}
+
+} // anonymous namespace
+
+void database::setup_scylla_memory_diagnostics_producer() {
+    memory::set_additional_diagnostics_producer([this] (memory::memory_diagnostics_writer wr) {
+        auto writeln = memory_diagnostics_line_writer(std::move(wr));
+
+        const auto lsa_occupancy_stats = logalloc::lsa_global_occupancy_stats();
+        writeln("LSA\n");
+        writeln("  allocated: {}\n", utils::to_hr_size(lsa_occupancy_stats.total_space()));
+        writeln("  used:      {}\n", utils::to_hr_size(lsa_occupancy_stats.used_space()));
+        writeln("  free:      {}\n\n", utils::to_hr_size(lsa_occupancy_stats.free_space()));
+
+        const auto row_cache_occupancy_stats = _row_cache_tracker.region().occupancy();
+        writeln("Cache:\n");
+        writeln("  total: {}\n", utils::to_hr_size(row_cache_occupancy_stats.total_space()));
+        writeln("  used:  {}\n", utils::to_hr_size(row_cache_occupancy_stats.used_space()));
+        writeln("  free:  {}\n\n", utils::to_hr_size(row_cache_occupancy_stats.free_space()));
+
+        writeln("Memtables:\n");
+        writeln(" total: {}\n", utils::to_hr_size(lsa_occupancy_stats.total_space() - row_cache_occupancy_stats.total_space()));
+
+        writeln(" Regular:\n");
+        writeln("  real dirty: {}\n", utils::to_hr_size(_dirty_memory_manager.real_dirty_memory()));
+        writeln("  virt dirty: {}\n", utils::to_hr_size(_dirty_memory_manager.virtual_dirty_memory()));
+        writeln(" System:\n");
+        writeln("  real dirty: {}\n", utils::to_hr_size(_system_dirty_memory_manager.real_dirty_memory()));
+        writeln("  virt dirty: {}\n\n", utils::to_hr_size(_system_dirty_memory_manager.virtual_dirty_memory()));
+
+        writeln("Replica:\n");
+
+        writeln("  Read Concurrency Semaphores:\n");
+        const std::pair<const char*, reader_concurrency_semaphore&> semaphores[] = {
+                {"user", _read_concurrency_sem},
+                {"streaming", _streaming_concurrency_sem},
+                {"system", _system_read_concurrency_sem},
+                {"compaction", _compaction_concurrency_sem},
+        };
+        for (const auto& [name, sem] : semaphores) {
+            const auto initial_res = sem.initial_resources();
+            const auto available_res = sem.available_resources();
+            if (sem.is_unlimited()) {
+                writeln("    {}: {}/∞, {}/∞\n",
+                        name,
+                        initial_res.count - available_res.count,
+                        utils::to_hr_size(initial_res.memory - available_res.memory),
+                        sem.waiters());
+            } else {
+                writeln("    {}: {}/{}, {}/{}, queued: {}\n",
+                        name,
+                        initial_res.count - available_res.count,
+                        initial_res.count,
+                        utils::to_hr_size(initial_res.memory - available_res.memory),
+                        utils::to_hr_size(initial_res.memory),
+                        sem.waiters());
+            }
+        }
+
+        writeln("  Execution Stages:\n");
+        const std::pair<const char*, inheriting_execution_stage::stats> execution_stage_summaries[] = {
+                {"data query stage", _data_query_stage.get_stats()},
+                {"mutation query stage", _mutation_query_stage.get_stats()},
+                {"apply stage", _apply_stage.get_stats()},
+        };
+        for (const auto& [name, exec_stage_summary] : execution_stage_summaries) {
+            writeln("    {}:\n", name);
+            size_t total = 0;
+            for (const auto& [sg, stats ] : exec_stage_summary) {
+                const auto count = stats.function_calls_enqueued - stats.function_calls_executed;
+                if (!count) {
+                    continue;
+                }
+                writeln("      {}\t{}\n", sg.name(), count);
+                total += count;
+            }
+            writeln("         Total: {}\n", total);
+        }
+
+        writeln("  Tables - Ongoing Operations:\n");
+        const std::pair<const char*, std::function<size_t(table&)>> phased_barriers[] = {
+                {"Pending writes", std::mem_fn(&table::writes_in_progress)},
+                {"Pending reads", std::mem_fn(&table::reads_in_progress)},
+                {"Pending streams", std::mem_fn(&table::streams_in_progress)},
+        };
+        for (const auto& [name, op_count_getter] : phased_barriers) {
+            writeln("    {} (top 10):\n", name);
+            auto total = 0;
+            for (const auto& [count, table_list] : phased_barrier_top_10_counts(_column_families, op_count_getter)) {
+                total += count;
+                writeln("      {}", count);
+                if (table_list.empty()) {
+                    writeln("\n");
+                    continue;
+                }
+                auto it = table_list.begin();
+                for (; it != table_list.end() - 1; ++it) {
+                    writeln(" {}.{},", (*it)->schema()->ks_name(), (*it)->schema()->cf_name());
+                }
+                writeln(" {}.{}\n", (*it)->schema()->ks_name(), (*it)->schema()->cf_name());
+            }
+            writeln("      {} Total (all)\n", total);
+        }
+        writeln("\n");
+    });
+}
+
+database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm, abort_source& as, sharded<semaphore>& sst_dir_sem)
     : _stats(make_lw_shared<db_stats>())
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
     // Allow system tables a pool of 10 MB memory to write, but never block on other regions.
     , _system_dirty_memory_manager(*this, 10 << 20, cfg.virtual_dirty_soft_limit(), default_scheduling_group())
-    , _dirty_memory_manager(*this, dbcfg.available_memory * 0.45, cfg.virtual_dirty_soft_limit(), dbcfg.statement_scheduling_group)
-    , _streaming_dirty_memory_manager(*this, dbcfg.available_memory * 0.10, cfg.virtual_dirty_soft_limit(), dbcfg.streaming_scheduling_group)
+    , _dirty_memory_manager(*this, dbcfg.available_memory * 0.50, cfg.virtual_dirty_soft_limit(), dbcfg.statement_scheduling_group)
     , _dbcfg(dbcfg)
     , _memtable_controller(make_flush_controller(_cfg, dbcfg.memtable_scheduling_group, service::get_local_memtable_flush_priority(), [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
         auto backlog = (_dirty_memory_manager.virtual_dirty_memory()) / limit;
@@ -208,9 +378,11 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _data_listeners(std::make_unique<db::data_listeners>(*this))
     , _mnotifier(mn)
     , _feat(feat)
-    , _token_metadata(tm)
+    , _shared_token_metadata(stm)
     , _sst_dir_semaphore(sst_dir_sem)
 {
+    assert(dbcfg.available_memory != 0); // Detect misconfigured unit tests, see #7544
+
     local_schema_registry().init(*this); // TODO: we're never unbound.
     setup_metrics();
 
@@ -222,6 +394,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
         dblog.debug("Enabling infinite bound range deletions");
         _supports_infinite_bound_range_deletions = true;
     });
+
+    setup_scylla_memory_diagnostics_producer();
 }
 
 const db::extensions& database::extensions() const {
@@ -298,7 +472,6 @@ void
 database::setup_metrics() {
     _dirty_memory_manager.setup_collectd("regular");
     _system_dirty_memory_manager.setup_collectd("system");
-    _streaming_dirty_memory_manager.setup_collectd("streaming");
 
     namespace sm = seastar::metrics;
 
@@ -307,12 +480,12 @@ database::setup_metrics() {
     auto system_label_instance = class_label("system");
 
     _metrics.add_group("memory", {
-        sm::make_gauge("dirty_bytes", [this] { return _dirty_memory_manager.real_dirty_memory() + _system_dirty_memory_manager.real_dirty_memory() + _streaming_dirty_memory_manager.real_dirty_memory(); },
+        sm::make_gauge("dirty_bytes", [this] { return _dirty_memory_manager.real_dirty_memory() + _system_dirty_memory_manager.real_dirty_memory(); },
                        sm::description("Holds the current size of all (\"regular\", \"system\" and \"streaming\") non-free memory in bytes: used memory + released memory that hasn't been returned to a free memory pool yet. "
                                        "Total memory size minus this value represents the amount of available memory. "
                                        "If this value minus virtual_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
 
-        sm::make_gauge("virtual_dirty_bytes", [this] { return _dirty_memory_manager.virtual_dirty_memory() + _system_dirty_memory_manager.virtual_dirty_memory() + _streaming_dirty_memory_manager.virtual_dirty_memory(); },
+        sm::make_gauge("virtual_dirty_bytes", [this] { return _dirty_memory_manager.virtual_dirty_memory() + _system_dirty_memory_manager.virtual_dirty_memory(); },
                        sm::description("Holds the size of all (\"regular\", \"system\" and \"streaming\") used memory in bytes. Compare it to \"dirty_bytes\" to see how many memory is wasted (neither used nor available).")),
     });
 
@@ -445,6 +618,11 @@ database::setup_metrics() {
                                        " to be able to admit new ones, if there is a shortage of permits."),
                        {user_label_instance}),
 
+        sm::make_derive("reads_shed_due_to_overload", _read_concurrency_sem.get_stats().total_reads_shed_due_to_overload,
+                       sm::description("The number of reads shed because the admission queue reached its max capacity."
+                                       " When the queue is full, excessive reads are shed to avoid overload."),
+                       {user_label_instance}),
+
         sm::make_gauge("active_reads", [this] { return max_count_streaming_concurrent_reads - _streaming_concurrency_sem.available_resources().count; },
                        sm::description("Holds the number of currently active read operations issued on behalf of streaming "),
                        {streaming_label_instance}),
@@ -470,6 +648,11 @@ database::setup_metrics() {
                                        " to be able to admit new ones, if there is a shortage of permits."),
                        {streaming_label_instance}),
 
+        sm::make_derive("reads_shed_due_to_overload", _streaming_concurrency_sem.get_stats().total_reads_shed_due_to_overload,
+                       sm::description("The number of reads shed because the admission queue reached its max capacity."
+                                       " When the queue is full, excessive reads are shed to avoid overload."),
+                       {streaming_label_instance}),
+
         sm::make_gauge("active_reads", [this] { return max_count_system_concurrent_reads - _system_read_concurrency_sem.available_resources().count; },
                        sm::description("Holds the number of currently active read operations from \"system\" keyspace tables. "),
                        {system_label_instance}),
@@ -492,6 +675,11 @@ database::setup_metrics() {
                        sm::description("The number of paused system reads evicted to free up permits"
                                        " Permits are required for new reads to start, and the database will evict inactive reads (if any)"
                                        " to be able to admit new ones, if there is a shortage of permits."),
+                       {system_label_instance}),
+
+        sm::make_derive("reads_shed_due_to_overload", _system_read_concurrency_sem.get_stats().total_reads_shed_due_to_overload,
+                       sm::description("The number of reads shed because the admission queue reached its max capacity."
+                                       " When the queue is full, excessive reads are shed to avoid overload."),
                        {system_label_instance}),
 
         sm::make_gauge("total_result_bytes", [this] { return get_result_memory_limiter().total_used_memory(); },
@@ -716,7 +904,7 @@ future<> database::update_keyspace(const sstring& name) {
             }
         }
 
-        ks.update_from(get_token_metadata(), std::move(new_ksm));
+        ks.update_from(get_shared_token_metadata(), std::move(new_ksm));
         return get_notifier().update_keyspace(ks.metadata());
     });
 }
@@ -896,12 +1084,12 @@ bool database::column_family_exists(const utils::UUID& uuid) const {
 }
 
 void
-keyspace::create_replication_strategy(const locator::token_metadata& tm, const std::map<sstring, sstring>& options) {
+keyspace::create_replication_strategy(const locator::shared_token_metadata& stm, const std::map<sstring, sstring>& options) {
     using namespace locator;
 
     _replication_strategy =
             abstract_replication_strategy::create_replication_strategy(
-                _metadata->name(), _metadata->strategy_name(), tm, options);
+                _metadata->name(), _metadata->strategy_name(), stm, options);
 }
 
 locator::abstract_replication_strategy&
@@ -920,9 +1108,9 @@ keyspace::set_replication_strategy(std::unique_ptr<locator::abstract_replication
     _replication_strategy = std::move(replication_strategy);
 }
 
-void keyspace::update_from(const locator::token_metadata& tm, ::lw_shared_ptr<keyspace_metadata> ksm) {
+void keyspace::update_from(const locator::shared_token_metadata& stm, ::lw_shared_ptr<keyspace_metadata> ksm) {
     _metadata = std::move(ksm);
-   create_replication_strategy(tm, _metadata->strategy_options());
+   create_replication_strategy(stm, _metadata->strategy_options());
 }
 
 future<> keyspace::ensure_populated() const {
@@ -956,7 +1144,6 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.enable_dangerous_direct_import_of_cassandra_counters = _config.enable_dangerous_direct_import_of_cassandra_counters;
     cfg.compaction_enforce_min_threshold = _config.compaction_enforce_min_threshold;
     cfg.dirty_memory_manager = _config.dirty_memory_manager;
-    cfg.streaming_dirty_memory_manager = _config.streaming_dirty_memory_manager;
     cfg.streaming_read_concurrency_semaphore = _config.streaming_read_concurrency_semaphore;
     cfg.compaction_concurrency_semaphore = _config.compaction_concurrency_semaphore;
     cfg.cf_stats = _config.cf_stats;
@@ -1036,7 +1223,7 @@ const column_family& database::find_column_family(const schema_ptr& schema) cons
 using strategy_class_registry = class_registry<
     locator::abstract_replication_strategy,
     const sstring&,
-    const locator::token_metadata&,
+    const locator::shared_token_metadata&,
     locator::snitch_ptr&,
     const std::map<sstring, sstring>&>;
 
@@ -1069,20 +1256,20 @@ keyspace_metadata::keyspace_metadata(std::string_view name,
     }
 }
 
-void keyspace_metadata::validate(const locator::token_metadata& tm) const {
+void keyspace_metadata::validate(const locator::shared_token_metadata& stm) const {
     using namespace locator;
-    abstract_replication_strategy::validate_replication_strategy(name(), strategy_name(), tm, strategy_options());
+    abstract_replication_strategy::validate_replication_strategy(name(), strategy_name(), stm, strategy_options());
 }
 
 void database::validate_keyspace_update(keyspace_metadata& ksm) {
-    ksm.validate(get_token_metadata());
+    ksm.validate(get_shared_token_metadata());
     if (!has_keyspace(ksm.name())) {
         throw exceptions::configuration_exception(format("Cannot update non existing keyspace '{}'.", ksm.name()));
     }
 }
 
 void database::validate_new_keyspace(keyspace_metadata& ksm) {
-    ksm.validate(get_token_metadata());
+    ksm.validate(get_shared_token_metadata());
     if (has_keyspace(ksm.name())) {
         throw exceptions::already_exists_exception{ksm.name()};
     }
@@ -1125,7 +1312,7 @@ std::vector<view_ptr> database::get_views() const {
 
 void database::create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
     keyspace ks(ksm, std::move(make_keyspace_config(*ksm)));
-    ks.create_replication_strategy(get_token_metadata(), ksm->strategy_options());
+    ks.create_replication_strategy(get_shared_token_metadata(), ksm->strategy_options());
     _keyspaces.emplace(ksm->name(), std::move(ks));
 }
 
@@ -1676,7 +1863,6 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     cfg.enable_dangerous_direct_import_of_cassandra_counters = _cfg.enable_dangerous_direct_import_of_cassandra_counters();
     cfg.compaction_enforce_min_threshold = _cfg.compaction_enforce_min_threshold;
     cfg.dirty_memory_manager = &_dirty_memory_manager;
-    cfg.streaming_dirty_memory_manager = &_streaming_dirty_memory_manager;
     cfg.streaming_read_concurrency_semaphore = &_streaming_concurrency_sem;
     cfg.compaction_concurrency_semaphore = &_compaction_concurrency_sem;
     cfg.cf_stats = &_cf_stats;
@@ -1822,8 +2008,6 @@ database::stop() {
     }).then([this] {
         return _dirty_memory_manager.shutdown();
     }).then([this] {
-        return _streaming_dirty_memory_manager.shutdown();
-    }).then([this] {
         return _memtable_controller.shutdown();
     }).then([this] {
         return _user_sstables_manager->close();
@@ -1836,6 +2020,11 @@ future<> database::flush_all_memtables() {
     return parallel_for_each(_column_families, [this] (auto& cfp) {
         return cfp.second->flush();
     });
+}
+
+future<> database::flush(const sstring& ksname, const sstring& cfname) {
+    auto& cf = find_column_family(ksname, cfname);
+    return cf.flush();
 }
 
 future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) {

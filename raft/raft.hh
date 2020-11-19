@@ -115,6 +115,10 @@ struct conf_change_in_progress : public error {
     conf_change_in_progress() : error("A configuration change is already in progress") {}
 };
 
+struct config_error : public error {
+    using error::error;
+};
+
 struct snapshot {
     // Index and term of last entry in the snapshot
     index_t idx = index_t(0);
@@ -124,8 +128,6 @@ struct snapshot {
     // Id of the snapshot.
     snapshot_id id;
 };
-
-using log_entry_cref = std::reference_wrapper<const log_entry>;
 
 struct append_request_base {
     // The leader's term.
@@ -144,7 +146,7 @@ struct append_request_base {
 struct append_request_send : public append_request_base {
     // Log entries to store (empty vector for heartbeat; may send more
     // than one entry for efficiency).
-    std::vector<log_entry_cref> entries;
+    std::vector<log_entry_ptr> entries;
 };
 struct append_request_recv : public append_request_base {
     // Same as for append_request_send but unlike it here the

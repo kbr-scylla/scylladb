@@ -367,7 +367,6 @@ public:
         utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
-        ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
         ::cf_stats* cf_stats = nullptr;
@@ -407,20 +406,6 @@ private:
 
     lw_shared_ptr<memtable_list> _memtables;
 
-    utils::phased_barrier _streaming_flush_phaser;
-
-    // If mutations are fragmented during streaming the sstables cannot be made
-    // visible immediately after memtable flush, because that could cause
-    // readers to see only a part of a partition thus violating isolation
-    // guarantees.
-    // Mutations that are sent in fragments are kept separately in per-streaming
-    // plan memtables and the resulting sstables are not made visible until
-    // the streaming is complete.
-    struct monitored_sstable {
-        std::unique_ptr<database_sstable_write_monitor> monitor;
-        sstables::shared_sstable sstable;
-    };
-
     lw_shared_ptr<memtable_list> make_memory_only_memtable_list();
     lw_shared_ptr<memtable_list> make_memtable_list();
 
@@ -459,7 +444,6 @@ private:
     int _compaction_disabled = 0;
     bool _compaction_disabled_by_user = false;
     utils::phased_barrier _flush_barrier;
-    seastar::gate _streaming_flush_gate;
     std::vector<view_ptr> _views;
 
     std::unique_ptr<cell_locker> _counter_cell_locks; // Memory-intensive; allocate only when needed.
@@ -477,7 +461,7 @@ private:
 
     // Operations like truncate, flush, query, etc, may depend on a column family being alive to
     // complete.  Some of them have their own gate already (like flush), used in specialized wait
-    // logic (like the streaming_flush_gate). That is particularly useful if there is a particular
+    // logic. That is particularly useful if there is a particular
     // order in which we need to close those gates. For all the others operations that don't have
     // such needs, we have this generic _async_gate, which all potentially asynchronous operations
     // have to get.  It will be closed by stop().
@@ -735,7 +719,6 @@ public:
     // The mutation is always upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle&& = {});
     void apply(const mutation& m, db::rp_handle&& = {});
-    void apply_streaming_mutation(schema_ptr, utils::UUID plan_id, const frozen_mutation&, bool fragmented);
 
     // Returns at most "cmd.limit" rows
     future<lw_shared_ptr<query::result>> query(schema_ptr,
@@ -751,7 +734,6 @@ public:
     void start();
     future<> stop();
     future<> flush();
-    future<> flush_streaming_mutations(utils::UUID plan_id, dht::partition_range_vector ranges = dht::partition_range_vector{});
     future<> clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
@@ -899,6 +881,10 @@ public:
         return _pending_writes_phaser.advance_and_await();
     }
 
+    size_t writes_in_progress() const {
+        return _pending_writes_phaser.operations_in_progress();
+    }
+
     utils::phased_barrier::operation read_in_progress() {
         return _pending_reads_phaser.start();
     }
@@ -907,12 +893,20 @@ public:
         return _pending_reads_phaser.advance_and_await();
     }
 
+    size_t reads_in_progress() const {
+        return _pending_reads_phaser.operations_in_progress();
+    }
+
     utils::phased_barrier::operation stream_in_progress() {
         return _pending_streams_phaser.start();
     }
 
     future<> await_pending_streams() {
         return _pending_streams_phaser.advance_and_await();
+    }
+
+    size_t streams_in_progress() const {
+        return _pending_streams_phaser.operations_in_progress();
     }
 
     void add_or_update_view(view_ptr v);
@@ -1067,7 +1061,7 @@ public:
                  std::map<sstring, sstring> options,
                  bool durables_writes,
                  std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
-    void validate(const locator::token_metadata& tm) const;
+    void validate(const locator::shared_token_metadata& stm) const;
     const sstring& name() const {
         return _name;
     }
@@ -1115,7 +1109,6 @@ public:
         utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
-        ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
         ::cf_stats* cf_stats = nullptr;
@@ -1137,14 +1130,14 @@ private:
 public:
     explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg);
 
-    void update_from(const locator::token_metadata& tm, lw_shared_ptr<keyspace_metadata>);
+    void update_from(const locator::shared_token_metadata& stm, lw_shared_ptr<keyspace_metadata>);
 
     /** Note: return by shared pointer value, since the meta data is
      * semi-volatile. I.e. we could do alter keyspace at any time, and
      * boom, it is replaced.
      */
     lw_shared_ptr<keyspace_metadata> metadata() const;
-    void create_replication_strategy(const locator::token_metadata& tm, const std::map<sstring, sstring>& options);
+    void create_replication_strategy(const locator::shared_token_metadata& stm, const std::map<sstring, sstring>& options);
     /**
      * This should not really be return by reference, since replication
      * strategy is also volatile in that it could be replaced at "any" time.
@@ -1260,7 +1253,6 @@ private:
 
     dirty_memory_manager _system_dirty_memory_manager;
     dirty_memory_manager _dirty_memory_manager;
-    dirty_memory_manager _streaming_dirty_memory_manager;
 
     database_config _dbcfg;
     flush_controller _memtable_controller;
@@ -1325,7 +1317,7 @@ private:
 
     service::migration_notifier& _mnotifier;
     gms::feature_service& _feat;
-    const locator::token_metadata& _token_metadata;
+    const locator::shared_token_metadata& _shared_token_metadata;
 
     sharded<semaphore>& _sst_dir_semaphore;
 
@@ -1344,6 +1336,7 @@ private:
     void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm);
     friend void db::system_keyspace::make(database& db, bool durable, bool volatile_testing_only);
     void setup_metrics();
+    void setup_scylla_memory_diagnostics_producer();
 
     friend class db_apply_executor;
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
@@ -1367,7 +1360,7 @@ public:
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::token_metadata& tm, abort_source& as, sharded<semaphore>& sst_dir_sem);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm, abort_source& as, sharded<semaphore>& sst_dir_sem);
     database(database&&) = delete;
     ~database();
 
@@ -1393,7 +1386,8 @@ public:
         return *_compaction_manager;
     }
 
-    const locator::token_metadata& get_token_metadata() const { return _token_metadata; }
+    const locator::shared_token_metadata& get_shared_token_metadata() const { return _shared_token_metadata; }
+    const locator::token_metadata& get_token_metadata() const { return *_shared_token_metadata.get(); }
 
     service::migration_notifier& get_notifier() { return _mnotifier; }
     const service::migration_notifier& get_notifier() const { return _mnotifier; }
@@ -1526,6 +1520,7 @@ public:
     void set_format_by_config();
 
     future<> flush_all_memtables();
+    future<> flush(const sstring& ks, const sstring& cf);
 
     // See #937. Truncation now requires a callback to get a time stamp
     // that must be guaranteed to be the same for all shards.

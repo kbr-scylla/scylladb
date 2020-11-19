@@ -31,7 +31,7 @@ void list_service_level_attachments_statement::validate(service::storage_proxy &
 }
 
 future<> list_service_level_attachments_statement::check_access(service::storage_proxy& sp, const service::client_state &state) const {
-    return state.ensure_has_permission(auth::permission::DESCRIBE, auth::root_service_level_resource());
+    return state.ensure_has_permission(auth::command_desc{.permission = auth::permission::DESCRIBE, .resource = auth::root_service_level_resource()});
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>

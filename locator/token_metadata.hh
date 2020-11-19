@@ -38,6 +38,8 @@
 #include <boost/range/iterator_range.hpp>
 #include <boost/icl/interval.hpp>
 #include "range.hh"
+#include <seastar/core/shared_ptr.hh>
+#include <seastar/core/semaphore.hh>
 
 // forward declaration since database.hh includes this file
 class keyspace;
@@ -135,7 +137,14 @@ public:
     using UUID = utils::UUID;
     using inet_address = gms::inet_address;
 private:
-    class tokens_iterator : public std::iterator<std::input_iterator_tag, token> {
+    class tokens_iterator {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = token;
+        using difference_type = std::ptrdiff_t;
+        using pointer = token*;
+        using reference = token&;
+    private:
         using impl_type = tokens_iterator_impl;
         std::unique_ptr<impl_type> _impl;
     public:
@@ -234,17 +243,34 @@ public:
     void del_replacing_endpoint(inet_address existing_node);
 
     /**
+     * Create a full copy of token_metadata using asynchronous continuations.
+     * The caller must ensure that the cloned object will not change if
+     * the function yields.
+     */
+    future<token_metadata> clone_async() const noexcept;
+
+    /**
      * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
      * bootstrap tokens and leaving endpoints are not included in the copy.
      */
-    token_metadata clone_only_token_map() const;
+    token_metadata clone_only_token_map_sync() const;
+
+    /**
+     * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
+     * bootstrap tokens and leaving endpoints are not included in the copy.
+     * The caller must ensure that the cloned object will not change if
+     * the function yields.
+     */
+    future<token_metadata> clone_only_token_map() const noexcept;
     /**
      * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
      * current leave operations have finished.
+     * The caller must ensure that the cloned object will not change if
+     * the function yields.
      *
-     * @return new token metadata
+     * @return a future holding a new token metadata
      */
-    token_metadata clone_after_all_left() const;
+    future<token_metadata> clone_after_all_left() const noexcept;
 
     dht::token_range_vector get_primary_ranges_for(std::unordered_set<token> tokens) const;
 
@@ -302,6 +328,42 @@ public:
     void invalidate_cached_rings();
 
     friend class token_metadata_impl;
+};
+
+using token_metadata_ptr = lw_shared_ptr<const token_metadata>;
+using mutable_token_metadata_ptr = lw_shared_ptr<token_metadata>;
+using token_metadata_lock = semaphore_units<semaphore_default_exception_factory>;
+
+template <typename... Args>
+mutable_token_metadata_ptr make_token_metadata_ptr(Args... args) {
+    return make_lw_shared<token_metadata>(std::forward<Args>(args)...);
+}
+
+class shared_token_metadata {
+    mutable_token_metadata_ptr _shared;
+    semaphore _sem = { 1 };
+public:
+    // used to construct the shared object as a sharded<> instance
+    shared_token_metadata()
+        : _shared(make_token_metadata_ptr())
+    { }
+
+    shared_token_metadata(const shared_token_metadata& x) = default;
+    shared_token_metadata(shared_token_metadata&& x) = default;
+
+    token_metadata_ptr get() const noexcept {
+        return _shared;
+    }
+
+    mutable_token_metadata_ptr clone() const {
+        return make_token_metadata_ptr(*_shared);
+    }
+
+    void set(mutable_token_metadata_ptr tmptr) noexcept {
+        _shared = std::move(tmptr);
+    }
+
+    future<token_metadata_lock> get_lock() noexcept;
 };
 
 }

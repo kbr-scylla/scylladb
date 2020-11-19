@@ -27,7 +27,7 @@ void detach_service_level_statement::validate(service::storage_proxy &, const se
 }
 
 future<> detach_service_level_statement::check_access(service::storage_proxy& sp, const service::client_state &state) const {
-    return state.ensure_has_permission(auth::permission::AUTHORIZE, auth::root_service_level_resource());
+    return state.ensure_has_permission(auth::command_desc{.permission = auth::permission::AUTHORIZE, .resource = auth::root_service_level_resource()});
 }
 
 future<::shared_ptr<cql_transport::messages::result_message>>
