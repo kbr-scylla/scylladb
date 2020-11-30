@@ -2013,7 +2013,7 @@ future<> sstable::create_links_common(const sstring& dir, int64_t generation, bo
             } else {
                 // Now that the source sstable is linked to dir, remove
                 // the TemporaryTOC file at the destination.
-                return sstable_write_io_check(remove_file, std::move(dst_temp_toc));
+                return sstable_write_io_check(remove_mirrored_file, std::move(dst_temp_toc));
             }
         }).then([this, &dir] {
             return sstable_write_io_check(sync_directory, dir);
@@ -2059,7 +2059,7 @@ future<> sstable::move_to_new_dir(sstring new_dir, int64_t new_generation, bool 
         _dir = new_dir;
         int64_t old_generation = std::exchange(_generation, new_generation);
         return parallel_for_each(all_components(), [this, old_generation, old_dir] (auto p) {
-            return sstable_write_io_check(remove_file, sstable::filename(old_dir, _schema->ks_name(), _schema->cf_name(), _version, old_generation, _format, p.second));
+            return sstable_write_io_check(remove_mirrored_file, sstable::filename(old_dir, _schema->ks_name(), _schema->cf_name(), _version, old_generation, _format, p.second));
         }).then([this, old_dir, old_generation] {
             auto temp_toc = sstable_version_constants::get_component_map(_version).at(component_type::TemporaryTOC);
             return sstable_write_io_check(remove_file, sstable::filename(old_dir, _schema->ks_name(), _schema->cf_name(), _version, old_generation, _format, temp_toc));
