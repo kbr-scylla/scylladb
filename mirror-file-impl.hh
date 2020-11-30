@@ -15,7 +15,7 @@
 #include <seastar/core/sstring.hh>
 #include "seastarx.hh"
 
-future<file> make_in_memory_mirror_file(file primary, sstring name, const io_priority_class& pc = default_priority_class());
+future<file> make_in_memory_mirror_file(file primary, sstring name, bool check_integrity = false, const io_priority_class& pc = default_priority_class());
 
 future<> remove_mirrored_file(sstring path);
 future<> rename_mirrored_file(sstring oldpath, sstring newpath);
