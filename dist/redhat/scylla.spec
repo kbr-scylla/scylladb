@@ -52,7 +52,6 @@ Group:          Applications/Databases
 Summary:        The Scylla database server
 License:        Proprietary
 URL:            http://www.scylladb.com/
-Conflicts: kernel < 3.10.0-514
 Requires:       %{product}-conf %{product}-python3
 Conflicts:      abrt
 AutoReqProv:    no
@@ -130,10 +129,9 @@ rm -rf $RPM_BUILD_ROOT
 %attr(0755,scylla,scylla) %dir %{_sharedstatedir}/scylla-housekeeping
 %ghost /etc/systemd/system/scylla-helper.slice.d/
 %ghost /etc/systemd/system/scylla-helper.slice.d/memory.conf
-%ghost /etc/systemd/system/scylla-server.service.d/
 %ghost /etc/systemd/system/scylla-server.service.d/capabilities.conf
 %ghost /etc/systemd/system/scylla-server.service.d/mounts.conf
-%ghost /etc/systemd/system/scylla-server.service.d/dependencies.conf
+/etc/systemd/system/scylla-server.service.d/dependencies.conf
 %ghost /etc/systemd/system/var-lib-systemd-coredump.mount
 %ghost /etc/systemd/system/scylla-cpupower.service
 %ghost /etc/systemd/system/var-lib-scylla.mount
@@ -204,6 +202,7 @@ if Scylla is the main application on your server and you wish to optimize its la
 /usr/lib/systemd/systemd-sysctl 99-scylla-sched.conf >/dev/null 2>&1 || :
 /usr/lib/systemd/systemd-sysctl 99-scylla-aio.conf >/dev/null 2>&1 || :
 /usr/lib/systemd/systemd-sysctl 99-scylla-vm.conf >/dev/null 2>&1 || :
+/usr/lib/systemd/systemd-sysctl 99-scylla-inotify.conf >/dev/null 2>&1 || :
 
 %files kernel-conf
 %defattr(-,root,root)

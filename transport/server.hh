@@ -126,6 +126,8 @@ private:
         uint64_t execute_requests;
         uint64_t batch_requests;
         uint64_t register_requests;
+
+        std::unordered_map<exceptions::exception_code, uint64_t> errors;
     };
 private:
     class event_notifier;

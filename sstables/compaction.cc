@@ -811,9 +811,8 @@ public:
     }
 
     flat_mutation_reader make_sstable_reader() const override {
-        return ::make_local_shard_sstable_reader(_schema,
+        return _compacting->make_local_shard_sstable_reader(_schema,
                 _permit,
-                _compacting,
                 query::full_partition_range,
                 _schema->full_slice(),
                 _io_priority,
@@ -858,9 +857,8 @@ public:
     }
 
     flat_mutation_reader make_sstable_reader() const override {
-        return ::make_local_shard_sstable_reader(_schema,
+        return _compacting->make_local_shard_sstable_reader(_schema,
                 _permit,
-                _compacting,
                 query::full_partition_range,
                 _schema->full_slice(),
                 _io_priority,
@@ -1018,12 +1016,14 @@ private:
 class cleanup_compaction final : public regular_compaction {
     dht::token_range_vector _owned_ranges;
 private:
+    // Called in a seastar thread
     dht::partition_range_vector
     get_ranges_for_invalidation(const std::vector<shared_sstable>& sstables) {
-        auto owned_ranges = dht::to_partition_ranges(_owned_ranges);
+        auto owned_ranges = dht::to_partition_ranges(_owned_ranges, utils::can_yield::yes);
 
         auto non_owned_ranges = boost::copy_range<dht::partition_range_vector>(sstables
                 | boost::adaptors::transformed([] (const shared_sstable& sst) {
+            seastar::thread::maybe_yield();
             return dht::partition_range::make({sst->get_first_decorated_key(), true},
                                               {sst->get_last_decorated_key(), true});
         }));
@@ -1037,6 +1037,7 @@ private:
             for (auto& non_owned_range : non_owned_ranges) {
                 auto ret = non_owned_range.subtract(owned_range, dht::ring_position_comparator(*_schema));
                 new_non_owned_ranges.insert(new_non_owned_ranges.end(), ret.begin(), ret.end());
+                seastar::thread::maybe_yield();
             }
             non_owned_ranges = std::move(new_non_owned_ranges);
         }
@@ -1330,9 +1331,8 @@ public:
 
     // Use reader that makes sure no non-local mutation will not be filtered out.
     flat_mutation_reader make_sstable_reader() const override {
-        return ::make_range_sstable_reader(_schema,
+        return _compacting->make_range_sstable_reader(_schema,
                 _permit,
-                _compacting,
                 query::full_partition_range,
                 _schema->full_slice(),
                 _io_priority,

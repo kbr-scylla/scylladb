@@ -49,17 +49,17 @@ public:
         auto ops_label_type = sm::label("ops");
         _metrics.add_group("node_ops", {
             sm::make_gauge("finished_percentage", [this] { return bootstrap_finished_percentage(); },
-                    sm::description("Number of finished percentage for bootstrap operation on this shard."), {ops_label_type("bootstrap")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("bootstrap")}),
             sm::make_gauge("finished_percentage", [this] { return replace_finished_percentage(); },
-                    sm::description("Number of finished percentage for replace operation on this shard."), {ops_label_type("replace")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("replace")}),
             sm::make_gauge("finished_percentage", [this] { return rebuild_finished_percentage(); },
-                    sm::description("Number of finished percentage for rebuild operation on this shard."), {ops_label_type("rebuild")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("rebuild")}),
             sm::make_gauge("finished_percentage", [this] { return decommission_finished_percentage(); },
-                    sm::description("Number of finished percentage for decommission operation on this shard."), {ops_label_type("decommission")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("decommission")}),
             sm::make_gauge("finished_percentage", [this] { return removenode_finished_percentage(); },
-                    sm::description("Number of finished percentage for removenode operation on this shard."), {ops_label_type("removenode")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("removenode")}),
             sm::make_gauge("finished_percentage", [this] { return repair_finished_percentage(); },
-                    sm::description("Number of finished percentage for repair operation on this shard."), {ops_label_type("repair")}),
+                    sm::description("Finished percentage of node operation on this shard"), {ops_label_type("repair")}),
         });
     }
     uint64_t bootstrap_total_ranges{0};
@@ -1166,13 +1166,13 @@ static future<> repair_range(repair_info& ri, const dht::token_range& range) {
 }
 
 static dht::token_range_vector get_primary_ranges_for_endpoint(
-        database& db, sstring keyspace, gms::inet_address ep, locator::can_yield can_yield = locator::can_yield::no) {
+        database& db, sstring keyspace, gms::inet_address ep, utils::can_yield can_yield = utils::can_yield::no) {
     auto& rs = db.find_keyspace(keyspace).get_replication_strategy();
     return rs.get_primary_ranges(ep, can_yield);
 }
 
 static dht::token_range_vector get_primary_ranges(
-        database& db, sstring keyspace, locator::can_yield can_yield = locator::can_yield::no) {
+        database& db, sstring keyspace, utils::can_yield can_yield = utils::can_yield::no) {
     return get_primary_ranges_for_endpoint(db, keyspace,
             utils::fb_utilities::get_broadcast_address(), can_yield);
 }
@@ -1182,7 +1182,7 @@ static dht::token_range_vector get_primary_ranges(
 // across the entire cluster, here each range is assigned a primary
 // owner in each of the clusters.
 static dht::token_range_vector get_primary_ranges_within_dc(
-        database& db, sstring keyspace, locator::can_yield can_yield = locator::can_yield::no) {
+        database& db, sstring keyspace, utils::can_yield can_yield = utils::can_yield::no) {
     auto& rs = db.find_keyspace(keyspace).get_replication_strategy();
     return rs.get_primary_ranges_within_dc(
             utils::fb_utilities::get_broadcast_address(), can_yield);
@@ -1753,7 +1753,7 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, seastar::sharded<
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
-            dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip, locator::can_yield::yes);
+            dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip, utils::can_yield::yes);
             seastar::thread::maybe_yield();
             nr_ranges_total += desired_ranges.size();
         }
@@ -1769,16 +1769,16 @@ future<> bootstrap_with_repair(seastar::sharded<database>& db, seastar::sharded<
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
-            dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip, locator::can_yield::yes);
+            dht::token_range_vector desired_ranges = strat.get_pending_address_ranges(tmptr, tokens, myip, utils::can_yield::yes);
             bool find_node_in_local_dc_only = strat.get_type() == locator::replication_strategy_type::network_topology;
 
             //Active ranges
             auto metadata_clone = tmptr->clone_only_token_map().get0();
-            auto range_addresses = strat.get_range_addresses(metadata_clone, locator::can_yield::yes);
+            auto range_addresses = strat.get_range_addresses(metadata_clone, utils::can_yield::yes);
 
             //Pending ranges
             metadata_clone.update_normal_tokens(tokens, myip);
-            auto pending_range_addresses = strat.get_range_addresses(metadata_clone, locator::can_yield::yes);
+            auto pending_range_addresses = strat.get_range_addresses(metadata_clone, utils::can_yield::yes);
 
             //Collects the source that will have its range moved to the new node
             std::unordered_map<dht::token_range, repair_neighbors> range_sources;
@@ -1921,7 +1921,7 @@ static future<> do_decommission_removenode_with_repair(seastar::sharded<database
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
-            dht::token_range_vector ranges = strat.get_ranges(leaving_node, locator::can_yield::yes);
+            dht::token_range_vector ranges = strat.get_ranges(leaving_node, utils::can_yield::yes);
             nr_ranges_total += ranges.size();
         }
         if (reason == streaming::stream_reason::decommission) {
@@ -1944,7 +1944,7 @@ static future<> do_decommission_removenode_with_repair(seastar::sharded<database
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
             // First get all ranges the leaving node is responsible for
-            dht::token_range_vector ranges = strat.get_ranges(leaving_node, locator::can_yield::yes);
+            dht::token_range_vector ranges = strat.get_ranges(leaving_node, utils::can_yield::yes);
             rlogger.info("{}: started with keyspace={}, leaving_node={}, nr_ranges={}", op, keyspace_name, leaving_node, ranges.size());
             size_t nr_ranges_total = ranges.size();
             size_t nr_ranges_skipped = 0;
@@ -1952,7 +1952,7 @@ static future<> do_decommission_removenode_with_repair(seastar::sharded<database
             // Find (for each range) all nodes that store replicas for these ranges as well
             for (auto& r : ranges) {
                 auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
-                auto eps = strat.calculate_natural_endpoints(end_token, *tmptr, locator::can_yield::yes);
+                auto eps = strat.calculate_natural_endpoints(end_token, *tmptr, utils::can_yield::yes);
                 current_replica_endpoints.emplace(r, std::move(eps));
             }
             auto temp = tmptr->clone_after_all_left().get0();
@@ -1968,7 +1968,7 @@ static future<> do_decommission_removenode_with_repair(seastar::sharded<database
             bool find_node_in_local_dc_only = strat.get_type() == locator::replication_strategy_type::network_topology;
             for (auto&r : ranges) {
                 auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
-                const std::vector<inet_address> new_eps = ks.get_replication_strategy().calculate_natural_endpoints(end_token, temp, locator::can_yield::yes);
+                const std::vector<inet_address> new_eps = ks.get_replication_strategy().calculate_natural_endpoints(end_token, temp, utils::can_yield::yes);
                 const std::vector<inet_address>& current_eps = current_replica_endpoints[r];
                 std::unordered_set<inet_address> neighbors_set(new_eps.begin(), new_eps.end());
                 bool skip_this_range = false;
@@ -2108,7 +2108,7 @@ static future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, s
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
             // Okay to yield since tm is immutable
-            dht::token_range_vector ranges = strat.get_ranges(myip, tmptr, locator::can_yield::yes);
+            dht::token_range_vector ranges = strat.get_ranges(myip, tmptr, utils::can_yield::yes);
             nr_ranges_total += ranges.size();
 
         }
@@ -2132,7 +2132,7 @@ static future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, s
             }
             auto& ks = db.local().find_keyspace(keyspace_name);
             auto& strat = ks.get_replication_strategy();
-            dht::token_range_vector ranges = strat.get_ranges(myip, tmptr, locator::can_yield::yes);
+            dht::token_range_vector ranges = strat.get_ranges(myip, tmptr, utils::can_yield::yes);
             std::unordered_map<dht::token_range, repair_neighbors> range_sources;
             rlogger.info("{}: started with keyspace={}, source_dc={}, nr_ranges={}", op, keyspace_name, source_dc, ranges.size());
             for (auto it = ranges.begin(); it != ranges.end();) {
@@ -2140,7 +2140,7 @@ static future<> do_rebuild_replace_with_repair(seastar::sharded<database>& db, s
                 seastar::thread::maybe_yield();
                 auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
                 auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
-                auto neighbors = boost::copy_range<std::vector<gms::inet_address>>(strat.calculate_natural_endpoints(end_token, *tmptr, locator::can_yield::yes) |
+                auto neighbors = boost::copy_range<std::vector<gms::inet_address>>(strat.calculate_natural_endpoints(end_token, *tmptr, utils::can_yield::yes) |
                     boost::adaptors::filtered([myip, &source_dc, &snitch_ptr] (const gms::inet_address& node) {
                         if (node == myip) {
                             return false;
