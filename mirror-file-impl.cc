@@ -10,6 +10,7 @@
 
 #include <boost/intrusive/slist.hpp>
 #include "in-memory-file-impl.hh"
+#include "mirror-file-impl.hh"
 #include <seastar/core/file.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/aligned_buffer.hh>
@@ -202,7 +203,7 @@ file make_mirror_file(file primary, file secondary) {
     return file(make_shared<mirror_file_impl>(std::move(primary), std::move(secondary)));
 }
 
-future<file> make_in_memory_mirror_file(file primary, sstring name, const io_priority_class& pc = default_priority_class()) {
+future<file> make_in_memory_mirror_file(file primary, sstring name, const io_priority_class& pc) {
     auto [mem_file, new_file] = get_in_memory_file(name);
 
     if (!new_file) {
