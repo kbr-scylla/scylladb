@@ -99,7 +99,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, void* buffer, size_t len
     auto f = get_file_impl(_secondary)->read_dma(pos, buffer, len, pc);
     if (_check_integrity) {
         return f.then([this, pos, len , buffer, &pc] (size_t secondary_size) {
-            auto b = allocate_aligned_buffer<uint8_t>(len, 4096);
+            auto b = allocate_aligned_buffer<uint8_t>(len, _primary.memory_dma_alignment());
             auto p = b.get();
             return get_file_impl(_primary)->read_dma(pos, p, len, pc).then([this, secondary_size, buffer, b = std::move(b)] (size_t primary_size) {
                 if (primary_size != secondary_size) {
@@ -123,7 +123,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, 
             std::vector<std::unique_ptr<uint8_t[], free_deleter>> vb(iov.size());
             auto iov2 = iov;
             for (size_t i = 0; i < iov2.size(); i++) {
-                vb[i] = allocate_aligned_buffer<uint8_t>(iov[i].iov_len, 4096);
+                vb[i] = allocate_aligned_buffer<uint8_t>(iov[i].iov_len, _primary.memory_dma_alignment());
                 iov2[i].iov_base = vb[i].get();
             }
             return get_file_impl(_primary)->read_dma(pos, std::move(iov2), pc).then([this, secondary_size, iov = std::move(iov), vb = std::move(vb)] (size_t primary_size) {
@@ -226,7 +226,8 @@ future<file> make_in_memory_mirror_file(file primary, sstring name, bool check_i
     // create new memory file and read it into memory
     static constexpr size_t chunk = 128 * 1024;
     return primary.size().then([&pc, primary = std::move(primary), name = std::move(name), mem_file = std::move(mem_file), check_integrity] (uint64_t size) mutable {
-        return do_with(size, uint64_t(0), std::move(primary), std::move(mem_file), allocate_aligned_buffer<uint8_t>(chunk, 4096), [&pc, check_integrity] (uint64_t& size, uint64_t& off, file& primary, file& secondary, auto& bufptr) {
+        auto buf = allocate_aligned_buffer<uint8_t>(chunk, primary.memory_dma_alignment());
+        return do_with(size, uint64_t(0), std::move(primary), std::move(mem_file), std::move(buf), [&pc, check_integrity] (uint64_t& size, uint64_t& off, file& primary, file& secondary, auto& bufptr) {
             return do_until([&size, &off] { return size == off; }, [&] {
                 auto buf = bufptr.get();
                 return primary.dma_read(off, buf, chunk, pc).then([&, buf] (size_t len) {
