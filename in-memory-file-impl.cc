@@ -211,8 +211,11 @@ future<size_t> in_memory_file_impl::write_dma(uint64_t pos, std::vector<iovec> i
 future<size_t> in_memory_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) {
     size_t len = 0;
     for (auto&& v : iov) {
-        read_dma_internal(pos + len, v.iov_base, v.iov_len, pc);
-        len += v.iov_len;
+        auto l = read_dma_internal(pos + len, v.iov_base, v.iov_len, pc);
+        len += l;
+        if (l < v.iov_len) {
+            break;
+        }
     }
     return make_ready_future<size_t>(len);
 }
@@ -226,7 +229,10 @@ future<> in_memory_file_impl::discard(uint64_t offset, uint64_t length) {
 
 future<temporary_buffer<uint8_t>> in_memory_file_impl::dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) {
     temporary_buffer<uint8_t> tmp(range_size);
-    read_dma_internal(offset, tmp.get_write(), range_size, pc);
+    auto l = read_dma_internal(offset, tmp.get_write(), range_size, pc);
+    if (l < range_size) {
+        tmp.trim(l);
+    }
     return make_ready_future<temporary_buffer<uint8_t>>(std::move(tmp));
 }
 

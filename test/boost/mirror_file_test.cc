@@ -101,3 +101,80 @@ SEASTAR_THREAD_TEST_CASE(test_mirror_file_link) {
     BOOST_REQUIRE_THROW(remove_mirrored_file(old_path.native()).get(), std::system_error);
     BOOST_REQUIRE_THROW(remove_mirrored_file(new_path.native()).get(), std::system_error);
 }
+
+SEASTAR_THREAD_TEST_CASE(test_mirror_file_dma_read) {
+    using char_type = uint8_t;
+
+    init_in_memory_file_store(smp::count);
+    auto img = defer([] { deinit_in_memory_file_store().get(); });
+    auto tmp = tmpdir();
+    auto name = test_file_name;
+    auto primary = prepare_test_file(tmp, name);
+    auto fpath = tmp.path() / name.c_str();
+    auto size = file_size(fpath.native()).get0();
+    auto mirrored = make_in_memory_mirror_file(primary, fpath.native(), true /* check_integrity */).get0();
+    auto aligned_size = align_up(size, mirrored.disk_read_dma_alignment());
+
+    auto buf = allocate_aligned_buffer<char_type>(aligned_size, mirrored.memory_dma_alignment());
+    auto count = mirrored.dma_read(0, buf.get(), aligned_size).get0();
+    BOOST_REQUIRE_EQUAL(count, size);
+
+    mirrored.close().get();
+    // remove_memory_file to prevent memory leak
+    remove_memory_file(fpath.native());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_mirror_file_dma_read_exactly) {
+    using char_type = uint8_t;
+
+    init_in_memory_file_store(smp::count);
+    auto img = defer([] { deinit_in_memory_file_store().get(); });
+    auto tmp = tmpdir();
+    auto name = test_file_name;
+    auto primary = prepare_test_file(tmp, name);
+    auto fpath = tmp.path() / name.c_str();
+    auto size = file_size(fpath.native()).get0();
+    auto mirrored = make_in_memory_mirror_file(primary, fpath.native(), true /* check_integrity */).get0();
+
+    auto tmp_buf = mirrored.dma_read_exactly<char_type>(0, size).get0();
+    BOOST_REQUIRE_EQUAL(tmp_buf.size(), size);
+
+    mirrored.close().get();
+    // remove_memory_file to prevent memory leak
+    remove_memory_file(fpath.native());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_mirror_file_dma_read_iov) {
+    using char_type = uint8_t;
+
+    init_in_memory_file_store(smp::count);
+    auto img = defer([] { deinit_in_memory_file_store().get(); });
+    auto tmp = tmpdir();
+    auto name = test_file_name;
+    auto primary = prepare_test_file(tmp, name);
+    auto fpath = tmp.path() / name.c_str();
+    auto size = file_size(fpath.native()).get0();
+    auto mirrored = make_in_memory_mirror_file(primary, fpath.native(), true /* check_integrity */).get0();
+    auto aligned_size = align_up(size, mirrored.disk_read_dma_alignment());
+
+    std::vector<std::unique_ptr<char_type[], free_deleter>> bufs;
+    std::vector<iovec> iovs;
+    size_t len = 0;
+    size_t alignment = mirrored.memory_dma_alignment();
+    while (len < size) {
+        auto iov_len = alignment * (1 + tests::random::get_int((size - len) / alignment));
+        auto buf = allocate_aligned_buffer<char_type>(iov_len, alignment);
+        auto iov = iovec{buf.get(), iov_len};
+        iovs.push_back(std::move(iov));
+        bufs.push_back(std::move(buf));
+        len += iov_len;
+    }
+    auto count = primary.dma_read(0, iovs).get0();
+    BOOST_REQUIRE_EQUAL(count, size);
+    count = mirrored.dma_read(0, iovs).get0();
+    BOOST_REQUIRE_EQUAL(count, size);
+
+    mirrored.close().get();
+    // remove_memory_file to prevent memory leak
+    remove_memory_file(fpath.native());
+}
