@@ -95,8 +95,8 @@ class in_memory_file_impl : public file_impl {
     }
 
 public:
-    in_memory_file_impl() : _data(std::make_shared<foreign_ptr<std::unique_ptr<in_memory_data_store>>>(make_foreign(std::make_unique<in_memory_data_store>()))) {}
-    explicit in_memory_file_impl(std::shared_ptr<foreign_ptr<std::unique_ptr<in_memory_data_store>>> data) : _data(std::move(data)) {}
+    in_memory_file_impl() : in_memory_file_impl(std::make_shared<foreign_ptr<std::unique_ptr<in_memory_data_store>>>(make_foreign(std::make_unique<in_memory_data_store>()))) {}
+    explicit in_memory_file_impl(std::shared_ptr<foreign_ptr<std::unique_ptr<in_memory_data_store>>> data);
     future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override {
         return make_ready_future<size_t>(write_dma_internal(pos, buffer, len));
     }
@@ -133,6 +133,17 @@ public:
     }
     future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override;
 };
+
+in_memory_file_impl::in_memory_file_impl(std::shared_ptr<foreign_ptr<std::unique_ptr<in_memory_data_store>>> data)
+        : _data(std::move(data))
+{
+    // We're not doing any actual dma transfers and we do not require
+    // any specific alignment.
+    // The following alignment parameters are solely an optimization.
+    _memory_dma_alignment = seastar::cache_line_size;
+    _disk_read_dma_alignment = in_memory_data_store::chunk_size;
+    _disk_write_dma_alignment = in_memory_data_store::chunk_size;
+}
 
 void in_memory_data_store::resize(size_t newsize) {
     auto oldchunknr = _data.size();
