@@ -1317,6 +1317,11 @@ future<> sstable::open_data() noexcept {
             _open = true;
             return make_ready_future<>();
         });
+    }).then([this] {
+        auto* ld_stats = _components->scylla_metadata->data.get<scylla_metadata_type::LargeDataStats, scylla_metadata::large_data_stats>();
+        if (ld_stats) {
+            _large_data_stats.emplace(*ld_stats);
+        }
     });
 }
 
@@ -1590,7 +1595,8 @@ sstable::read_scylla_metadata(const io_priority_class& pc) noexcept {
 }
 
 void
-sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, struct run_identifier identifier) {
+sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, struct run_identifier identifier,
+        std::optional<scylla_metadata::large_data_stats> ld_stats) {
     auto&& first_key = get_first_decorated_key();
     auto&& last_key = get_last_decorated_key();
     auto sm = create_sharding_metadata(_schema, first_key, last_key, shard);
@@ -1608,6 +1614,9 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
     _components->scylla_metadata->data.set<scylla_metadata_type::Sharding>(std::move(sm));
     _components->scylla_metadata->data.set<scylla_metadata_type::Features>(std::move(features));
     _components->scylla_metadata->data.set<scylla_metadata_type::RunIdentifier>(std::move(identifier));
+    if (ld_stats) {
+        _components->scylla_metadata->data.set<scylla_metadata_type::LargeDataStats>(std::move(*ld_stats));
+    }
 
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
 }
@@ -2642,7 +2651,7 @@ sstable::unlink()
     });
 
     name = get_filename();
-    fut = get_large_data_handler().maybe_delete_large_data_entries(*get_schema(), name, data_size());
+    fut = get_large_data_handler().maybe_delete_large_data_entries(shared_from_this());
     auto update_large_data_fut = fut.then_wrapped([name = std::move(name)] (future<> f) {
         if (f.failed()) {
             // Just log and ignore failures to delete large data entries.
@@ -2926,6 +2935,16 @@ std::ostream& operator<<(std::ostream& out, const sstables::component_type& comp
     case ct::Unknown: out << "Unknown"; break;
     }
     return out;
+}
+
+std::optional<large_data_stats_entry> sstable::get_large_data_stat(large_data_type t) const noexcept {
+    if (_large_data_stats) {
+        auto it = _large_data_stats->map.find(t);
+        if (it != _large_data_stats->map.end()) {
+            return std::make_optional<large_data_stats_entry>(it->second);
+        }
+    }
+    return std::make_optional<large_data_stats_entry>();
 }
 
 }
