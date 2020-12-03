@@ -293,6 +293,8 @@ static_assert(sizeof(file_block) == in_memory_data_store::chunk_size, "wrong fil
 future<> init_in_memory_file_store(size_t memory_reserve_in_mb) {
     per_shard_memory_reserve = (memory_reserve_in_mb << 20) / smp::count;
     return smp::invoke_on_all([] {
+        mlogger.debug("Reserving {} MB in {} chunks", per_shard_memory_reserve,
+                (per_shard_memory_reserve + in_memory_data_store::chunk_size - 1) / in_memory_data_store::chunk_size);
         reserve_memory(per_shard_memory_reserve);
         size_t allocated = 0;
         while (allocated < per_shard_memory_reserve) {
@@ -303,6 +305,18 @@ future<> init_in_memory_file_store(size_t memory_reserve_in_mb) {
             seastar::metrics::make_gauge("total_memory", seastar::metrics::description("Memory reserved for in memory file store"), per_shard_memory_reserve),
             seastar::metrics::make_gauge("used_memory", seastar::metrics::description("Memory used by in memory file store"), used_memory)
         });
+    });
+}
+
+future<> deinit_in_memory_file_store() {
+    return smp::invoke_on_all([] {
+        mlogger.debug("Deleting {} chunks. Used memory: {}", free_file_blocks.size(), used_memory);
+        while (!free_file_blocks.empty()) {
+            uint8_t* p = reinterpret_cast<uint8_t*>(&free_file_blocks.front());
+            free_file_blocks.pop_front();
+            delete p;
+        }
+        in_memory_store_metrics.clear();
     });
 }
 
