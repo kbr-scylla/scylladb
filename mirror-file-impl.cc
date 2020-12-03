@@ -40,7 +40,7 @@ class mirror_file_impl : public file_impl {
     file _secondary;
     bool _check_integrity;
 public:
-    mirror_file_impl(file primary, file secondary, bool check_integrity = false) : _primary(std::move(primary)), _secondary(std::move(secondary)), _check_integrity(check_integrity) {}
+    mirror_file_impl(file primary, file secondary, bool check_integrity = false);
     future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override;
     future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override;
     future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override;
@@ -56,6 +56,19 @@ public:
     subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) override;
     future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override;
 };
+
+mirror_file_impl::mirror_file_impl(file primary, file secondary, bool check_integrity)
+        : _primary(std::move(primary)), _secondary(std::move(secondary)), _check_integrity(check_integrity)
+{
+    _memory_dma_alignment = std::max(_primary.memory_dma_alignment(), _secondary.memory_dma_alignment());
+    if (_check_integrity) {
+        // we read from the primary file only when check_integrity is enabled
+        _disk_read_dma_alignment = std::max(_primary.disk_read_dma_alignment(), _secondary.disk_read_dma_alignment());
+    } else {
+        _disk_read_dma_alignment = _secondary.disk_read_dma_alignment();
+    }
+    _disk_write_dma_alignment = std::max(_primary.disk_write_dma_alignment(), _secondary.disk_write_dma_alignment());
+}
 
 future<size_t> mirror_file_impl::write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) {
     return get_file_impl(_primary)->write_dma(pos, buffer, len, pc).then([this, pos, buffer, &pc] (size_t len) {
