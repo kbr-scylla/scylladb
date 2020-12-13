@@ -532,10 +532,9 @@ struct serializer<bytes> {
     requires FragmentRange<FragmentedBuffer>
     static void write_fragmented(Output& out, FragmentedBuffer&& fragments) {
         safe_serialize_as_uint32(out, uint32_t(fragments.size_bytes()));
-        using boost::range::for_each;
-        for_each(fragments, [&out] (bytes_view frag) {
+        for (bytes_view frag : fragments) {
             out.write(reinterpret_cast<const char*>(frag.begin()), frag.size());
-        });
+        }
     }
     template<typename Input>
     static void skip(Input& in) {
@@ -713,7 +712,7 @@ void serialize(Output& out, const std::variant<T...>& v) {
 template<typename Input, typename T, size_t... I>
 T deserialize_std_variant(Input& in, boost::type<T> t,  size_t idx, std::index_sequence<I...>) {
     T v;
-    ((I == idx ? v = deserialize(in, boost::type<std::variant_alternative_t<I, T>>()), true : false) || ...);
+    (void)((I == idx ? v = deserialize(in, boost::type<std::variant_alternative_t<I, T>>()), true : false) || ...);
     return v;
 }
 

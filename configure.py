@@ -244,7 +244,7 @@ modes = {
         'stack-usage-threshold': 1024*13,
     },
     'dev': {
-        'cxxflags': '-O1 -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
+        'cxxflags': '-O1 -DDEVEL -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
         'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*21,
     },
@@ -1163,7 +1163,6 @@ warnings = [
     '-Wno-delete-non-abstract-non-virtual-dtor',
     '-Wno-unknown-attributes',
     '-Wno-braced-scalar-init',
-    '-Wno-unused-value',
     '-Wno-range-loop-construct',
     '-Wno-unused-function',
     '-Wno-implicit-int-float-conversion',

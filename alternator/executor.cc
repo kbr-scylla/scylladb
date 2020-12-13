@@ -1230,10 +1230,16 @@ mutation put_or_delete_item::build(schema_ptr schema, api::timestamp_type ts) co
     return m;
 }
 
-// The DynamoDB API doesn't let the client control the server's timeout.
-// Let's pick something reasonable:
+// The DynamoDB API doesn't let the client control the server's timeout, so
+// we have a global default_timeout() for Alternator requests. The value of
+// default_timeout is overwritten by main.cc based on the
+// "alternator_timeout_in_ms" configuration parameter.
+db::timeout_clock::duration executor::s_default_timeout = 10s;
+void executor::set_default_timeout(db::timeout_clock::duration timeout) {
+    s_default_timeout = timeout;
+}
 db::timeout_clock::time_point executor::default_timeout() {
-    return db::timeout_clock::now() + 10s;
+    return db::timeout_clock::now() + s_default_timeout;
 }
         
 static future<std::unique_ptr<rjson::value>> get_previous_item(
@@ -2234,19 +2240,30 @@ update_item_operation::apply(std::unique_ptr<rjson::value> previous_item, api::t
                     rjson::value v1 = calculate_value(base, calculate_value_caller::UpdateExpression, previous_item.get());
                     rjson::value v2 = calculate_value(addition, calculate_value_caller::UpdateExpression, previous_item.get());
                     rjson::value result;
-                    std::string v1_type = get_item_type_string(v1);
-                    if (v1_type == "N") {
-                        if (get_item_type_string(v2) != "N") {
-                            throw api_error::validation(format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, rjson::print(v2)));
+                    // An ADD can be used to create a new attribute (when
+                    // v1.IsNull()) or to add to a pre-existing attribute:
+                    if (v1.IsNull()) {
+                        std::string v2_type = get_item_type_string(v2);
+                        if (v2_type == "N" || v2_type == "SS" || v2_type == "NS" || v2_type == "BS") {
+                            result = v2;
+                        } else {
+                            throw api_error::validation(format("An operand in the update expression has an incorrect data type: {}", v2));
                         }
-                        result = number_add(v1, v2);
-                    } else if (v1_type == "SS" || v1_type == "NS" || v1_type == "BS") {
-                        if (get_item_type_string(v2) != v1_type) {
-                            throw api_error::validation(format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, rjson::print(v2)));
-                        }
-                        result = set_sum(v1, v2);
                     } else {
-                        throw api_error::validation(format("An operand in the update expression has an incorrect data type: {}", v1));
+                        std::string v1_type = get_item_type_string(v1);
+                        if (v1_type == "N") {
+                            if (get_item_type_string(v2) != "N") {
+                                throw api_error::validation(format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, rjson::print(v2)));
+                            }
+                            result = number_add(v1, v2);
+                        } else if (v1_type == "SS" || v1_type == "NS" || v1_type == "BS") {
+                            if (get_item_type_string(v2) != v1_type) {
+                                throw api_error::validation(format("Incorrect operand type for operator or function. Expected {}: {}", v1_type, rjson::print(v2)));
+                            }
+                            result = set_sum(v1, v2);
+                        } else {
+                            throw api_error::validation(format("An operand in the update expression has an incorrect data type: {}", v1));
+                        }
                     }
                     do_update(to_bytes(column_name), result);
                 },
@@ -2777,7 +2794,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
     for (const column_definition& cdef : schema.partition_key_columns()) {
         rjson::set_with_string_name(last_evaluated_key, std::string_view(cdef.name_as_text()), rjson::empty_object());
         rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
-        rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_pk_it)));
+        rjson::set_with_string_name(key_entry, type_to_string(cdef.type), json_key_column_value(*exploded_pk_it, cdef));
         ++exploded_pk_it;
     }
     auto ck = paging_state.get_clustering_key();
@@ -2787,7 +2804,7 @@ static rjson::value encode_paging_state(const schema& schema, const service::pag
         for (const column_definition& cdef : schema.clustering_key_columns()) {
             rjson::set_with_string_name(last_evaluated_key, std::string_view(cdef.name_as_text()), rjson::empty_object());
             rjson::value& key_entry = last_evaluated_key[cdef.name_as_text()];
-            rjson::set_with_string_name(key_entry, type_to_string(cdef.type), rjson::parse(to_json_string(*cdef.type, *exploded_ck_it)));
+            rjson::set_with_string_name(key_entry, type_to_string(cdef.type), json_key_column_value(*exploded_ck_it, cdef));
             ++exploded_ck_it;
         }
     }
