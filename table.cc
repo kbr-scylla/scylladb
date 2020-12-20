@@ -564,7 +564,7 @@ table::stop() {
         return make_ready_future<>();
     }
     return _async_gate.close().then([this] {
-        return when_all(await_pending_writes(), await_pending_reads(), await_pending_streams()).discard_result().finally([this] {
+        return await_pending_ops().finally([this] {
             return _memtables->request_flush().finally([this] {
                 return _compaction_manager.remove(this).then([this] {
                     return _sstable_deletion_gate.close().then([this] {
@@ -1235,7 +1235,12 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
 }
 
 future<> table::flush() {
-    return _memtables->request_flush();
+    auto op = _pending_flushes_phaser.start();
+    return _memtables->request_flush().then([op = std::move(op)] {});
+}
+
+bool table::can_flush() const {
+    return _memtables->can_flush();
 }
 
 future<> table::clear() {

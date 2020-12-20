@@ -213,6 +213,10 @@ public:
         return bool(_seal_immediate_fn);
     }
 
+    bool can_flush() const {
+        return may_flush() && !empty();
+    }
+
     bool empty() const {
         for (auto& m : _memtables) {
            if (!m->empty()) {
@@ -479,6 +483,8 @@ private:
     utils::phased_barrier _pending_reads_phaser;
     // Corresponding phaser for in-progress streams
     utils::phased_barrier _pending_streams_phaser;
+    // Corresponding phaser for in-progress flushes
+    utils::phased_barrier _pending_flushes_phaser;
 
     // This field cashes the last truncation time for the table.
     // The master resides in system.truncated table
@@ -737,6 +743,8 @@ public:
     future<> clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
+    bool can_flush() const;
+
     // FIXME: this is just an example, should be changed to something more
     // general. compact_all_sstables() starts a compaction of all sstables.
     // It doesn't flush the current memtable first. It's just a ad-hoc method,
@@ -907,6 +915,14 @@ public:
 
     size_t streams_in_progress() const {
         return _pending_streams_phaser.operations_in_progress();
+    }
+
+    future<> await_pending_flushes() {
+        return _pending_flushes_phaser.advance_and_await();
+    }
+
+    future<> await_pending_ops() {
+        return when_all(await_pending_reads(), await_pending_writes(), await_pending_streams(), await_pending_flushes()).discard_result();
     }
 
     void add_or_update_view(view_ptr v);

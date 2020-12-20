@@ -63,6 +63,10 @@ modification_statement_timeout(const schema& s) {
     }
 }
 
+db::timeout_clock::duration modification_statement::get_timeout(const query_options& options) const {
+    return attrs->is_timeout_set() ? attrs->get_timeout(options) : options.get_timeout_config().*get_timeout_config_selector();
+}
+
 modification_statement::modification_statement(statement_type type_, uint32_t bound_terms, schema_ptr schema_, std::unique_ptr<attributes> attrs_, cql_stats& stats_)
     : cql_statement_opt_metadata(modification_statement_timeout(*schema_))
     , type{type_}
@@ -109,10 +113,11 @@ gc_clock::duration modification_statement::get_time_to_live(const query_options&
 }
 
 future<> modification_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
-    auto f = state.has_column_family_access(keyspace(), column_family(), auth::permission::MODIFY);
+    const database& db = proxy.local_db();
+    auto f = state.has_column_family_access(db, keyspace(), column_family(), auth::permission::MODIFY);
     if (has_conditions()) {
-        f = f.then([this, &state] {
-           return state.has_column_family_access(keyspace(), column_family(), auth::permission::SELECT);
+        f = f.then([this, &state, &db] {
+           return state.has_column_family_access(db, keyspace(), column_family(), auth::permission::SELECT);
         });
     }
     return f;
@@ -275,7 +280,7 @@ modification_statement::do_execute(service::storage_proxy& proxy, service::query
 future<>
 modification_statement::execute_without_condition(service::storage_proxy& proxy, service::query_state& qs, const query_options& options) const {
     auto cl = options.get_consistency();
-    auto timeout = db::timeout_clock::now() + options.get_timeout_config().*get_timeout_config_selector();
+    auto timeout = db::timeout_clock::now() + get_timeout(options);
     return get_mutations(proxy, options, timeout, false, options.get_timestamp(qs), qs).then([this, cl, timeout, &proxy, &qs] (auto mutations) {
         if (mutations.empty()) {
             return now();

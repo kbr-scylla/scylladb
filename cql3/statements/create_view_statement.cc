@@ -78,7 +78,7 @@ create_view_statement::create_view_statement(
 }
 
 future<> create_view_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
-    return state.has_column_family_access(keyspace(), _base_name->get_column_family(), auth::permission::ALTER);
+    return state.has_column_family_access(proxy.local_db(), keyspace(), _base_name->get_column_family(), auth::permission::ALTER);
 }
 
 void create_view_statement::validate(service::storage_proxy& proxy, const service::client_state& state) const {
@@ -214,7 +214,7 @@ future<shared_ptr<cql_transport::event::schema_change>> create_view_statement::a
     }
 
     auto parameters = make_lw_shared<raw::select_statement::parameters>(raw::select_statement::parameters::orderings_type(), false, true);
-    raw::select_statement raw_select(_base_name, std::move(parameters), _select_clause, _where_clause, nullptr, nullptr, {});
+    raw::select_statement raw_select(_base_name, std::move(parameters), _select_clause, _where_clause, nullptr, nullptr, {}, std::make_unique<cql3::attributes::raw>());
     raw_select.prepare_keyspace(keyspace());
     raw_select.set_bound_variables({});
 
