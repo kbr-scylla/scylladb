@@ -150,12 +150,12 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                 "org.apache.cassandra.locator.SimpleStrategy",
                 {{"replication_factor", "3"}},
                 true);
-        return _mm.announce_new_keyspace(ksm, api::min_timestamp, false);
+        return _mm.announce_new_keyspace(ksm, api::min_timestamp);
     }).then([this, tables = std::move(tables)] () mutable {
         return do_with(std::vector<schema_ptr>{std::move(tables)}, [this] (std::vector<schema_ptr>& tables) {
             return do_for_each(tables, [this] (schema_ptr table) {
                 return ignore_existing([this, table = std::move(table)] {
-                    return _mm.announce_new_column_family(std::move(table), api::min_timestamp, false);
+                    return _mm.announce_new_column_family(std::move(table), api::min_timestamp);
                 });
             });
         });
