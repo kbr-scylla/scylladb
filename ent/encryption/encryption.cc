@@ -174,6 +174,19 @@ future<> write_text_file_fully(const sstring& filename, const sstring& s) {
 static const sstring namespace_prefix = "com.datastax.bdp.cassandra.crypto.";
 static const sstring encryption_attribute = "scylla_encryption_options";
 
+static inline const sstring key_id_attribute = "scylla_key_id";
+static inline const sstring encrypted_components_attribute = "encrypted_components";
+
+static inline const sstables::disk_string<uint32_t> encryption_attribute_ds{
+    bytes{encryption_attribute.begin(), encryption_attribute.end()}
+};
+static inline const sstables::disk_string<uint32_t> key_id_attribute_ds{
+    bytes{key_id_attribute.begin(), key_id_attribute.end()}
+};
+static inline const sstables::disk_string<uint32_t> encrypted_components_attribute_ds{
+    bytes{encrypted_components_attribute.begin(), encrypted_components_attribute.end()}
+};
+
 key_info get_key_info(const options& map) {
     opt_wrapper opts(map);
 
@@ -419,19 +432,6 @@ public:
     encryption_file_io_extension(::shared_ptr<encryption_context> ctxt)
         : _ctxt(std::move(ctxt))
     {}
-
-    static inline const sstring key_id_attribute = "scylla_key_id";
-    static inline const sstring encrypted_components_attribute = "encrypted_components";
-
-    static inline const sstables::disk_string<uint32_t> encryption_attribute_ds{
-        bytes{encryption_attribute.begin(), encryption_attribute.end()}
-    };
-    static inline const sstables::disk_string<uint32_t> key_id_attribute_ds{
-        bytes{key_id_attribute.begin(), key_id_attribute.end()}
-    };
-    static inline const sstables::disk_string<uint32_t> encrypted_components_attribute_ds{
-        bytes{encrypted_components_attribute.begin(), encrypted_components_attribute.end()}
-    };
 
     attr_value_map get_attributes(const sstables::sstable& sst) const override {
         auto& sc = sst.get_shared_components();
