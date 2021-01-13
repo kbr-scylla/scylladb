@@ -62,8 +62,12 @@ def new_test_keyspace(cql, opts):
 #   with create_test_table(cql, keyspace, '...') as table:
 # This is not a fixture - see those in conftest.py.
 @contextmanager
-def new_test_table(cql, keyspace, schema):
+def new_test_table(cql, keyspace, schema, extra=""):
     table = keyspace + "." + unique_name()
-    cql.execute("CREATE TABLE " + table + "(" + schema + ")")
+    cql.execute("CREATE TABLE " + table + "(" + schema + ")" + extra)
     yield table
     cql.execute("DROP TABLE " + table)
+
+def project(column_name_string, rows):
+    """Returns a list of column values from each of the rows."""
+    return [getattr(r, column_name_string) for r in rows]

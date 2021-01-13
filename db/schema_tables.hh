@@ -155,6 +155,8 @@ future<> save_system_schema(cql3::query_processor& qp, const sstring & ks);
 // saves/creates "system_schema" keyspace
 future<> save_system_keyspace_schema(cql3::query_processor& qp);
 
+future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy, schema_features, noncopyable_function<bool(std::string_view)> accept_keyspace);
+// Calculates schema digest for all non-system keyspaces
 future<utils::UUID> calculate_schema_digest(distributed<service::storage_proxy>& proxy, schema_features);
 
 future<std::vector<canonical_mutation>> convert_schema_to_mutations(distributed<service::storage_proxy>& proxy, schema_features);
@@ -165,8 +167,6 @@ read_schema_partition_for_keyspace(distributed<service::storage_proxy>& proxy, c
 future<mutation> read_keyspace_mutation(distributed<service::storage_proxy>&, const sstring& keyspace_name);
 
 future<> merge_schema(distributed<service::storage_proxy>& proxy, gms::feature_service& feat, std::vector<mutation> mutations);
-
-future<> merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush);
 
 // Recalculates the local schema version.
 //

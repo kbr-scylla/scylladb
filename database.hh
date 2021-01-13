@@ -535,7 +535,7 @@ private:
     lw_shared_ptr<memtable> new_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt, sstable_write_permit&& permit);
     // Caller must keep m alive.
-    future<> update_cache(lw_shared_ptr<memtable> m, sstables::shared_sstable sst);
+    future<> update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_sstable> ssts);
     struct merge_comparator;
 
     // update the sstable generation, making sure that new new sstables don't overwrite this one.
@@ -1150,7 +1150,7 @@ public:
 
 class no_such_keyspace : public std::runtime_error {
 public:
-    no_such_keyspace(const sstring& ks_name);
+    no_such_keyspace(std::string_view ks_name);
 };
 
 class no_such_column_family : public std::runtime_error {
@@ -1383,8 +1383,8 @@ public:
      */
     future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&);
     /* below, find_keyspace throws no_such_<type> on fail */
-    keyspace& find_keyspace(const sstring& name);
-    const keyspace& find_keyspace(const sstring& name) const;
+    keyspace& find_keyspace(std::string_view name);
+    const keyspace& find_keyspace(std::string_view name) const;
     bool has_keyspace(std::string_view name) const;
     void validate_keyspace_update(keyspace_metadata& ksm);
     void validate_new_keyspace(keyspace_metadata& ksm);
@@ -1570,6 +1570,6 @@ future<> stop_database(sharded<database>& db);
 flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, schema_ptr schema,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
-bool is_internal_keyspace(const sstring& name);
+bool is_internal_keyspace(std::string_view name);
 
 #endif /* DATABASE_HH_ */

@@ -51,7 +51,7 @@
 #include "test/lib/select_statement_utils.hh"
 #include <boost/algorithm/cxx11/any_of.hpp>
 
-bool is_system_keyspace(const sstring& name);
+bool is_system_keyspace(std::string_view name);
 
 namespace cql3 {
 
@@ -1466,7 +1466,7 @@ select_statement::prepare_restrictions(database& db,
 {
     try {
         return ::make_shared<restrictions::statement_restrictions>(db, schema, statement_type::SELECT, std::move(_where_clause), bound_names,
-            selection->contains_only_static_columns(), selection->contains_a_collection(), for_view, allow_filtering);
+            selection->contains_only_static_columns(), for_view, allow_filtering);
     } catch (const exceptions::unrecognized_entity_exception& e) {
         if (contains_alias(e.entity)) {
             throw exceptions::invalid_request_exception(format("Aliases aren't allowed in the where clause ('{}')", e.relation_str));

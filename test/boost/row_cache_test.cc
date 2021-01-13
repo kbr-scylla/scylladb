@@ -29,6 +29,7 @@
 #include "test/lib/memtable_snapshot_source.hh"
 #include "test/lib/log.hh"
 #include "test/lib/reader_permit.hh"
+#include "test/lib/random_utils.hh"
 
 using namespace std::chrono_literals;
 
@@ -849,8 +850,8 @@ SEASTAR_TEST_CASE(test_eviction) {
             cache.populate(m);
         }
 
-        std::random_device random;
-        std::shuffle(keys.begin(), keys.end(), std::default_random_engine(random()));
+        auto& random = seastar::testing::local_random_engine;
+        std::shuffle(keys.begin(), keys.end(), random);
 
         for (auto&& key : keys) {
             auto pr = dht::partition_range::make_singular(key);
@@ -888,8 +889,8 @@ SEASTAR_TEST_CASE(test_eviction_from_invalidated) {
             cache.populate(m);
         }
 
-        std::random_device random;
-        std::shuffle(keys.begin(), keys.end(), std::default_random_engine(random()));
+        auto& random = seastar::testing::local_random_engine;
+        std::shuffle(keys.begin(), keys.end(), random);
 
         for (auto&& key : keys) {
             cache.make_reader(s, tests::make_permit(), dht::partition_range::make_singular(key));
@@ -2662,8 +2663,7 @@ SEASTAR_TEST_CASE(test_random_row_population) {
             }
         }
 
-        std::random_device rnd;
-        std::default_random_engine rng(rnd());
+        auto& rng = seastar::testing::local_random_engine;
         std::shuffle(ranges.begin(), ranges.end(), rng);
 
         struct read {
