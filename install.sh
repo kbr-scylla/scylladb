@@ -163,6 +163,11 @@ check_usermode_support() {
     [ -n "$user" ]
 }
 
+if ! $packaging && [ ! -d /run/systemd/system/ ]; then
+    echo "systemd is not detected, unsupported distribution."
+    exit 1
+fi
+
 # change directory to the package's root directory
 cd "$(dirname "$0")"
 
@@ -261,6 +266,7 @@ EOS
 fi
 
 # scylla-server
+install -m755 -d "$rprefix"
 install -m755 -d "$rsysconfdir"
 install -m755 -d "$retc/scylla.d"
 installconfig 644 dist/common/sysconfig/scylla-housekeeping "$rsysconfdir"
@@ -329,6 +335,9 @@ EnvironmentFile=
 EnvironmentFile=$sysconfdir/scylla-housekeeping
 EOS
     done
+        cat << EOS > "$rprefix"/scripts/scylla_sysconfdir.py
+SYSCONFDIR="$sysconfdir"
+EOS
     fi
     install -m755 -d "$retc/security/limits.d"
     install -m755 -d "$rusr/bin"
@@ -387,6 +396,9 @@ StandardOutput=file:$rprefix/scylla-server.log
 StandardError=
 StandardError=inherit
 EOS
+        cat << EOS > "$rprefix"/scripts/scylla_sysconfdir.py
+SYSCONFDIR="$sysconfdir"
+EOS
     fi
 
     install -d "$rprefix"/sbin
@@ -441,7 +453,8 @@ elif ! $packaging; then
 
     for file in dist/common/sysctl.d/*.conf; do
         bn=$(basename "$file")
-        sysctl -p "$rusr"/lib/sysctl.d/"$bn"
+        # ignore error since some kernel may not have specified parameter
+        sysctl -p "$rusr"/lib/sysctl.d/"$bn" || :
     done
     $rprefix/scripts/scylla_post_install.sh
     echo "Scylla offline install completed."

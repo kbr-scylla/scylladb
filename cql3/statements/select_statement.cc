@@ -368,14 +368,14 @@ select_statement::do_execute(service::storage_proxy& proxy,
     if (aggregate || nonpaged_filtering) {
         return do_with(
                 cql3::selection::result_set_builder(*_selection, now,
-                        options.get_cql_serialization_format(), *_group_by_cell_indices),
-                [this, p, page_size, now, timeout, restrictions_need_filtering](auto& builder) {
-                    return do_until([p] {return p->is_exhausted();},
-                            [p, &builder, page_size, now, timeout] {
+                        options.get_cql_serialization_format(), *_group_by_cell_indices), std::move(p),
+                [this, page_size, now, timeout, restrictions_need_filtering](auto& builder, std::unique_ptr<service::pager::query_pager>& p) {
+                    return do_until([&p] {return p->is_exhausted();},
+                            [&p, &builder, page_size, now, timeout] {
                                 return p->fetch_page(builder, page_size, now, timeout);
                             }
-                    ).then([this, p, &builder, restrictions_need_filtering] {
-                        return builder.with_thread_if_needed([this, p, &builder, restrictions_need_filtering] {
+                    ).then([this, &p, &builder, restrictions_need_filtering] {
+                        return builder.with_thread_if_needed([this, &p, &builder, restrictions_need_filtering] {
                             auto rs = builder.build();
                             if (restrictions_need_filtering) {
                                 _stats.filtered_rows_read_total += p->stats().rows_read_total;
@@ -396,7 +396,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
     }
 
     if (_selection->is_trivial() && !restrictions_need_filtering && !_per_partition_limit) {
-        return p->fetch_page_generator(page_size, now, timeout, _stats).then([this, p] (result_generator generator) {
+        return p->fetch_page_generator(page_size, now, timeout, _stats).then([this, p = std::move(p)] (result_generator generator) {
             auto meta = [&] () -> shared_ptr<const cql3::metadata> {
                 if (!p->is_exhausted()) {
                     auto meta = make_shared<metadata>(*_selection->get_result_metadata());
@@ -414,7 +414,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
     }
 
     return p->fetch_page(page_size, now, timeout).then(
-            [this, p, &options, now, restrictions_need_filtering](std::unique_ptr<cql3::result_set> rs) {
+            [this, p = std::move(p), &options, now, restrictions_need_filtering](std::unique_ptr<cql3::result_set> rs) {
 
                 if (!p->is_exhausted()) {
                     rs->get_metadata().set_paging_state(p->state());
@@ -441,7 +441,7 @@ generate_base_key_from_index_pk(const partition_key& index_pk, const std::option
         return KeyType::make_empty();
     }
 
-    std::vector<bytes_view> exploded_base_key;
+    std::vector<managed_bytes_view> exploded_base_key;
     exploded_base_key.reserve(base_columns.size());
 
     for (const column_definition& base_col : base_columns) {
@@ -876,7 +876,7 @@ indexed_table_select_statement::indexed_table_select_statement(schema_ptr schema
 
 template<typename KeyType>
 requires (std::is_same_v<KeyType, partition_key> || std::is_same_v<KeyType, clustering_key_prefix>)
-static void append_base_key_to_index_ck(std::vector<bytes_view>& exploded_index_ck, const KeyType& base_key, const column_definition& index_cdef) {
+static void append_base_key_to_index_ck(std::vector<managed_bytes_view>& exploded_index_ck, const KeyType& base_key, const column_definition& index_cdef) {
     auto key_view = base_key.view();
     auto begin = key_view.begin();
     if ((std::is_same_v<KeyType, partition_key> && index_cdef.is_partition_key())
@@ -931,7 +931,7 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
         }
     }();
 
-    std::vector<bytes_view> exploded_index_ck;
+    std::vector<managed_bytes_view> exploded_index_ck;
     exploded_index_ck.reserve(_view_schema->clustering_key_size());
 
     bytes token_bytes;
@@ -1233,7 +1233,7 @@ indexed_table_select_statement::read_posting_list(service::storage_proxy& proxy,
 
     auto p = service::pager::query_pagers::pager(_view_schema, selection,
             state, options, cmd, std::move(partition_ranges), nullptr);
-    return p->fetch_page(options.get_page_size(), now, timeout).then([p, &options, limit, now] (std::unique_ptr<cql3::result_set> rs) {
+    return p->fetch_page(options.get_page_size(), now, timeout).then([p = std::move(p), &options, limit, now] (std::unique_ptr<cql3::result_set> rs) {
         rs->get_metadata().set_paging_state(p->state());
         return ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
     });
