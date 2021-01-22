@@ -922,12 +922,13 @@ public:
         });
     }
 
-    virtual void next_partition() override {
+    virtual future<> next_partition() override {
         _end_of_stream = false;
         clear_buffer_to_next_partition();
         if (is_buffer_empty()) {
-            _reader.next_partition();
+            return _reader.next_partition();
         }
+        return make_ready_future<>();
     }
 
     virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
@@ -2073,7 +2074,7 @@ public:
         }
         abort();
     }
-    virtual void next_partition() override { }
+    virtual future<> next_partition() override { return make_ready_future<>(); }
     virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point) override {
         ++_ctrl.fast_forward_to;
         clear_buffer();
@@ -2227,6 +2228,49 @@ multishard_reader_for_read_ahead prepare_multishard_reader_for_read_ahead_test(s
     return {std::move(reader), std::move(sharder), std::move(remote_controls), std::move(pr)};
 }
 
+// Regression test for #7945
+SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_custom_shard_number) {
+    if (smp::count < 2) {
+        std::cerr << "Cannot run test " << get_name() << " with smp::count < 2" << std::endl;
+        return;
+    }
+
+    auto no_shards = smp::count - 1;
+    test_reader_lifecycle_policy::operations_gate operations_gate;
+
+    do_with_cql_env([&] (cql_test_env& env) -> future<> {
+        std::vector<std::atomic<bool>> shards_touched(smp::count);
+        simple_schema s;
+        auto sharder = std::make_unique<dht::sharder>(no_shards, 0);
+        auto factory = [&shards_touched] (
+                schema_ptr s,
+                const dht::partition_range& range,
+                const query::partition_slice& slice,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr trace_state,
+                mutation_reader::forwarding fwd_mr) {
+            shards_touched[this_shard_id()] = true;
+            return make_empty_flat_reader(s, tests::make_permit());
+        };
+
+        assert_that(make_multishard_combining_reader_for_tests(
+                *sharder,
+                seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), operations_gate),
+                s.schema(),
+                tests::make_permit(),
+                query::full_partition_range,
+                s.schema()->full_slice(),
+                service::get_local_sstable_query_read_priority()))
+            .produces_end_of_stream();
+
+        for (unsigned i = 0; i < no_shards; ++i) {
+            BOOST_REQUIRE(shards_touched[i]);
+        }
+        BOOST_REQUIRE(!shards_touched[no_shards]);
+
+        return operations_gate.close();
+    }).get();
+}
 
 // Test a background pending read-ahead outliving the reader.
 //
@@ -2972,13 +3016,13 @@ SEASTAR_THREAD_TEST_CASE(test_manual_paused_evictable_reader_is_mutation_source)
                 maybe_pause();
             });
         }
-        virtual void next_partition() override {
+        virtual future<> next_partition() override {
             clear_buffer_to_next_partition();
             if (!is_buffer_empty()) {
-                return;
+                return make_ready_future<>();
             }
             _end_of_stream = false;
-            _reader.next_partition();
+            return _reader.next_partition();
         }
         virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
             clear_buffer();
@@ -3775,7 +3819,7 @@ SEASTAR_THREAD_TEST_CASE(clustering_combined_reader_mutation_source_test) {
             }
         }
 
-        virtual void next_partition() override {
+        virtual future<> next_partition() override {
             clear_buffer_to_next_partition();
             _end_of_stream = false;
             if (is_buffer_empty()) {
@@ -3792,6 +3836,7 @@ SEASTAR_THREAD_TEST_CASE(clustering_combined_reader_mutation_source_test) {
                     // either no previously fetched fragment or must have come from before _it. Nothing to do
                 }
             }
+            return make_ready_future<>();
         }
 
         virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {

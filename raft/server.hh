@@ -122,13 +122,15 @@ public:
 
     // Ad hoc functions for testing
     virtual future<> elect_me_leader() = 0;
+    virtual future<> wait_log_idx(index_t) = 0;
+    virtual index_t log_last_idx() = 0;
     virtual void elapse_election() = 0;
     virtual bool is_leader() = 0;
     virtual void tick() = 0;
 };
 
 std::unique_ptr<server> create_server(server_id uuid, std::unique_ptr<rpc> rpc,
-        std::unique_ptr<state_machine> state_machine, std::unique_ptr<storage> storage,
+        std::unique_ptr<state_machine> state_machine, std::unique_ptr<persistence> persistence,
         seastar::shared_ptr<failure_detector> failure_detector, server::configuration config);
 
 } // namespace raft

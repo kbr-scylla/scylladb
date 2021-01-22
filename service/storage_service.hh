@@ -51,9 +51,11 @@
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/rwlock.hh>
 #include "sstables/version.hh"
+#include "sstables/shared_sstable.hh"
 #include "cdc/metadata.hh"
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/lowres_clock.hh>
+#include "locator/snitch_base.hh"
 
 class node_ops_cmd_request;
 class node_ops_cmd_response;
@@ -217,6 +219,8 @@ private:
     future<> update_pending_ranges(sstring reason);
     future<> keyspace_changed(const sstring& ks_name);
     void register_metrics();
+    future<> snitch_reconfigured();
+    static future<> update_topology(inet_address endpoint);
     future<> publish_schema_version();
     void install_schema_version_change_listener();
 
@@ -226,7 +230,6 @@ private:
         });
     }
 public:
-    static future<> update_topology(inet_address endpoint);
 
     token_metadata_ptr get_token_metadata_ptr() const noexcept {
         return _shared_token_metadata.get();
@@ -248,7 +251,6 @@ public:
         return _mnotifier.local();
     }
 
-    future<> gossip_snitch_info();
     future<> gossip_sharder();
 
     distributed<database>& db() {
@@ -594,6 +596,7 @@ private:
     future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     sharded<db::view::view_update_generator>& _view_update_generator;
+    locator::snitch_signal_slot_t _snitch_reconfigure;
     serialized_action _schema_version_publisher;
 private:
     /**
@@ -854,7 +857,11 @@ public:
      * @param cf_name the column family in which to search for new SSTables.
      * @return a future<> when the operation finishes.
      */
-    future<> load_new_sstables(sstring ks_name, sstring cf_name);
+    future<> load_new_sstables(sstring ks_name, sstring cf_name,
+            bool load_and_stream, bool primary_replica_only);
+    future<> load_and_stream(sstring ks_name, sstring cf_name,
+            utils::UUID table_id, std::vector<sstables::shared_sstable> sstables,
+            bool primary_replica_only);
 
     future<> set_tables_autocompaction(const sstring &keyspace, std::vector<sstring> tables, bool enabled);
 

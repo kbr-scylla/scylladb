@@ -440,6 +440,7 @@ perf_tests = set([
 raft_tests = set([
     'test/raft/replication_test',
     'test/boost/raft_fsm_test',
+    'test/boost/raft_etcd_test',
 ])
 
 apps = set([
@@ -526,7 +527,12 @@ defines = ['XXH_PRIVATE_API',
            'SEASTAR_TESTING_MAIN',
 ]
 
-extra_cxxflags = {}
+extra_cxxflags = {
+    'debug': {},
+    'dev': {},
+    'release': {},
+    'sanitize': {}
+}
 
 scylla_core = (['database.cc',
                 'absl-flat_hash_map.cc',
@@ -876,6 +882,7 @@ scylla_core = (['database.cc',
                 'utils/error_injection.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
                 'mutation_writer/shard_based_splitting_writer.cc',
+                'mutation_writer/feed_writers.cc',
                 'lua.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
@@ -1132,6 +1139,7 @@ deps['test/boost/alternator_base64_test'] += ['alternator/base64.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc'] + scylla_raft_dependencies
 deps['test/boost/raft_fsm_test'] =  ['test/boost/raft_fsm_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
+deps['test/boost/raft_etcd_test'] =  ['test/boost/raft_etcd_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
@@ -1316,7 +1324,9 @@ scylla_release = file.read().strip()
 file = open(f'{outdir}/SCYLLA-PRODUCT-FILE', 'r')
 scylla_product = file.read().strip()
 
-extra_cxxflags["release.cc"] = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\""
+for m in ['debug', 'release', 'sanitize', 'dev']:
+    cxxflags = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\" -DSCYLLA_BUILD_MODE=\"\\\"" + m + "\\\"\""
+    extra_cxxflags[m]["release.cc"] = cxxflags
 
 for m in ['debug', 'release', 'sanitize']:
     modes[m]['cxxflags'] += ' ' + dbgflag
@@ -1801,8 +1811,8 @@ with open(buildfile_tmp, 'w') as f:
         for obj in compiles:
             src = compiles[obj]
             f.write('build {}: cxx.{} {} || {} {}\n'.format(obj, mode, src, seastar_dep, gen_headers_dep))
-            if src in extra_cxxflags:
-                f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=extra_cxxflags[src], **modeval))
+            if src in extra_cxxflags[mode]:
+                f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=extra_cxxflags[mode][src], **modeval))
         for swagger in swaggers:
             hh = swagger.headers(gen_dir)[0]
             cc = swagger.sources(gen_dir)[0]

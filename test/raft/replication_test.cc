@@ -202,12 +202,12 @@ struct initial_state {
     raft::server::configuration server_config = raft::server::configuration{.append_request_threshold = 200};
 };
 
-class storage : public raft::storage {
+class persistence : public raft::persistence {
     raft::server_id _id;
     initial_state _conf;
 public:
-    storage(raft::server_id id, initial_state conf) : _id(id), _conf(std::move(conf)) {}
-    storage() {}
+    persistence(raft::server_id id, initial_state conf) : _id(id), _conf(std::move(conf)) {}
+    persistence() {}
     virtual future<> store_term_and_vote(raft::term_t term, raft::server_id vote) { return seastar::sleep(1us); }
     virtual future<std::pair<raft::term_t, raft::server_id>> load_term_and_vote() {
         auto term_and_vote = std::make_pair(_conf.term, _conf.vote);
@@ -261,21 +261,11 @@ public:
         snapshots[id] = snapshots[_id];
         return net[id]->_client->apply_snapshot(_id, std::move(snap));
     }
-    virtual future<> send_append_entries(raft::server_id id, const raft::append_request_send& append_request) {
+    virtual future<> send_append_entries(raft::server_id id, const raft::append_request& append_request) {
         if (is_disconnected(id) || is_disconnected(_id) || (drop_replication && !(rand() % 5))) {
             return make_ready_future<>();
         }
-        raft::append_request_recv req;
-        req.current_term = append_request.current_term;
-        req.leader_id = append_request.leader_id;
-        req.prev_log_idx = append_request.prev_log_idx;
-        req.prev_log_term = append_request.prev_log_term;
-        req.leader_commit_idx = append_request.leader_commit_idx;
-        for (auto&& e: append_request.entries) {
-            req.entries.push_back(*e);
-        }
-        net[id]->_client->append_entries(_id, std::move(req));
-        //co_return seastar::sleep(1us);
+        net[id]->_client->append_entries(_id, append_request);
         return make_ready_future<>();
     }
     virtual future<> send_append_entries_reply(raft::server_id id, const raft::append_reply& reply) {
@@ -319,10 +309,10 @@ create_raft_server(raft::server_id uuid, state_machine::apply_fn apply, initial_
     auto sm = std::make_unique<state_machine>(uuid, std::move(apply), std::move(val), apply_entries);
     auto& rsm = *sm;
     auto mrpc = std::make_unique<rpc>(uuid);
-    auto mstorage = std::make_unique<storage>(uuid, state);
+    auto mpersistence = std::make_unique<persistence>(uuid, state);
     auto fd = seastar::make_shared<failure_detector>(uuid);
 
-    auto raft = raft::create_server(uuid, std::move(mrpc), std::move(sm), std::move(mstorage),
+    auto raft = raft::create_server(uuid, std::move(mrpc), std::move(sm), std::move(mpersistence),
         std::move(fd), state.server_config);
 
     return std::make_pair(std::move(raft), &rsm);
@@ -483,7 +473,7 @@ future<int> run_test(test_case test) {
             std::vector<int> values(n);
             std::iota(values.begin(), values.end(), next_val);
             std::vector<raft::command> commands = create_commands<int>(values);
-            co_await seastar::parallel_for_each(commands, [&] (raft::command cmd) {
+            co_await seastar::do_for_each(commands, [&] (raft::command cmd) {
                 tlogger.debug("Adding command entry on leader {}", leader);
                 return rafts[leader].first->add_entry(std::move(cmd), raft::wait_type::committed);
             });
@@ -492,6 +482,14 @@ future<int> run_test(test_case test) {
             unsigned next_leader = std::get<new_leader>(update);
             if (next_leader != leader) {
                 assert(next_leader < rafts.size());
+                // Wait for leader log to propagate
+                auto leader_log_idx = rafts[leader].first->log_last_idx();
+                for (size_t s = 0; s < test.nodes; ++s) {
+                    auto id = raft::server_id{utils::UUID(0, s + 1)};
+                    if (s != leader && server_disconnected.find(id) == server_disconnected.end()) {
+                        co_await rafts[s].first->wait_log_idx(leader_log_idx);
+                    }
+                }
                 // Make current leader a follower: disconnect, timeout, re-connect
                 server_disconnected.insert(raft::server_id{utils::UUID(0, leader + 1)});
                 for (size_t s = 0; s < test.nodes; ++s) {
@@ -503,6 +501,14 @@ future<int> run_test(test_case test) {
                 leader = next_leader;
             }
         } else if (std::holds_alternative<partition>(update)) {
+            // Wait for leader log to propagate
+            auto leader_log_idx = rafts[leader].first->log_last_idx();
+            for (size_t s = 0; s < test.nodes; ++s) {
+                auto id = raft::server_id{utils::UUID(0, s + 1)};
+                if (s != leader && server_disconnected.find(id) == server_disconnected.end()) {
+                    co_await rafts[s].first->wait_log_idx(leader_log_idx);
+                }
+            }
             auto p = std::get<partition>(update);
             server_disconnected.clear();
             std::unordered_set<size_t> partition_servers;
@@ -564,7 +570,7 @@ future<int> run_test(test_case test) {
         std::iota(values.begin(), values.end(), next_val);
         std::vector<raft::command> commands = create_commands<int>(values);
         tlogger.debug("Adding remaining {} entries on leader {}", values.size(), leader);
-        co_await seastar::parallel_for_each(commands, [&] (raft::command cmd) {
+        co_await seastar::do_for_each(commands, [&] (raft::command cmd) {
             return rafts[leader].first->add_entry(std::move(cmd), raft::wait_type::committed);
         });
     }
@@ -726,6 +732,13 @@ int main(int argc, char* argv[]) {
         {.name = "take_snapshot_and_stream", .nodes = 3,
          .config = {{.snapshot_threshold = 10, .snapshot_trailing = 5}},
          .updates = {entries{5}, partition{0,1}, entries{10}, partition{0, 2}, entries{20}}},
+
+        // verifies that each node in a cluster can campaign
+        // and be elected in turn. This ensures that elections work when not
+        // starting from a clean slate (as they do in TestLeaderElection)
+        // TODO: add pre-vote case
+        {.name = "etcd_test_leader_cycle", .nodes = 3,
+         .updates = {new_leader{1},new_leader{2},new_leader{0}}},
     };
 
     return app.run(argc, argv, [&replication_tests, &app] () -> future<int> {

@@ -124,6 +124,16 @@ sstring to_string(const event::schema_change::target_type t) {
     assert(false && "unreachable");
 }
 
+static bool is_broken_pipe_or_connection_reset(std::exception_ptr ep) {
+    try {
+        std::rethrow_exception(ep);
+    } catch (const std::system_error& e) {
+        return e.code().category() == std::system_category()
+            && (e.code().value() == EPIPE || e.code().value() == ECONNRESET);
+    } catch (...) {}
+    return false;
+}
+
 event::event_type parse_event_type(const sstring& value)
 {
     if (value == "TOPOLOGY_CHANGE") {
@@ -311,14 +321,10 @@ cql_server::do_accepts(int which, bool keepalive, socket_address server_addr) {
                     --_stats.connections;
                     return unadvertise_connection(conn);
                 }).handle_exception([] (std::exception_ptr ep) {
-                    try {
-                        std::rethrow_exception(ep);
-                    } catch(std::system_error& serr) {
-                        if (serr.code().category() ==  std::system_category() &&
-                                serr.code().value() == EPIPE) {  // expected if another side closes a connection
-                            return;
-                        }
-                    } catch(...) {}
+                    if (is_broken_pipe_or_connection_reset(ep)) {
+                        // expected if another side closes a connection or we're shutting down
+                        return;
+                    }
                     clogger.info("exception while processing connection: {}", ep);
                 });
             });
@@ -563,7 +569,17 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         } catch (const exceptions::prepared_query_not_found_exception& ex) {
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_unprepared_error(stream, ex.code(), ex.what(), ex.id, trace_state);
+        } catch (const exceptions::function_execution_exception& ex) {
+            try { ++_server._stats.errors[ex.code()]; } catch(...) {}
+            return make_function_failure_error(stream, ex.code(), ex.what(), ex.ks_name, ex.func_name, ex.args, trace_state);
         } catch (const exceptions::cassandra_exception& ex) {
+            // Note: the CQL protocol specifies that many types of errors have
+            // mandatory parameters. These cassandra_exception subclasses MUST
+            // be handled above. This default "cassandra_exception" case is
+            // only appropriate for the specific types of errors which do not have
+            // additional information, such as invalid_request_exception.
+            // TODO: consider listing those types explicitly, instead of the
+            // catch-all type cassandra_exception.
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_error(stream, ex.code(), ex.what(), trace_state);
         } catch (std::exception& ex) {
@@ -631,8 +647,14 @@ future<> cql_server::connection::process()
     }).finally([this] {
         return _pending_requests_gate.close().then([this] {
             _server._notifier->unregister_connection(this);
-            return _ready_to_respond.finally([this] {
-                return _write_buf.close();
+            return _ready_to_respond.handle_exception([] (std::exception_ptr ep) {
+                if (is_broken_pipe_or_connection_reset(ep)) {
+                    // expected if another side closes a connection or we're shutting down
+                    return;
+                }
+                std::rethrow_exception(ep);
+            }).finally([this] {
+                 return _write_buf.close();
             });
         });
     });
@@ -1335,6 +1357,17 @@ std::unique_ptr<cql_server::response> cql_server::connection::make_unprepared_er
     response->write_int(static_cast<int32_t>(err));
     response->write_string(msg);
     response->write_short_bytes(id);
+    return response;
+}
+
+std::unique_ptr<cql_server::response> cql_server::connection::make_function_failure_error(int16_t stream, exceptions::exception_code err, sstring msg, sstring ks_name, sstring func_name, std::vector<sstring> args, const tracing::trace_state_ptr& tr_state) const
+{
+    auto response = std::make_unique<cql_server::response>(stream, cql_binary_opcode::ERROR, tr_state);
+    response->write_int(static_cast<int32_t>(err));
+    response->write_string(msg);
+    response->write_string(ks_name);
+    response->write_string(func_name);
+    response->write_string_list(args);
     return response;
 }
 
