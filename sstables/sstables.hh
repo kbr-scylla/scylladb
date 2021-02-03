@@ -109,6 +109,7 @@ struct sstable_writer_config {
     bool correctly_serialize_static_compact_in_mc;
     utils::UUID run_identifier = utils::make_random_uuid();
     size_t summary_byte_cost;
+    sstring origin;
 
 private:
     explicit sstable_writer_config() {}
@@ -190,58 +191,17 @@ public:
         return _generation;
     }
 
-    // read_row() reads the entire sstable row (partition) at a given
-    // partition key k, or a subset of this row. The subset is defined by
-    // a filter on the clustering keys which we want to read, which
-    // additionally determines also if all the static columns will also be
-    // returned in the result.
-    flat_mutation_reader read_row_flat(
-        schema_ptr schema,
-        reader_permit permit,
-        dht::ring_position_view key,
-        const query::partition_slice& slice,
-        const io_priority_class& pc = default_priority_class(),
-        tracing::trace_state_ptr trace_state = {},
-        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-        read_monitor& monitor = default_read_monitor());
-
-    flat_mutation_reader read_row_flat(schema_ptr schema, reader_permit permit, dht::ring_position_view key) {
-        auto& full_slice = schema->full_slice();
-        return read_row_flat(std::move(schema), std::move(permit), std::move(key), full_slice);
-    }
-
     // Returns a mutation_reader for given range of partitions
-    flat_mutation_reader read_range_rows_flat(
-        schema_ptr schema,
-        reader_permit permit,
-        const dht::partition_range& range,
-        const query::partition_slice& slice,
-        const io_priority_class& pc = default_priority_class(),
-        tracing::trace_state_ptr trace_state = {},
-        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
-        read_monitor& monitor = default_read_monitor());
-
-    flat_mutation_reader read_range_rows_flat(schema_ptr schema, reader_permit permit, const dht::partition_range& range) {
-        auto& full_slice = schema->full_slice();
-        return read_range_rows_flat(std::move(schema), std::move(permit), range, full_slice);
-    }
-
-    // read_rows_flat() returns each of the rows in the sstable, in sequence,
-    // converted to a "mutation" data structure.
-    // This function is implemented efficiently - doing buffered, sequential
-    // read of the data file (no need to access the index file).
-    // A "mutation_reader" object is returned with which the caller can
-    // fetch mutations in sequence, and allows stop iteration any time
-    // after getting each row.
-    //
-    // The caller must ensure (e.g., using do_with()) that the context object,
-    // as well as the sstable, remains alive as long as a read() is in
-    // progress (i.e., returned a future which hasn't completed yet).
-    flat_mutation_reader read_rows_flat(schema_ptr schema,
-                              reader_permit permit,
-                              const io_priority_class& pc = default_priority_class(),
-                              streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no);
+    flat_mutation_reader make_reader(
+            schema_ptr schema,
+            reader_permit permit,
+            const dht::partition_range& range,
+            const query::partition_slice& slice,
+            const io_priority_class& pc = default_priority_class(),
+            tracing::trace_state_ptr trace_state = {},
+            streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+            mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
+            read_monitor& monitor = default_read_monitor());
 
     // Returns mutation_source containing all writes contained in this sstable.
     // The mutation_source shares ownership of this sstable.
@@ -539,6 +499,7 @@ private:
     // It can be disengaged normally when loading legacy sstables that do not have this
     // information in their scylla metadata.
     std::optional<scylla_metadata::large_data_stats> _large_data_stats;
+    sstring _origin;
 public:
     const bool has_component(component_type f) const;
     sstables_manager& manager() { return _manager; }
@@ -576,7 +537,7 @@ private:
 
     future<> read_scylla_metadata(const io_priority_class& pc) noexcept;
     void write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, run_identifier identifier,
-            std::optional<scylla_metadata::large_data_stats> ld_stats);
+            std::optional<scylla_metadata::large_data_stats> ld_stats, sstring origin);
 
     future<> read_filter(const io_priority_class& pc);
 
@@ -833,6 +794,10 @@ public:
     // iff _large_data_stats is available and the requested entry is in
     // the map.  Otherwise, return a disengaged optional.
     std::optional<large_data_stats_entry> get_large_data_stat(large_data_type t) const noexcept;
+
+    const sstring& get_origin() const noexcept {
+        return _origin;
+    }
 
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class

@@ -395,9 +395,11 @@ scylla_tests = set([
     'test/boost/vint_serialization_test',
     'test/boost/virtual_reader_test',
     'test/boost/bptree_test',
+    'test/boost/btree_test',
     'test/boost/double_decker_test',
     'test/boost/stall_free_test',
     'test/boost/imr_test',
+    'test/boost/raft_sys_table_storage_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -425,7 +427,9 @@ scylla_tests = set([
     'test/unit/row_cache_alloc_stress_test',
     'test/unit/row_cache_stress_test',
     'test/unit/bptree_stress_test',
+    'test/unit/btree_stress_test',
     'test/unit/bptree_compaction_test',
+    'test/unit/btree_compaction_test',
 ]) | ldap_tests
 
 perf_tests = set([
@@ -884,6 +888,8 @@ scylla_core = (['database.cc',
                 'mutation_writer/shard_based_splitting_writer.cc',
                 'mutation_writer/feed_writers.cc',
                 'lua.cc',
+                'service/raft/schema_raft_state_machine.cc',
+                'service/raft/raft_sys_table_storage.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
                )
 
@@ -980,6 +986,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/view.idl.hh',
         'idl/messaging_service.idl.hh',
         'idl/paxos.idl.hh',
+        'idl/raft.idl.hh',
         ]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
@@ -1056,6 +1063,7 @@ pure_boost_tests = set([
     'test/boost/vint_serialization_test',
     'test/boost/bptree_test',
     'test/boost/utf8_test',
+    'test/boost/btree_test',
     'test/manual/streaming_histogram_test',
 ])
 
@@ -1075,7 +1083,9 @@ tests_not_using_seastar_test_framework = set([
     'test/unit/lsa_sync_eviction_test',
     'test/unit/row_cache_alloc_stress_test',
     'test/unit/bptree_stress_test',
+    'test/unit/btree_stress_test',
     'test/unit/bptree_compaction_test',
+    'test/unit/btree_compaction_test',
     'test/manual/sstable_scan_footprint_test',
 ]) | pure_boost_tests
 
@@ -1195,9 +1205,16 @@ warnings = [w
 
 warnings = ' '.join(warnings + ['-Wno-error=deprecated-declarations'])
 
+def clang_inline_threshold():
+    if platform.machine() == 'aarch64':
+        # we see miscompiles with 1200 and above with format("{}", uuid)
+        return 600
+    else:
+        return 2500
+
 optimization_flags = [
     '--param inline-unit-growth=300', # gcc
-    '-mllvm -inline-threshold=2500',  # clang
+    f'-mllvm -inline-threshold={clang_inline_threshold()}',  # clang
 ]
 optimization_flags = [o
                       for o in optimization_flags

@@ -555,7 +555,7 @@ struct sst_factory {
     {}
 
     sstables::shared_sstable operator()() {
-        auto sst = env.make_sstable(s, path, gen, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
+        auto sst = env.make_sstable(s, path, gen);
         sst->set_sstable_level(level);
 
         return sst;
@@ -880,7 +880,7 @@ sstables::shared_sstable create_sstable(sstables::test_env& env, simple_schema& 
     }
 
     return make_sstable_containing([&] {
-            return env.make_sstable(sschema.schema(), path, 0, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
+            return env.make_sstable(sschema.schema(), path, 0);
         }
         , mutations);
 }
@@ -890,7 +890,7 @@ sstables::shared_sstable create_sstable(sstables::test_env& env, schema_ptr s, s
     static thread_local auto tmp = tmpdir();
     static int gen = 0;
     return make_sstable_containing([&] {
-        return env.make_sstable(s, tmp.path().string(), gen++, sstables::sstable::version_types::la, sstables::sstable::format_types::big);
+        return env.make_sstable(s, tmp.path().string(), gen++);
     }, mutations);
 }
 
@@ -901,7 +901,7 @@ class tracking_reader : public flat_mutation_reader::impl {
 public:
     tracking_reader(schema_ptr schema, reader_permit permit, lw_shared_ptr<sstables::sstable> sst)
         : impl(schema, permit)
-        , _reader(sst->read_range_rows_flat(
+        , _reader(sst->make_reader(
                         schema,
                         permit,
                         query::full_partition_range,
@@ -1355,6 +1355,7 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
         const int n_readers = 10;
         auto keys = gen.make_partition_keys(3);
         std::vector<mutation> combined;
+        std::list<dht::partition_range> reader_ranges;
         std::vector<flat_mutation_reader> readers;
         for (int i = 0; i < n_readers; ++i) {
             std::vector<mutation> muts;
@@ -1371,9 +1372,10 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
                 }
             }
             mutation_source ds = create_sstable(env, s, muts)->as_mutation_source();
+            reader_ranges.push_back(dht::partition_range::make({keys[0]}, {keys[0]}));
             readers.push_back(ds.make_reader(s,
                 tests::make_permit(),
-                dht::partition_range::make({keys[0]}, {keys[0]}),
+                reader_ranges.back(),
                 s->full_slice(), default_priority_class(), nullptr,
                 streamed_mutation::forwarding::yes,
                 mutation_reader::forwarding::yes));
@@ -3709,12 +3711,12 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_sstable_set) {
         return flat_mutation_reader_from_mutations(tests::make_permit(), {std::move(mut)}, fwd);
     };
 
-    auto make_tested = [s = g._s, pos = dht::ring_position(g.decorated_pk())]
+    auto make_tested = [s = g._s, pr = dht::partition_range::make_singular(dht::ring_position(g.decorated_pk()))]
             (const time_series_sstable_set& sst_set,
                 const std::unordered_set<int64_t>& included_gens, streamed_mutation::forwarding fwd) {
         auto q = sst_set.make_min_position_reader_queue(
-            [s, pos, fwd] (sstable& sst) {
-                return sst.read_row_flat(s, tests::make_permit(), pos,
+            [s, &pr, fwd] (sstable& sst) {
+                return sst.make_reader(s, tests::make_permit(), pr,
                             s->full_slice(), seastar::default_priority_class(), nullptr, fwd);
             },
             [included_gens] (const sstable& sst) { return included_gens.contains(sst.generation()); });

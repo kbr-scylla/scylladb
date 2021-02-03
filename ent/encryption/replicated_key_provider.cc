@@ -99,7 +99,8 @@ public:
             return true;
         }
         auto& qp = _ctxt.get_query_processor();
-        return !qp.local_is_initialized() || _ctxt.get_database().local().get_compaction_manager().enabled();
+        // FIXME: wait for system tables to be started.
+        return !qp.local_is_initialized();
     }
 
     void print(std::ostream& os) const override {

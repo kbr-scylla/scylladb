@@ -18,7 +18,6 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/execution_stage.hh>
 #include <seastar/net/byteorder.hh>
-#include "utils/UUID_gen.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "db_clock.hh"
@@ -1390,7 +1389,6 @@ public:
     void validate_new_keyspace(keyspace_metadata& ksm);
     future<> update_keyspace(const sstring& name);
     void drop_keyspace(const sstring& name);
-    const auto& keyspaces() const { return _keyspaces; }
     std::vector<sstring> get_non_system_keyspaces() const;
     column_family& find_column_family(std::string_view ks, std::string_view name);
     const column_family& find_column_family(std::string_view ks, std::string_view name) const;

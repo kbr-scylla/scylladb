@@ -34,7 +34,7 @@ import random
 @pytest.fixture(scope="session")
 def table1(cql, test_keyspace):
     table = test_keyspace + "." + unique_name()
-    cql.execute(f"CREATE TABLE {table} (p int PRIMARY KEY, v int, a ascii, b boolean, vi varint)")
+    cql.execute(f"CREATE TABLE {table} (p int PRIMARY KEY, v int, a ascii, b boolean, vi varint, mai map<ascii, int>, tup frozen<tuple<text, int>>, l list<text>, d double)")
     yield table
     cql.execute("DROP TABLE " + table)
 
@@ -176,3 +176,64 @@ def test_fromjson_null_prepared(cql, table1):
     stmt = cql.prepare(f"INSERT INTO {table1} (p, v) VALUES (?, fromJson(?))")
     cql.execute(stmt, [p, None])
     assert list(cql.execute(f"SELECT p, v from {table1} where p = {p}")) == [(p, None)]
+
+# Test that fromJson can parse a map<ascii,int>. Strangely Scylla had a bug
+# setting a map<ascii,int> with fromJson(), while map<text,int> worked well.
+# Reproduces #7949.
+@pytest.mark.xfail(reason="issue #7949")
+def test_fromjson_map_ascii_unprepared(cql, table1):
+    p = random.randint(1,1000000000)
+    cql.execute("INSERT INTO " + table1 + " (p, mai) VALUES (" + str(p) + ", fromJson('{\"a\": 1, \"b\": 2}'))")
+    assert list(cql.execute(f"SELECT p, mai from {table1} where p = {p}")) == [(p, {'a': 1, 'b': 2})]
+@pytest.mark.xfail(reason="issue #7949")
+def test_fromjson_map_ascii_prepared(cql, table1):
+    p = random.randint(1,1000000000)
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, mai) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '{"a": 1, "b": 2}'])
+    assert list(cql.execute(f"SELECT p, mai from {table1} where p = {p}")) == [(p, {'a': 1, 'b': 2})]
+
+# With fromJson() the JSON "null" constant can be used to unset a column,
+# but can also be used to unset a part of a tuple column. In both cases,
+# in addition to fromJson() allowing the expected type, the "null" constant
+# should also be allowed. But it's not like a null is allowed *everywhere*
+# that a normal value is allowed. For example, it cannot be given as an
+# element of a list.
+# Reproduces #7954.
+@pytest.mark.xfail(reason="issue #7954")
+def test_fromjson_null_constant(cql, table1):
+    p = random.randint(1,1000000000)
+    # Check that a "null" JSON constant can be used to unset a column
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, v) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '1'])
+    assert list(cql.execute(f"SELECT p, v from {table1} where p = {p}")) == [(p, 1)]
+    cql.execute(stmt, [p, 'null'])
+    assert list(cql.execute(f"SELECT p, v from {table1} where p = {p}")) == [(p, None)]
+    # Check that a "null" JSON constant can be used to unset part of a tuple
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, tup) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '["a", 1]'])
+    assert list(cql.execute(f"SELECT p, tup from {table1} where p = {p}")) == [(p, ('a', 1))]
+    cql.execute(stmt, [p, '["a", null]'])
+    assert list(cql.execute(f"SELECT p, tup from {table1} where p = {p}")) == [(p, ('a', None))]
+    cql.execute(stmt, [p, '[null, 2]'])
+    assert list(cql.execute(f"SELECT p, tup from {table1} where p = {p}")) == [(p, (None, 2))]
+    # However, a "null" JSON constant is not just allowed everywhere that a
+    # normal value is allowed. E.g, it cannot be part of a list. Let's
+    # verify that we didn't overdo the fix.
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, l) VALUES (?, fromJson(?))")
+    with pytest.raises(FunctionFailure):
+        cql.execute(stmt, [p, '["a", null]'])
+
+# Check that toJson() correctly formats double values. Strangely, we had a bug`
+# (issue #7972) where the double value 123.456 was correctly formatted, but
+# the value 123123.123123 was truncated to an integer. This test reproduces
+# this.
+@pytest.mark.xfail(reason="issue #7972")
+def test_tojson_double(cql, table1):
+    p = random.randint(1,1000000000)
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, d) VALUES (?, ?)")
+    cql.execute(stmt, [p, 123.456])
+    assert list(cql.execute(f"SELECT d, toJson(d) from {table1} where p = {p}")) == [(123.456, "123.456")]
+    # While 123.456 above worked, in issue #7972 we note that 123123.123123
+    # does not work.
+    cql.execute(stmt, [p, 123123.123123])
+    assert list(cql.execute(f"SELECT d, toJson(d) from {table1} where p = {p}")) == [(123123.123123, "123123.123123")]

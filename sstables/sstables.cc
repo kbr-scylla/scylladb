@@ -1322,6 +1322,10 @@ future<> sstable::open_data() noexcept {
         if (ld_stats) {
             _large_data_stats.emplace(*ld_stats);
         }
+        auto* origin = _components->scylla_metadata->data.get<scylla_metadata_type::SSTableOrigin, scylla_metadata::sstable_origin>();
+        if (origin) {
+            _origin = sstring(to_sstring_view(bytes_view(origin->value)));
+        }
     });
 }
 
@@ -1596,7 +1600,7 @@ sstable::read_scylla_metadata(const io_priority_class& pc) noexcept {
 
 void
 sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, sstable_enabled_features features, struct run_identifier identifier,
-        std::optional<scylla_metadata::large_data_stats> ld_stats) {
+        std::optional<scylla_metadata::large_data_stats> ld_stats, sstring origin) {
     auto&& first_key = get_first_decorated_key();
     auto&& last_key = get_last_decorated_key();
     auto sm = create_sharding_metadata(_schema, first_key, last_key, shard);
@@ -1616,6 +1620,11 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
     _components->scylla_metadata->data.set<scylla_metadata_type::RunIdentifier>(std::move(identifier));
     if (ld_stats) {
         _components->scylla_metadata->data.set<scylla_metadata_type::LargeDataStats>(std::move(*ld_stats));
+    }
+    if (!origin.empty()) {
+        scylla_metadata::sstable_origin o;
+        o.value = bytes(to_bytes_view(sstring_view(origin)));
+        _components->scylla_metadata->data.set<scylla_metadata_type::SSTableOrigin>(std::move(o));
     }
 
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
@@ -2830,8 +2839,6 @@ future<> init_metrics() {
             sm::description("Number of single partition flat mutation reads")),
         sm::make_derive("range_partition_reads", [] { return sstables_stats::get_shard_stats().range_partition_reads; },
             sm::description("Number of partition range flat mutation reads")),
-        sm::make_derive("sstable_partition_reads", [] { return sstables_stats::get_shard_stats().sstable_partition_reads; },
-            sm::description("Number of whole sstable flat mutation reads")),
         sm::make_derive("partition_reads", [] { return sstables_stats::get_shard_stats().partition_reads; },
             sm::description("Number of partitions read")),
         sm::make_derive("partition_seeks", [] { return sstables_stats::get_shard_stats().partition_seeks; },
@@ -2856,15 +2863,7 @@ mutation_source sstable::as_mutation_source() {
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
             mutation_reader::forwarding fwd_mr) mutable {
-        // CAVEAT: if as_mutation_source() is called on a single partition
-        // we want to optimize and read exactly this partition. As a
-        // consequence, fast_forward_to() will *NOT* work on the result,
-        // regardless of what the fwd_mr parameter says.
-        if (range.is_singular() && range.start()->value().has_key()) {
-            return sst->read_row_flat(s, std::move(permit), range.start()->value(), slice, pc, std::move(trace_state), fwd);
-        } else {
-            return sst->read_range_rows_flat(s, std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
-        }
+        return sst->make_reader(std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
     });
 }
 

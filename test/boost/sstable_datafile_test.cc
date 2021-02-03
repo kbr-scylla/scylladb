@@ -63,6 +63,7 @@
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/reader_permit.hh"
 #include "test/lib/sstable_utils.hh"
+#include "test/lib/random_utils.hh"
 
 namespace fs = std::filesystem;
 
@@ -824,8 +825,8 @@ SEASTAR_TEST_CASE(datafile_generation_11) {
         auto sst = env.make_sstable(s, tmpdir_path, 11, la, big);
         return write_memtable_to_sstable_for_test(*mt, sst).then([&env, s, sst, mt, verifier, tomb, &static_set_col, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 11).then([s, verifier, tomb, &static_set_col] (auto sstp) mutable {
-                return do_with(make_dkey(s, "key1"), [sstp, s, verifier, tomb, &static_set_col] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s, verifier, tomb, &static_set_col] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, verifier, tomb, &static_set_col, rd] (auto mutation) {
                         auto verify_set = [&tomb] (const collection_mutation_description& m) {
                             BOOST_REQUIRE(bool(m.tomb) == true);
@@ -852,8 +853,8 @@ SEASTAR_TEST_CASE(datafile_generation_11) {
                         verify_set(m);
                     });
                 }).then([sstp, s, verifier] {
-                    return do_with(make_dkey(s, "key2"), [sstp, s, verifier] (auto& key) {
-                        auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                    return do_with(dht::partition_range::make_singular(make_dkey(s, "key2")), [sstp, s, verifier] (auto& pr) {
+                        auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                         return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, verifier, rd] (auto mutation) {
                             auto m = verifier(mutation);
                             BOOST_REQUIRE(!m.tomb);
@@ -885,8 +886,8 @@ SEASTAR_TEST_CASE(datafile_generation_12) {
         auto sst = env.make_sstable(s, tmpdir_path, 12, la, big);
         return write_memtable_to_sstable_for_test(*mt, sst).then([&env, s, tomb, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 12).then([s, tomb] (auto sstp) mutable {
-                return do_with(make_dkey(s, "key1"), [sstp, s, tomb] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s, tomb] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, tomb, rd] (auto mutation) {
                         auto& mp = mutation->partition();
                         BOOST_REQUIRE(mp.row_tombstones().size() == 1);
@@ -921,8 +922,8 @@ static future<> sstable_compression_test(compressor_ptr c, unsigned generation) 
         auto sst = env.make_sstable(s, tmpdir_path, generation, la, big);
         return write_memtable_to_sstable_for_test(*mtp, sst).then([&env, s, tomb, generation, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, generation).then([s, tomb] (auto sstp) mutable {
-                return do_with(make_dkey(s, "key1"), [sstp, s, tomb] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s, tomb] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, tomb, rd] (auto mutation) {
                         auto& mp = mutation->partition();
                         BOOST_REQUIRE(mp.row_tombstones().size() == 1);
@@ -1403,8 +1404,8 @@ SEASTAR_TEST_CASE(datafile_generation_37) {
         auto sst = env.make_sstable(s, tmpdir_path, 37, la, big);
         return write_memtable_to_sstable_for_test(*mtp, sst).then([&env, s, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 37).then([s, tmpdir_path] (auto sstp) {
-                return do_with(make_dkey(s, "key1"), [sstp, s] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, rd] (auto mutation) {
                         auto& mp = mutation->partition();
 
@@ -1438,8 +1439,8 @@ SEASTAR_TEST_CASE(datafile_generation_38) {
         auto sst = env.make_sstable(s, tmpdir_path, 38, la, big);
         return write_memtable_to_sstable_for_test(*mtp, sst).then([&env, s, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 38).then([s] (auto sstp) {
-                return do_with(make_dkey(s, "key1"), [sstp, s] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, rd] (auto mutation) {
                         auto& mp = mutation->partition();
                         auto clustering = clustering_key_prefix::from_exploded(*s, {to_bytes("cl1"), to_bytes("cl2")});
@@ -1474,8 +1475,8 @@ SEASTAR_TEST_CASE(datafile_generation_39) {
         auto sst = env.make_sstable(s, tmpdir_path, 39, la, big);
         return write_memtable_to_sstable_for_test(*mtp, sst).then([&env, s, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 39).then([s] (auto sstp) {
-                return do_with(make_dkey(s, "key1"), [sstp, s] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, rd] (auto mutation) {
                         auto& mp = mutation->partition();
                         auto& row = mp.clustered_row(*s, clustering_key::make_empty());
@@ -1570,8 +1571,8 @@ SEASTAR_TEST_CASE(datafile_generation_41) {
         auto sst = env.make_sstable(s, tmpdir_path, 41, la, big);
         return write_memtable_to_sstable_for_test(*mt, sst).then([&env, s, tomb, tmpdir_path] {
             return env.reusable_sst(s, tmpdir_path, 41).then([s, tomb] (auto sstp) mutable {
-                return do_with(make_dkey(s, "key1"), [sstp, s, tomb] (auto& key) {
-                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
+                return do_with(dht::partition_range::make_singular(make_dkey(s, "key1")), [sstp, s, tomb] (auto& pr) {
+                    auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), pr, s->full_slice()));
                     return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, tomb, rd] (auto mutation) {
                         auto& mp = mutation->partition();
                         BOOST_REQUIRE(mp.clustered_rows().calculate_size() == 1);
@@ -5285,7 +5286,7 @@ SEASTAR_TEST_CASE(sstable_scrub_test) {
 
             auto tmp = tmpdir();
             auto sst_gen = [&env, schema, &tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
-                return env.make_sstable(schema, tmp.path().string(), (*gen)++, sstables::sstable_version_types::mc, big);
+                return env.make_sstable(schema, tmp.path().string(), (*gen)++);
             };
 
             std::vector<mutation_fragment> corrupt_fragments;
@@ -6073,7 +6074,7 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
         public:
             explicit compacting_sstable_writer_test(const schema_ptr& s, shared_sstable& sst, sstables_manager& manager)
                 : _sst(sst),
-                  _writer(sst->get_writer(*s, 1, manager.configure_writer(),
+                  _writer(sst->get_writer(*s, 1, manager.configure_writer("test"),
                         encoding_stats{}, service::get_local_compaction_priority())) {}
 
             void consume_new_partition(const dht::decorated_key& dk) { _writer.consume_new_partition(dk); }
@@ -6764,7 +6765,7 @@ SEASTAR_TEST_CASE(stcs_reshape_test) {
         std::vector<shared_sstable> sstables;
         sstables.reserve(s->max_compaction_threshold());
         for (auto gen = 1; gen <= s->max_compaction_threshold(); gen++) {
-            auto sst = env.make_sstable(s, "", gen, la, big);
+            auto sst = env.make_sstable(s, "", gen);
             sstables::test(sst).set_data_file_size(1);
             sstables.push_back(std::move(sst));
         }
@@ -6843,5 +6844,43 @@ SEASTAR_TEST_CASE(test_twcs_interposer_on_memtable_flush) {
 
       test_interposer_on_flush(true);
       test_interposer_on_flush(false);
+    });
+}
+
+SEASTAR_TEST_CASE(test_sstable_origin) {
+    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+        simple_schema ss;
+        auto s = ss.schema();
+
+        auto pk = ss.make_pkey(make_local_key(s));
+        auto mut = mutation(s, pk);
+        ss.add_row(mut, ss.make_ckey(0), "val");
+        int gen = 1;
+
+        for (const auto version : all_sstable_versions) {
+            if (version < sstable_version_types::mc) {
+                continue;
+            }
+
+            // Test empty sstable_origin.
+            auto mr = flat_mutation_reader_from_mutations(tests::make_permit(), {mut});
+            auto sst = env.make_sstable(s, tmpdir_path, gen++, version, big);
+            sstable_writer_config cfg = env.manager().configure_writer("");
+            sst->write_components(std::move(mr), 0, s, std::move(cfg), encoding_stats{}).get();
+            sst->load().get();
+            BOOST_REQUIRE_EQUAL(sst->get_origin(), "");
+
+            // Test that a random sstable_origin is stored and retrieved properly.
+            mr = flat_mutation_reader_from_mutations(tests::make_permit(), {mut});
+            sst = env.make_sstable(s, tmpdir_path, gen++, version, big);
+            sstring origin = fmt::format("test-{}", tests::random::get_sstring());
+            cfg = env.manager().configure_writer(origin);
+            sst->write_components(std::move(mr), 0, s, std::move(cfg), encoding_stats{}).get();
+            sst->load().get();
+
+            BOOST_REQUIRE_EQUAL(sst->get_origin(), origin);
+        }
+
+        return make_ready_future<>();
     });
 }

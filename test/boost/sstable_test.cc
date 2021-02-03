@@ -162,7 +162,7 @@ SEASTAR_TEST_CASE(missing_summary_first_last_sane) {
 }
 
 static future<sstable_ptr> do_write_sst(test_env& env, schema_ptr schema, sstring load_dir, sstring write_dir, unsigned long generation) {
-    return env.reusable_sst(std::move(schema), load_dir, generation, la).then([write_dir, generation] (sstable_ptr sst) {
+    return env.reusable_sst(std::move(schema), load_dir, generation).then([write_dir, generation] (sstable_ptr sst) {
         sstables::test(sst).change_generation_number(generation + 1);
         sstables::test(sst).change_dir(write_dir);
         auto fut = sstables::test(sst).store();
@@ -234,7 +234,7 @@ future<>
 write_and_validate_sst(schema_ptr s, sstring dir, noncopyable_function<future<> (shared_sstable sst1, shared_sstable sst2)> func) {
     return test_env::do_with(tmpdir(), [s = std::move(s), dir = std::move(dir), func = std::move(func)] (test_env& env, tmpdir& tmp) mutable {
         return do_write_sst(env, s, dir, tmp.path().string(), 1).then([&env, &tmp, s = std::move(s), func = std::move(func)] (auto sst1) {
-            auto sst2 = env.make_sstable(s, tmp.path().string(), 2, la, big);
+            auto sst2 = env.make_sstable(s, tmp.path().string(), 2, sst1->get_version());
             return func(std::move(sst1), std::move(sst2));
         });
     });
@@ -828,10 +828,10 @@ SEASTAR_TEST_CASE(not_find_key_composite_bucket0) {
 // See CASSANDRA-7593. This sstable writes 0 in the range_start. We need to handle that case as well
 SEASTAR_TEST_CASE(wrong_range) {
     return test_using_reusable_sst(uncompressed_schema(), "test/resource/sstables/wrongrange", 114, [] (auto sstp) {
-        return do_with(make_dkey(uncompressed_schema(), "todata"), [sstp] (auto& key) {
+        return do_with(dht::partition_range::make_singular(make_dkey(uncompressed_schema(), "todata")), [sstp] (auto& range) {
             auto s = columns_schema();
-            auto rd = make_lw_shared<flat_mutation_reader>(sstp->read_row_flat(s, tests::make_permit(), key));
-            return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, &key, rd] (auto mutation) {
+            auto rd = make_lw_shared<flat_mutation_reader>(sstp->make_reader(s, tests::make_permit(), range, s->full_slice()));
+            return read_mutation_from_flat_mutation_reader(*rd, db::no_timeout).then([sstp, s, rd] (auto mutation) {
                 return make_ready_future<>();
             });
         });
@@ -965,8 +965,8 @@ static query::partition_slice make_partition_slice(const schema& s, sstring ck1,
 static future<int> count_rows(sstable_ptr sstp, schema_ptr s, sstring key, sstring ck1, sstring ck2) {
     return seastar::async([sstp, s, key, ck1, ck2] () mutable {
         auto ps = make_partition_slice(*s, ck1, ck2);
-        auto dkey = make_dkey(s, key.c_str());
-        auto rd = sstp->read_row_flat(s, tests::make_permit(), dkey, ps);
+        auto pr = dht::partition_range::make_singular(make_dkey(s, key.c_str()));
+        auto rd = sstp->make_reader(s, tests::make_permit(), pr, ps);
         auto mfopt = rd(db::no_timeout).get0();
         if (!mfopt) {
             return 0;
@@ -986,8 +986,8 @@ static future<int> count_rows(sstable_ptr sstp, schema_ptr s, sstring key, sstri
 // Count the number of CQL rows in one partition
 static future<int> count_rows(sstable_ptr sstp, schema_ptr s, sstring key) {
     return seastar::async([sstp, s, key] () mutable {
-        auto dkey = make_dkey(s, key.c_str());
-        auto rd = sstp->read_row_flat(s, tests::make_permit(), dkey);
+        auto pr = dht::partition_range::make_singular(make_dkey(s, key.c_str()));
+        auto rd = sstp->make_reader(s, tests::make_permit(), pr, s->full_slice());
         auto mfopt = rd(db::no_timeout).get0();
         if (!mfopt) {
             return 0;
@@ -1009,7 +1009,7 @@ static future<int> count_rows(sstable_ptr sstp, schema_ptr s, sstring key) {
 static future<int> count_rows(sstable_ptr sstp, schema_ptr s, sstring ck1, sstring ck2) {
     return seastar::async([sstp, s, ck1, ck2] () mutable {
         auto ps = make_partition_slice(*s, ck1, ck2);
-        auto reader = sstp->read_range_rows_flat(s, tests::make_permit(), query::full_partition_range, ps);
+        auto reader = sstp->make_reader(s, tests::make_permit(), query::full_partition_range, ps);
         int nrows = 0;
         auto mfopt = reader(db::no_timeout).get0();
         while (mfopt) {
