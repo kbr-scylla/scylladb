@@ -41,7 +41,7 @@ static bool errors_found = false;
 cql_test_env* cql_env;
 
 static void print_error(const sstring& msg) {
-    std::cerr << "^^^ ERROR: " << msg << "\n";
+    std::cout << "^^^ ERROR: " << msg << "\n";
     errors_found = true;
 }
 
@@ -1829,6 +1829,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Data directory: " << db_cfg.data_file_directories() << "\n";
+        std::cout << "Output directory: " << output_dir << "\n";
 
         auto init = [] {
             auto conf_seed = app.configuration()["random-seed"];

@@ -513,8 +513,6 @@ arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', def
                         help='path to antlr3 executable')
 arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', default='ragel',
         help='path to ragel executable')
-arg_parser.add_argument('--build-raft', dest='build_raft', action='store_true', default=False,
-                        help='build raft code')
 add_tristate(arg_parser, name='stack-guards', dest='stack_guards', help='Use stack guards')
 arg_parser.add_argument('--verbose', dest='verbose', action='store_true',
                         help='Make configure.py output more verbose (useful for debugging the build process itself)')
@@ -522,10 +520,6 @@ arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', typ
                          help='Set number of times to repeat each unittest.')
 arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
 args = arg_parser.parse_args()
-
-if not args.build_raft:
-    all_artifacts.difference_update(raft_tests)
-    tests.difference_update(raft_tests)
 
 defines = ['XXH_PRIVATE_API',
            'SEASTAR_TESTING_MAIN',
@@ -537,6 +531,14 @@ extra_cxxflags = {
     'release': {},
     'sanitize': {}
 }
+
+scylla_raft_core = [
+    'raft/raft.cc',
+    'raft/server.cc',
+    'raft/fsm.cc',
+    'raft/progress.cc',
+    'raft/log.cc',
+]
 
 scylla_core = (['database.cc',
                 'absl-flat_hash_map.cc',
@@ -890,7 +892,11 @@ scylla_core = (['database.cc',
                 'lua.cc',
                 'service/raft/schema_raft_state_machine.cc',
                 'service/raft/raft_sys_table_storage.cc',
-                ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')]
+                'serializer.cc',
+                'service/raft/raft_rpc.cc',
+                'service/raft/raft_gossip_failure_detector.cc',
+                ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
+                  + scylla_raft_core
                )
 
 api = ['api/api.cc',
@@ -1011,14 +1017,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'test/lib/random_schema.cc',
 ]
 
-scylla_raft_dependencies = [
-    'raft/raft.cc',
-    'raft/server.cc',
-    'raft/fsm.cc',
-    'raft/progress.cc',
-    'raft/log.cc',
-    'utils/uuid.cc'
-]
+scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc']
 
 deps = {
     'scylla': idls + ['main.cc', 'release.cc', 'utils/build_id.cc'] + scylla_core + api + alternator + redis,
@@ -1516,9 +1515,6 @@ libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-l
 
 if not args.staticboost:
     args.user_cflags += ' -DBOOST_TEST_DYN_LINK'
-
-if build_raft:
-    args.user_cflags += ' -DENABLE_SCYLLA_RAFT'
 
 # thrift version detection, see #4538
 proc_res = subprocess.run(["thrift", "-version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
