@@ -378,13 +378,18 @@ table::add_sstable_and_update_cache(sstables::shared_sstable sst) {
 
 future<>
 table::update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_sstable> ssts) {
-    std::vector<mutation_source> sources;
-    sources.reserve(ssts.size());
-    for (auto& sst : ssts) {
-        sources.push_back(sst->as_mutation_source());
+    mutation_source_opt ms_opt;
+    if (ssts.size() == 1) {
+        ms_opt = ssts.front()->as_mutation_source();
+    } else {
+        std::vector<mutation_source> sources;
+        sources.reserve(ssts.size());
+        for (auto& sst : ssts) {
+            sources.push_back(sst->as_mutation_source());
+        }
+        ms_opt = make_combined_mutation_source(std::move(sources));
     }
-    auto new_ssts_ms = make_combined_mutation_source(std::move(sources));
-    auto adder = row_cache::external_updater([this, m, ssts = std::move(ssts), new_ssts_ms = std::move(new_ssts_ms)] () mutable {
+    auto adder = row_cache::external_updater([this, m, ssts = std::move(ssts), new_ssts_ms = std::move(*ms_opt)] () mutable {
         for (auto& sst : ssts) {
             add_sstable(sst);
         }
@@ -1300,9 +1305,14 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
     });
 }
 
-future<> table::flush() {
+future<> table::flush(std::optional<db::replay_position> pos) {
+    if (pos && *pos < _flush_rp) {
+        return make_ready_future<>();
+    }
     auto op = _pending_flushes_phaser.start();
-    return _memtables->request_flush().then([op = std::move(op)] {});
+    return _memtables->request_flush().then([this, op = std::move(op), fp = _highest_rp] {
+        _flush_rp = std::max(_flush_rp, fp);
+    });
 }
 
 bool table::can_flush() const {

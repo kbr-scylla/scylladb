@@ -135,7 +135,7 @@ class data_listeners;
 class large_data_handler;
 
 namespace system_keyspace {
-void make(database& db, bool durable, bool volatile_testing_only);
+future<> make(database& db);
 }
 }
 
@@ -437,6 +437,7 @@ private:
     std::optional<int64_t> _sstable_generation = {};
 
     db::replay_position _highest_rp;
+    db::replay_position _flush_rp;
     db::replay_position _lowest_allowed_rp;
 
     // Provided by the database that owns this commitlog
@@ -739,7 +740,7 @@ public:
 
     void start();
     future<> stop();
-    future<> flush();
+    future<> flush(std::optional<db::replay_position> = {});
     future<> clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
@@ -1306,11 +1307,9 @@ public:
     void set_local_id(utils::UUID uuid) noexcept { _local_host_id = std::move(uuid); }
 
 private:
-    // Unless you are an earlier boostraper or the database itself, you should
-    // not be using this directly.  Go for the public create_keyspace instead.
-    void add_keyspace(sstring name, keyspace k);
-    void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm);
-    friend void db::system_keyspace::make(database& db, bool durable, bool volatile_testing_only);
+    using system_keyspace = bool_class<struct system_keyspace_tag>;
+    void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, system_keyspace system);
+    friend future<> db::system_keyspace::make(database& db);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
 
@@ -1325,7 +1324,7 @@ private:
     template<typename Future>
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
-    future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, bool is_bootstrap);
+    future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, bool is_bootstrap, system_keyspace system);
 public:
     static utils::UUID empty_version;
 
@@ -1387,7 +1386,7 @@ public:
     bool has_keyspace(std::string_view name) const;
     void validate_keyspace_update(keyspace_metadata& ksm);
     void validate_new_keyspace(keyspace_metadata& ksm);
-    future<> update_keyspace(const sstring& name);
+    future<> update_keyspace(sharded<service::storage_proxy>& proxy, const sstring& name);
     void drop_keyspace(const sstring& name);
     std::vector<sstring> get_non_system_keyspaces() const;
     column_family& find_column_family(std::string_view ks, std::string_view name);

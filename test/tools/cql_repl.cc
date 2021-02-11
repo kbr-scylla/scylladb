@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 #include <filesystem>
+#include <fstream>
 // use boost::regex instead of std::regex due
 // to stack overflow in debug mode
 #include <boost/regex.hpp>
