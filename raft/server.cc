@@ -81,7 +81,6 @@ private:
     std::unique_ptr<fsm> _fsm;
     // id of this server
     server_id _id;
-    seastar::timer<lowres_clock> _ticker;
     server::configuration _config;
 
     seastar::pipe<std::vector<log_entry_ptr>> _apply_entries = seastar::pipe<std::vector<log_entry_ptr>>(10);
@@ -212,11 +211,6 @@ future<> server_impl::start() {
     _io_status = io_fiber(stable_idx);
     // start fiber to apply committed entries
     _applier_status = applier_fiber();
-
-    _ticker.arm_periodic(100ms);
-    _ticker.set_callback([this] {
-        _fsm->tick();
-    });
 
     co_return;
 }
@@ -523,7 +517,6 @@ future<> server_impl::abort() {
     }
     _awaited_commits.clear();
     _awaited_applies.clear();
-    _ticker.cancel();
 
     if (_snapshot_application_done) {
         _snapshot_application_done->set_exception(std::runtime_error("Snapshot application aborted"));

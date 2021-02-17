@@ -78,6 +78,8 @@
 #include "alternator/rmw_operation.hh"
 #include "db/paxos_grace_seconds_extension.hh"
 
+#include "service/raft/raft_services.hh"
+
 namespace fs = std::filesystem;
 
 seastar::metrics::metric_groups app_metrics;
@@ -478,6 +480,7 @@ int main(int ac, char** av) {
     sharded<netw::messaging_service> messaging;
     sharded<cql3::query_processor> qp;
     sharded<semaphore> sst_dir_semaphore;
+    sharded<raft_services> raft_srvs;
 
     return app.run(ac, av, [&] () -> future<int> {
 
@@ -506,8 +509,14 @@ int main(int ac, char** av) {
 
         return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
-                &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore] {
+                &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_srvs] {
           try {
+            // disable reactor stall detection during startup
+            auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
+            smp::invoke_on_all([] {
+                engine().update_blocked_reactor_notify_ms(std::chrono::milliseconds(1000000));
+            }).get();
+
             ::stop_signal stop_signal; // we can move this earlier to support SIGINT during initialization
             read_config(opts, *cfg).get();
             configurable::init_all(opts, *cfg, *ext).get();
@@ -864,6 +873,11 @@ int main(int ac, char** av) {
             }
 
             init_gossiper(gossiper, *cfg, listen_address, seed_provider, cluster_name);
+
+            smp::invoke_on_all([blocked_reactor_notify_ms] {
+                engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
+            }).get();
+
             supervisor::notify("starting storage proxy");
             service::storage_proxy::config spcfg {
                 .hints_directory_initializer = hints_dir_initializer,
@@ -1018,7 +1032,12 @@ int main(int ac, char** av) {
             auto stop_proxy_handlers = defer_verbose_shutdown("storage proxy RPC verbs", [&proxy] {
                 proxy.invoke_on_all(&service::storage_proxy::uninit_messaging_service).get();
             });
-
+            supervisor::notify("initializing Raft services");
+            raft_srvs.start(std::ref(messaging), std::ref(gossiper), std::ref(qp)).get();
+            raft_srvs.invoke_on_all(&raft_services::init).get();
+            auto stop_raft_sc_handlers = defer_verbose_shutdown("Raft services", [&raft_srvs] {
+                raft_srvs.invoke_on_all(&raft_services::uninit).get();
+            });
             supervisor::notify("starting streaming service");
             streaming::stream_session::init_streaming_service(db, sys_dist_ks, view_update_generator, messaging).get();
             auto stop_streaming_service = defer_verbose_shutdown("streaming service", [] {

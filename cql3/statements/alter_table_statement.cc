@@ -45,10 +45,10 @@ namespace cql3 {
 
 namespace statements {
 
-alter_table_statement::alter_table_statement(shared_ptr<cf_name> name,
+alter_table_statement::alter_table_statement(cf_name name,
                                              type t,
                                              std::vector<column_change> column_changes,
-                                             shared_ptr<cf_prop_defs> properties,
+                                             std::optional<cf_prop_defs> properties,
                                              renames_type renames)
     : schema_altering_statement(std::move(name))
     , _type(t)
