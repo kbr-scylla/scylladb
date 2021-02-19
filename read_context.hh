@@ -26,7 +26,7 @@ namespace cache {
 class autoupdating_underlying_reader final {
     row_cache& _cache;
     read_context& _read_context;
-    std::optional<flat_mutation_reader> _reader;
+    flat_mutation_reader_opt _reader;
     utils::phased_barrier::phase_type _reader_creation_phase = 0;
     dht::partition_range _range = { };
     std::optional<dht::decorated_key> _last_key;
@@ -149,11 +149,11 @@ public:
         , _pc(pc)
         , _trace_state(std::move(trace_state))
         , _fwd_mr(fwd_mr)
-        , _range_query(!range.is_singular() || !range.start()->value().has_key())
+        , _range_query(!query::is_single_partition(range))
         , _underlying(_cache, *this)
     {
         ++_cache._tracker._stats.reads;
-        if (range.is_singular() && range.start()->value().has_key()) {
+        if (!_range_query) {
             _key = range.start()->value().as_decorated_key();
         }
     }
