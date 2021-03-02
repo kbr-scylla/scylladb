@@ -22,6 +22,7 @@
 #include "cql3/column_identifier.hh"
 #include "cql3/functions/functions.hh"
 #include <seastar/core/seastar.hh>
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/rwlock.hh>
@@ -387,8 +388,6 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     setup_metrics();
 
     _row_cache_tracker.set_compaction_scheduling_group(dbcfg.memory_compaction_scheduling_group);
-
-    dblog.debug("Row: max_vector_size: {}, internal_count: {}", size_t(row::max_vector_size), size_t(row::internal_count));
 
     _infinite_bound_range_deletions_reg = _feat.cluster_supports_unbounded_range_tombstones().when_enabled([this] {
         dblog.debug("Enabling infinite bound range deletions");
@@ -1339,6 +1338,16 @@ database::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, bool is_b
     } else {
         return make_ready_future<>();
     }
+}
+
+future<>
+database::drop_caches() const {
+    std::unordered_map<utils::UUID, lw_shared_ptr<column_family>> tables = get_column_families();
+    for (auto&& e : tables) {
+        table& t = *e.second;
+        co_await t.get_row_cache().invalidate(row_cache::external_updater([] {}));
+    }
+    co_return;
 }
 
 std::set<sstring>

@@ -109,10 +109,9 @@ future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr
 future<> manager::stop() {
     manager_logger.info("Asked to stop");
 
-    if (_strorage_service_anchor) {
-        _strorage_service_anchor->unregister_subscriber(this);
-    }
+  auto f = _strorage_service_anchor ? _strorage_service_anchor->unregister_subscriber(this) : make_ready_future<>();
 
+  return f.finally([this] {
     set_stopping();
 
     return _draining_eps_gate.close().finally([this] {
@@ -123,6 +122,7 @@ future<> manager::stop() {
             manager_logger.info("Stopped");
         }).discard_result();
     });
+  });
 }
 
 future<> manager::compute_hints_dir_device_id() {

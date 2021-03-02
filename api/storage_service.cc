@@ -36,6 +36,7 @@
 #include "transport/controller.hh"
 #include "thrift/controller.hh"
 #include "locator/token_metadata.hh"
+#include "cdc/generation_service.hh"
 
 namespace api {
 
@@ -390,7 +391,7 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::cdc_streams_check_and_repair.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return service::get_local_storage_service().check_and_repair_cdc_streams().then([] {
+        return service::get_local_storage_service().get_cdc_generation_service().check_and_repair_cdc_streams().then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
@@ -975,8 +976,8 @@ void set_storage_service(http_context& ctx, routes& r) {
                         ss::table_sstables tst;
                         tst.keyspace = schema->ks_name();
                         tst.table = schema->cf_name();
-
-                        for (auto sstable : *t->get_sstables_including_compacted_undeleted()) {
+                        auto sstables = t->get_sstables_including_compacted_undeleted();
+                        for (auto sstable : *sstables) {
                             auto ts = db_clock::to_time_t(sstable->data_file_write_time());
                             ::tm t;
                             ::gmtime_r(&ts, &t);

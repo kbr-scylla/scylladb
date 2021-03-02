@@ -21,6 +21,7 @@
 #include "cdc/split.hh"
 #include "cdc/cdc_options.hh"
 #include "cdc/change_visitor.hh"
+#include "cdc/metadata.hh"
 #include "bytes.hh"
 #include "database.hh"
 #include "db/config.hh"
@@ -267,8 +268,8 @@ private:
     }
 };
 
-cdc::cdc_service::cdc_service(service::storage_proxy& proxy)
-    : cdc_service(db_context::builder(proxy).build())
+cdc::cdc_service::cdc_service(service::storage_proxy& proxy, cdc::metadata& cdc_metadata)
+    : cdc_service(db_context::builder(proxy, cdc_metadata).build())
 {}
 
 cdc::cdc_service::cdc_service(db_context ctxt)
@@ -560,8 +561,8 @@ static schema_ptr create_log_schema(const schema& s, std::optional<utils::UUID> 
     return b.build();
 }
 
-db_context::builder::builder(service::storage_proxy& proxy) 
-    : _proxy(proxy) 
+db_context::builder::builder(service::storage_proxy& proxy, cdc::metadata& cdc_metadata)
+    : _proxy(proxy), _cdc_metadata(cdc_metadata)
 {}
 
 db_context::builder& db_context::builder::with_migration_notifier(service::migration_notifier& migration_notifier) {
@@ -569,16 +570,11 @@ db_context::builder& db_context::builder::with_migration_notifier(service::migra
     return *this;
 }
 
-db_context::builder& db_context::builder::with_cdc_metadata(cdc::metadata& cdc_metadata) {
-    _cdc_metadata = cdc_metadata;
-    return *this;
-}
-
 db_context db_context::builder::build() {
     return db_context{
         _proxy,
         _migration_notifier ? _migration_notifier->get() : service::get_local_storage_service().get_migration_notifier(),
-        _cdc_metadata ? _cdc_metadata->get() : service::get_local_storage_service().get_cdc_metadata(),
+        _cdc_metadata,
     };
 }
 
@@ -971,9 +967,9 @@ static bytes get_bytes(const atomic_cell_view& acv) {
     return to_bytes(acv.value());
 }
 
-static bytes_view get_bytes_view(const atomic_cell_view& acv, std::vector<bytes>& buf) {
+static bytes_view get_bytes_view(const atomic_cell_view& acv, std::forward_list<bytes>& buf) {
     return acv.value().is_fragmented()
-        ? bytes_view{buf.emplace_back(to_bytes(acv.value()))}
+        ? bytes_view{buf.emplace_front(to_bytes(acv.value()))}
         : acv.value().current_fragment();
 }
 
@@ -1127,10 +1123,10 @@ struct process_row_visitor {
                 _touched_parts.set<stats::part_type::UDT>();
 
                 struct udt_visitor : public collection_visitor {
-                    std::vector<bytes_opt> _added_cells;
-                    std::vector<bytes>& _buf;
+                    std::vector<bytes_view_opt> _added_cells;
+                    std::forward_list<bytes>& _buf;
 
-                    udt_visitor(ttl_opt& ttl_column, size_t num_keys, std::vector<bytes>& buf)
+                    udt_visitor(ttl_opt& ttl_column, size_t num_keys, std::forward_list<bytes>& buf)
                         : collection_visitor(ttl_column), _added_cells(num_keys), _buf(buf) {}
 
                     void live_collection_cell(bytes_view key, const atomic_cell_view& cell) {
@@ -1139,7 +1135,7 @@ struct process_row_visitor {
                     }
                 };
 
-                std::vector<bytes> buf;
+                std::forward_list<bytes> buf;
                 udt_visitor v(_ttl_column, type.size(), buf);
 
                 visit_collection(v);
@@ -1158,9 +1154,9 @@ struct process_row_visitor {
 
                 struct map_or_list_visitor : public collection_visitor {
                     std::vector<std::pair<bytes_view, bytes_view>> _added_cells;
-                    std::vector<bytes>& _buf;
+                    std::forward_list<bytes>& _buf;
 
-                    map_or_list_visitor(ttl_opt& ttl_column, std::vector<bytes>& buf)
+                    map_or_list_visitor(ttl_opt& ttl_column, std::forward_list<bytes>& buf)
                         : collection_visitor(ttl_column), _buf(buf) {}
 
                     void live_collection_cell(bytes_view key, const atomic_cell_view& cell) {
@@ -1169,7 +1165,7 @@ struct process_row_visitor {
                     }
                 };
 
-                std::vector<bytes> buf;
+                std::forward_list<bytes> buf;
                 map_or_list_visitor v(_ttl_column, buf);
 
                 visit_collection(v);

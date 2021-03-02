@@ -120,9 +120,12 @@ static inline int calculate_weight(uint64_t total_size) {
     // comes along, you do them in parallel.
     // TODO: Find a possibly better log base through experimentation.
     static constexpr int WEIGHT_LOG_BASE = 4;
+    // Fixed tax is added to size before taking the log, to make sure all jobs
+    // smaller than the tax (i.e. 1MB) will be serialized.
+    static constexpr int fixed_size_tax = 1024*1024;
 
     // computes the logarithm (base WEIGHT_LOG_BASE) of total_size.
-    return int(std::log(total_size) / std::log(WEIGHT_LOG_BASE));
+    return int(std::log(total_size + fixed_size_tax) / std::log(WEIGHT_LOG_BASE));
 }
 
 static inline int calculate_weight(const std::vector<sstables::shared_sstable>& sstables) {
@@ -618,10 +621,11 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
     _tasks.push_back(task);
 
     auto sstables = std::make_unique<std::vector<sstables::shared_sstable>>(get_func(*cf));
+    auto compacting = make_lw_shared<compacting_sstable_registration>(this, *sstables);
     auto sstables_ptr = sstables.get();
     _stats.pending_tasks += sstables->size();
 
-    task->compaction_done = do_until([sstables_ptr] { return sstables_ptr->empty(); }, [this, task, options, sstables_ptr] () mutable {
+    task->compaction_done = do_until([sstables_ptr] { return sstables_ptr->empty(); }, [this, task, options, sstables_ptr, compacting] () mutable {
 
         // FIXME: lock cf here
         if (!can_proceed(task)) {
@@ -631,7 +635,7 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
         auto sst = sstables_ptr->back();
         sstables_ptr->pop_back();
 
-        return repeat([this, task, options, sst = std::move(sst)] () mutable {
+        return repeat([this, task, options, sst = std::move(sst), compacting] () mutable {
             column_family& cf = *task->compacting_cf;
             auto sstable_level = sst->get_sstable_level();
             auto run_identifier = sst->run_identifier();
@@ -639,7 +643,6 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
             auto descriptor = sstables::compaction_descriptor({ sst }, cf.get_sstable_set(), service::get_local_compaction_priority(),
                 sstable_level, sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, options);
 
-            auto compacting = make_lw_shared<compacting_sstable_registration>(this, descriptor.sstables);
             // Releases reference to cleaned sstable such that respective used disk space can be freed.
             descriptor.release_exhausted = [compacting] (const std::vector<sstables::shared_sstable>& exhausted_sstables) {
                 compacting->release_compacting(exhausted_sstables);

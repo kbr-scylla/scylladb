@@ -707,21 +707,17 @@ void table::rebuild_statistics() {
 future<lw_shared_ptr<sstables::sstable_set>>
 table::build_new_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                               const std::vector<sstables::shared_sstable>& old_sstables) {
-    auto current_sstables = _sstables;
-    auto new_sstable_list = _compaction_strategy.make_sstable_set(_schema);
 
-    std::unordered_set<sstables::shared_sstable> s(old_sstables.begin(), old_sstables.end());
-
-    // this might seem dangerous, but "move" here just avoids constness,
-    // making the two ranges compatible when compiling with boost 1.55.
-    // Noone is actually moving anything...
-    for (auto&& tab : boost::range::join(new_sstables, std::move(*current_sstables->all()))) {
-        if (!s.contains(tab)) {
-            new_sstable_list.insert(tab);
-        }
+    auto new_sstable_set = *_sstables;
+    for (auto& tab : new_sstables) {
+        new_sstable_set.insert(tab);
         co_await make_ready_future<>(); // yield if needed.
     }
-    co_return make_lw_shared<sstables::sstable_set>(std::move(new_sstable_list));
+    for (auto& tab : old_sstables) {
+        new_sstable_set.erase(tab);
+        co_await make_ready_future<>(); // yield if needed.
+    }
+    co_return make_lw_shared<sstables::sstable_set>(std::move(new_sstable_set));
 }
 
 // Note: must run in a seastar thread
@@ -1687,7 +1683,8 @@ write_memtable_to_sstable(flat_mutation_reader reader,
     cfg.replay_position = mt.replay_position();
     cfg.monitor = &monitor;
     cfg.origin = "memtable";
-    return sst->write_components(std::move(reader), mt.partition_count(), mt.schema(), cfg, mt.get_encoding_stats(), pc);
+    schema_ptr s = reader.schema();
+    return sst->write_components(std::move(reader), mt.partition_count(), s, cfg, mt.get_encoding_stats(), pc);
 }
 
 future<>

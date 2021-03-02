@@ -379,6 +379,7 @@ scylla_tests = set([
     'test/boost/sstable_conforms_to_mutation_source_test',
     'test/boost/sstable_resharding_test',
     'test/boost/sstable_directory_test',
+    'test/boost/sstable_set_test',
     'test/boost/incremental_compaction_test',
     'test/boost/sstable_test',
     'test/boost/sstable_move_test',
@@ -399,6 +400,7 @@ scylla_tests = set([
     'test/boost/virtual_reader_test',
     'test/boost/bptree_test',
     'test/boost/btree_test',
+    'test/boost/radix_tree_test',
     'test/boost/double_decker_test',
     'test/boost/stall_free_test',
     'test/boost/raft_sys_table_storage_test',
@@ -422,8 +424,10 @@ scylla_tests = set([
     'test/perf/perf_mutation',
     'test/perf/perf_collection',
     'test/perf/perf_row_cache_update',
+    'test/perf/perf_row_cache_reads',
     'test/perf/perf_simple_query',
     'test/perf/perf_sstable',
+    'test/perf/perf_sstable_set',
     'test/unit/lsa_async_eviction_test',
     'test/unit/lsa_sync_eviction_test',
     'test/unit/row_cache_alloc_stress_test',
@@ -432,6 +436,8 @@ scylla_tests = set([
     'test/unit/btree_stress_test',
     'test/unit/bptree_compaction_test',
     'test/unit/btree_compaction_test',
+    'test/unit/radix_tree_stress_test',
+    'test/unit/radix_tree_compaction_test',
 ]) | ldap_tests
 
 perf_tests = set([
@@ -540,7 +546,7 @@ scylla_raft_core = [
     'raft/raft.cc',
     'raft/server.cc',
     'raft/fsm.cc',
-    'raft/progress.cc',
+    'raft/tracker.cc',
     'raft/log.cc',
 ]
 
@@ -1088,6 +1094,8 @@ tests_not_using_seastar_test_framework = set([
     'test/unit/btree_stress_test',
     'test/unit/bptree_compaction_test',
     'test/unit/btree_compaction_test',
+    'test/unit/radix_tree_stress_test',
+    'test/unit/radix_tree_compaction_test',
     'test/manual/sstable_scan_footprint_test',
 ]) | pure_boost_tests
 

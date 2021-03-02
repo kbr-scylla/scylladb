@@ -97,6 +97,7 @@ cache_tracker::setup_metrics() {
         sm::make_derive("partition_misses", sm::description("number of partitions needed by reads and missing in cache"), _stats.partition_misses),
         sm::make_derive("partition_insertions", sm::description("total number of partitions added to cache"), _stats.partition_insertions),
         sm::make_derive("row_hits", sm::description("total number of rows needed by reads and found in cache"), _stats.row_hits),
+        sm::make_derive("dummy_row_hits", sm::description("total number of dummy rows touched by reads in cache"), _stats.dummy_row_hits),
         sm::make_derive("row_misses", sm::description("total number of rows needed by reads and missing in cache"), _stats.row_misses),
         sm::make_derive("row_insertions", sm::description("total number of rows added to cache"), _stats.row_insertions),
         sm::make_derive("row_evictions", sm::description("total number of rows evicted from cache"), _stats.row_evictions),
@@ -187,6 +188,10 @@ void cache_tracker::on_row_eviction() noexcept {
 
 void cache_tracker::on_row_hit() noexcept {
     ++_stats.row_hits;
+}
+
+void cache_tracker::on_dummy_row_hit() noexcept {
+    ++_stats.dummy_row_hits;
 }
 
 void cache_tracker::on_row_miss() noexcept {
@@ -1195,8 +1200,13 @@ void rows_entry::on_evicted(cache_tracker& tracker) noexcept {
         // with no regular rows, and we need to track them.
         unlink_from_lru();
     } else {
+        // When evicting a dummy with both sides continuous we don't need to break continuity.
+        //
+        auto still_continuous = continuous() && dummy();
         it = it.erase_and_dispose(current_deleter<rows_entry>());
-        it->set_continuous(false);
+        if (!still_continuous) {
+            it->set_continuous(false);
+        }
         tracker.on_row_eviction();
     }
 

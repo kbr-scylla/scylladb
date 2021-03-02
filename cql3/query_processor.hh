@@ -204,8 +204,7 @@ public:
     // creating namespaces, etc) is explicitly forbidden via this interface.
     future<::shared_ptr<untyped_result_set>>
     execute_internal(const sstring& query_string, const std::initializer_list<data_value>& values = { }) {
-        return execute_internal(query_string, db::consistency_level::ONE,
-                infinite_timeout_config, values, true);
+        return execute_internal(query_string, db::consistency_level::ONE, values, true);
     }
 
     statements::prepared_statement::checked_weak_ptr prepare_internal(const sstring& query);
@@ -213,75 +212,49 @@ public:
     /*!
      * \brief iterate over all cql results using paging
      *
-     * You Create a statement with optional paraemter and pass
-     * a function that goes over the results.
+     * You create a statement with optional parameters and pass
+     * a function that goes over the result rows.
      *
-     * The passed function would be called for all the results, return stop_iteration::yes
-     * to stop during iteration.
-     *
-     * For example:
-            return query("SELECT * from system.compaction_history",
-                         [&history] (const cql3::untyped_result_set::row& row) mutable {
-                ....
-                ....
-                return stop_iteration::no;
-            });
-
-     * You can use place holder in the query, the prepared statement will only be done once.
-     *
-     *
-     * query_string - the cql string, can contain place holder
-     * f - a function to be run on each of the query result, if the function return false the iteration would stop
-     * args - arbitrary number of query parameters
-     */
-    template<typename... Args>
-    future<> query(
-            const sstring& query_string,
-            std::function<stop_iteration(const cql3::untyped_result_set_row&)>&& f,
-            Args&&... args) {
-        return for_each_cql_result(
-                create_paged_state(query_string, { data_value(std::forward<Args>(args))... }), std::move(f));
-    }
-
-    /*!
-     * \brief iterate over all cql results using paging
-     *
-     * You Create a statement with optional paraemter and pass
-     * a function that goes over the results.
-     *
-     * The passed function would be called for all the results, return future<stop_iteration::yes>
-     * to stop during iteration.
+     * The passed function would be called for all rows; return future<stop_iteration::yes>
+     * to stop iteration.
      *
      * For example:
-            return query("SELECT * from system.compaction_history",
-                         [&history] (const cql3::untyped_result_set::row& row) mutable {
+            return query_internal(
+                    "SELECT * from system.compaction_history",
+                    db::consistency_level::ONE,
+                    {},
+                    [&history] (const cql3::untyped_result_set::row& row) mutable {
                 ....
                 ....
                 return make_ready_future<stop_iteration>(stop_iteration::no);
             });
 
-     * You can use place holder in the query, the prepared statement will only be done once.
+     * You can use placeholders in the query, the statement will only be prepared once.
      *
-     *
-     * query_string - the cql string, can contain place holder
-     * values - query parameters value
-     * f - a function to be run on each of the query result, if the function return stop_iteration::no the iteration
-     * would stop
+     * query_string - the cql string, can contain placeholders
+     * cl - consistency level of the query
+     * values - values to be substituted for the placeholders in the query
+     * page_size - maximum page size
+     * f - a function to be run on each row of the query result,
+     *     if the function returns stop_iteration::yes the iteration will stop
      */
-    future<> query(
+    future<> query_internal(
             const sstring& query_string,
+            db::consistency_level cl,
             const std::initializer_list<data_value>& values,
+            int32_t page_size,
             noncopyable_function<future<stop_iteration>(const cql3::untyped_result_set_row&)>&& f);
 
     /*
      * \brief iterate over all cql results using paging
-     * An overload of the query with future function without query parameters.
+     * An overload of query_internal without query parameters
+     * using CL = ONE, no timeout, and page size = 1000.
      *
-     * query_string - the cql string, can contain place holder
-     * f - a function to be run on each of the query result, if the function return stop_iteration::no the iteration
-     * would stop
+     * query_string - the cql string, can contain placeholders
+     * f - a function to be run on each row of the query result,
+     *     if the function returns stop_iteration::yes the iteration will stop
      */
-    future<> query(
+    future<> query_internal(
             const sstring& query_string,
             noncopyable_function<future<stop_iteration>(const cql3::untyped_result_set_row&)>&& f);
 
@@ -295,7 +268,7 @@ public:
     process_internal(
             statements::prepared_statement::checked_weak_ptr,
             db::consistency_level,
-            const timeout_config& timeout_config,
+            service::query_state& state,
             const std::initializer_list<data_value>& = { });
 
     /*
@@ -310,7 +283,12 @@ public:
     future<::shared_ptr<untyped_result_set>> execute_internal(
             const sstring& query_string,
             db::consistency_level,
-            const timeout_config& timeout_config,
+            const std::initializer_list<data_value>& = { },
+            bool cache = false);
+    future<::shared_ptr<untyped_result_set>> execute_internal(
+            const sstring& query_string,
+            db::consistency_level,
+            service::query_state& query_state,
             const std::initializer_list<data_value>& = { },
             bool cache = false);
 
@@ -320,7 +298,7 @@ public:
     future<::shared_ptr<untyped_result_set>> execute_with_params(
             statements::prepared_statement::checked_weak_ptr p,
             db::consistency_level,
-            const timeout_config& timeout_config,
+            service::query_state& query_state,
             const std::initializer_list<data_value>& = { });
 
     future<::shared_ptr<cql_transport::messages::result_message::prepared>>
@@ -349,7 +327,6 @@ private:
             const statements::prepared_statement::checked_weak_ptr& p,
             const std::initializer_list<data_value>&,
             db::consistency_level,
-            const timeout_config& timeout_config,
             int32_t page_size = -1) const;
 
     future<::shared_ptr<cql_transport::messages::result_message>>
@@ -362,8 +339,9 @@ private:
      */
     ::shared_ptr<internal_query_state> create_paged_state(
             const sstring& query_string,
-            const std::initializer_list<data_value>& = { },
-            int32_t page_size = 1000);
+            db::consistency_level,
+            const std::initializer_list<data_value>&,
+            int32_t page_size);
 
     /*!
      * \brief run a query using paging

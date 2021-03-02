@@ -599,7 +599,7 @@ cql_server::connection::connection(cql_server& server, socket_address server_add
     , _fd(std::move(fd))
     , _read_buf(_fd.input())
     , _write_buf(_fd.output())
-    , _client_state(service::client_state::external_tag{}, server._auth_service, addr)
+    , _client_state(service::client_state::external_tag{}, server._auth_service, server.timeout_config(), addr)
 {
     ++_server._total_connections;
     ++_server._current_connections;
@@ -739,8 +739,6 @@ future<> cql_server::connection::process_request() {
 
             _pending_requests_gate.enter();
             auto leave = defer([this] { _pending_requests_gate.leave(); });
-            // Replacing the immediately-invoked lambda below with just its body costs 5-10 usec extra per invocation.
-            // Cause not understood.
             auto istream = buf.get_istream();
             (void)_process_request_stage(this, istream, op, stream, seastar::ref(_client_state), tracing_requested, mem_permit)
                     .then_wrapped([this, buf = std::move(buf), mem_permit, leave = std::move(leave)] (future<foreign_ptr<std::unique_ptr<cql_server::response>>> response_f) mutable {
@@ -953,7 +951,7 @@ cql_server::connection::process_on_shard(unsigned shard, uint16_t stream, fragme
                                               (bytes_ostream& linearization_buffer, service::client_state& client_state) mutable {
             request_reader in(is, linearization_buffer);
             return process_fn(client_state, server._query_processor, in, stream, _version, _cql_serialization_format,
-                    server.timeout_config(), /* FIXME */empty_service_permit(), std::move(trace_state), false, server._sl_controller).then([] (auto msg) {
+                    /* FIXME */empty_service_permit(), std::move(trace_state), false, server._sl_controller).then([] (auto msg) {
                 // result here has to be foreign ptr
                 return std::get<foreign_ptr<std::unique_ptr<cql_server::response>>>(std::move(msg));
             });
@@ -968,7 +966,7 @@ cql_server::connection::process(uint16_t stream, request_reader in, service::cli
     fragmented_temporary_buffer::istream is = in.get_stream();
 
     return process_fn(client_state, _server._query_processor, in, stream,
-            _version, _cql_serialization_format,  _server.timeout_config(), permit, trace_state, true, _server._sl_controller)
+            _version, _cql_serialization_format, permit, trace_state, true, _server._sl_controller)
             .then([stream, &client_state, this, is, permit, process_fn, trace_state]
                    (std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned> msg) mutable {
         unsigned* shard = std::get_if<unsigned>(&msg);
@@ -982,14 +980,14 @@ cql_server::connection::process(uint16_t stream, request_reader in, service::cli
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_query_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        const ::timeout_config& timeout_config, service_permit permit,
+        service_permit permit,
         tracing::trace_state_ptr trace_state,
         bool init_trace,
         qos::service_level_controller& sl_controller) {
     auto query = in.read_long_string_view();
     auto q_state = std::make_unique<cql_query_state>(client_state, trace_state, std::move(permit), sl_controller);
     auto& query_state = q_state->query_state;
-    q_state->options = in.read_options(version, serialization_format, timeout_config, qp.local().get_cql_config());
+    q_state->options = in.read_options(version, serialization_format, qp.local().get_cql_config());
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
 
@@ -1052,7 +1050,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_pr
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_execute_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        const ::timeout_config& timeout_config, service_permit permit,
+        service_permit permit,
         tracing::trace_state_ptr trace_state, bool init_trace,
         qos::service_level_controller& sl_controller) {
     cql3::prepared_cache_key_type cache_key(in.read_short_bytes());
@@ -1077,10 +1075,10 @@ process_execute_internal(service::client_state& client_state, distributed<cql3::
         std::vector<cql3::raw_value_view> values;
         in.read_value_view_list(version, values);
         auto consistency = in.read_consistency();
-        q_state->options = std::make_unique<cql3::query_options>(qp.local().get_cql_config(), consistency, timeout_config, std::nullopt, values, false,
+        q_state->options = std::make_unique<cql3::query_options>(qp.local().get_cql_config(), consistency, std::nullopt, values, false,
                                                                  cql3::query_options::specific_options::DEFAULT, serialization_format);
     } else {
-        q_state->options = in.read_options(version, serialization_format, timeout_config, qp.local().get_cql_config());
+        q_state->options = in.read_options(version, serialization_format, qp.local().get_cql_config());
     }
     auto& options = *q_state->options;
     auto skip_metadata = options.skip_metadata();
@@ -1133,7 +1131,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>> cql_server::connectio
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_batch_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        const ::timeout_config& timeout_config, service_permit permit,
+        service_permit permit,
         tracing::trace_state_ptr trace_state, bool init_trace,
         qos::service_level_controller& sl_controller) {
     if (version == 1) {
@@ -1223,7 +1221,7 @@ process_batch_internal(service::client_state& client_state, distributed<cql3::qu
     auto& query_state = q_state->query_state;
     // #563. CQL v2 encodes query_options in v1 format for batch requests.
     q_state->options = std::make_unique<cql3::query_options>(cql3::query_options::make_batch_options(std::move(*in.read_options(version < 3 ? 1 : version, serialization_format,
-                                                                     timeout_config, qp.local().get_cql_config())), std::move(values)));
+                                                                     qp.local().get_cql_config())), std::move(values)));
     auto& options = *q_state->options;
 
     if (init_trace) {
