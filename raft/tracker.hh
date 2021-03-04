@@ -62,16 +62,12 @@ public:
     void become_pipeline();
     void become_snapshot();
 
-    void stable_to(index_t idx) {
+    void accepted(index_t idx) {
         // AppendEntries replies can arrive out of order.
-        if (idx > match_idx) {
-            match_idx = idx;
-        }
-        if (idx >= next_idx) {
-            // idx may be smaller if we increased next_idx
-            // optimistically in pipeline mode.
-            next_idx = idx + index_t{1};
-        }
+        match_idx = std::max(idx, match_idx);
+        // idx may be smaller if we increased next_idx
+        // optimistically in pipeline mode.
+        next_idx = std::max(idx + index_t{1}, next_idx);
     }
 
     // Return true if a new replication record can be sent to the follower.

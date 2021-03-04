@@ -149,19 +149,19 @@ BOOST_AUTO_TEST_CASE(test_tracker) {
     BOOST_CHECK_EQUAL(pr(id1)->match_idx, index_t{0});
     BOOST_CHECK_EQUAL(pr(id1)->next_idx, index_t{1});
 
-    pr(id1)->stable_to(index_t{1});
+    pr(id1)->accepted(index_t{1});
     BOOST_CHECK_EQUAL(pr(id1)->match_idx, index_t{1});
     BOOST_CHECK_EQUAL(pr(id1)->next_idx, index_t{2});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{1});
 
-    pr(id1)->stable_to(index_t{10});
+    pr(id1)->accepted(index_t{10});
     BOOST_CHECK_EQUAL(pr(id1)->match_idx, index_t{10});
     BOOST_CHECK_EQUAL(pr(id1)->next_idx, index_t{11});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{10});
 
     // Out of order confirmation is OK
     //
-    pr(id1)->stable_to(index_t{5});
+    pr(id1)->accepted(index_t{5});
     BOOST_CHECK_EQUAL(pr(id1)->match_idx, index_t{10});
     BOOST_CHECK_EQUAL(pr(id1)->next_idx, index_t{11});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{5}), index_t{10});
@@ -171,13 +171,13 @@ BOOST_AUTO_TEST_CASE(test_tracker) {
     cfg.enter_joint({id1, id2, id3});
     tracker.set_configuration(cfg, index_t{1});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{10}), index_t{10});
-    pr(id2)->stable_to(index_t{11});
+    pr(id2)->accepted(index_t{11});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{10}), index_t{10});
-    pr(id3)->stable_to(index_t{12});
+    pr(id3)->accepted(index_t{12});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{10}), index_t{10});
-    pr(id1)->stable_to(index_t{13});
+    pr(id1)->accepted(index_t{13});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{10}), index_t{12});
-    pr(id1)->stable_to(index_t{14});
+    pr(id1)->accepted(index_t{14});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{13}), index_t{13});
 
     // Leave joint configuration, final configuration is  {A,B,C}
@@ -189,16 +189,16 @@ BOOST_AUTO_TEST_CASE(test_tracker) {
     cfg.enter_joint({id3, id4, id5});
     tracker.set_configuration(cfg, index_t{1});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{13}), index_t{13});
-    pr(id1)->stable_to(index_t{15});
+    pr(id1)->accepted(index_t{15});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{13}), index_t{13});
-    pr(id5)->stable_to(index_t{15});
+    pr(id5)->accepted(index_t{15});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{13}), index_t{13});
-    pr(id3)->stable_to(index_t{15});
+    pr(id3)->accepted(index_t{15});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{13}), index_t{15});
     // This does not advance the joint quorum
-    pr(id1)->stable_to(index_t{16});
-    pr(id4)->stable_to(index_t{17});
-    pr(id5)->stable_to(index_t{18});
+    pr(id1)->accepted(index_t{16});
+    pr(id4)->accepted(index_t{17});
+    pr(id5)->accepted(index_t{18});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{15}), index_t{15});
 
     cfg.leave_joint();
@@ -218,11 +218,11 @@ BOOST_AUTO_TEST_CASE(test_tracker) {
     // and old quorum is insufficient, the leader won't be able to
     // commit new entries until the new members catch up.
     BOOST_CHECK_EQUAL(tracker.committed(index_t{17}), index_t{17});
-    pr(id1)->stable_to(index_t{18});
+    pr(id1)->accepted(index_t{18});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{17}), index_t{17});
-    pr(id2)->stable_to(index_t{19});
+    pr(id2)->accepted(index_t{19});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{17}), index_t{18});
-    pr(id1)->stable_to(index_t{20});
+    pr(id1)->accepted(index_t{20});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{18}), index_t{19});
 }
 
@@ -258,22 +258,22 @@ BOOST_AUTO_TEST_CASE(test_log_last_conf_idx) {
     BOOST_CHECK(log.empty());
     BOOST_CHECK_EQUAL(log.next_idx(), log.get_snapshot().idx + index_t{1});
     add_entry(log, log_entry::dummy{});
-    BOOST_CHECK_EQUAL(log.length(), 1);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 1);
     add_entry(log, log_entry::dummy{});
-    BOOST_CHECK_EQUAL(log.length(), 2);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 2);
     // Set trailing longer than the length of the log.
     log.apply_snapshot(log_snapshot(log, log.last_idx()), 3);
-    BOOST_CHECK_EQUAL(log.length(), 2);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 2);
     // Set trailing the same length as the current log length
     add_entry(log, log_entry::dummy{});
-    BOOST_CHECK_EQUAL(log.length(), 3);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 3);
     log.apply_snapshot(log_snapshot(log, log.last_idx()), 3);
-    BOOST_CHECK_EQUAL(log.length(), 3);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 3);
     BOOST_CHECK_EQUAL(log.last_conf_idx(), 0);
     add_entry(log, log_entry::dummy{});
     // Set trailing shorter than the length of the log
     log.apply_snapshot(log_snapshot(log, log.last_idx()), 1);
-    BOOST_CHECK_EQUAL(log.length(), 1);
+    BOOST_CHECK_EQUAL(log.in_memory_size(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(test_election_single_node) {

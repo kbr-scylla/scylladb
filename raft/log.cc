@@ -61,7 +61,7 @@ index_t log::next_idx() const {
     return last_idx() + index_t(1);
 }
 
-void log::truncate(index_t idx) {
+void log::truncate_uncommitted(index_t idx) {
     assert(idx >= _first_idx);
     auto it = _log.begin() + (idx - _first_idx);
     _log.erase(it, _log.end());
@@ -118,7 +118,6 @@ std::pair<bool, term_t> log::match_term(index_t idx, term_t term) const {
     if (idx == _snapshot.idx) {
         my_term = _snapshot.term;
     } else {
-        assert(idx >= _first_idx);
         auto i = idx - _first_idx;
 
         if (i >= _log.size()) {
@@ -169,7 +168,7 @@ index_t log::maybe_append(std::vector<log_entry_ptr>&& entries) {
             // If an existing entry conflicts with a new one (same
             // index but different terms), delete the existing
             // entry and all that follow it (§5.3).
-            truncate(e->idx);
+            truncate_uncommitted(e->idx);
         }
         // Assert log monotonicity
         assert(e->idx == next_idx());

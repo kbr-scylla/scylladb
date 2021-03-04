@@ -45,7 +45,7 @@ public:
         // whatever the default number of trailing log entries
         // is configured by the snapshot, otherwise the state
         // machine will deadlock on attempt to submit a new entry.
-        size_t max_log_length = 5000;
+        size_t max_log_size = 5000;
     };
 
     virtual ~server() {}
@@ -94,7 +94,7 @@ public:
     //
     // 1) The result of all completed
     //    add_entries(wait_type::applied) can be observed by
-    //    direct access to the local state machine. 
+    //    direct access to the local state machine.
     // 2) A subsequent add_entry() is likely to find this
     //    server still in the leader role.
     // 3) If the caller ensures that writes to the state machine

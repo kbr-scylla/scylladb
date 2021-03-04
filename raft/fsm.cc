@@ -35,7 +35,7 @@ fsm::fsm(server_id id, term_t current_term, server_id voted_for, log log,
     assert(!bool(_current_leader));
 }
 
-future<> fsm::wait_max_log_length() {
+future<> fsm::wait_max_log_size() {
     check_is_leader();
 
    return _log_limiter_semaphore->sem.wait();
@@ -136,12 +136,12 @@ void fsm::become_leader() {
     _votes = std::nullopt;
     _tracker.emplace(_my_id);
     _log_limiter_semaphore.emplace(this);
-    _log_limiter_semaphore->sem.consume(_log.length());
+    _log_limiter_semaphore->sem.consume(_log.in_memory_size());
     _last_election_time = _clock.now();
     // a new leader needs to commit at lease one entry to make sure that
-    // all existing entries in its log are commited as well. Also it should
-    // send append entries rpc as soon as possible to establish its leqdership
-    // (3.4).  Do both of those by commiting a dummy entry.
+    // all existing entries in its log are committed as well. Also it should
+    // send append entries RPC as soon as possible to establish its leadership
+    // (3.4). Do both of those by committing a dummy entry.
     add_entry(log_entry::dummy());
     // set_configuration() begins replicating from the last entry
     // in the log.
@@ -291,7 +291,7 @@ void fsm::advance_stable_idx(index_t idx) {
     // configuration, update it's progress and optionally
     // commit new entries.
     if (is_leader() && _tracker->leader_progress()) {
-        _tracker->leader_progress()->stable_to(idx);
+        _tracker->leader_progress()->accepted(idx);
         replicate();
         maybe_commit();
     }
@@ -338,8 +338,20 @@ void fsm::maybe_commit() {
             _log.emplace_back(seastar::make_lw_shared<log_entry>({_current_term, _log.next_idx(), std::move(cfg)}));
             _tracker->set_configuration(_log.get_configuration(), _log.last_idx());
             // Leaving joint configuration may commit more entries
-            // even if we had no new acks, by switching the quorum
-            // from joint to simple majority.
+            // even if we had no new acks. Imagine the cluster is
+            // in joint configuration {{A, B}, {A, B, C, D, E}}.
+            // The leader's view of stable indexes is:
+            //
+            // Server  Match Index
+            // A       5
+            // B       5
+            // C       6
+            // D       7
+            // E       8
+            //
+            // The commit index would be 5 if we use joint
+            // configuration, and 6 if we assume we left it. Let
+            // it happen without an extra FSM step.
             maybe_commit();
         } else if (_tracker->leader_progress() == nullptr) {
             // 4.2.2 Removing the current leader
@@ -483,7 +495,7 @@ void fsm::append_entries_reply(server_id from, append_reply&& reply) {
         logger.trace("append_entries_reply[{}->{}]: accepted match={} last index={}",
             _my_id, from, progress.match_idx, last_idx);
 
-        progress.stable_to(last_idx);
+        progress.accepted(last_idx);
 
         progress.become_pipeline();
 
@@ -523,7 +535,7 @@ void fsm::append_entries_reply(server_id from, append_reply&& reply) {
         _my_id, from, progress.next_idx, progress.match_idx);
 
     // We may have just applied a configuration that removes this
-    // followre, so re-track it.
+    // follower, so re-track it.
     opt_progress = _tracker->find(from);
     if (opt_progress != nullptr) {
         replicate_to(*opt_progress, false);
@@ -739,7 +751,7 @@ void fsm::snapshot_status(server_id id, std::optional<index_t> idx) {
         // If snapshot was successfully transferred start replication immediately
         replicate_to(progress, false);
     }
-    // Otherwise wait for a heartbeat. Next attempt will move us to snapshotting state
+    // Otherwise wait for a heartbeat. Next attempt will move us to SNAPSHOT state
     // again and snapshot transfer will be attempted one more time.
 }
 

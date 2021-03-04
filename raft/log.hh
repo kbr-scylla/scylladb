@@ -72,7 +72,7 @@ class log {
     index_t _prev_conf_idx = index_t{0};
 private:
     // Drop uncommitted log entries not present on the leader.
-    void truncate(index_t i);
+    void truncate_uncommitted(index_t i);
     // A helper used to find the last configuration entry in the
     // log after it's been loaded from disk.
     void init_last_conf_idx();
@@ -125,7 +125,7 @@ public:
     // a less recent term.
     term_t last_term() const;
     // Return the number of log entries in memory
-    size_t length() const {
+    size_t in_memory_size() const {
         return _log.size();
     }
 
