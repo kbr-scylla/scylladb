@@ -987,6 +987,9 @@ operator<<(std::ostream& os, const mutation_partition::printer& p) {
         if (!row.marker().is_missing()) {
             os << indent << indent << indent << "marker: " << row.marker() << ",\n";
         }
+        if (row.deleted_at()) {
+            os << indent << indent << indent << "tombstone: " << row.deleted_at() << ",\n";
+        }
 
         position_in_partition pip(re.position());
         if (pip.get_clustering_key_prefix()) {
@@ -1159,8 +1162,8 @@ row::apply(const column_definition& column, atomic_cell_or_collection&& value, c
 template<typename Func>
 void row::consume_with(Func&& func) {
     _cells.weed([func, this] (column_id id, cell_and_hash& cah) {
-        _size--;
         func(id, cah);
+        _size--;
         return true;
     });
 }

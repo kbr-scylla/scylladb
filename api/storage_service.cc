@@ -150,7 +150,7 @@ void unset_rpc_controller(http_context& ctx, routes& r) {
 void set_repair(http_context& ctx, routes& r, sharded<netw::messaging_service>& ms) {
     ss::repair_async.set(r, [&ctx, &ms](std::unique_ptr<request> req) {
         static std::vector<sstring> options = {"primaryRange", "parallelism", "incremental",
-                "jobThreads", "ranges", "columnFamilies", "dataCenters", "hosts", "trace",
+                "jobThreads", "ranges", "columnFamilies", "dataCenters", "hosts", "ignore_nodes", "trace",
                 "startToken", "endToken" };
         std::unordered_map<sstring, sstring> options_map;
         for (auto o : options) {
@@ -977,7 +977,7 @@ void set_storage_service(http_context& ctx, routes& r) {
                         tst.keyspace = schema->ks_name();
                         tst.table = schema->cf_name();
 
-                        for (auto sstable : *t->get_sstables_including_compacted_undeleted()) {
+                        for (auto sstables = t->get_sstables_including_compacted_undeleted(); auto sstable : *sstables) {
                             auto ts = db_clock::to_time_t(sstable->data_file_write_time());
                             ::tm t;
                             ::gmtime_r(&ts, &t);

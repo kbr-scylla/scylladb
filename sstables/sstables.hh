@@ -58,7 +58,6 @@
 
 class sstable_assertions;
 class flat_mutation_reader;
-class row_consumer;
 
 namespace sstables {
 
@@ -816,13 +815,13 @@ public:
     friend class compaction;
     friend class sstables_manager;
     template <typename DataConsumeRowsContext>
-    friend data_consume_context<DataConsumeRowsContext>
+    friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range, uint64_t);
     template <typename DataConsumeRowsContext>
-    friend data_consume_context<DataConsumeRowsContext>
+    friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_single_partition(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range);
     template <typename DataConsumeRowsContext>
-    friend data_consume_context<DataConsumeRowsContext>
+    friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&);
     friend void lw_shared_ptr_deleter<sstables::sstable>::dispose(sstable* s);
 };

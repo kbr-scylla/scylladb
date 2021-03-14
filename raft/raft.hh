@@ -64,6 +64,7 @@ using server_info = bytes;
 
 struct server_address {
     server_id id;
+    bool can_vote = true;
     server_info info;
     bool operator==(const server_address& rhs) const {
         return id == rhs.id;
@@ -106,6 +107,7 @@ struct configuration {
             current.emplace(server_address{std::move(id)});
         }
     }
+
     configuration(server_address_set current_arg = {}, server_address_set previous_arg = {})
         : current(std::move(current_arg)), previous(std::move(previous_arg)) {}
 
@@ -118,17 +120,21 @@ struct configuration {
     // Check the proposed configuration and compute a diff
     // between it and the current one.
     configuration_diff diff(const server_address_set& c_new) const {
-
-        if (c_new.empty()) {
+        // We must have at least one voting member in the config.
+        if (std::count_if(c_new.begin(), c_new.end(), [] (const server_address& s) { return s.can_vote; }) == 0) {
             throw std::invalid_argument("Attempt to transition to an empty Raft configuration");
         }
+
         configuration_diff diff;
         // joining
         for (const auto& s : c_new) {
-            if (current.count(s) == 0) {
+            auto it = current.find(s);
+            // a node is added to a joining set if it is not yet known or its voting status changes
+            if (it == current.end() || it->can_vote != s.can_vote) {
                 diff.joining.insert(s);
             }
         }
+
         // leaving
         for (const auto& s : current) {
             if (c_new.count(s) == 0) {
@@ -253,6 +259,8 @@ struct vote_request {
     index_t last_log_idx;
     // The term of the candidate's last log entry.
     term_t last_log_term;
+    // True if this is prevote request
+    bool is_prevote;
 };
 
 struct vote_reply {
@@ -260,6 +268,8 @@ struct vote_reply {
     term_t current_term;
     // True means the candidate received a vote.
     bool vote_granted;
+    // True if it is a reply to prevote request
+    bool is_prevote;
 };
 
 struct install_snapshot {

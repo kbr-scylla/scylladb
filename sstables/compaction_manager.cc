@@ -621,6 +621,13 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
     _tasks.push_back(task);
 
     auto sstables = std::make_unique<std::vector<sstables::shared_sstable>>(get_func(*cf));
+    // sort sstables by size in descending order, such that the smallest files will be rewritten first
+    // (as sstable to be rewritten is popped off from the back of container), so rewrite will have higher
+    // chance to succeed when the biggest files are reached.
+    std::sort(sstables->begin(), sstables->end(), [](sstables::shared_sstable& a, sstables::shared_sstable& b) {
+        return a->data_size() > b->data_size();
+    });
+
     auto compacting = make_lw_shared<compacting_sstable_registration>(this, *sstables);
     auto sstables_ptr = sstables.get();
     _stats.pending_tasks += sstables->size();
@@ -656,7 +663,7 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
                 return with_scheduling_group(_scheduling_group, [this, &cf, descriptor = std::move(descriptor)] () mutable {
                     return cf.run_compaction(std::move(descriptor));
                 });
-            }).then_wrapped([this, task, compacting = std::move(compacting)] (future<> f) mutable {
+            }).then_wrapped([this, task, compacting] (future<> f) mutable {
                 task->compaction_running = false;
                 _stats.active_tasks--;
                 if (!can_proceed(task)) {

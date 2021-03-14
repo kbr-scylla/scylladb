@@ -57,7 +57,7 @@ raft::snapshot log_snapshot(raft::log& log, index_t idx) {
     return raft::snapshot{.idx = idx, .term = log.last_term(), .config = log.get_snapshot().config};
 }
 
-raft::fsm_config fsm_cfg{.append_request_threshold = 1};
+raft::fsm_config fsm_cfg{.append_request_threshold = 1, .enable_prevoting = false};
 
 BOOST_AUTO_TEST_CASE(test_votes) {
     auto id = []() -> raft::server_address { return raft::server_address{utils::make_random_uuid()}; };
@@ -67,7 +67,7 @@ BOOST_AUTO_TEST_CASE(test_votes) {
     BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::UNKNOWN);
     BOOST_CHECK_EQUAL(votes.voters().size(), 1);
     // Try a vote from an unknown server, it should be ignored.
-    BOOST_CHECK_THROW(votes.register_vote(id().id, true), std::runtime_error);
+    votes.register_vote(id().id, true);
     votes.register_vote(id1.id, false);
     // Quorum votes against the decision
     BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::LOST);
@@ -127,6 +127,36 @@ BOOST_AUTO_TEST_CASE(test_votes) {
     votes.register_vote(id4.id, true);
     votes.register_vote(id5.id, true);
     BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::LOST);
+    // Basic voting test with tree voters and one no-voter
+    votes = raft::votes(raft::configuration({id1, id2, id3, {id4.id, false}}));
+    votes.register_vote(id1.id, true);
+    votes.register_vote(id2.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::WON);
+    // Basic test that non-voting votes are ignored
+    votes = raft::votes(raft::configuration({id1, id2, id3, {id4.id, false}}));
+    votes.register_vote(id1.id, true);
+    votes.register_vote(id4.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::UNKNOWN);
+    votes.register_vote(id3.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::WON);
+    // Joint configuration with non voting members
+    votes = raft::votes(raft::configuration({id1}, {id2, id3, {id4.id, false}}));
+    BOOST_CHECK_EQUAL(votes.voters().size(), 3);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::UNKNOWN);
+    votes.register_vote(id2.id, true);
+    votes.register_vote(id3.id, true);
+    votes.register_vote(id4.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::UNKNOWN);
+    votes.register_vote(id1.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::WON);
+    // Same node is voting in one config and non voting in another
+    votes = raft::votes(raft::configuration({id1, id4}, {id2, id3, {id4.id, false}}));
+    votes.register_vote(id2.id, true);
+    votes.register_vote(id1.id, true);
+    votes.register_vote(id4.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::UNKNOWN);
+    votes.register_vote(id3.id, true);
+    BOOST_CHECK_EQUAL(votes.tally_votes(), raft::vote_result::WON);
 }
 
 BOOST_AUTO_TEST_CASE(test_tracker) {
@@ -224,6 +254,27 @@ BOOST_AUTO_TEST_CASE(test_tracker) {
     BOOST_CHECK_EQUAL(tracker.committed(index_t{17}), index_t{18});
     pr(id1)->accepted(index_t{20});
     BOOST_CHECK_EQUAL(tracker.committed(index_t{18}), index_t{19});
+
+    // Check that non voting member is not counted for the quorum in simple config
+    cfg.enter_joint({id1, id2, {id3.id, false}});
+    cfg.leave_joint();
+    tracker.set_configuration(cfg, index_t{1});
+    pr(id1)->accepted(index_t{30});
+    pr(id2)->accepted(index_t{25});
+    pr(id3)->accepted(index_t{30});
+    BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{25});
+
+    // Check that non voting member is not counted for the quorum in joint config
+    cfg.enter_joint({id4, id5});
+    tracker.set_configuration(cfg, index_t{1});
+    pr(id4)->accepted(index_t{30});
+    pr(id5)->accepted(index_t{30});
+    BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{25});
+
+    // Check the case where the same node is in both config but different voting rights
+    cfg.leave_joint();
+    cfg.enter_joint({id1, id2, {id5.id, false}});
+    BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{25});
 }
 
 BOOST_AUTO_TEST_CASE(test_log_last_conf_idx) {
@@ -276,13 +327,13 @@ BOOST_AUTO_TEST_CASE(test_log_last_conf_idx) {
     BOOST_CHECK_EQUAL(log.in_memory_size(), 1);
 }
 
-BOOST_AUTO_TEST_CASE(test_election_single_node) {
+void test_election_single_node_helper(raft::fsm_config fcfg) {
 
     failure_detector fd;
     server_id id1{utils::make_random_uuid()};
     raft::configuration cfg({id1});
     raft::log log{raft::snapshot{.config = cfg}};
-    raft::fsm fsm(id1, term_t{}, server_id{}, std::move(log), fd, fsm_cfg);
+    raft::fsm fsm(id1, term_t{}, server_id{}, std::move(log), fd, fcfg);
 
     BOOST_CHECK(fsm.is_follower());
 
@@ -313,6 +364,9 @@ BOOST_AUTO_TEST_CASE(test_election_single_node) {
     BOOST_CHECK(output.committed.size() == 1 && std::holds_alternative<raft::log_entry::dummy>(output.committed[0]->data));
 }
 
+BOOST_AUTO_TEST_CASE(test_election_single_node) {
+    test_election_single_node_helper(fsm_cfg);
+}
 // Test that adding an entry to a single-node cluster
 // does not lead to RPC
 BOOST_AUTO_TEST_CASE(test_single_node_is_quiet) {
@@ -368,7 +422,7 @@ BOOST_AUTO_TEST_CASE(test_election_two_nodes) {
     BOOST_CHECK(fsm.is_leader());
     // Out of order response to the previous election is ignored
     fsm.step(id2, raft::vote_reply{output.term - term_t{1}, false});
-    assert(fsm.is_leader());
+    BOOST_CHECK(fsm.is_leader());
 
     // Vote request within the election timeout is ignored
     // (avoiding disruptive leaders).
@@ -452,6 +506,137 @@ BOOST_AUTO_TEST_CASE(test_election_four_nodes) {
     // Add another one, this adds up to quorum
     fsm.step(id3, raft::vote_reply{output.term, true});
     BOOST_CHECK(fsm.is_leader());
+}
+
+BOOST_AUTO_TEST_CASE(test_election_single_node_prevote) {
+    auto fcfg = fsm_cfg;
+    fcfg.enable_prevoting = true;
+    test_election_single_node_helper(fcfg);
+}
+
+BOOST_AUTO_TEST_CASE(test_election_two_nodes_prevote) {
+    auto fcfg = fsm_cfg;
+    fcfg.enable_prevoting = true;
+
+    failure_detector fd;
+
+    server_id id1{utils::make_random_uuid()}, id2{utils::make_random_uuid()};
+
+    raft::configuration cfg({id1, id2});
+    raft::log log{raft::snapshot{.config = cfg}};
+
+    raft::fsm fsm(id1, term_t{}, server_id{}, std::move(log), fd, fcfg);
+
+    // Initial state is follower
+    BOOST_CHECK(fsm.is_follower());
+
+    // After election timeout, a follower becomes a prevote candidate
+    election_timeout(fsm);
+    BOOST_CHECK(fsm.is_prevote_candidate());
+    // Term was not increased
+    BOOST_CHECK_EQUAL(fsm.get_current_term(), term_t{});
+
+    // If nothing happens, the candidate stays this way
+    election_timeout(fsm);
+    BOOST_CHECK(fsm.is_prevote_candidate());
+    BOOST_CHECK_EQUAL(fsm.get_current_term(), term_t{});
+
+    auto output = fsm.get_output();
+    // After a favourable prevote reply, we become a regular candidate (quorum is 2)
+    fsm.step(id2, raft::vote_reply{output.term, true, true});
+    BOOST_CHECK(fsm.is_candidate() && !fsm.is_prevote_candidate());
+    // And increased our term this time
+    BOOST_CHECK_EQUAL(fsm.get_current_term(), term_t{1});
+
+    election_timeout(fsm);
+    // Check that rejected prevote with higher term causes prevote candidate move to follower
+    fsm.step(id2, raft::vote_reply{term_t{2}, false, true});
+    BOOST_CHECK(fsm.is_follower());
+    BOOST_CHECK_EQUAL(fsm.get_current_term(), term_t{2});
+
+    election_timeout(fsm);
+    (void)fsm.get_output();
+    // Check that receiving prevote with smaller term generate reject with newer term
+    fsm.step(id2, raft::vote_request{term_t{1}, index_t{}, term_t{}, true});
+    output = fsm.get_output();
+    BOOST_CHECK_EQUAL(output.messages.size(), 1);
+    auto msg = std::get<raft::vote_reply>(output.messages.back().second);
+    BOOST_CHECK(msg.current_term == term_t{2} && !msg.vote_granted);
+
+    // Check that prevote with higer term get a reply with term in the future
+    // and does not change local term.
+    // Move to follower again
+    fsm.step(id2, raft::vote_reply{term_t{3}, false, true});
+    BOOST_CHECK(fsm.is_follower());
+    // Send prevote with higher term
+    fsm.step(id2, raft::vote_request{term_t{4}, index_t{}, term_t{}, true});
+    output = fsm.get_output();
+    BOOST_CHECK_EQUAL(output.messages.size(), 1);
+    // Reply has request's term
+    msg = std::get<raft::vote_reply>(output.messages.back().second);
+    BOOST_CHECK(msg.current_term == term_t{4} && msg.vote_granted);
+    // But fsm current term stays the same
+    BOOST_CHECK_EQUAL(fsm.get_current_term(), term_t{3});
+}
+
+BOOST_AUTO_TEST_CASE(test_election_four_nodes_prevote) {
+    auto fcfg = fsm_cfg;
+    fcfg.enable_prevoting = true;
+
+    failure_detector fd;
+
+    server_id id1{utils::make_random_uuid()},
+              id2{utils::make_random_uuid()},
+              id3{utils::make_random_uuid()},
+              id4{utils::make_random_uuid()};
+
+    raft::configuration cfg({id1, id2, id3, id4});
+    raft::log log{raft::snapshot{.config = cfg}};
+
+    raft::fsm fsm(id1, term_t{}, server_id{}, std::move(log), fd, fcfg);
+
+    // Initial state is follower
+    BOOST_CHECK(fsm.is_follower());
+
+    // Inform FSM about a new leader at a new term
+    fsm.step(id4, raft::append_request{term_t{1}, id4, index_t{1}, term_t{1}});
+
+    (void) fsm.get_output();
+
+    // Request a prevote during the same term. Even though
+    // we haven't voted, we should deny a vote because we
+    // know about a leader for this term.
+    fsm.step(id3, raft::vote_request{term_t{1}, index_t{1}, term_t{1}, true});
+
+    auto output = fsm.get_output();
+    auto reply = std::get<raft::vote_reply>(output.messages.back().second);
+    BOOST_CHECK(!reply.vote_granted && reply.is_prevote);
+
+    // Run out of steam for this term. Start a new one.
+    fd.alive = false;
+    election_timeout(fsm);
+    BOOST_CHECK(fsm.is_candidate() && fsm.is_prevote_candidate());
+
+    output = fsm.get_output();
+    // Add a favourable prevote reply, not enough for quorum
+    fsm.step(id2, raft::vote_reply{output.term + term_t{1}, true, true});
+    BOOST_CHECK(fsm.is_candidate() && fsm.is_prevote_candidate());
+
+    // Add another one, this adds up to quorum
+    fsm.step(id3, raft::vote_reply{output.term + term_t{1}, true, true});
+    BOOST_CHECK(fsm.is_candidate() && !fsm.is_prevote_candidate());
+
+    // Check that prevote with future term is answered even if we voted already
+    // Request regular vote
+    fsm.step(id2, raft::vote_request{fsm.get_current_term(), index_t{1}, term_t{1}, false});
+    // Clear message queue
+    (void)fsm.get_output();
+    // Ask for prevote with future term
+    fsm.step(id3, raft::vote_request{fsm.get_current_term() + term_t{1}, index_t{1}, term_t{1}, true});
+    output = fsm.get_output();
+    BOOST_CHECK_EQUAL(output.messages.size(), 1);
+    reply = std::get<raft::vote_reply>(output.messages.back().second);
+    BOOST_CHECK(reply.vote_granted && reply.is_prevote);
 }
 
 BOOST_AUTO_TEST_CASE(test_log_matching_rule) {

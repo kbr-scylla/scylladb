@@ -42,7 +42,6 @@
 #include "utils/utf8.hh"
 #include "utils/ascii.hh"
 #include "mutation_partition.hh"
-#include "compaction_garbage_collector.hh"
 
 #include "types/user.hh"
 #include "types/tuple.hh"
