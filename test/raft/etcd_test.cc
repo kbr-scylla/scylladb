@@ -35,55 +35,7 @@
 
 // Port of etcd Raft implementation unit tests
 
-#define BOOST_TEST_MODULE raft
-
-#include <boost/test/unit_test.hpp>
-#include "test/lib/log.hh"
-#include "serializer_impl.hh"
-#include <limits>
-
-#include "raft/fsm.hh"
-
-using raft::term_t, raft::index_t, raft::server_id, raft::log_entry;
-
-void election_threshold(raft::fsm& fsm) {
-    for (int i = 0; i <= raft::ELECTION_TIMEOUT.count(); i++) {
-        fsm.tick();
-    }
-}
-
-void election_timeout(raft::fsm& fsm) {
-    for (int i = 0; i <= 2 * raft::ELECTION_TIMEOUT.count(); i++) {
-        fsm.tick();
-    }
-}
-
-struct failure_detector: public raft::failure_detector {
-    bool alive = true;
-    bool is_alive(raft::server_id from) override {
-        return alive;
-    }
-};
-
-template <typename T>
-raft::command create_command(T val) {
-    raft::command command;
-    ser::serialize(command, val);
-
-    return std::move(command);
-}
-
-raft::fsm_config fsm_cfg{.append_request_threshold = 1};
-
-class fsm_debug : public raft::fsm {
-public:
-    using raft::fsm::fsm;
-    const raft::follower_progress& get_progress(server_id id) {
-        raft::follower_progress* progress = leader_state().tracker.find(id);
-        return *progress;
-    }
-};
-
+#include "test/raft/helpers.hh"
 
 // TestProgressLeader
 BOOST_AUTO_TEST_CASE(test_progress_leader) {
@@ -101,7 +53,8 @@ BOOST_AUTO_TEST_CASE(test_progress_leader) {
     BOOST_CHECK(fsm.is_candidate());
 
     auto output = fsm.get_output();
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    fsm.step(id2, raft::vote_reply{output.term_and_vote->first, true});
     BOOST_CHECK(fsm.is_leader());
 
     for (int i = 0; i < 30; ++i) {
@@ -136,7 +89,8 @@ BOOST_AUTO_TEST_CASE(test_progress_resume_by_append_resp) {
 
     election_timeout(fsm);
     auto output = fsm.get_output();
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    fsm.step(id2, raft::vote_reply{output.term_and_vote->first, true});
     BOOST_CHECK(fsm.is_leader());
 
     const raft::follower_progress& fprogress = fsm.get_progress(id2);
@@ -165,10 +119,12 @@ BOOST_AUTO_TEST_CASE(test_progress_paused) {
 
     election_timeout(fsm);
     auto output = fsm.get_output();
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    auto current_term = output.term_and_vote->first;
+    fsm.step(id2, raft::vote_reply{current_term, true});
     BOOST_CHECK(fsm.is_leader());
 
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    fsm.step(id2, raft::vote_reply{current_term, true});
 
     fsm.add_entry(create_command(1));
     fsm.add_entry(create_command(2));
@@ -194,10 +150,12 @@ BOOST_AUTO_TEST_CASE(test_progress_flow_control) {
 
     election_timeout(fsm);
     auto output = fsm.get_output();
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    auto current_term = output.term_and_vote->first;
+    fsm.step(id2, raft::vote_reply{current_term, true});
     BOOST_CHECK(fsm.is_leader());
 
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    fsm.step(id2, raft::vote_reply{current_term, true});
     // Throw away all the messages relating to the initial election.
     output = fsm.get_output();
     const raft::follower_progress& fprogress = fsm.get_progress(id2);
@@ -295,9 +253,10 @@ BOOST_AUTO_TEST_CASE(test_leader_election_overwrite_newer_logs) {
     election_timeout(fsm3);
     BOOST_CHECK(fsm3.is_candidate());
     auto output3 = fsm3.get_output();
-    BOOST_CHECK(output3.term == term_t{2});
-    fsm3.step(id4, raft::vote_reply{term_t{output3.term}, true});
-    fsm3.step(id5, raft::vote_reply{term_t{output3.term}, true});
+    BOOST_CHECK(output3.term_and_vote);
+    BOOST_CHECK(output3.term_and_vote->first == term_t{2});
+    fsm3.step(id4, raft::vote_reply{term_t{output3.term_and_vote->first}, true});
+    fsm3.step(id5, raft::vote_reply{term_t{output3.term_and_vote->first}, true});
     BOOST_CHECK(fsm3.is_leader());
     output3 = fsm3.get_output();
     // Node 3 [gets] a different entry on idx 1 (term 2)
@@ -312,7 +271,8 @@ BOOST_AUTO_TEST_CASE(test_leader_election_overwrite_newer_logs) {
     election_timeout(fsm1);
     BOOST_CHECK(fsm1.is_candidate());
     auto output1 = fsm1.get_output();
-    BOOST_CHECK(output1.term == term_t{2});
+    BOOST_CHECK(output1.term_and_vote);
+    BOOST_CHECK(output1.term_and_vote->first == term_t{2});
     BOOST_CHECK(output1.messages.size() == 4);  // Request votes to all 4 other nodes
     raft::vote_request vreq;
     BOOST_REQUIRE_NO_THROW(vreq = std::get<raft::vote_request>(output1.messages.back().second));
@@ -338,13 +298,14 @@ BOOST_AUTO_TEST_CASE(test_leader_election_overwrite_newer_logs) {
     output1 = fsm1.get_output();
     // NOTE: election timeout might trigger 2 elections so term might be 3 or 4
     //       and there could be 4 or 8 vote request ouputs, so use last one
-    BOOST_CHECK(output1.term > term_t{2});      // After learning about term 2, move to 3+
-    auto current_term = output1.term;
+    BOOST_CHECK(output1.term_and_vote);
+    auto current_term = output1.term_and_vote->first;
+    BOOST_CHECK(current_term > term_t{2});      // After learning about term 2, move to 3+
     BOOST_CHECK(output1.messages.size() >= 4);  // Request votes to all 4 other nodes
     BOOST_REQUIRE_NO_THROW(vreq = std::get<raft::vote_request>(output1.messages.back().second));
 
-    fsm1.step(id2, raft::vote_reply{output1.term, true});
-    fsm1.step(id4, raft::vote_reply{output1.term, true});  // Now term is fine
+    fsm1.step(id2, raft::vote_reply{current_term, true});
+    fsm1.step(id4, raft::vote_reply{current_term, true});  // Now term is fine
 
     BOOST_CHECK(fsm1.is_leader());
 
@@ -374,7 +335,8 @@ BOOST_AUTO_TEST_CASE(test_leader_election_overwrite_newer_logs) {
     fsm3.step(id1, raft::append_request{areq});
     BOOST_CHECK(fsm3.is_follower());
     output3 = fsm3.get_output();
-    BOOST_CHECK(output3.term == current_term);
+    BOOST_CHECK(output3.term_and_vote);
+    BOOST_CHECK(output3.term_and_vote->first == current_term);
     BOOST_CHECK(output3.messages.size() == 1);  // Node 3 tells Node 1 there is no match at idx 1
     raft::append_reply arepl;
     BOOST_REQUIRE_NO_THROW(arepl = std::get<raft::append_reply>(output3.messages.back().second));
@@ -433,7 +395,8 @@ BOOST_AUTO_TEST_CASE(test_vote_from_any_state) {
     BOOST_CHECK(fsm.is_candidate());
     output = fsm.get_output();
     // Node 2 requests vote for a later term
-    fsm.step(id2, raft::vote_request{output.term + term_t{1}, index_t{1}, term_t{1}});
+    BOOST_CHECK(output.term_and_vote);
+    fsm.step(id2, raft::vote_request{output.term_and_vote->first + term_t{1}, index_t{1}, term_t{1}});
     output = fsm.get_output();
     BOOST_CHECK(output.messages.size() == 1);
     BOOST_REQUIRE_NO_THROW(vrepl = std::get<raft::vote_reply>(output.messages.back().second));
@@ -444,7 +407,8 @@ BOOST_AUTO_TEST_CASE(test_vote_from_any_state) {
     election_timeout(fsm);
     BOOST_CHECK(fsm.is_candidate());
     output = fsm.get_output();
-    term_t current_term = output.term;
+    BOOST_CHECK(output.term_and_vote);
+    term_t current_term = output.term_and_vote->first;
     fsm.step(id2, raft::vote_reply{current_term, true});
     BOOST_CHECK(fsm.is_leader());
     output = fsm.get_output();
@@ -479,9 +443,10 @@ BOOST_AUTO_TEST_CASE(test_log_replication_1) {
     election_timeout(fsm);
     BOOST_CHECK(fsm.is_candidate());
     output = fsm.get_output();
-    BOOST_CHECK(output.term != term_t{0});
-    current_term = output.term;
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    current_term = output.term_and_vote->first;
+    BOOST_CHECK(current_term != term_t{0});
+    fsm.step(id2, raft::vote_reply{current_term, true});
     BOOST_CHECK(fsm.is_leader());
     output = fsm.get_output();
     BOOST_CHECK(output.log_entries.size() == 1);
@@ -545,8 +510,9 @@ BOOST_AUTO_TEST_CASE(test_log_replication_2) {
 
     election_timeout(fsm);
     output = fsm.get_output();
-    current_term = output.term;
-    fsm.step(id2, raft::vote_reply{output.term, true});
+    BOOST_CHECK(output.term_and_vote);
+    current_term = output.term_and_vote->first;
+    fsm.step(id2, raft::vote_reply{current_term, true});
     BOOST_CHECK(fsm.is_leader());
     output = fsm.get_output();
     output = fsm.get_output();

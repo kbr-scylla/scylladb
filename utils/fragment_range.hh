@@ -18,6 +18,7 @@
 
 #include "marshal_exception.hh"
 #include "bytes.hh"
+#include "utils/bit_cast.hh"
 
 enum class mutable_view { no, yes, };
 
@@ -335,7 +336,7 @@ T read_simple_native(View& v) {
     if (v.current_fragment().size() >= sizeof(T)) [[likely]] {
         auto p = v.current_fragment().data();
         v.remove_prefix(sizeof(T));
-        return *reinterpret_cast<const net::packed<T>*>(p);
+        return read_unaligned<T>(p);
     } else if (v.size_bytes() >= sizeof(T)) {
         T buf;
         read_fragmented(v, sizeof(T), reinterpret_cast<bytes::value_type*>(&buf));
@@ -350,7 +351,7 @@ T read_simple(View& v) {
     if (v.current_fragment().size() >= sizeof(T)) [[likely]] {
         auto p = v.current_fragment().data();
         v.remove_prefix(sizeof(T));
-        return net::ntoh(*reinterpret_cast<const net::packed<T>*>(p));
+        return net::ntoh(read_unaligned<T>(p));
     } else if (v.size_bytes() >= sizeof(T)) {
         T buf;
         read_fragmented(v, sizeof(T), reinterpret_cast<bytes::value_type*>(&buf));
@@ -364,7 +365,7 @@ template<typename T, FragmentedView View>
 T read_simple_exactly(View v) {
     if (v.current_fragment().size() == sizeof(T)) [[likely]] {
         auto p = v.current_fragment().data();
-        return net::ntoh(*reinterpret_cast<const net::packed<T>*>(p));
+        return net::ntoh(read_unaligned<T>(p));
     } else if (v.size_bytes() == sizeof(T)) {
         T buf;
         read_fragmented(v, sizeof(T), reinterpret_cast<bytes::value_type*>(&buf));

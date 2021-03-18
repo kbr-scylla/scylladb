@@ -108,18 +108,21 @@ def ensure_tmp_dir_exists():
         os.makedirs(tempfile.tempdir)
 
 
-def try_compile_and_link(compiler, source='', flags=[]):
+def try_compile_and_link(compiler, source='', flags=[], verbose=False):
     ensure_tmp_dir_exists()
     with tempfile.NamedTemporaryFile() as sfile:
         ofile = tempfile.mktemp()
         try:
             sfile.file.write(bytes(source, 'utf-8'))
             sfile.file.flush()
-            # We can't write to /dev/null, since in some cases (-ftest-coverage) gcc will create an auxiliary
-            # output file based on the name of the output file, and "/dev/null.gcsa" is not a good name
-            return subprocess.call([compiler, '-x', 'c++', '-o', ofile, sfile.name] + args.user_cflags.split() + flags,
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL) == 0
+            ret = subprocess.run([compiler, '-x', 'c++', '-o', ofile, sfile.name] + args.user_cflags.split() + flags,
+                                 capture_output=True)
+            if verbose:
+                print(f"Compilation failed: {compiler} -x c++ -o {ofile} {sfile.name} {args.user_cflags} {flags}")
+                print(source)
+                print(ret.stdout.decode('utf-8'))
+                print(ret.stderr.decode('utf-8'))
+            return ret.returncode == 0
         finally:
             if os.path.exists(ofile):
                 os.unlink(ofile)
@@ -146,7 +149,21 @@ def linker_flags(compiler):
             link_flags.append(threads_flag)
         return ' '.join(link_flags)
     else:
-        print('Note: neither lld nor gold found; using default system linker')
+        linker = ''
+        try:
+            subprocess.call(["gold", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            linker = 'gold'
+        except:
+            pass
+        try:
+            subprocess.call(["lld", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            linker = 'lld'
+        except:
+            pass
+        if linker:
+            print(f'Linker {linker} found, but the compilation attempt failed, defaulting to default system linker')
+        else:
+            print('Note: neither lld nor gold found; using default system linker')
         return ''
 
 
@@ -404,6 +421,7 @@ scylla_tests = set([
     'test/boost/double_decker_test',
     'test/boost/stall_free_test',
     'test/boost/raft_sys_table_storage_test',
+    'test/boost/sstable_set_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -450,8 +468,8 @@ perf_tests = set([
 
 raft_tests = set([
     'test/raft/replication_test',
-    'test/boost/raft_fsm_test',
-    'test/boost/raft_etcd_test',
+    'test/raft/fsm_test',
+    'test/raft/etcd_test',
 ])
 
 apps = set([
@@ -1156,8 +1174,8 @@ deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/alternator_base64_test'] += ['alternator/base64.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc'] + scylla_raft_dependencies
-deps['test/boost/raft_fsm_test'] =  ['test/boost/raft_fsm_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
-deps['test/boost/raft_etcd_test'] =  ['test/boost/raft_etcd_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
+deps['test/raft/fsm_test'] =  ['test/raft/fsm_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
+deps['test/raft/etcd_test'] =  ['test/raft/etcd_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 
@@ -1307,7 +1325,8 @@ compiler_test_src = '''
 int main() { return 0; }
 '''
 if not try_compile_and_link(compiler=args.cxx, source=compiler_test_src):
-    print('Wrong GCC version. Scylla needs GCC >= 10.1.1 to compile.')
+    try_compile_and_link(compiler=args.cxx, source=compiler_test_src, verbose=True)
+    print('Wrong compiler version or incorrect flags. Scylla needs GCC >= 10.1.1 with coroutines (-fcoroutines) or clang >= 10.0.0 to compile.')
     sys.exit(1)
 
 if not try_compile(compiler=args.cxx, source='#include <boost/version.hpp>'):

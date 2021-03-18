@@ -30,7 +30,7 @@
 
 #include "cql3/statements/select_statement.hh"
 #include "cql3/statements/raw/select_statement.hh"
-
+#include "cql3/query_processor.hh"
 #include "transport/messages/result_message.hh"
 #include "cql3/functions/as_json_function.hh"
 #include "cql3/selection/selection.hh"
@@ -277,10 +277,11 @@ static thread_local inheriting_concrete_execution_stage<
         const query_options&> select_stage{"cql3_select", select_statement_executor::get()};
 
 future<shared_ptr<cql_transport::messages::result_message>>
-select_statement::execute(service::storage_proxy& proxy,
+select_statement::execute(query_processor& qp,
                              service::query_state& state,
                              const query_options& options) const
 {
+    service::storage_proxy& proxy = qp.proxy();
     return select_stage(this, seastar::ref(proxy), seastar::ref(state), seastar::cref(options));
 }
 

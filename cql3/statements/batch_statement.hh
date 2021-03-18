@@ -45,6 +45,8 @@
 
 namespace cql3 {
 
+class query_processor;
+
 namespace statements {
 
 /**
@@ -141,7 +143,7 @@ public:
     static void verify_batch_size(service::storage_proxy& proxy, const std::vector<mutation>& mutations);
 
     virtual future<shared_ptr<cql_transport::messages::result_message>> execute(
-            service::storage_proxy& storage, service::query_state& state, const query_options& options) const override;
+            query_processor& qp, service::query_state& state, const query_options& options) const override;
 private:
     friend class batch_statement_executor;
     future<shared_ptr<cql_transport::messages::result_message>> do_execute(

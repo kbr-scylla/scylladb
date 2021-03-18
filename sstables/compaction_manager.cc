@@ -655,13 +655,15 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
                 compacting->release_compacting(exhausted_sstables);
             };
 
-            _stats.pending_tasks--;
-            _stats.active_tasks++;
-            task->compaction_running = true;
-            compaction_backlog_tracker user_initiated(std::make_unique<user_initiated_backlog_tracker>(_compaction_controller.backlog_of_shares(200), _available_memory));
-            return do_with(std::move(user_initiated), [this, &cf, descriptor = std::move(descriptor)] (compaction_backlog_tracker& bt) mutable {
-                return with_scheduling_group(_scheduling_group, [this, &cf, descriptor = std::move(descriptor)] () mutable {
-                    return cf.run_compaction(std::move(descriptor));
+            return with_semaphore(_rewrite_sstables_sem, 1, [this, task, &cf, descriptor = std::move(descriptor)] () mutable {
+                _stats.pending_tasks--;
+                _stats.active_tasks++;
+                task->compaction_running = true;
+                compaction_backlog_tracker user_initiated(std::make_unique<user_initiated_backlog_tracker>(_compaction_controller.backlog_of_shares(200), _available_memory));
+                return do_with(std::move(user_initiated), [this, &cf, descriptor = std::move(descriptor)] (compaction_backlog_tracker& bt) mutable {
+                    return with_scheduling_group(_scheduling_group, [this, &cf, descriptor = std::move(descriptor)]() mutable {
+                        return cf.run_compaction(std::move(descriptor));
+                    });
                 });
             }).then_wrapped([this, task, compacting] (future<> f) mutable {
                 task->compaction_running = false;
@@ -814,15 +816,11 @@ void compaction_manager::stop_tracking_ongoing_compactions(column_family* cf) {
 }
 
 void compaction_manager::stop_compaction(sstring type) {
-    // TODO: this method only works for compaction of type compaction and cleanup.
-    // Other types are: validation, scrub, index_build.
     sstables::compaction_type target_type;
-    if (type == "COMPACTION") {
-        target_type = sstables::compaction_type::Compaction;
-    } else if (type == "CLEANUP") {
-        target_type = sstables::compaction_type::Cleanup;
-    } else {
-        throw std::runtime_error(format("Compaction of type {} cannot be stopped by compaction manager", type.c_str()));
+    try {
+        target_type = sstables::to_compaction_type(type);
+    } catch (...) {
+        throw std::runtime_error(format("Compaction of type {} cannot be stopped by compaction manager: {}", type.c_str(), std::current_exception()));
     }
     for (auto& info : _compactions) {
         if (target_type == info->type) {

@@ -70,8 +70,7 @@ sstable_set::sstable_set(std::unique_ptr<sstable_set_impl> impl, schema_ptr s)
 
 sstable_set::sstable_set(const sstable_set& x)
         : _impl(x._impl->clone())
-        , _schema(x._schema)
-        , _all_runs(x._all_runs) {
+        , _schema(x._schema) {
 }
 
 sstable_set::sstable_set(sstable_set&&) noexcept = default;
@@ -95,7 +94,13 @@ sstable_set::select(const dht::partition_range& range) const {
 
 std::vector<sstable_run>
 sstable_set::select_sstable_runs(const std::vector<shared_sstable>& sstables) const {
-    auto run_ids = boost::copy_range<std::unordered_set<utils::UUID>>(sstables | boost::adaptors::transformed(std::mem_fn(&sstable::run_identifier)));
+    return _impl->select_sstable_runs(sstables);
+}
+
+std::vector<sstable_run>
+partitioned_sstable_set::select_sstable_runs(const std::vector<shared_sstable>& sstables) const {
+    auto has_run = [this] (const shared_sstable& sst) { return _all_runs.contains(sst->run_identifier()); };
+    auto run_ids = boost::copy_range<std::unordered_set<utils::UUID>>(sstables | boost::adaptors::filtered(has_run) | boost::adaptors::transformed(std::mem_fn(&sstable::run_identifier)));
     return boost::copy_range<std::vector<sstable_run>>(run_ids | boost::adaptors::transformed([this] (utils::UUID run_id) {
         return _all_runs.at(run_id);
     }));
@@ -113,18 +118,11 @@ void sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> fu
 void
 sstable_set::insert(shared_sstable sst) {
     _impl->insert(sst);
-    try {
-        _all_runs[sst->run_identifier()].insert(sst);
-    } catch (...) {
-        _impl->erase(sst);
-        throw;
-    }
 }
 
 void
 sstable_set::erase(shared_sstable sst) {
     _impl->erase(sst);
-    _all_runs[sst->run_identifier()].erase(sst);
 }
 
 sstable_set::~sstable_set() = default;
@@ -231,8 +229,18 @@ partitioned_sstable_set::partitioned_sstable_set(schema_ptr schema, lw_shared_pt
         , _use_level_metadata(use_level_metadata) {
 }
 
+partitioned_sstable_set::partitioned_sstable_set(schema_ptr schema, const std::vector<shared_sstable>& unleveled_sstables, const interval_map_type& leveled_sstables,
+        const lw_shared_ptr<sstable_list>& all, const std::unordered_map<utils::UUID, sstable_run>& all_runs, bool use_level_metadata)
+        : _schema(schema)
+        , _unleveled_sstables(unleveled_sstables)
+        , _leveled_sstables(leveled_sstables)
+        , _all(make_lw_shared<sstable_list>(*all))
+        , _all_runs(all_runs)
+        , _use_level_metadata(use_level_metadata) {
+}
+
 std::unique_ptr<sstable_set_impl> partitioned_sstable_set::clone() const {
-    return std::make_unique<partitioned_sstable_set>(*this);
+    return std::make_unique<partitioned_sstable_set>(_schema, _unleveled_sstables, _leveled_sstables, _all, _all_runs, _use_level_metadata);
 }
 
 std::vector<shared_sstable> partitioned_sstable_set::select(const dht::partition_range& range) const {
@@ -261,18 +269,25 @@ void partitioned_sstable_set::for_each_sstable(std::function<void(const shared_s
 void partitioned_sstable_set::insert(shared_sstable sst) {
     _all->insert(sst);
     try {
-        if (store_as_unleveled(sst)) {
-            _unleveled_sstables.push_back(std::move(sst));
-        } else {
-            _leveled_sstables_change_cnt++;
-            _leveled_sstables.add({make_interval(*sst), value_set({sst})});
+        _all_runs[sst->run_identifier()].insert(sst);
+        try {
+            if (store_as_unleveled(sst)) {
+                _unleveled_sstables.push_back(sst);
+            } else {
+                _leveled_sstables_change_cnt++;
+                _leveled_sstables.add({make_interval(*sst), value_set({sst})});
+            }
+        } catch (...) {
+            _all_runs[sst->run_identifier()].erase(sst);
         }
     } catch (...) {
         _all->erase(sst);
+        throw;
     }
 }
 
 void partitioned_sstable_set::erase(shared_sstable sst) {
+    _all_runs[sst->run_identifier()].erase(sst);
     _all->erase(sst);
     if (store_as_unleveled(sst)) {
         _unleveled_sstables.erase(std::remove(_unleveled_sstables.begin(), _unleveled_sstables.end(), sst), _unleveled_sstables.end());
@@ -681,6 +696,11 @@ filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, column_f
     stats->surviving_sstables_after_clustering_filter += sstables.size();
 
     return sstables;
+}
+
+std::vector<sstable_run>
+sstable_set_impl::select_sstable_runs(const std::vector<shared_sstable>& sstables) const {
+    throw_with_backtrace<std::bad_function_call>();
 }
 
 flat_mutation_reader

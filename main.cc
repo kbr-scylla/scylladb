@@ -770,6 +770,13 @@ int main(int ac, char** av) {
                 mscfg.encrypt = netw::messaging_service::encrypt_what::rack;
             }
 
+            if (clauth && (mscfg.encrypt == netw::messaging_service::encrypt_what::dc || mscfg.encrypt == netw::messaging_service::encrypt_what::dc)) {
+                startlog.warn("Setting require_client_auth is incompatible with 'rack' and 'dc' internode_encryption values."
+                    " To ensure that mutual TLS authentication is enforced, please set internode_encryption to 'all'. Continuing with"
+                    " potentially insecure configuration."
+                );
+            }
+
             sstring compress_what = cfg->internode_compression();
             if (compress_what == "all") {
                 mscfg.compress = netw::messaging_service::compress_what::all;
@@ -925,7 +932,7 @@ int main(int ac, char** av) {
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             debug::the_query_processor = &qp;
-            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
+            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
