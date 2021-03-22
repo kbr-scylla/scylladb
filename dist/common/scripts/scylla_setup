@@ -501,7 +501,7 @@ if __name__ == '__main__':
         node_exporter = interactive_ask_service('Do you want to enable node exporter to export Prometheus data from the node? Note that the Scylla monitoring stack uses this data', 'Yes - enable node exporter. No - skip this  step.', node_exporter)
     args.no_node_exporter = not node_exporter
     if node_exporter:
-        node_exporter_unit = systemd_unit('scylla-enterprise-node-exporter')
+        node_exporter_unit = systemd_unit('scylla-node-exporter')
         node_exporter_unit.enable()
         node_exporter_unit.start()
 
