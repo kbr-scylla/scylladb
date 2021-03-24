@@ -57,10 +57,11 @@ public:
     void append_entries_reply(server_id from, append_reply reply) override;
     void request_vote(server_id from, vote_request vote_request) override;
     void request_vote_reply(server_id from, vote_reply vote_reply) override;
+    void timeout_now_request(server_id from, timeout_now timeout_now) override;
 
     // server interface
     future<> add_entry(command command, wait_type type);
-    future<> apply_snapshot(server_id from, install_snapshot snp) override;
+    future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) override;
     future<> set_configuration(server_address_set c_new) override;
     future<> start() override;
     future<> abort() override;
@@ -110,6 +111,8 @@ private:
         uint64_t queue_entries_for_apply = 0;
         uint64_t applied_entries = 0;
         uint64_t snapshots_taken = 0;
+        uint64_t timeout_now_sent = 0;
+        uint64_t timeout_now_received = 0;
     } _stats;
 
     struct op_status {
@@ -263,6 +266,11 @@ void server_impl::request_vote_reply(server_id from, vote_reply vote_reply) {
     _fsm->step(from, std::move(vote_reply));
 }
 
+void server_impl::timeout_now_request(server_id from, timeout_now timeout_now) {
+    _stats.timeout_now_received++;
+    _fsm->step(from, std::move(timeout_now));
+}
+
 void server_impl::notify_waiters(std::map<index_t, op_status>& waiters,
         const std::vector<log_entry_ptr>& entries) {
     index_t commit_idx = entries.back()->idx;
@@ -321,6 +329,9 @@ future<> server_impl::send_message(server_id id, Message m) {
         } else if constexpr (std::is_same_v<T, vote_reply>) {
             _stats.vote_request_reply_sent++;
             return _rpc->send_vote_reply(id, m);
+        } else if constexpr (std::is_same_v<T, timeout_now>) {
+            _stats.timeout_now_sent++;
+            return _rpc->send_timeout_now(id, m);
         } else if constexpr (std::is_same_v<T, install_snapshot>) {
             _stats.install_snapshot_sent++;
             // Send in the background.
@@ -329,9 +340,11 @@ future<> server_impl::send_message(server_id id, Message m) {
         } else if constexpr (std::is_same_v<T, snapshot_reply>) {
             _stats.snapshot_reply_sent++;
             assert(_snapshot_application_done);
-            // send reply to install_snapshot here
+            // Send a reply to install_snapshot after
+            // snapshot application is done.
             _snapshot_application_done->set_value(std::move(m));
             _snapshot_application_done = std::nullopt;
+            // ... and do not wait for it here.
             return make_ready_future<>();
         } else {
             static_assert(!sizeof(T*), "not all message types are handled");
@@ -413,32 +426,27 @@ future<> server_impl::io_fiber(index_t last_stable) {
 }
 
 void server_impl::send_snapshot(server_id dst, install_snapshot&& snp) {
-    index_t snp_idx = snp.snp.idx;
-    future<> f = _rpc->send_snapshot(dst, std::move(snp)).then_wrapped([this, dst, snp_idx] (future<> f) {
+    future<> f = _rpc->send_snapshot(dst, std::move(snp)).then_wrapped([this, dst] (future<snapshot_reply> f) {
         _snapshot_transfers.erase(dst);
+        auto reply = raft::snapshot_reply{.current_term = _fsm->get_current_term(), .success = false};
         if (f.failed()) {
             logger.error("[{}] Transferring snapshot to {} failed with: {}", _id, dst, f.get_exception());
-            _fsm->snapshot_status(dst, std::nullopt);
         } else {
             logger.trace("[{}] Transferred snapshot to {}", _id, dst);
-            _fsm->snapshot_status(dst, snp_idx);
+            reply = f.get();
         }
-
+        _fsm->step(dst, std::move(reply));
     });
     auto res = _snapshot_transfers.emplace(dst, std::move(f));
     assert(res.second);
 }
 
-future<> server_impl::apply_snapshot(server_id from, install_snapshot snp) {
+future<snapshot_reply> server_impl::apply_snapshot(server_id from, install_snapshot snp) {
     _fsm->step(from, std::move(snp));
     // Only one snapshot can be received at a time
     assert(! _snapshot_application_done);
     _snapshot_application_done = promise<snapshot_reply>();
-    return _snapshot_application_done->get_future().then([] (snapshot_reply&& reply) {
-        if (!reply.success) {
-            throw std::runtime_error("Snapshot application failed");
-        }
-    });
+    return _snapshot_application_done->get_future();
 }
 
 future<> server_impl::applier_fiber() {
@@ -561,6 +569,8 @@ void server_impl::register_metrics() {
              sm::description("how many messages were received"), {server_id_label(_id), message_type("request_vote")}),
         sm::make_total_operations("messages_received", _stats.request_vote_reply_received,
              sm::description("how many messages were received"), {server_id_label(_id), message_type("request_vote_reply")}),
+        sm::make_total_operations("messages_received", _stats.timeout_now_received,
+             sm::description("how many messages were received"), {server_id_label(_id), message_type("timeout_now")}),
 
         sm::make_total_operations("messages_sent", _stats.append_entries_sent,
              sm::description("how many messages were send"), {server_id_label(_id), message_type("append_entries")}),
@@ -574,6 +584,8 @@ void server_impl::register_metrics() {
              sm::description("how many messages were sent"), {server_id_label(_id), message_type("install_snapshot")}),
         sm::make_total_operations("messages_sent", _stats.snapshot_reply_sent,
              sm::description("how many messages were sent"), {server_id_label(_id), message_type("snapshot_reply")}),
+        sm::make_total_operations("messages_sent", _stats.timeout_now_sent,
+             sm::description("how many messages were sent"), {server_id_label(_id), message_type("timeout_now")}),
 
         sm::make_total_operations("waiter_awaiken", _stats.waiters_awaiken,
              sm::description("how many waiters got result back"), {server_id_label(_id)}),

@@ -24,6 +24,7 @@
 #include "dht/token-sharding.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_service.hh"
+#include "service/memory_limiter.hh"
 #include "service/qos/service_level_controller.hh"
 #include "db/consistency_level_type.hh"
 #include "database.hh"
@@ -150,12 +151,12 @@ event::event_type parse_event_type(const sstring& value)
 }
 
 cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
-        service::migration_notifier& mn, database& db, cql_server_config config, qos::service_level_controller& sl_controller)
+        service::migration_notifier& mn, database& db, service::memory_limiter& ml, cql_server_config config, qos::service_level_controller& sl_controller)
     : _query_processor(qp)
     , _config(config)
     , _max_request_size(config.max_request_size)
     , _max_concurrent_requests(db.get_config().max_concurrent_requests_per_shard)
-    , _memory_available(config.get_service_memory_limiter_semaphore())
+    , _memory_available(ml.get_semaphore())
     , _notifier(std::make_unique<event_notifier>(mn))
     , _auth_service(auth_service)
     , _sl_controller(sl_controller)

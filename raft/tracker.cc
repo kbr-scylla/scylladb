@@ -62,8 +62,12 @@ void follower_progress::become_pipeline() {
     }
 }
 
-void follower_progress::become_snapshot() {
+void follower_progress::become_snapshot(index_t snp_idx) {
     state = state::SNAPSHOT;
+    // If snapshot transfer succeeds, start replicating from the
+    // next index, otherwise we will learn the follower's index
+    // again by sending a probe request.
+    next_idx = snp_idx + index_t{1};
 }
 
 bool follower_progress::can_send_to() {
@@ -117,6 +121,7 @@ void tracker::set_configuration(const configuration& configuration, index_t next
             } else {
                 newp = this->progress::emplace(s.id, follower_progress{s.id, next_idx}).first;
             }
+            newp->second.can_vote = s.can_vote;
             if (s.id == _my_id) {
                 // The leader is part of the current
                 // configuration.

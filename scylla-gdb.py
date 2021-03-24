@@ -151,6 +151,54 @@ class intrusive_set:
             yield n
 
 
+class compact_radix_tree:
+    def __init__(self, ref):
+        self.root = ref['_root']['_v']
+
+    def to_string(self):
+        if self.root['_base_layout'] == 0:
+            return '<empty>'
+
+        # Compiler optimizes-away lots of critical stuff, so
+        # for now just show where the tree is
+        return 'compact radix tree @ 0x%x' % self.root
+
+
+class intrusive_btree:
+    def __init__(self, ref):
+        container_type = ref.type.strip_typedefs()
+        self.tree = ref
+        self.leaf_node_flag = gdb.parse_and_eval('intrusive_b::node_base::NODE_LEAF')
+        self.key_type = container_type.template_argument(0)
+
+    def __visit_node_base(self, base, kids):
+        for i in range(0, base['num_keys']):
+            if kids:
+                for r in self.__visit_node(kids[i]):
+                    yield r
+
+            yield base['keys'][i].cast(self.key_type.pointer()).dereference()
+
+        if kids:
+            for r in self.__visit_node(kids[base['num_keys']]):
+                yield r
+
+    def __visit_node(self, node):
+        base = node['_base']
+        kids = node['_kids'] if not base['flags'] & self.leaf_node_flag else None
+
+        for r in self.__visit_node_base(base, kids):
+            yield r
+
+    def __iter__(self):
+        if self.tree['_root']:
+            for r in self.__visit_node(self.tree['_root']):
+                yield r
+        else:
+            for r in self.__visit_node_base(self.tree['_inline'], None):
+                yield r
+
+
 class double_decker:
     def __init__(self, ref):
         self.tree = ref['_tree']
@@ -597,8 +645,15 @@ class mutation_partition_printer(gdb.printing.PrettyPrinter):
     def __init__(self, val):
         self.val = val
 
+    def __rows(self):
+        try:
+            return intrusive_btree(self.val['_rows'])
+        except gdb.error:
+            # Compatibility, rows were stored in intrusive set
+            return intrusive_set_external_comparator(self.val['_rows'])
+
     def to_string(self):
-        rows = list(str(r) for r in intrusive_set_external_comparator(self.val['_rows']))
+        rows = list(str(r) for r in self.__rows())
         range_tombstones = list(str(r) for r in intrusive_set(self.val['_row_tombstones']['_tombstones']))
         return '{_tombstone=%s, _static_row=%s (cont=%s), _row_tombstones=[%s], _rows=[%s]}' % (
             self.val['_tombstone'],
@@ -615,7 +670,7 @@ class row_printer(gdb.printing.PrettyPrinter):
     def __init__(self, val):
         self.val = val
 
-    def to_string(self):
+    def __to_string_legacy(self):
         if self.val['_type'] == gdb.parse_and_eval('row::storage_type::vector'):
             cells = str(self.val['_storage']['vector'])
         elif self.val['_type'] == gdb.parse_and_eval('row::storage_type::set'):
@@ -623,6 +678,12 @@ class row_printer(gdb.printing.PrettyPrinter):
         else:
             raise Exception('Unsupported storage type: ' + self.val['_type'])
         return '{type=%s, cells=%s}' % (self.val['_type'], cells)
+
+    def to_string(self):
+        try:
+            return '{cells=[%s]}' % compact_radix_tree(self.val['_cells']).to_string()
+        except gdb.error:
+            return self.__to_string_legacy()
 
     def display_hint(self):
         return 'row'
@@ -1442,7 +1503,11 @@ class scylla_memory(gdb.Command):
         sp = sharded(gdb.parse_and_eval('service::_the_storage_proxy')).local()
         global_sp_stats, per_sg_sp_stats = scylla_memory.summarize_storage_proxy_coordinator_stats(sp)
 
-        hm = std_optional(sp['_hints_manager']).get()
+        try:
+            # 4.4 compatibility
+            hm = std_optional(sp['_hints_manager']).get()
+        except gdb.error:
+            hm = sp['_hints_manager']
         view_hm = sp['_hints_for_views_manager']
 
         gdb.write('Coordinator:\n'
@@ -3861,6 +3926,8 @@ class scylla_gdb_func_dereference_smart_ptr(gdb.Function):
             ptr = gdb.parse_and_eval(expr)
 
         typ = ptr.type.strip_typedefs()
+        if typ.name.startswith('seastar::shared_ptr<'):
+            return ptr['_p'].dereference()
         if typ.name.startswith('seastar::lw_shared_ptr<'):
             return seastar_lw_shared_ptr(ptr).get().dereference()
         elif typ.name.startswith('seastar::foreign_ptr<'):
@@ -4069,6 +4136,29 @@ class scylla_gdb_func_sharded_local(gdb.Function):
         return sharded(obj).local()
 
 
+class scylla_gdb_func_variant_member(gdb.Function):
+    """Get the active member of an std::variant
+
+    Usage:
+    $variant_member($obj)
+
+    Where:
+    $obj - a variable, or an expression that evaluates to any `std::variant`
+    instance.
+
+    Example:
+    # $1 = (cql3::raw_value_view *) 0x6060365a7a50
+    (gdb) p &$variant_member($1->_data)
+    $2 = (cql3::null_value *) 0x6060365a7a50
+    """
+
+    def __init__(self):
+        super(scylla_gdb_func_variant_member, self).__init__('variant_member')
+
+    def invoke(self, obj):
+        return std_variant(obj).get()
+
+
 # Commands
 scylla()
 scylla_databases()
@@ -4120,3 +4210,4 @@ scylla_gdb_func_dereference_smart_ptr()
 scylla_gdb_func_downcast_vptr()
 scylla_gdb_func_collection_element()
 scylla_gdb_func_sharded_local()
+scylla_gdb_func_variant_member()

@@ -321,9 +321,11 @@ public:
             _packet_drops(packet_drops) {
         net[_id] = this;
     }
-    virtual future<> send_snapshot(raft::server_id id, const raft::install_snapshot& snap) {
+    virtual future<raft::snapshot_reply> send_snapshot(raft::server_id id, const raft::install_snapshot& snap) {
         if (!_connected(id) || !_connected(_id)) {
-            return make_ready_future<>();
+            return make_ready_future<raft::snapshot_reply>(raft::snapshot_reply{
+                    .current_term = snap.current_term,
+                    .success = false});
         }
         (*_snapshots)[id] = (*_snapshots)[_id];
         return net[id]->_client->apply_snapshot(_id, std::move(snap));
@@ -354,6 +356,13 @@ public:
             return make_ready_future<>();
         }
         net[id]->_client->request_vote_reply(_id, std::move(vote_reply));
+        return make_ready_future<>();
+    }
+    virtual future<> send_timeout_now(raft::server_id id, const raft::timeout_now& timeout_now) {
+        if (!_connected(id) || !_connected(_id)) {
+            return make_ready_future<>();
+        }
+        net[id]->_client->timeout_now_request(_id, std::move(timeout_now));
         return make_ready_future<>();
     }
     virtual void add_server(raft::server_id id, bytes node_info) {}

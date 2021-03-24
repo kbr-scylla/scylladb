@@ -31,8 +31,8 @@ raft_rpc::raft_rpc(netw::messaging_service& ms, raft_services& raft_srvs, uint64
     : _group_id(group_id), _server_id(srv_id), _messaging(ms), _raft_services(raft_srvs)
 {}
 
-future<> raft_rpc::send_snapshot(raft::server_id id, const raft::install_snapshot& snap) {
-    return _messaging.send_raft_send_snapshot(
+future<raft::snapshot_reply> raft_rpc::send_snapshot(raft::server_id id, const raft::install_snapshot& snap) {
+    return _messaging.send_raft_snapshot(
         netw::msg_addr(_raft_services.get_inet_address(id)), db::no_timeout, _group_id, _server_id, id, snap);
 }
 
@@ -54,6 +54,11 @@ future<> raft_rpc::send_vote_request(raft::server_id id, const raft::vote_reques
 future<> raft_rpc::send_vote_reply(raft::server_id id, const raft::vote_reply& vote_reply) {
     return _messaging.send_raft_vote_reply(
         netw::msg_addr(_raft_services.get_inet_address(id)), db::no_timeout, _group_id, _server_id, id, vote_reply);
+}
+
+future<> raft_rpc::send_timeout_now(raft::server_id id, const raft::timeout_now& timeout_now) {
+    return _messaging.send_raft_timeout_now(
+        netw::msg_addr(_raft_services.get_inet_address(id)), db::no_timeout, _group_id, _server_id, id, timeout_now);
 }
 
 void raft_rpc::add_server(raft::server_id id, raft::server_info info) {
@@ -89,6 +94,10 @@ void raft_rpc::request_vote_reply(raft::server_id from, raft::vote_reply vote_re
     _client->request_vote_reply(from, vote_reply);
 }
 
-future<> raft_rpc::apply_snapshot(raft::server_id from, raft::install_snapshot snp) {
+void raft_rpc::timeout_now_request(raft::server_id from, raft::timeout_now timeout_now) {
+    _client->timeout_now_request(from, timeout_now);
+}
+
+future<raft::snapshot_reply> raft_rpc::apply_snapshot(raft::server_id from, raft::install_snapshot snp) {
     return _client->apply_snapshot(from, std::move(snp));
 }

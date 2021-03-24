@@ -241,7 +241,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
 
         void run() {
             for (;;) {
-                auto desc = _ics.get_sstables_for_compaction(*_cf, _cf->non_staging_sstables());
+                auto desc = _ics.get_sstables_for_compaction(*_cf, _cf->in_strategy_sstables());
                 // no more jobs, bailing out...
                 if (desc.sstables.empty()) {
                     break;

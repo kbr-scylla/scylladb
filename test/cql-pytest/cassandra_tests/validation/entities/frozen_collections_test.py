@@ -440,7 +440,6 @@ def testNestedClusteringKeyUsage(cql, test_keyspace):
         )
 
 # Reproduces issue #7868 and #7902
-@pytest.mark.xfail(reason="fails because of issue #7902")
 def testNestedClusteringKeyUsageWithReverseOrder(cql, test_keyspace):
     with create_table(cql, test_keyspace, "(a int, b frozen<map<set<int>, list<int>>>, c frozen<set<int>>, d int, PRIMARY KEY (a, b, c)) WITH CLUSTERING ORDER BY (b DESC)") as table:
         execute(cql, table, "INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, {}, set(), 0)
@@ -882,7 +881,6 @@ def testSecondaryIndex(cql, test_keyspace):
 
 # Test for CASSANDRA-8302
 # Also reproduces Scylla issue #7888.
-@pytest.mark.xfail(reason="issue #7888")
 def testClusteringColumnFiltering(cql, test_keyspace):
     with create_table(cql, test_keyspace, "(a int, b frozen<map<int, int>>, c int, d int, PRIMARY KEY (a,b,c))") as table:
         execute(cql, table, "CREATE INDEX c_index ON %s (c)")

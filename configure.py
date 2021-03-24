@@ -384,6 +384,7 @@ scylla_tests = set([
     'test/boost/schema_change_test',
     'test/boost/schema_registry_test',
     'test/boost/secondary_index_test',
+    'test/boost/tracing',
     'test/boost/index_with_paging_test',
     'test/boost/serialization_test',
     'test/boost/serialized_action_test',
@@ -546,6 +547,8 @@ arg_parser.add_argument('--verbose', dest='verbose', action='store_true',
 arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', type=str, default='1',
                          help='Set number of times to repeat each unittest.')
 arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
+arg_parser.add_argument('--clang-inline-threshold', action='store', type=int, dest='clang_inline_threshold', default=-1,
+                        help="LLVM-specific inline threshold compilation parameter")
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -1232,7 +1235,9 @@ warnings = [w
 warnings = ' '.join(warnings + ['-Wno-error=deprecated-declarations'])
 
 def clang_inline_threshold():
-    if platform.machine() == 'aarch64':
+    if args.clang_inline_threshold != -1:
+        return args.clang_inline_threshold
+    elif platform.machine() == 'aarch64':
         # we see miscompiles with 1200 and above with format("{}", uuid)
         return 600
     else:
@@ -1928,7 +1933,7 @@ with open(buildfile_tmp, 'w') as f:
         f.write(f'build dist-server-{mode}: phony $builddir/dist/{mode}/redhat $builddir/dist/{mode}/debian\n')
         f.write(f'build dist-jmx-{mode}: phony $builddir/{mode}/dist/tar/{scylla_product}-jmx-package.tar.gz dist-jmx-rpm dist-jmx-deb\n')
         f.write(f'build dist-tools-{mode}: phony $builddir/{mode}/dist/tar/{scylla_product}-tools-package.tar.gz dist-tools-rpm dist-tools-deb\n')
-        f.write(f'build dist-python3-{mode}: phony dist-python3-tar dist-python3-rpm dist-python3-deb compat-python3-rpm compat-python3-deb\n')
+        f.write(f'build dist-python3-{mode}: phony dist-python3-tar dist-python3-rpm dist-python3-deb\n')
         f.write(f'build dist-unified-{mode}: phony $builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz\n')
         f.write(f'build $builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}.{scylla_release}.tar.gz: unified $builddir/{mode}/dist/tar/{scylla_product}-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-python3-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-jmx-package.tar.gz $builddir/{mode}/dist/tar/{scylla_product}-tools-package.tar.gz | always\n')
         f.write(f'  mode = {mode}\n')
@@ -1994,22 +1999,6 @@ with open(buildfile_tmp, 'w') as f:
         build dist-tools-tar: phony {' '.join(['$builddir/{mode}/dist/tar/{scylla_product}-tools-package.tar.gz'.format(mode=mode, scylla_product=scylla_product) for mode in build_modes])}
         build dist-tools: phony dist-tools-tar dist-tools-rpm dist-tools-deb
 
-        rule compat-python3-reloc
-          command = mkdir -p $builddir/release && ln -f $dir/$artifact $builddir/release/
-        rule compat-python3-rpm
-          command = cd $dir && ./reloc/build_rpm.sh --reloc-pkg $artifact --builddir ../../build/redhat
-        rule compat-python3-deb
-          command = cd $dir && ./reloc/build_deb.sh --reloc-pkg $artifact --builddir ../../build/debian
-        build $builddir/release/{scylla_product}-python3-package.tar.gz: compat-python3-reloc tools/python3/build/{scylla_product}-python3-package.tar.gz
-          dir = tools/python3
-          artifact = $builddir/{scylla_product}-python3-package.tar.gz
-        build compat-python3-rpm: compat-python3-rpm tools/python3/build/{scylla_product}-python3-package.tar.gz
-          dir = tools/python3
-          artifact = $builddir/{scylla_product}-python3-package.tar.gz
-        build compat-python3-deb: compat-python3-deb tools/python3/build/{scylla_product}-python3-package.tar.gz
-          dir = tools/python3
-          artifact = $builddir/{scylla_product}-python3-package.tar.gz
-
         build tools/python3/build/{scylla_product}-python3-package.tar.gz: build-submodule-reloc
           reloc_dir = tools/python3
           args = --packages "{python3_dependencies}"
@@ -2020,7 +2009,7 @@ with open(buildfile_tmp, 'w') as f:
           dir = tools/python3
           artifact = $builddir/{scylla_product}-python3-package.tar.gz
         build dist-python3-tar: phony {' '.join(['$builddir/{mode}/dist/tar/{scylla_product}-python3-package.tar.gz'.format(mode=mode, scylla_product=scylla_product) for mode in build_modes])}
-        build dist-python3: phony dist-python3-tar dist-python3-rpm dist-python3-deb $builddir/release/{scylla_product}-python3-package.tar.gz compat-python3-rpm compat-python3-deb
+        build dist-python3: phony dist-python3-tar dist-python3-rpm dist-python3-deb $builddir/release/{scylla_product}-python3-package.tar.gz
         build dist-deb: phony dist-server-deb dist-python3-deb dist-jmx-deb dist-tools-deb
         build dist-rpm: phony dist-server-rpm dist-python3-rpm dist-jmx-rpm dist-tools-rpm
         build dist-tar: phony dist-unified-tar dist-server-tar dist-python3-tar dist-jmx-tar dist-tools-tar

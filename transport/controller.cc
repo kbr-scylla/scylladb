@@ -21,7 +21,7 @@
 
 #include "transport/controller.hh"
 #include "transport/server.hh"
-#include "service/storage_service.hh"
+#include "service/memory_limiter.hh"
 #include "database.hh"
 #include "db/config.hh"
 #include "gms/gossiper.hh"
@@ -33,13 +33,14 @@ namespace cql_transport {
 
 static logging::logger logger("cql_server_controller");
 
-controller::controller(distributed<database>& db, sharded<auth::service>& auth, sharded<service::migration_notifier>& mn, gms::gossiper& gossiper, sharded<cql3::query_processor>& qp, sharded<qos::service_level_controller>& sl_controller)
+controller::controller(distributed<database>& db, sharded<auth::service>& auth, sharded<service::migration_notifier>& mn, gms::gossiper& gossiper, sharded<cql3::query_processor>& qp, sharded<service::memory_limiter>& ml, sharded<qos::service_level_controller>& sl_controller)
     : _ops_sem(1)
     , _db(db)
     , _auth_service(auth)
     , _mnotifier(mn)
     , _gossiper(gossiper)
     , _qp(qp)
+    , _mem_limiter(ml)
     , _sl_controller(sl_controller) {
 }
 
@@ -70,8 +71,7 @@ future<> controller::do_start_server() {
         auto keepalive = cfg.rpc_keepalive();
         cql_transport::cql_server_config cql_server_config;
         cql_server_config.timeout_config = make_timeout_config(cfg);
-        cql_server_config.max_request_size = service::get_local_storage_service().service_memory_total();
-        cql_server_config.get_service_memory_limiter_semaphore = [ss = std::ref(service::get_storage_service())] () -> semaphore& { return ss.get().local().service_memory_limiter(); };
+        cql_server_config.max_request_size = _mem_limiter.local().total_memory();
         cql_server_config.allow_shard_aware_drivers = cfg.enable_shard_aware_drivers();
         cql_server_config.sharding_ignore_msb = cfg.murmur3_partitioner_ignore_msb_bits();
         if (cfg.native_shard_aware_transport_port.is_set()) {
@@ -148,7 +148,7 @@ future<> controller::do_start_server() {
             }
         }
 
-        cserver->start(std::ref(_qp), std::ref(_auth_service), std::ref(_mnotifier), std::ref(_db), cql_server_config, std::ref(_sl_controller)).get();
+        cserver->start(std::ref(_qp), std::ref(_auth_service), std::ref(_mnotifier), std::ref(_db), std::ref(_mem_limiter), cql_server_config, std::ref(_sl_controller)).get();
 
         try {
             parallel_for_each(configs, [cserver, keepalive](const listen_cfg & cfg) {

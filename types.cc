@@ -28,6 +28,7 @@
 #include <sstream>
 #include <string>
 #include <regex>
+#include <concepts>
 #include <boost/iterator/transform_iterator.hpp>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/numeric.hpp>
@@ -58,7 +59,11 @@ void on_types_internal_error(std::exception_ptr ex) {
 }
 
 template<typename T>
-std::enable_if_t<std::is_same_v<typename T::duration, std::chrono::milliseconds>, sstring>
+requires requires {
+        typename T::duration;
+        requires std::same_as<typename T::duration, std::chrono::milliseconds>;
+    }
+sstring
 time_point_to_string(const T& tp)
 {
     int64_t count = tp.time_since_epoch().count();
@@ -1609,10 +1614,10 @@ static void serialize_aux(const tuple_type_impl& type, const tuple_type_impl::na
     assert(elems.size() <= type.size());
 
     for (size_t i = 0; i < elems.size(); ++i) {
-        const data_type& t = type.type(i);
+        const abstract_type& t = type.type(i)->without_reversed();
         const data_value& v = elems[i];
-        if (!v.is_null() && t != v.type()) {
-            throw std::runtime_error(format("tuple element type mismatch: expected {}, got {}", t->name(), v.type()->name()));
+        if (!v.is_null() && t != *v.type()) {
+            throw std::runtime_error(format("tuple element type mismatch: expected {}, got {}", t.name(), v.type()->name()));
         }
 
         if (v.is_null()) {

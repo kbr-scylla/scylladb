@@ -257,8 +257,8 @@ future<> parse(const schema& s, sstable_version_types v, random_access_reader& i
 }
 
 // Intended to be used for a type that describes itself through describe_type().
-template <class T>
-typename std::enable_if_t<!std::is_integral<T>::value && !std::is_enum<T>::value, future<>>
+template <self_describing T>
+future<>
 parse(const schema& s, sstable_version_types v, random_access_reader& in, T& t) {
     return t.describe_type(v, [v, &s, &in] (auto&&... what) -> future<> {
         return parse(s, v, in, what...);
@@ -322,7 +322,7 @@ future<> parse(const schema& s, sstable_version_types v, random_access_reader& i
 // to do is to convert each member because they are all stored big endian.
 // We'll offer a specialization for that case below.
 template <typename Size, typename Members>
-typename std::enable_if_t<!std::is_integral<Members>::value, future<>>
+future<>
 parse(const schema& s, sstable_version_types v, random_access_reader& in, Size& len, utils::chunked_vector<Members>& arr) {
 
     auto count = make_lw_shared<size_t>(0);
@@ -335,8 +335,8 @@ parse(const schema& s, sstable_version_types v, random_access_reader& in, Size& 
     });
 }
 
-template <typename Size, typename Members>
-typename std::enable_if_t<std::is_integral<Members>::value, future<>>
+template <typename Size, std::integral Members>
+future<>
 parse(const schema&, sstable_version_types, random_access_reader& in, Size& len, utils::chunked_vector<Members>& arr) {
     auto done = make_lw_shared<size_t>(0);
     return repeat([&in, &len, &arr, done]  {
@@ -2226,7 +2226,7 @@ const dht::decorated_key& sstable::get_last_decorated_key() const {
     return *_last;
 }
 
-int sstable::compare_by_first_key(const sstable& other) const {
+std::strong_ordering sstable::compare_by_first_key(const sstable& other) const {
     return get_first_decorated_key().tri_compare(*_schema, other.get_first_decorated_key());
 }
 

@@ -38,6 +38,8 @@ public:
     index_t match_idx = index_t(0);
     // Index that we know to be committed by the follower
     index_t commit_idx = index_t(0);
+    // True if the follower is voting one
+    bool can_vote = true;
 
     enum class state {
         // In this state only one append entry is send until matching index is found
@@ -60,7 +62,7 @@ public:
 
     void become_probe();
     void become_pipeline();
-    void become_snapshot();
+    void become_snapshot(index_t snp_idx);
 
     void accepted(index_t idx) {
         // AppendEntries replies can arrive out of order.
