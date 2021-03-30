@@ -81,6 +81,8 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
     bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) const;
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
+
+    static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
 public:
     incremental_compaction_strategy() = default;
 
