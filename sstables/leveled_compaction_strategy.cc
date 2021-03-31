@@ -144,13 +144,15 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
         return { overlapping_sstables <= tolerance, overlapping_sstables };
     };
 
+    auto max_sstable_size_in_bytes = _max_sstable_size_in_mb * 1024 * 1024;
+
     for (auto& sst : input) {
         auto sst_level = sst->get_sstable_level();
         if (sst_level > leveled_manifest::MAX_LEVELS - 1) {
             leveled_manifest::logger.warn("Found SSTable with level {}, higher than the maximum {}. This is unexpected, but will fix", sst_level, leveled_manifest::MAX_LEVELS - 1);
 
             // This is really unexpected, so we'll just compact it all to fix it
-            compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, leveled_manifest::MAX_LEVELS - 1, _max_sstable_size_in_mb * 1024 * 1024);
+            compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, leveled_manifest::MAX_LEVELS - 1, max_sstable_size_in_bytes);
             desc.options = compaction_options::make_reshape();
             return desc;
         }
@@ -158,7 +160,7 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
     }
 
     // Can't use std::ranges::views::drop due to https://bugs.llvm.org/show_bug.cgi?id=47509
-    for (auto i = level_info.begin() + 1; i != level_info.end(); ++i) {
+    for (auto i = level_info.begin(); i != level_info.end(); ++i) {
         auto& level = *i;
         std::sort(level.begin(), level.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
             return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
@@ -177,11 +179,27 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
         return std::max(double(fan_out), std::ceil(std::pow(fan_out, level) * 0.1));
     };
 
-    if (level_info[0].size() > offstrategy_threshold) {
-        level_info[0].resize(std::min(level_info[0].size(), max_sstables));
-        compaction_descriptor desc(std::move(level_info[0]), std::optional<sstables::sstable_set>(), iop);
+    // If there's only disjoint L0 sstables like on bootstrap, let's compact them all into a level L which has capacity to store the output.
+    // The best possible level can be calculated with the formula: log (base fan_out) of (L0_total_bytes / max_sstable_size)
+    auto [l0_disjoint, _] = is_disjoint(level_info[0], 0);
+    if (mode == reshape_mode::strict && level_info[0].size() == input.size() && l0_disjoint) {
+        auto log_fanout = [fanout = leveled_manifest::leveled_fan_out] (double x) {
+            double inv_log_fanout = 1.0f / std::log(fanout);
+            return log(x) * inv_log_fanout;
+        };
+
+        auto total_bytes = std::max(leveled_manifest::get_total_bytes(level_info[0]), uint64_t(max_sstable_size_in_bytes));
+        unsigned ideal_level = std::ceil(log_fanout(total_bytes / max_sstable_size_in_bytes));
+
+        leveled_manifest::logger.info("Reshaping {} disjoint sstables in level 0 into level {}", level_info[0].size(), ideal_level);
+        compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, ideal_level, max_sstable_size_in_bytes);
         desc.options = compaction_options::make_reshape();
         return desc;
+    }
+
+    if (level_info[0].size() > offstrategy_threshold) {
+        size_tiered_compaction_strategy stcs(_stcs_options);
+        return stcs.get_reshaping_job(std::move(level_info[0]), schema, iop, mode);
     }
 
     for (unsigned level = leveled_manifest::MAX_LEVELS - 1; level > 0; --level) {
@@ -194,7 +212,7 @@ leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input
         if (!disjoint) {
             leveled_manifest::logger.warn("Turns out that level {} is not disjoint, found {} overlapping SSTables, so compacting everything on behalf of {}.{}", level, overlapping_sstables, schema->ks_name(), schema->cf_name());
             // Unfortunately no good limit to limit input size to max_sstables for LCS major
-            compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, max_filled_level, _max_sstable_size_in_mb * 1024 * 1024);
+            compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop, max_filled_level, max_sstable_size_in_bytes);
             desc.options = compaction_options::make_reshape();
             return desc;
         }

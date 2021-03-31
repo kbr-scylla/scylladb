@@ -193,6 +193,7 @@ class thrift_handler : public CassandraCobSvIf {
     ::timeout_config _timeout_config;
     service::client_state _client_state;
     service::query_state _query_state;
+    service_permit& _current_permit;
 private:
     template <typename Cob, typename Func>
     void
@@ -206,12 +207,16 @@ private:
         });
     }
 public:
-    explicit thrift_handler(distributed<database>& db, distributed<cql3::query_processor>& qp, auth::service& auth_service, ::timeout_config timeout_config)
+    explicit thrift_handler(distributed<database>& db, distributed<cql3::query_processor>& qp, auth::service& auth_service, ::timeout_config timeout_config, service_permit& current_permit)
         : _db(db)
         , _query_processor(qp)
         , _timeout_config(timeout_config)
         , _client_state(service::client_state::external_tag{}, auth_service, _timeout_config, socket_address(), true)
+        // FIXME: Handlers are not created per query, but rather per connection, so it makes little sense to store
+        // service permits in here. The query state should be reinstantiated per query - AFAIK it's only used
+        // for CQL queries which piggy-back on Thrift protocol.
         , _query_state(_client_state, /*FIXME: pass real permit*/empty_service_permit())
+        , _current_permit(current_permit)
     { }
 
     const sstring& current_keyspace() const {
@@ -223,6 +228,7 @@ public:
     };
 
     void login(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const AuthenticationRequest& auth_request) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auth::authenticator::credentials_map creds(auth_request.credentials.begin(), auth_request.credentials.end());
             auto& auth_service = *_query_state.get_client_state().get_auth_service();
@@ -241,12 +247,14 @@ public:
     }
 
     void set_keyspace(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& keyspace) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             _query_state.get_client_state().set_keyspace(_db.local(), keyspace);
         });
     }
 
     void get(thrift_fn::function<void(ColumnOrSuperColumn const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnPath& column_path, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         return get_slice([cob = std::move(cob), &column_path](auto&& results) {
             if (results.empty()) {
                 throw NotFoundException();
@@ -256,6 +264,7 @@ public:
     }
 
     void get_slice(thrift_fn::function<void(std::vector<ColumnOrSuperColumn>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnParent& column_parent, const SlicePredicate& predicate, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         return multiget_slice([cob = std::move(cob)](auto&& results) {
             if (!results.empty()) {
                 return cob(std::move(results.begin()->second));
@@ -265,6 +274,7 @@ public:
     }
 
     void get_count(thrift_fn::function<void(int32_t const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnParent& column_parent, const SlicePredicate& predicate, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         return multiget_count([cob = std::move(cob)](auto&& results) {
             if (!results.empty()) {
                 return cob(results.begin()->second);
@@ -274,6 +284,7 @@ public:
     }
 
     void multiget_slice(thrift_fn::function<void(std::map<std::string, std::vector<ColumnOrSuperColumn> >  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::vector<std::string> & keys, const ColumnParent& column_parent, const SlicePredicate& predicate, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_parent.column_family, [&](schema_ptr schema) {
             if (!column_parent.super_column.empty()) {
                 fail(unimplemented::cause::SUPER);
@@ -283,9 +294,9 @@ public:
             auto cell_limit = predicate.__isset.slice_range ? static_cast<uint32_t>(predicate.slice_range.count) : std::numeric_limits<uint32_t>::max();
             auto pranges = make_partition_ranges(*schema, keys);
             auto f = _query_state.get_client_state().has_schema_access(*schema, auth::permission::SELECT);
-            return f.then([this, &proxy, schema, cmd, pranges = std::move(pranges), cell_limit, consistency_level, keys]() mutable {
+            return f.then([this, &proxy, schema, cmd, pranges = std::move(pranges), cell_limit, consistency_level, keys, permit = std::move(permit)]() mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.read_timeout;
-                return proxy.query(schema, cmd, std::move(pranges), cl_from_thrift(consistency_level), {timeout, empty_service_permit(), _query_state.get_client_state()}).then(
+                return proxy.query(schema, cmd, std::move(pranges), cl_from_thrift(consistency_level), {timeout, std::move(permit), _query_state.get_client_state()}).then(
                         [schema, cmd, cell_limit, keys = std::move(keys)](service::storage_proxy::coordinator_query_result qr) {
                     return query::result_view::do_with(*qr.query_result, [schema, cmd, cell_limit, keys = std::move(keys)](query::result_view v) mutable {
                         if (schema->is_counter()) {
@@ -303,6 +314,7 @@ public:
     }
 
     void multiget_count(thrift_fn::function<void(std::map<std::string, int32_t>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::vector<std::string> & keys, const ColumnParent& column_parent, const SlicePredicate& predicate, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_parent.column_family, [&](schema_ptr schema) {
             if (!column_parent.super_column.empty()) {
                 fail(unimplemented::cause::SUPER);
@@ -312,9 +324,9 @@ public:
             auto cell_limit = predicate.__isset.slice_range ? static_cast<uint32_t>(predicate.slice_range.count) : std::numeric_limits<uint32_t>::max();
             auto pranges = make_partition_ranges(*schema, keys);
             auto f = _query_state.get_client_state().has_schema_access(*schema, auth::permission::SELECT);
-            return f.then([this, &proxy, schema, cmd, pranges = std::move(pranges), cell_limit, consistency_level, keys]() mutable {
+            return f.then([this, &proxy, schema, cmd, pranges = std::move(pranges), cell_limit, consistency_level, keys, permit = std::move(permit)]() mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.read_timeout;
-                return proxy.query(schema, cmd, std::move(pranges), cl_from_thrift(consistency_level), {timeout, empty_service_permit(), _query_state.get_client_state()}).then(
+                return proxy.query(schema, cmd, std::move(pranges), cl_from_thrift(consistency_level), {timeout, std::move(permit), _query_state.get_client_state()}).then(
                         [schema, cmd, cell_limit, keys = std::move(keys)](service::storage_proxy::coordinator_query_result qr) {
                     return query::result_view::do_with(*qr.query_result, [schema, cmd, cell_limit, keys = std::move(keys)](query::result_view v) mutable {
                         column_counter counter(*schema, cmd->slice, cell_limit, std::move(keys));
@@ -333,6 +345,7 @@ public:
      * now our behavior differs from Origin.
      */
     void get_range_slices(thrift_fn::function<void(std::vector<KeySlice>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const ColumnParent& column_parent, const SlicePredicate& predicate, const KeyRange& range, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_parent.column_family, [&](schema_ptr schema) {
             if (!column_parent.super_column.empty()) {
                 fail(unimplemented::cause::SUPER);
@@ -350,9 +363,9 @@ public:
                 cmd->set_row_limit(static_cast<uint64_t>(range.count));
             }
             auto f = _query_state.get_client_state().has_schema_access(*schema, auth::permission::SELECT);
-            return f.then([this, &proxy, schema, cmd, prange = std::move(prange), consistency_level] () mutable {
+            return f.then([this, &proxy, schema, cmd, prange = std::move(prange), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.range_read_timeout;
-                return proxy.query(schema, cmd, std::move(prange), cl_from_thrift(consistency_level), {timeout, empty_service_permit(), _query_state.get_client_state()}).then(
+                return proxy.query(schema, cmd, std::move(prange), cl_from_thrift(consistency_level), {timeout, std::move(permit), _query_state.get_client_state()}).then(
                         [schema, cmd](service::storage_proxy::coordinator_query_result qr) {
                     return query::result_view::do_with(*qr.query_result, [schema, cmd](query::result_view v) {
                         return to_key_slices(*schema, cmd->slice, v, std::numeric_limits<uint32_t>::max());
@@ -406,7 +419,8 @@ public:
             db::consistency_level consistency_level,
             const ::timeout_config& timeout_config,
             std::vector<KeySlice>& output,
-            service::query_state& qs) {
+            service::query_state& qs,
+            service_permit permit) {
         auto& proxy = service::get_local_storage_proxy();
         auto cmd = make_paged_read_cmd(proxy, *schema, column_limit, start_column, range);
         std::optional<partition_key> start_key;
@@ -419,12 +433,12 @@ public:
         }
         auto range1 = range; // query() below accepts an rvalue, so need a copy to reuse later
         auto timeout = db::timeout_clock::now() + timeout_config.range_read_timeout;
-        return proxy.query(schema, cmd, std::move(range), consistency_level, {timeout, empty_service_permit(), qs.get_client_state()}).then(
+        return proxy.query(schema, cmd, std::move(range), consistency_level, {timeout, std::move(permit), qs.get_client_state()}).then(
                 [schema, cmd, column_limit](service::storage_proxy::coordinator_query_result qr) {
             return query::result_view::do_with(*qr.query_result, [schema, cmd, column_limit](query::result_view v) {
                 return to_key_slices(*schema, cmd->slice, v, column_limit);
             });
-        }).then([schema, cmd, column_limit, range = std::move(range1), consistency_level, start_key = std::move(start_key), end = std::move(end), &timeout_config, &output, &qs](auto&& slices) mutable {
+        }).then([schema, cmd, column_limit, range = std::move(range1), consistency_level, start_key = std::move(start_key), end = std::move(end), &timeout_config, &output, &qs, permit = std::move(permit)](auto&& slices) mutable {
             auto columns = std::accumulate(slices.begin(), slices.end(), 0u, [](auto&& acc, auto&& ks) {
                 return acc + ks.columns.size();
             });
@@ -433,7 +447,7 @@ public:
                 if (!output.empty() || !start_key) {
                     if (range.size() > 1 && columns < column_limit) {
                         range.erase(range.begin());
-                        return do_get_paged_slice(std::move(schema), column_limit - columns, std::move(range), nullptr, consistency_level, timeout_config, output, qs);
+                        return do_get_paged_slice(std::move(schema), column_limit - columns, std::move(range), nullptr, consistency_level, timeout_config, output, qs, std::move(permit));
                     }
                     return make_ready_future();
                 }
@@ -443,11 +457,12 @@ public:
             }
             auto start = dht::decorate_key(*schema, std::move(*start_key));
             range[0] = dht::partition_range(dht::partition_range::bound(std::move(start), false), std::move(end));
-            return do_get_paged_slice(schema, column_limit - columns, std::move(range), nullptr, consistency_level, timeout_config, output, qs);
+            return do_get_paged_slice(schema, column_limit - columns, std::move(range), nullptr, consistency_level, timeout_config, output, qs, std::move(permit));
         });
     }
 
     void get_paged_slice(thrift_fn::function<void(std::vector<KeySlice> const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& column_family, const KeyRange& range, const std::string& start_column, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_family, [&](schema_ptr schema) {
             return do_with(std::vector<KeySlice>(), [&](auto& output) {
                 if (range.__isset.row_filter) {
@@ -465,9 +480,9 @@ public:
                     }
                 }
                 auto f = _query_state.get_client_state().has_schema_access(*schema, auth::permission::SELECT);
-                return f.then([this, schema, count = range.count, start_column, prange = std::move(prange), consistency_level, &output] () mutable {
+                return f.then([this, schema, count = range.count, start_column, prange = std::move(prange), consistency_level, &output, permit = std::move(permit)] () mutable {
                     return do_get_paged_slice(std::move(schema), count, std::move(prange), &start_column,
-                            cl_from_thrift(consistency_level), _timeout_config, output, _query_state).then([&output] {
+                            cl_from_thrift(consistency_level), _timeout_config, output, _query_state, std::move(permit)).then([&output] {
                         return std::move(output);
                     });
                 });
@@ -476,6 +491,7 @@ public:
     }
 
     void get_indexed_slices(thrift_fn::function<void(std::vector<KeySlice>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const ColumnParent& column_parent, const IndexClause& index_clause, const SlicePredicate& column_predicate, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         std::vector<KeySlice>  _return;
         warn(unimplemented::cause::INDEXES);
         // FIXME: implement
@@ -483,6 +499,7 @@ public:
     }
 
     void insert(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnParent& column_parent, const Column& column, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_parent.column_family, [&](schema_ptr schema) {
             if (column_parent.__isset.super_column) {
                 fail(unimplemented::cause::SUPER);
@@ -494,14 +511,15 @@ public:
 
             mutation m_to_apply(schema, key_from_thrift(*schema, to_bytes_view(key)));
             add_to_mutation(*schema, column, m_to_apply);
-            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level] {
+            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.write_timeout;
-                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void add(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnParent& column_parent, const CounterColumn& column, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_parent.column_family, [&](schema_ptr schema) {
             if (column_parent.__isset.super_column) {
                 fail(unimplemented::cause::SUPER);
@@ -509,14 +527,15 @@ public:
 
             mutation m_to_apply(schema, key_from_thrift(*schema, to_bytes_view(key)));
             add_to_mutation(*schema, column, m_to_apply);
-            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level] {
+            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.write_timeout;
-                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void cas(thrift_fn::function<void(CASResult const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const std::string& column_family, const std::vector<Column> & expected, const std::vector<Column> & updates, const ConsistencyLevel::type serial_consistency_level, const ConsistencyLevel::type commit_consistency_level) {
+        service_permit permit = obtain_permit();
         CASResult _return;
         warn(unimplemented::cause::LWT);
         // FIXME: implement
@@ -524,6 +543,7 @@ public:
     }
 
     void remove(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnPath& column_path, const int64_t timestamp, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_path.column_family, [&](schema_ptr schema) {
             if (schema->is_view()) {
                 throw make_exception<InvalidRequestException>("Cannot modify Materialized Views directly");
@@ -544,14 +564,15 @@ public:
                 m_to_apply.partition().apply(tombstone(timestamp, gc_clock::now()));
             }
 
-            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level] {
+            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.write_timeout;
-                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void remove_counter(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnPath& column_path, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), column_path.column_family, [&](schema_ptr schema) {
             mutation m_to_apply(schema, key_from_thrift(*schema, to_bytes_view(key)));
 
@@ -569,39 +590,42 @@ public:
                 m_to_apply.partition().apply(tombstone(timestamp, gc_clock::now()));
             }
 
-            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level] {
+            return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY).then([this, m_to_apply = std::move(m_to_apply), consistency_level, permit = std::move(permit)] () mutable {
                 // This mutation contains only counter tombstones so it can be applied like non-counter mutations.
                 auto timeout = db::timeout_clock::now() + _timeout_config.counter_write_timeout;
-                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate({std::move(m_to_apply)}, cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void batch_mutate(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::map<std::string, std::map<std::string, std::vector<Mutation> > > & mutation_map, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auto p = prepare_mutations(_db.local(), current_keyspace(), mutation_map);
             return parallel_for_each(std::move(p.second), [this](auto&& schema) {
                 return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY);
-            }).then([this, muts = std::move(p.first), consistency_level] {
+            }).then([this, muts = std::move(p.first), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.write_timeout;
-                return service::get_local_storage_proxy().mutate(std::move(muts), cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate(std::move(muts), cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void atomic_batch_mutate(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::map<std::string, std::map<std::string, std::vector<Mutation> > > & mutation_map, const ConsistencyLevel::type consistency_level) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auto p = prepare_mutations(_db.local(), current_keyspace(), mutation_map);
             return parallel_for_each(std::move(p.second), [this](auto&& schema) {
                 return _query_state.get_client_state().has_schema_access(*schema, auth::permission::MODIFY);
-            }).then([this, muts = std::move(p.first), consistency_level] {
+            }).then([this, muts = std::move(p.first), consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.write_timeout;
-                return service::get_local_storage_proxy().mutate_atomically(std::move(muts), cl_from_thrift(consistency_level), timeout, nullptr, /*FIXME: pass real permit*/empty_service_permit());
+                return service::get_local_storage_proxy().mutate_atomically(std::move(muts), cl_from_thrift(consistency_level), timeout, nullptr, std::move(permit));
             });
         });
     }
 
     void truncate(thrift_fn::function<void()> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& cfname) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             if (current_keyspace().empty()) {
                 throw make_exception<InvalidRequestException>("keyspace not set");
@@ -617,6 +641,7 @@ public:
     }
 
     void get_multi_slice(thrift_fn::function<void(std::vector<ColumnOrSuperColumn>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const MultiSliceRequest& request) {
+        service_permit permit = obtain_permit();
         with_schema(std::move(cob), std::move(exn_cob), request.column_parent.column_family, [&](schema_ptr schema) {
             if (!request.__isset.key) {
                 throw make_exception<InvalidRequestException>("Key may not be empty");
@@ -670,9 +695,9 @@ public:
             auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.get_max_result_size(slice),
                     query::row_limit(row_limit));
             auto f = _query_state.get_client_state().has_schema_access(*schema, auth::permission::SELECT);
-            return f.then([this, &proxy, dk = std::move(dk), cmd, schema, column_limit = request.count, cl = request.consistency_level] {
+            return f.then([this, &proxy, dk = std::move(dk), cmd, schema, column_limit = request.count, cl = request.consistency_level, permit = std::move(permit)] () mutable {
                 auto timeout = db::timeout_clock::now() + _timeout_config.read_timeout;
-                return proxy.query(schema, cmd, {dht::partition_range::make_singular(dk)}, cl_from_thrift(cl), {timeout, /* FIXME: pass real permit */empty_service_permit(), _query_state.get_client_state()}).then(
+                return proxy.query(schema, cmd, {dht::partition_range::make_singular(dk)}, cl_from_thrift(cl), {timeout, std::move(permit), _query_state.get_client_state()}).then(
                         [schema, cmd, column_limit](service::storage_proxy::coordinator_query_result qr) {
                     return query::result_view::do_with(*qr.query_result, [schema, cmd, column_limit](query::result_view v) {
                         column_aggregator<query_order::no> aggregator(*schema, cmd->slice, column_limit, { });
@@ -686,6 +711,7 @@ public:
     }
 
     void describe_schema_versions(thrift_fn::function<void(std::map<std::string, std::vector<std::string> >  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [] {
             return service::get_local_storage_service().describe_schema_versions().then([](auto&& m) {
                 std::map<std::string, std::vector<std::string>> ret;
@@ -698,6 +724,7 @@ public:
     }
 
     void describe_keyspaces(thrift_fn::function<void(std::vector<KsDef>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             validate_login();
             std::vector<KsDef>  ret;
@@ -709,14 +736,17 @@ public:
     }
 
     void describe_cluster_name(thrift_fn::function<void(std::string const& _return)> cob) {
+        service_permit permit = obtain_permit();
         cob(_db.local().get_config().cluster_name());
     }
 
     void describe_version(thrift_fn::function<void(std::string const& _return)> cob) {
+        service_permit permit = obtain_permit();
         cob(::cassandra::thrift_version);
     }
 
     void do_describe_ring(thrift_fn::function<void(std::vector<TokenRange>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& keyspace, bool local) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auto& ks = _db.local().find_keyspace(keyspace);
             if (ks.get_replication_strategy().get_type() == locator::replication_strategy_type::local) {
@@ -756,6 +786,7 @@ public:
     }
 
     void describe_token_map(thrift_fn::function<void(std::map<std::string, std::string>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [] {
             auto m = service::get_local_storage_service().get_token_to_endpoint_map();
             std::map<std::string, std::string> ret;
@@ -767,14 +798,17 @@ public:
     }
 
     void describe_partitioner(thrift_fn::function<void(std::string const& _return)> cob) {
+        service_permit permit = obtain_permit();
         cob(_db.local().get_config().partitioner());
     }
 
     void describe_snitch(thrift_fn::function<void(std::string const& _return)> cob) {
+        service_permit permit = obtain_permit();
         cob(format("org.apache.cassandra.locator.{}", _db.local().get_snitch_name()));
     }
 
     void describe_keyspace(thrift_fn::function<void(KsDef const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& keyspace) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             validate_login();
             auto& ks = _db.local().find_keyspace(keyspace);
@@ -783,6 +817,7 @@ public:
     }
 
     void describe_splits(thrift_fn::function<void(std::vector<std::string>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& cfName, const std::string& start_token, const std::string& end_token, const int32_t keys_per_split) {
+        service_permit permit = obtain_permit();
         return describe_splits_ex([cob = std::move(cob)](auto&& results) {
             std::vector<std::string> res;
             res.reserve(results.size() + 1);
@@ -795,12 +830,14 @@ public:
     }
 
     void trace_next_query(thrift_fn::function<void(std::string const& _return)> cob) {
+        service_permit permit = obtain_permit();
         std::string _return;
         // FIXME: implement
         return cob("dummy trace");
     }
 
     void describe_splits_ex(thrift_fn::function<void(std::vector<CfSplit>  const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& cfName, const std::string& start_token, const std::string& end_token, const int32_t keys_per_split) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&]{
             dht::token_range_vector ranges;
             auto tstart = start_token.empty() ? dht::minimum_token() : dht::token::from_sstring(sstring(start_token));
@@ -824,6 +861,7 @@ public:
     }
 
     void system_add_column_family(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const CfDef& cf_def) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             if (!_db.local().has_keyspace(cf_def.keyspace)) {
                 throw NotFoundException();
@@ -841,6 +879,7 @@ public:
         });
     }
     void system_drop_column_family(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& column_family) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             return _query_state.get_client_state().has_column_family_access(_db.local(), current_keyspace(), column_family, auth::permission::DROP).then([this, column_family] {
                 auto& cf = _db.local().find_column_family(current_keyspace(), column_family);
@@ -858,6 +897,7 @@ public:
     }
 
     void system_add_keyspace(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const KsDef& ks_def) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auto ksm = keyspace_from_thrift(ks_def);
             return _query_state.get_client_state().has_all_keyspaces_access(auth::permission::CREATE).then([this, ksm = std::move(ksm)] {
@@ -869,6 +909,7 @@ public:
     }
 
     void system_drop_keyspace(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& keyspace) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             thrift_validation::validate_keyspace_not_system(keyspace);
             if (!_db.local().has_keyspace(keyspace)) {
@@ -884,6 +925,7 @@ public:
     }
 
     void system_update_keyspace(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const KsDef& ks_def) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             thrift_validation::validate_keyspace_not_system(ks_def.name);
 
@@ -904,6 +946,7 @@ public:
     }
 
     void system_update_column_family(thrift_fn::function<void(std::string const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const CfDef& cf_def) {
+        service_permit permit = obtain_permit();
         with_cob(std::move(cob), std::move(exn_cob), [&] {
             auto& cf = _db.local().find_column_family(cf_def.keyspace, cf_def.name);
             auto schema = cf.schema();
@@ -1962,6 +2005,10 @@ private:
         }
         return {std::move(muts), std::move(schemas)};
     }
+protected:
+    service_permit obtain_permit() {
+        return std::move(_current_permit);
+    }
 };
 
 class handler_factory : public CassandraCobSvIfFactory {
@@ -1969,15 +2016,17 @@ class handler_factory : public CassandraCobSvIfFactory {
     distributed<cql3::query_processor>& _query_processor;
     auth::service& _auth_service;
     timeout_config _timeout_config;
+    service_permit& _current_permit;
 public:
     explicit handler_factory(distributed<database>& db,
                              distributed<cql3::query_processor>& qp,
                              auth::service& auth_service,
-                             ::timeout_config timeout_config)
-        : _db(db), _query_processor(qp), _auth_service(auth_service), _timeout_config(timeout_config) {}
+                             ::timeout_config timeout_config,
+                             service_permit& current_permit)
+        : _db(db), _query_processor(qp), _auth_service(auth_service), _timeout_config(timeout_config), _current_permit(current_permit) {}
     typedef CassandraCobSvIf Handler;
     virtual CassandraCobSvIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) {
-        return new thrift_handler(_db, _query_processor, _auth_service, _timeout_config);
+        return new thrift_handler(_db, _query_processor, _auth_service, _timeout_config, _current_permit);
     }
     virtual void releaseHandler(CassandraCobSvIf* handler) {
         delete handler;
@@ -1986,6 +2035,6 @@ public:
 
 std::unique_ptr<CassandraCobSvIfFactory>
 create_handler_factory(distributed<database>& db, distributed<cql3::query_processor>& qp, auth::service& auth_service,
-        ::timeout_config timeout_config) {
-    return std::make_unique<handler_factory>(db, qp, auth_service, timeout_config);
+        ::timeout_config timeout_config, service_permit& current_permit) {
+    return std::make_unique<handler_factory>(db, qp, auth_service, timeout_config, current_permit);
 }

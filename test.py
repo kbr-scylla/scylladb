@@ -327,7 +327,7 @@ Returns (fn, txt) where fn is a cleanup function to call unconditionally after t
 
 
 class UnitTest(Test):
-    standard_args = shlex.split("--overprovisioned --unsafe-bypass-fsync 1 --blocked-reactor-notify-ms 2000000 --collectd 0")
+    standard_args = shlex.split("--overprovisioned --unsafe-bypass-fsync 1 --kernel-page-cache 1 --blocked-reactor-notify-ms 2000000 --collectd 0")
 
     def __init__(self, test_no, shortname, args, suite, mode, options):
         super().__init__(test_no, shortname, suite, mode, options)
@@ -700,7 +700,7 @@ def parse_cmd_line():
     """ Print usage and process command line options. """
     all_modes = ['debug', 'release', 'dev', 'sanitize']
     sysmem = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
-    testmem = 6e9
+    testmem = 6e9 if os.sysconf('SC_PAGE_SIZE') > 4096 else 2e9
     cpus_per_test_job = 1
     default_num_jobs_mem = ((sysmem - 4e9) // testmem)
     default_num_jobs_cpu = multiprocessing.cpu_count() // cpus_per_test_job

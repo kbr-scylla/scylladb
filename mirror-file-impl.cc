@@ -130,10 +130,13 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, 
                 if (primary_size != secondary_size) {
                     throw std::runtime_error(sprint("inconsistency between on disk and memory file sizes (%d != %d)", primary_size, secondary_size));
                 }
+                auto to_compare = primary_size;
                 for (size_t i = 0; i < iov.size(); i++) {
-                    if (std::memcmp(iov[i].iov_base, vb[i].get(), iov[i].iov_len)) {
+                    auto compare_now = std::min(to_compare, iov[i].iov_len);
+                    if (std::memcmp(iov[i].iov_base, vb[i].get(), compare_now)) {
                         throw std::runtime_error("inconsistency between on disk and memory file data");
                     }
+                    to_compare -= compare_now;
                 }
                 return primary_size;
             });

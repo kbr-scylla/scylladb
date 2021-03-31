@@ -28,11 +28,12 @@
 //   T val2 = traits::unwrap(f.get0());
 //
 
-template<typename T, typename Enable = void>
+template<typename T>
 struct noexcept_movable;
 
 template<typename T>
-struct noexcept_movable<T, std::enable_if_t<std::is_nothrow_move_constructible<T>::value>> {
+requires std::is_nothrow_move_constructible_v<T>
+struct noexcept_movable<T> {
     using type = T;
 
     static type wrap(T&& v) {
@@ -53,7 +54,8 @@ struct noexcept_movable<T, std::enable_if_t<std::is_nothrow_move_constructible<T
 };
 
 template<typename T>
-struct noexcept_movable<T, std::enable_if_t<!std::is_nothrow_move_constructible<T>::value>> {
+requires (!std::is_nothrow_move_constructible_v<T>)
+struct noexcept_movable<T> {
     using type = std::unique_ptr<T>;
 
     static type wrap(T&& v) {

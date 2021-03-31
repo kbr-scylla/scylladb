@@ -35,6 +35,17 @@ struct fsm_output {
     // Entries to apply.
     std::vector<log_entry_ptr> committed;
     std::optional<snapshot> snp;
+    // Latest configuration obtained from the log in case it has changed
+    // since last fsm output poll.
+    std::optional<server_address_set> rpc_configuration;
+
+    // True if there is no new output
+    bool empty() const {
+        return !term_and_vote.has_value() &&
+            log_entries.size() == 0 && messages.size() == 0 &&
+            committed.size() == 0 && !snp.has_value() &&
+            !rpc_configuration.has_value();
+    }
 };
 
 struct fsm_config {
@@ -160,10 +171,14 @@ class fsm {
         server_id _voted_for;
         index_t _commit_idx;
         snapshot _snapshot;
+        index_t _last_conf_idx;
+        term_t _last_term;
 
         bool is_equal(const fsm& fsm) const {
             return _current_term == fsm._current_term && _voted_for == fsm._voted_for &&
-                _commit_idx == fsm._commit_idx && _snapshot.id == fsm._log.get_snapshot().id;
+                _commit_idx == fsm._commit_idx && _snapshot.id == fsm._log.get_snapshot().id &&
+                _last_conf_idx == fsm._log.last_conf_idx() &&
+                _last_term == fsm._log.last_term();
         }
 
         void advance(const fsm& fsm) {
@@ -171,6 +186,8 @@ class fsm {
             _voted_for = fsm._voted_for;
             _commit_idx = fsm._commit_idx;
             _snapshot = fsm._log.get_snapshot();
+            _last_conf_idx = fsm._log.last_conf_idx();
+            _last_term = fsm._log.last_term();
         }
     } _observed;
 
@@ -231,8 +248,6 @@ private:
 
     void become_candidate(bool is_prevote, bool is_leadership_transfer = false);
 
-    void become_follower(server_id leader);
-
     // Controls whether the follower has been responsive recently,
     // so it makes sense to send more data to it.
     bool can_send_to(const follower_progress& progress);
@@ -270,12 +285,19 @@ private:
 
     void send_timeout_now(server_id);
 protected: // For testing
+
+    void become_follower(server_id leader);
+
     leader& leader_state() {
         return std::get<leader>(_state);
     }
 
     const leader& leader_state() const {
         return std::get<leader>(_state);
+    }
+
+    log& get_log() {
+        return _log;
     }
 
 public:
@@ -334,6 +356,13 @@ public:
     template <typename Message>
     void step(server_id from, Message&& msg);
 
+    template <typename Message>
+    void step(server_id from, const leader& s, Message&& msg);
+    template <typename Message>
+    void step(server_id from, const candidate& s, Message&& msg);
+    template <typename Message>
+    void step(server_id from, const follower& s, Message&& msg);
+
     // This function can be called on a leader only.
     // When called it makes the leader to stop accepting
     // new requests and waits for one of the voting followers
@@ -371,9 +400,57 @@ public:
         return _log.in_memory_size();
     };
 
+    server_id id() const { return _my_id; }
+
     friend std::ostream& operator<<(std::ostream& os, const fsm& f);
 };
 
+template <typename Message>
+void fsm::step(server_id from, const leader& s, Message&& msg) {
+    if constexpr (std::is_same_v<Message, append_request>) {
+        // Got AppendEntries RPC from self
+        append_entries(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, append_reply>) {
+        append_entries_reply(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, vote_request>) {
+        request_vote(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+        send_to(from, snapshot_reply{.current_term = _current_term,
+                     .success = false });
+    } else if constexpr (std::is_same_v<Message, snapshot_reply>) {
+        install_snapshot_reply(from, std::move(msg));
+    }
+}
+
+template <typename Message>
+void fsm::step(server_id from, const candidate& c, Message&& msg) {
+    if constexpr (std::is_same_v<Message, vote_request>) {
+        request_vote(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, vote_reply>) {
+        request_vote_reply(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+        send_to(from, snapshot_reply{.current_term = _current_term,
+                     .success = false });
+    }
+}
+
+template <typename Message>
+void fsm::step(server_id from, const follower& c, Message&& msg) {
+    if constexpr (std::is_same_v<Message, append_request>) {
+        // Got AppendEntries RPC from self
+        append_entries(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, vote_request>) {
+        request_vote(from, std::move(msg));
+    } else if constexpr (std::is_same_v<Message, install_snapshot>) {
+        send_to(from, snapshot_reply{.current_term = _current_term,
+                    .success = apply_snapshot(std::move(msg.snp), 0)});
+    } else if constexpr (std::is_same_v<Message, timeout_now>) {
+        // Leadership transfers never use pre-vote; we know we are not
+        // recovering from a partition so there is no need for the
+        // extra round trip.
+        become_candidate(false, true);
+    }
+}
 
 template <typename Message>
 void fsm::step(server_id from, Message&& msg) {
@@ -476,46 +553,7 @@ void fsm::step(server_id from, Message&& msg) {
     }
 
     auto visitor = [this, from, msg = std::move(msg)](const auto& state) mutable {
-        using State = std::remove_cvref_t<decltype(state)>;
-
-        if constexpr (std::is_same_v<Message, append_request>) {
-            // Got AppendEntries RPC from self
-            append_entries(from, std::move(msg));
-        } else if constexpr (std::is_same_v<Message, append_reply>) {
-            if constexpr (!std::is_same_v<State, leader>) {
-                // Ignore stray reply if we're not a leader.
-                return;
-            }
-            append_entries_reply(from, std::move(msg));
-        } else if constexpr (std::is_same_v<Message, vote_request>) {
-            request_vote(from, std::move(msg));
-        } else if constexpr (std::is_same_v<Message, vote_reply>) {
-            if constexpr (!std::is_same_v<State, candidate>) {
-                // Ignore stray reply if we're not a candidate.
-                return;
-            }
-            request_vote_reply(from, std::move(msg));
-        } else if constexpr (std::is_same_v<Message, install_snapshot>) {
-            bool success = false;
-            if constexpr (std::is_same_v<State, follower>) {
-                // snapshot can be installed only in follower
-                success = apply_snapshot(std::move(msg.snp), 0);
-            }
-            send_to(from, snapshot_reply{.current_term = _current_term,
-                    .success = success});
-        } else if constexpr (std::is_same_v<Message, snapshot_reply>) {
-            if constexpr (std::is_same_v<State, leader>) {
-                // Switch the follower to log transfer mode.
-                install_snapshot_reply(from, std::move(msg));
-            }
-        } else if constexpr (std::is_same_v<Message, timeout_now>) {
-            if constexpr (std::is_same_v<State, follower>) {
-                // Leadership transfers never use pre-vote; we know we are not
-                // recovering from a partition so there is no need for the
-                // extra round trip.
-                become_candidate(false, true);
-            }
-        }
+        step(from, state, std::move(msg));
     };
 
     std::visit(visitor, _state);

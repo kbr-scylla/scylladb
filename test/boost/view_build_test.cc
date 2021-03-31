@@ -699,6 +699,7 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
         const size_t _max_rows_soft;
         const size_t _max_rows_hard;
         size_t _buffer_rows = 0;
+        bool& _ok;
 
     private:
         static size_t rows_in_limit(size_t l) {
@@ -758,9 +759,9 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
         }
 
     public:
-        consumer_verifier(schema_ptr schema, reader_permit permit, const partition_size_map& partition_rows, std::vector<mutation>& collected_muts)
+        consumer_verifier(schema_ptr schema, reader_concurrency_semaphore& sem, const partition_size_map& partition_rows, std::vector<mutation>& collected_muts, bool& ok)
             : _schema(std::move(schema))
-            , _permit(std::move(permit))
+            , _permit(sem.make_permit(_schema.get(), "consumer_verifier"))
             , _partition_rows(partition_rows)
             , _collected_muts(collected_muts)
             , _rl(std::make_unique<row_locker>(_schema))
@@ -768,13 +769,14 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
             , _less_cmp(*_schema)
             , _max_rows_soft(rows_in_limit(db::view::view_updating_consumer::buffer_size_soft_limit))
             , _max_rows_hard(rows_in_limit(db::view::view_updating_consumer::buffer_size_hard_limit))
+            , _ok(ok)
         { }
 
         future<row_locker::lock_holder> operator()(mutation mut) {
             try {
                 check(std::move(mut));
             } catch (...) {
-                //testlog.error("consumer_verifier::operator(): caught unexpected exception {}", std::current_exception());
+                _ok = false;
                 BOOST_FAIL(fmt::format("consumer_verifier::operator(): caught unexpected exception {}", std::current_exception()));
             }
             return _rl->lock_pk(_collected_muts.back().decorated_key(), true, db::no_timeout, *_rl_stats);
@@ -846,9 +848,12 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_buffering) {
                 ::mutation_reader::forwarding::no);
 
         std::vector<mutation> collected_muts;
+        bool ok = true;
 
         staging_reader.consume_in_thread(db::view::view_updating_consumer(schema, permit, as, staging_reader_handle,
-                    consumer_verifier(schema, permit, partition_rows, collected_muts)), db::no_timeout);
+                    consumer_verifier(schema, sem, partition_rows, collected_muts, ok)), db::no_timeout);
+
+        BOOST_REQUIRE(ok);
 
         BOOST_REQUIRE_EQUAL(muts.size(), collected_muts.size());
         for (size_t i = 0; i < muts.size(); ++i) {
