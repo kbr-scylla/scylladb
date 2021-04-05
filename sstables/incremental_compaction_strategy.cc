@@ -140,21 +140,14 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
 
     auto buckets = get_buckets(cf.get_sstable_set().select_sstable_runs(candidates));
 
-    auto get_all = [](std::vector<sstables::sstable_run> runs) mutable {
-        return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>&& v, const sstable_run& run) {
-            v.insert(v.end(), run.all().begin(), run.all().end());
-            return std::move(v);
-        });
-    };
-
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
-        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), cf.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
+        return sstables::compaction_descriptor(runs_to_sstables(std::move(most_interesting)), cf.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
     }
     // If we are not enforcing min_threshold explicitly, try any pair of sstable runs in the same tier.
     if (!cf.compaction_enforce_min_threshold() && is_any_bucket_interesting(buckets, 2)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), 2, max_threshold);
-        return sstables::compaction_descriptor(get_all(std::move(most_interesting)), cf.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
+        return sstables::compaction_descriptor(runs_to_sstables(std::move(most_interesting)), cf.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
     }
 
     // The SAG behavior is only triggered once we're done with all the pending same-tier compaction to
@@ -196,7 +189,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
             cross_tier_input.reserve(cross_tier_input.size() + s1.size());
             std::move(s1.begin(), s1.end(), std::back_inserter(cross_tier_input));
 
-            return sstables::compaction_descriptor(get_all(std::move(cross_tier_input)), cf.get_sstable_set(),
+            return sstables::compaction_descriptor(runs_to_sstables(std::move(cross_tier_input)), cf.get_sstable_set(),
                                                    service::get_local_compaction_priority(), 0, _fragment_size);
         }
     }
@@ -229,6 +222,55 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(column_fa
         }
     }
     return n;
+}
+
+std::vector<shared_sstable>
+incremental_compaction_strategy::runs_to_sstables(std::vector<sstable_run> runs) {
+    return boost::accumulate(runs, std::vector<shared_sstable>(), [&] (std::vector<shared_sstable>&& v, const sstable_run& run) {
+        v.insert(v.end(), run.all().begin(), run.all().end());
+        return std::move(v);
+    });
+}
+
+std::vector<sstable_run>
+incremental_compaction_strategy::sstables_to_runs(std::vector<shared_sstable> sstables) {
+    std::unordered_map<utils::UUID, sstable_run> runs;
+    for (auto& sst : sstables) {
+        runs[sst->run_identifier()].insert(sst);
+    }
+    return boost::copy_range<std::vector<sstable_run>>(runs | boost::adaptors::map_values);
+}
+
+compaction_descriptor
+incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) {
+    size_t offstrategy_threshold = std::max(schema->min_compaction_threshold(), 4);
+    size_t max_sstables = std::max(schema->max_compaction_threshold(), int(offstrategy_threshold));
+
+    if (mode == reshape_mode::relaxed) {
+        offstrategy_threshold = max_sstables;
+    }
+
+    for (auto& bucket : get_buckets(sstables_to_runs(std::move(input)))) {
+        if (bucket.size() >= offstrategy_threshold) {
+            // preserve token contiguity by prioritizing runs with the lowest first keys.
+            if (bucket.size() > max_sstables) {
+                std::partial_sort(bucket.begin(), bucket.begin() + max_sstables, bucket.end(), [&schema](const sstable_run& a, const sstable_run& b) {
+                    auto sst_first_key_less = [&schema] (const shared_sstable& sst_a, const shared_sstable& sst_b) {
+                        return sst_a->get_first_decorated_key().tri_compare(*schema, sst_b->get_first_decorated_key()) <= 0;
+                    };
+                    auto& a_first = *boost::min_element(a.all(), sst_first_key_less);
+                    auto& b_first = *boost::min_element(b.all(), sst_first_key_less);
+                    return a_first->get_first_decorated_key().tri_compare(*schema, b_first->get_first_decorated_key()) <= 0;
+                });
+                bucket.resize(max_sstables);
+            }
+            compaction_descriptor desc(runs_to_sstables(std::move(bucket)), std::optional<sstables::sstable_set>(), iop);
+            desc.options = compaction_options::make_reshape();
+            return desc;
+        }
+    }
+
+    return compaction_descriptor();
 }
 
 incremental_compaction_strategy::incremental_compaction_strategy(const std::map<sstring, sstring>& options)

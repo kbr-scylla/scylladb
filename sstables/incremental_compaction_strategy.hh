@@ -81,6 +81,9 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
     bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) const;
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
+
+    static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
+    static std::vector<sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
 public:
     incremental_compaction_strategy() = default;
 
@@ -99,6 +102,8 @@ public:
     virtual compaction_backlog_tracker& get_backlog_tracker() override {
         return _backlog_tracker;
     }
+
+    virtual compaction_descriptor get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) override;
 
     virtual std::unique_ptr<sstable_set_impl> make_sstable_set(schema_ptr schema) const override;
 };
