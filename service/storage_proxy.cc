@@ -82,6 +82,7 @@
 #include "cdc/cdc_options.hh"
 #include "utils/histogram_metrics_helper.hh"
 #include "service/paxos/prepare_summary.hh"
+#include "service/migration_manager.hh"
 #include "service/paxos/proposal.hh"
 #include "locator/token_metadata.hh"
 #include "seastar/core/coroutine.hh"
@@ -802,7 +803,7 @@ paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& conte
             // Note that ballotMicros is not guaranteed to be unique if two proposal are being handled
             // concurrently by the same coordinator. But we still need ballots to be unique for each
             // proposal so we have to use getRandomTimeUUIDFromMicros.
-            utils::UUID ballot = utils::UUID_gen::get_random_time_UUID_from_micros(ballot_micros);
+            utils::UUID ballot = utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{ballot_micros});
 
             paxos::paxos_state::logger.debug("CAS[{}] Preparing {}", _id, ballot);
             tracing::trace(tr_state, "Preparing {}", ballot);
@@ -978,7 +979,7 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                         request_tracker.set_value(std::move(summary));
                         return;
                     } else if constexpr (std::is_same_v<T, paxos::promise>) {
-                        utils::UUID mrc_ballot = utils::UUID_gen::min_time_UUID(0);
+                        utils::UUID mrc_ballot = utils::UUID_gen::min_time_UUID();
 
                         paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got a response {} from {}", _id, response, peer);
                         tracing::trace(tr_state, "prepare_ballot: got a response {} from /{}", response, peer);
@@ -3632,7 +3633,12 @@ protected:
     }
 
 public:
-    virtual future<foreign_ptr<lw_shared_ptr<query::result>>> execute(storage_proxy::clock_type::time_point timeout) {
+    future<foreign_ptr<lw_shared_ptr<query::result>>> execute(storage_proxy::clock_type::time_point timeout) {
+        if (_targets.empty()) {
+            // We may have no targets to read from if a DC with zero replication is queried with LOCACL_QUORUM.
+            // Return an empty result in this case
+            return make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(make_foreign(make_lw_shared(query::result())));
+        }
         digest_resolver_ptr digest_resolver = ::make_shared<digest_read_resolver>(_schema, _cl, _block_for,
                 db::is_datacenter_local(_cl) ? db::count_local_endpoints(_targets): _targets.size(), timeout);
         auto exec = shared_from_this();

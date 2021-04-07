@@ -24,6 +24,7 @@ from subprocess import run, DEVNULL
 
 import distro
 from scylla_sysconfdir import SYSCONFDIR
+from scylla_product import PRODUCT
 
 
 def scriptsdir_p():
@@ -801,6 +802,12 @@ class systemd_unit:
     @classmethod
     def reload(cls):
         run('systemctl daemon-reload', shell=True, check=True)
+
+    @classmethod
+    def available(cls, unit):
+        res = run('systemctl cat {}'.format(unit), shell=True, check=True, stdout=DEVNULL, stderr=DEVNULL)
+        return True if res.returncode == 0 else False
+
 
 class sysconfig_parser:
     def __load(self):

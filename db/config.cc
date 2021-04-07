@@ -218,12 +218,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , cluster_name(this, "cluster_name", value_status::Used, "",
         "The name of the cluster; used to prevent machines in one logical cluster from joining another. All nodes participating in a cluster must have the same value.")
     , listen_address(this, "listen_address", value_status::Used, "localhost",
-        "The IP address or hostname that Scylla binds to for connecting to other Scylla nodes. Set this parameter or listen_interface, not both. You must change the default setting for multiple nodes to communicate:\n"
-        "\n"
-        "Generally set to empty. If the node is properly configured (host name, name resolution, and so on), Scylla uses InetAddress.getLocalHost() to get the local address from the system.\n"
-        "For a single node cluster, you can use the default setting (localhost).\n"
-        "If Scylla can't find the correct address, you must specify the IP address or host name.\n"
-        "Never specify 0.0.0.0; it is always wrong.")
+        "The IP address or hostname that Scylla binds to for connecting to other Scylla nodes. You must change the default setting for multiple nodes to communicate. Do not set to 0.0.0.0, unless you have set broadcast_address to an address that other nodes can use to reach this node.")
     , listen_interface(this, "listen_interface", value_status::Unused, "eth0",
         "The interface that Scylla binds to for connecting to other Scylla nodes. Interfaces must correspond to a single address, IP aliasing is not supported. See listen_address.")
     , listen_interface_prefer_ipv6(this, "listen_interface_prefer_ipv6", value_status::Used, false,
@@ -421,10 +416,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , auto_bootstrap(this, "auto_bootstrap", value_status::Used, true,
         "This setting has been removed from default configuration. It makes new (non-seed) nodes automatically migrate the right data to themselves. Do not set this to false unless you really know what you are doing.\n"
         "Related information: Initializing a multiple node cluster (single data center) and Initializing a multiple node cluster (multiple data centers).")
-    , batch_size_warn_threshold_in_kb(this, "batch_size_warn_threshold_in_kb", value_status::Used, 5,
+    , batch_size_warn_threshold_in_kb(this, "batch_size_warn_threshold_in_kb", value_status::Used, 128,
         "Log WARN on any batch size exceeding this value in kilobytes. Caution should be taken on increasing the size of this threshold as it can lead to node instability.")
-    , batch_size_fail_threshold_in_kb(this, "batch_size_fail_threshold_in_kb", value_status::Used, 50,
-        "Fail any multiple-partition batch exceeding this value. 50kb (10x warn threshold) by default.")
+    , batch_size_fail_threshold_in_kb(this, "batch_size_fail_threshold_in_kb", value_status::Used, 1024,
+        "Fail any multiple-partition batch exceeding this value. 1 MiB (8x warn threshold) by default.")
     , broadcast_address(this, "broadcast_address", value_status::Used, {/* listen_address */},
         "The IP address a node tells other nodes in the cluster to contact it by. It allows public and private address to be different. For example, use the broadcast_address parameter in topologies where not all nodes have access to other nodes by their private IP addresses.\n"
         "If your Scylla cluster is deployed across multiple Amazon EC2 regions and you use the EC2MultiRegionSnitch , set the broadcast_address to public IP address of the node and the listen_address to the private IP.")
@@ -741,8 +736,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.")
     , cpu_scheduler(this, "cpu_scheduler", value_status::Used, true, "Enable cpu scheduling")
     , view_building(this, "view_building", value_status::Used, true, "Enable view building; should only be set to false when the node is experience issues due to view building")
-    , enable_sstables_mc_format(this, "enable_sstables_mc_format", value_status::Used, true, "Enable SSTables 'mc' format to be used as the default file format")
-    , enable_sstables_md_format(this, "enable_sstables_md_format", value_status::Used, true, "Enable SSTables 'md' format to be used as the default file format (requires enable_sstables_mc_format)")
+    , enable_sstables_mc_format(this, "enable_sstables_mc_format", value_status::Unused, true, "Enable SSTables 'mc' format to be used as the default file format")
+    , enable_sstables_md_format(this, "enable_sstables_md_format", value_status::Used, true, "Enable SSTables 'md' format to be used as the default file format")
     , enable_dangerous_direct_import_of_cassandra_counters(this, "enable_dangerous_direct_import_of_cassandra_counters", value_status::Used, false, "Only turn this option on if you want to import tables from Cassandra containing counters, and you are SURE that no counters in that table were created in a version earlier than Cassandra 2.1."
         " It is not enough to have ever since upgraded to newer versions of Cassandra. If you EVER used a version earlier than 2.1 in the cluster where these SSTables come from, DO NOT TURN ON THIS OPTION! You will corrupt your data. You have been warned.")
     , enable_shard_aware_drivers(this, "enable_shard_aware_drivers", value_status::Used, true, "Enable native transport drivers to use connection-per-shard for better performance")

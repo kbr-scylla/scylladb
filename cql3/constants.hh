@@ -62,7 +62,7 @@ public:
         value(cql3::raw_value bytes_) : _bytes(std::move(bytes_)) {}
         virtual cql3::raw_value get(const query_options& options) override { return _bytes; }
         virtual cql3::raw_value_view bind_and_get(const query_options& options) override { return _bytes.to_view(); }
-        virtual sstring to_string() const override { return to_hex(*_bytes); }
+        virtual sstring to_string() const override { return _bytes.to_view().with_value([] (const FragmentedView auto& v) { return to_hex(v); }); }
     };
 
     static thread_local const ::shared_ptr<value> UNSET_VALUE;
@@ -170,7 +170,7 @@ public:
             try {
                 auto value = options.get_value_at(_bind_index);
                 if (value) {
-                    _receiver->type->validate(*value, options.get_cql_serialization_format());
+                    value.validate(*_receiver->type, options.get_cql_serialization_format());
                 }
                 return value;
             } catch (const marshal_exception& e) {
@@ -187,7 +187,7 @@ public:
             if (bytes.is_unset_value()) {
                 return UNSET_VALUE;
             }
-            return ::make_shared<constants::value>(std::move(cql3::raw_value::make_value(to_bytes(*bytes))));
+            return ::make_shared<constants::value>(std::move(cql3::raw_value::make_value(bytes)));
         }
     };
 
@@ -202,9 +202,9 @@ public:
 
         static void execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const column_definition& column, cql3::raw_value_view value) {
             if (value.is_null()) {
-                m.set_cell(prefix, column, std::move(make_dead_cell(params)));
+                m.set_cell(prefix, column, params.make_dead_cell());
             } else if (value.is_value()) {
-                m.set_cell(prefix, column, std::move(make_cell(*column.type, *value, params)));
+                m.set_cell(prefix, column, params.make_cell(*column.type, value));
             }
         }
     };
@@ -219,8 +219,8 @@ public:
             } else if (value.is_unset_value()) {
                 return;
             }
-            auto increment = value_cast<int64_t>(long_type->deserialize_value(*value));
-            m.set_cell(prefix, column, make_counter_update_cell(increment, params));
+            auto increment = value.deserialize<int64_t>(*long_type);
+            m.set_cell(prefix, column, params.make_counter_update_cell(increment));
         }
     };
 
@@ -234,11 +234,11 @@ public:
             } else if (value.is_unset_value()) {
                 return;
             }
-            auto increment = value_cast<int64_t>(long_type->deserialize_value(*value));
+            auto increment = value.deserialize<int64_t>(*long_type);
             if (increment == std::numeric_limits<int64_t>::min()) {
                 throw exceptions::invalid_request_exception(format("The negation of {:d} overflows supported counter precision (signed 8 bytes integer)", increment));
             }
-            m.set_cell(prefix, column, make_counter_update_cell(-increment, params));
+            m.set_cell(prefix, column, params.make_counter_update_cell(-increment));
         }
     };
 

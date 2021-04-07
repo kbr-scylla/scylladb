@@ -39,6 +39,8 @@
 #include "log.hh"
 #include "utils/rjson.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/managed_bytes.hh"
+#include "utils/fragment_range.hh"
 #include "types.hh"
 #include "concrete_types.hh"
 #include "types/listlike_partial_deserializing_iterator.hh"
@@ -652,6 +654,14 @@ void collection_iterator<bytes_view>::parse() {
     _current = k;
 }
 
+template<>
+void collection_iterator<managed_bytes_view>::parse() {
+    assert(_rem > 0);
+    _next = _v;
+    auto k = read_collection_value(_next, cql_serialization_format::internal());
+    _current = k;
+}
+
 template<typename Container, typename T>
 class maybe_back_insert_iterator : public std::back_insert_iterator<Container> {
     const abstract_type& _type;
@@ -752,18 +762,18 @@ static bytes merge(const set_type_impl& ctype, const bytes_opt& prev, const byte
     return set_type_impl::serialize_partially_deserialized_form(res, cql_serialization_format::internal());
 }
 static bytes merge(const user_type_impl& type, const bytes_opt& prev, const bytes_opt& next, const bytes_opt& deleted) {
-    std::vector<bytes_view_opt> res(type.size());
-    udt_for_each(prev, [&res, i = res.begin()](bytes_view_opt k) mutable {
+    std::vector<managed_bytes_view_opt> res(type.size());
+    udt_for_each(prev, [&res, i = res.begin()](managed_bytes_view_opt k) mutable {
         *i++ = k;
     });
-    udt_for_each(next, [&res, i = res.begin()](bytes_view_opt k) mutable {
+    udt_for_each(next, [&res, i = res.begin()](managed_bytes_view_opt k) mutable {
         if (k) {
             *i = k;
         }
         ++i;
     });
-    collection_iterator<bytes_view> e, d(deleted);
-    std::for_each(d, e, [&res](bytes_view k) {
+    collection_iterator<managed_bytes_view> e, d(deleted);
+    std::for_each(d, e, [&res](managed_bytes_view k) {
         auto index = deserialize_field_index(k);
         res[index] = std::nullopt;
     });
@@ -825,7 +835,7 @@ static bytes_opt get_preimage_col_value(const column_definition& cdef, const cql
  * with unspecified nondeterministic ordering.
  */
 utils::UUID generate_timeuuid(api::timestamp_type t) {
-    return utils::UUID_gen::get_random_time_UUID_from_micros(t);
+    return utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{t});
 }
 
 class log_mutation_builder {

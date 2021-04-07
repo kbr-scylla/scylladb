@@ -19,6 +19,7 @@
 #include <seastar/core/sharded.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/condition-variable.hh>
+#include <seastar/core/gate.hh>
 
 #include "database_fwd.hh"
 #include "frozen_mutation.hh"
@@ -478,6 +479,12 @@ enum class node_ops_cmd : uint32_t {
      removenode_sync_data,
      removenode_abort,
      removenode_done,
+     replace_prepare,
+     replace_prepare_mark_alive,
+     replace_prepare_pending_ranges,
+     replace_heartbeat,
+     replace_abort,
+     replace_done,
 };
 
 // The cmd and ops_uuid are mandatory for each request.
@@ -487,6 +494,8 @@ struct node_ops_cmd_request {
     utils::UUID ops_uuid;
     std::list<gms::inet_address> ignore_nodes;
     std::list<gms::inet_address> leaving_nodes;
+    // Map existing nodes to replacing nodes
+    std::unordered_map<gms::inet_address, gms::inet_address> replace_nodes;
 };
 
 struct node_ops_cmd_response {

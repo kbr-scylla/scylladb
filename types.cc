@@ -42,6 +42,8 @@
 #include "utils/date.h"
 #include "utils/utf8.hh"
 #include "utils/ascii.hh"
+#include "utils/fragment_range.hh"
+#include "utils/managed_bytes.hh"
 #include "mutation_partition.hh"
 
 #include "types/user.hh"
@@ -102,15 +104,6 @@ sstring inet_addr_type_impl::to_sstring(const seastar::net::inet_address& addr) 
     return out.str();
 }
 
-std::vector<bytes_opt> to_bytes_opt_vec(const std::vector<bytes_view_opt>& v) {
-    std::vector<bytes_opt> r;
-    r.reserve(v.size());
-    for (auto& e: v) {
-        r.push_back(to_bytes_opt(e));
-    }
-    return r;
-}
-
 static const char* byte_type_name      = "org.apache.cassandra.db.marshal.ByteType";
 static const char* short_type_name     = "org.apache.cassandra.db.marshal.ShortType";
 static const char* int32_type_name     = "org.apache.cassandra.db.marshal.Int32Type";
@@ -137,7 +130,7 @@ static const char* empty_type_name     = "org.apache.cassandra.db.marshal.EmptyT
 template<typename T>
 struct simple_type_traits {
     static constexpr size_t serialized_size = sizeof(T);
-    static T read_nonempty(bytes_view v) {
+    static T read_nonempty(managed_bytes_view v) {
         return read_simple_exactly<T>(v);
     }
 };
@@ -145,7 +138,7 @@ struct simple_type_traits {
 template<>
 struct simple_type_traits<bool> {
     static constexpr size_t serialized_size = 1;
-    static bool read_nonempty(bytes_view v) {
+    static bool read_nonempty(managed_bytes_view v) {
         return read_simple_exactly<int8_t>(v) != 0;
     }
 };
@@ -153,7 +146,7 @@ struct simple_type_traits<bool> {
 template<>
 struct simple_type_traits<db_clock::time_point> {
     static constexpr size_t serialized_size = sizeof(uint64_t);
-    static db_clock::time_point read_nonempty(bytes_view v) {
+    static db_clock::time_point read_nonempty(managed_bytes_view v) {
         return db_clock::time_point(db_clock::duration(read_simple_exactly<int64_t>(v)));
     }
 };
@@ -425,7 +418,7 @@ template <> struct int_of_size<float> :
 template <typename T>
 struct float_type_traits {
     static constexpr size_t serialized_size = sizeof(typename int_of_size<T>::itype);
-    static double read_nonempty(bytes_view v) {
+    static double read_nonempty(managed_bytes_view v) {
         union {
             T d;
             typename int_of_size<T>::itype i;
@@ -621,15 +614,6 @@ size_t collection_value_len(cql_serialization_format sf) {
 }
 
 
-template <FragmentedView View>
-int read_collection_size(View& in, cql_serialization_format sf) {
-    if (sf.using_32_bits_for_collections()) {
-        return read_simple<int32_t>(in);
-    } else {
-        return read_simple<uint16_t>(in);
-    }
-}
-
 int read_collection_size(bytes_view& in, cql_serialization_format sf) {
     if (sf.using_32_bits_for_collections()) {
         return read_simple<int32_t>(in);
@@ -644,12 +628,6 @@ void write_collection_size(bytes::iterator& out, int size, cql_serialization_for
     } else {
         serialize_int16(out, uint16_t(size));
     }
-}
-
-template <FragmentedView View>
-View read_collection_value(View& in, cql_serialization_format sf) {
-    auto size = sf.using_32_bits_for_collections() ? read_simple<int32_t>(in) : read_simple<uint16_t>(in);
-    return read_simple_bytes(in, size);
 }
 
 bytes_view read_collection_value(bytes_view& in, cql_serialization_format sf) {
@@ -695,6 +673,66 @@ void write_collection_value(bytes_ostream& out, cql_serialization_format sf, ato
     for (auto&& frag : fragment_range(val)) {
         out.write(frag);
     }
+}
+
+void write_fragmented(managed_bytes_mutable_view& out, std::string_view val) {
+    while (val.size() > 0) {
+        size_t current_n = std::min(val.size(), out.current_fragment().size());
+        memcpy(out.current_fragment().data(), val.data(), current_n);
+        val.remove_prefix(current_n);
+        out.remove_prefix(current_n);
+    }
+}
+
+template<std::integral T>
+void write_simple(managed_bytes_mutable_view& out, std::type_identity_t<T> val) {
+    val = net::hton(val);
+    if (out.current_fragment().size() >= sizeof(T)) [[likely]] {
+        auto p = out.current_fragment().data();
+        out.remove_prefix(sizeof(T));
+        // FIXME use write_unaligned after it's merged.
+        write_unaligned<T>(p, val);
+    } else if (out.size_bytes() >= sizeof(T)) {
+        write_fragmented(out, std::string_view(reinterpret_cast<const char*>(&val), sizeof(T)));
+    } else {
+        on_internal_error(tlogger, format("write_simple: attempted write of size {} to buffer of size {}", sizeof(T), out.size_bytes()));
+    }
+}
+
+void write_collection_size(managed_bytes_mutable_view& out, int size, cql_serialization_format sf) {
+    if (sf.using_32_bits_for_collections()) {
+        write_simple<uint32_t>(out, uint32_t(size));
+    } else {
+        write_simple<uint16_t>(out, uint16_t(size));
+    }
+}
+
+void write_collection_value(managed_bytes_mutable_view& out, cql_serialization_format sf, bytes_view val) {
+    if (sf.using_32_bits_for_collections()) {
+        write_simple<int32_t>(out, int32_t(val.size()));
+    } else {
+        if (val.size() > std::numeric_limits<uint16_t>::max()) {
+            throw marshal_exception(
+                    format("Collection value exceeds the length limit for protocol v{:d}. Collection values are limited to {:d} bytes but {:d} bytes value provided",
+                            sf.protocol_version(), std::numeric_limits<uint16_t>::max(), val.size()));
+        }
+        write_simple<uint16_t>(out, uint16_t(val.size()));
+    }
+    write_fragmented(out, single_fragmented_view(val));
+}
+
+void write_collection_value(managed_bytes_mutable_view& out, cql_serialization_format sf, const managed_bytes_view& val) {
+    if (sf.using_32_bits_for_collections()) {
+        write_simple<int32_t>(out, int32_t(val.size_bytes()));
+    } else {
+        if (val.size_bytes() > std::numeric_limits<uint16_t>::max()) {
+            throw marshal_exception(
+                    format("Collection value exceeds the length limit for protocol v{:d}. Collection values are limited to {:d} bytes but {:d} bytes value provided",
+                            sf.protocol_version(), std::numeric_limits<uint16_t>::max(), val.size_bytes()));
+        }
+        write_simple<uint16_t>(out, uint16_t(val.size_bytes()));
+    }
+    write_fragmented(out, val);
 }
 
 shared_ptr<const abstract_type> abstract_type::underlying_type() const {
@@ -1034,7 +1072,7 @@ map_type_impl::is_value_compatible_with_frozen(const collection_type_impl& previ
 }
 
 int32_t
-map_type_impl::compare_maps(data_type keys, data_type values, bytes_view o1, bytes_view o2) {
+map_type_impl::compare_maps(data_type keys, data_type values, managed_bytes_view o1, managed_bytes_view o2) {
     if (o1.empty()) {
         return o2.empty() ? 0 : -1;
     } else if (o2.empty()) {
@@ -1161,8 +1199,8 @@ static std::optional<data_type> update_user_type_aux(
 
 static void serialize(const abstract_type& t, const void* value, bytes::iterator& out, cql_serialization_format sf);
 
-bytes_opt
-collection_type_impl::reserialize(cql_serialization_format from, cql_serialization_format to, bytes_view_opt v) const {
+managed_bytes_opt
+collection_type_impl::reserialize(cql_serialization_format from, cql_serialization_format to, managed_bytes_view_opt v) const {
     if (!v) {
         return std::nullopt;
     }
@@ -1170,7 +1208,8 @@ collection_type_impl::reserialize(cql_serialization_format from, cql_serializati
     bytes ret(bytes::initialized_later(), val.serialized_size());  // FIXME: serialized_size want @to
     auto out = ret.begin();
     ::serialize(*this, get_value_ptr(val), out, to);
-    return ret;
+    // FIXME: serialize directly to managed_bytes.
+    return managed_bytes(ret);
 }
 
 set_type
@@ -1271,6 +1310,34 @@ set_type_impl::serialize_partially_deserialized_form(
         const std::vector<bytes_view>& v, cql_serialization_format sf) {
     return pack(v.begin(), v.end(), v.size(), sf);
 }
+
+template <FragmentedView View>
+std::vector<managed_bytes> partially_deserialize_listlike(View in, cql_serialization_format sf) {
+    auto nr = read_collection_size(in, sf);
+    std::vector<managed_bytes> elements;
+    elements.reserve(nr);
+    for (int i = 0; i != nr; ++i) {
+        elements.emplace_back(read_collection_value(in, sf));
+    }
+    return elements;
+}
+template std::vector<managed_bytes> partially_deserialize_listlike(managed_bytes_view in, cql_serialization_format sf);
+template std::vector<managed_bytes> partially_deserialize_listlike(fragmented_temporary_buffer::view in, cql_serialization_format sf);
+
+template <FragmentedView View>
+std::vector<std::pair<managed_bytes, managed_bytes>> partially_deserialize_map(View in, cql_serialization_format sf) {
+    auto nr = read_collection_size(in, sf);
+    std::vector<std::pair<managed_bytes, managed_bytes>> elements;
+    elements.reserve(nr);
+    for (int i = 0; i != nr; ++i) {
+        auto key = managed_bytes(read_collection_value(in, sf));
+        auto value = managed_bytes(read_collection_value(in, sf));
+        elements.emplace_back(std::move(key), std::move(value));
+    }
+    return elements;
+}
+template std::vector<std::pair<managed_bytes, managed_bytes>> partially_deserialize_map(managed_bytes_view in, cql_serialization_format sf);
+template std::vector<std::pair<managed_bytes, managed_bytes>> partially_deserialize_map(fragmented_temporary_buffer::view in, cql_serialization_format sf);
 
 list_type
 list_type_impl::get_instance(data_type elements, bool is_multi_cell) {
@@ -2045,7 +2112,7 @@ template data_value abstract_type::deserialize_impl<>(single_fragmented_view) co
 template data_value abstract_type::deserialize_impl<>(ser::buffer_view<bytes_ostream::fragment_iterator>) const;
 template data_value abstract_type::deserialize_impl<>(managed_bytes_view) const;
 
-int32_t compare_aux(const tuple_type_impl& t, bytes_view v1, bytes_view v2) {
+int32_t compare_aux(const tuple_type_impl& t, const managed_bytes_view& v1, const managed_bytes_view& v2) {
     // This is a slight modification of lexicographical_tri_compare:
     // when the only difference between the tuples is that one of them has additional trailing nulls,
     // we consider them equal. For example, in the following CQL scenario:
@@ -2099,8 +2166,8 @@ int32_t compare_aux(const tuple_type_impl& t, bytes_view v1, bytes_view v2) {
 
 namespace {
 struct compare_visitor {
-    bytes_view v1;
-    bytes_view v2;
+    managed_bytes_view v1;
+    managed_bytes_view v2;
     template <typename T> int32_t operator()(const simple_type_impl<T>&) {
         if (v1.empty()) {
             return v2.empty() ? 0 : -1;
@@ -2127,14 +2194,18 @@ struct compare_visitor {
         if (v2.empty()) {
             return 1;
         }
-        return utils::timeuuid_tri_compare(v1, v2);
+        return with_linearized(v1, [&] (bytes_view v1) {
+            return with_linearized(v2, [&] (bytes_view v2) {
+                return utils::timeuuid_tri_compare(v1, v2);
+            });
+        });
     }
     int32_t operator()(const listlike_collection_type_impl& l) {
         using llpdi = listlike_partial_deserializing_iterator;
         auto sf = cql_serialization_format::internal();
         return lexicographical_tri_compare(llpdi::begin(v1, sf), llpdi::end(v1, sf), llpdi::begin(v2, sf),
                 llpdi::end(v2, sf),
-                [&] (bytes_view o1, bytes_view o2) { return l.get_elements_type()->compare(o1, o2); });
+                [&] (const managed_bytes_view& o1, const managed_bytes_view& o2) { return l.get_elements_type()->compare(o1, o2); });
     }
     int32_t operator()(const map_type_impl& m) {
         return map_type_impl::compare_maps(m.get_keys_type(), m.get_values_type(), v1, v2);
@@ -2155,7 +2226,11 @@ struct compare_visitor {
         }
 
         if (c1 == 1) {
-            return utils::uuid_tri_compare_timeuuid(v1, v2);
+            return with_linearized(v1, [&] (bytes_view v1) {
+                return with_linearized(v2, [&] (bytes_view v2) {
+                    return utils::uuid_tri_compare_timeuuid(v1, v2);
+                });
+            });
         }
         return compare_unsigned(v1, v2);
     }
@@ -2220,20 +2295,15 @@ struct compare_visitor {
 }
 
 int32_t abstract_type::compare(bytes_view v1, bytes_view v2) const {
+    return compare(managed_bytes_view(v1), managed_bytes_view(v2));
+}
+
+int32_t abstract_type::compare(managed_bytes_view v1, managed_bytes_view v2) const {
     try {
         return visit(*this, compare_visitor{v1, v2});
     } catch (const marshal_exception&) {
         on_types_internal_error(std::current_exception());
     }
-}
-
-int32_t abstract_type::compare(managed_bytes_view v1, managed_bytes_view v2) const {
-    // FIXME: don't linearize
-    return with_linearized(v1, [&] (bytes_view v1) {
-        return with_linearized(v2, [&] (bytes_view v2) {
-            return compare(v1, v2);
-        });
-    });
 }
 
 bool abstract_type::equal(bytes_view v1, bytes_view v2) const {
@@ -2246,17 +2316,12 @@ bool abstract_type::equal(bytes_view v1, bytes_view v2) const {
 }
 
 bool abstract_type::equal(managed_bytes_view v1, managed_bytes_view v2) const {
-    // FIXME: don't linearize
-    return with_linearized(v1, [&] (bytes_view v1) {
-        return with_linearized(v2, [&] (bytes_view v2) {
-            return equal(v1, v2);
-        });
+    return ::visit(*this, [&](const auto& t) {
+        if (is_byte_order_equal_visitor{}(t)) {
+            return compare_unsigned(v1, v2) == 0;
+        }
+        return compare_visitor{v1, v2}(t) == 0;
     });
-}
-
-std::vector<bytes_view_opt>
-tuple_type_impl::split(bytes_view v) const {
-    return { tuple_deserializing_iterator::start(v), tuple_deserializing_iterator::finish(v) };
 }
 
 // Count number of ':' which are not preceded by '\'.
@@ -3157,6 +3222,11 @@ bytes serialize_field_index(size_t idx) {
 size_t deserialize_field_index(const bytes_view& b) {
     assert(b.size() == sizeof(int16_t));
     return read_be<int16_t>(reinterpret_cast<const char*>(b.data()));
+}
+
+size_t deserialize_field_index(managed_bytes_view b) {
+    assert(b.size_bytes() == sizeof(int16_t));
+    return be_to_cpu(read_simple_native<int16_t>(b));
 }
 
 thread_local const shared_ptr<const abstract_type> byte_type(make_shared<byte_type_impl>());

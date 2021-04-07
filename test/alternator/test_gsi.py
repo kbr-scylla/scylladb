@@ -24,18 +24,33 @@ from util import create_test_table, random_string, full_scan, full_query, multis
 # secondary indexes within a fraction of a second, under normal conditions"
 # and indeed, in practice, the tests here almost always succeed without a
 # retry.
+# However, it is worthwhile to differenciate between the case where the
+# result set is not *yet* complete (which is ok, and requires retry), and
+# the case that the result set has wrong data. In the latter case, the
+# test will surely fail and no amount of retry will help, so we should
+# fail quickly, to avoid xfailing tests being very slow.
 def assert_index_query(table, index_name, expected_items, **kwargs):
-    for i in range(3):
-        if multiset(expected_items) == multiset(full_query(table, IndexName=index_name, ConsistentRead=False, **kwargs)):
+    expected = multiset(expected_items)
+    for i in range(5):
+        got = multiset(full_query(table, IndexName=index_name, ConsistentRead=False, **kwargs))
+        if expected == got:
             return
+        elif got - expected:
+            # If we got any items that weren't expected, there's no point to retry.
+            pytest.fail("assert_index_query() found unexpected items: " + str(got - expected))
         print('assert_index_query retrying')
         time.sleep(1)
     assert multiset(expected_items) == multiset(full_query(table, IndexName=index_name, ConsistentRead=False, **kwargs))
 
 def assert_index_scan(table, index_name, expected_items, **kwargs):
-    for i in range(3):
-        if multiset(expected_items) == multiset(full_scan(table, IndexName=index_name, ConsistentRead=False, **kwargs)):
+    expected = multiset(expected_items)
+    for i in range(5):
+        got =  multiset(full_scan(table, IndexName=index_name, ConsistentRead=False, **kwargs))
+        if expected == got:
             return
+        elif got - expected:
+            # If we got any items that weren't expected, there's no point to retry.
+            pytest.fail("assert_index_scan() found unexpected items: " + str(got - expected))
         print('assert_index_scan retrying')
         time.sleep(1)
     assert multiset(expected_items) == multiset(full_scan(table, IndexName=index_name, ConsistentRead=False, **kwargs))
@@ -71,7 +86,7 @@ def test_gsi_identical(dynamodb):
 # One of the simplest forms of a non-trivial GSI: The base table has a hash
 # and sort key, and the index reverses those roles. Other attributes are just
 # copied.
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_1(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' },
@@ -192,7 +207,7 @@ def test_gsi_missing_attribute_definition(dynamodb):
 # hash key (which is the base's hash key). In the materialized-view-based
 # implementation, we need to remember the other part of the base key as a
 # clustering key.
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_1_hash_only(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' },
@@ -239,7 +254,7 @@ def test_gsi_key_not_in_index(test_table_gsi_1_hash_only):
 
 # A second scenario of GSI. Base table has just hash key, Index has a
 # different hash key - one of the non-key attributes from the base table.
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_2(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' } ],
@@ -371,7 +386,7 @@ def test_gsi_wrong_type_attribute_batch(test_table_gsi_2):
 # difficult to implement in Alternator because Scylla's materialized-views
 # implementation only allows one new key column in the view, and here
 # we need two (which, also, aren't actual columns, but map items).
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_3(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' } ],
@@ -442,7 +457,7 @@ def test_gsi_missing_attribute_3(test_table_gsi_3):
     assert not any([i['p'] == p for i in full_scan(test_table_gsi_3, ConsistentRead=False, IndexName='hello')])
 
 # A fourth scenario of GSI. Two GSIs on a single base table.
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_4(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' } ],
@@ -489,7 +504,7 @@ def test_gsi_4_describe(test_table_gsi_4):
     assert multiset([g['IndexName'] for g in gsis]) == multiset(['hello_a', 'hello_b'])
 
 # A scenario for GSI in which the table has both hash and sort key
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_5(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' }, { 'AttributeName': 'c', 'KeyType': 'RANGE' } ],
@@ -578,7 +593,7 @@ def test_gsi_2_describe_table_schema(test_table_gsi_2):
 # "ProjectionType:: KEYS_ONLY" works. We note that it projects both
 # the index's key, *and* the base table's key. So items which had different
 # base-table keys cannot suddenly become the same item in the index.
-@pytest.mark.xfail(reason="GSI not supported")
+@pytest.mark.xfail(reason="GSI projection not supported - issue #5036")
 def test_gsi_projection_keys_only(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' } ],
@@ -606,7 +621,7 @@ def test_gsi_projection_keys_only(dynamodb):
 # Test for "ProjectionType:: INCLUDE". The secondary table includes the
 # its own and the base's keys (as in KEYS_ONLY) plus the extra keys given
 # in NonKeyAttributes.
-@pytest.mark.xfail(reason="GSI not supported")
+@pytest.mark.xfail(reason="GSI projection not supported - issue #5036")
 def test_gsi_projection_include(dynamodb):
     table = create_test_table(dynamodb,
         KeySchema=[ { 'AttributeName': 'p', 'KeyType': 'HASH' } ],
@@ -641,7 +656,7 @@ def test_gsi_projection_include(dynamodb):
 # "Projection" is optional - and Boto3 allows it to be missing. But in
 # fact, it is not allowed to be missing: DynamoDB complains: "Unknown
 # ProjectionType: null".
-@pytest.mark.xfail(reason="GSI not supported")
+@pytest.mark.xfail(reason="GSI projection not supported - issue #5036")
 def test_gsi_missing_projection_type(dynamodb):
     with pytest.raises(ClientError, match='ValidationException.*ProjectionType'):
         create_test_table(dynamodb,
@@ -864,7 +879,7 @@ def test_gsi_very_long_name(dynamodb):
 # name. This assumes that materialized-view names are composed using the
 # index's name (which is currently what we do).
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_table_gsi_random_name(dynamodb):
     index_name = random_string()
     table = create_test_table(dynamodb,

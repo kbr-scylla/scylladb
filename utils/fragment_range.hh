@@ -267,6 +267,13 @@ decltype(auto) with_simplified(const View& v, Function&& fn)
     }
 }
 
+template<FragmentedView View>
+void skip_empty_fragments(View& v) {
+    while (!v.empty() && v.current_fragment().empty()) {
+        v.remove_current();
+    }
+}
+
 template<FragmentedView V1, FragmentedView V2>
 int compare_unsigned(V1 v1, V2 v2) {
     while (!v1.empty() && !v2.empty()) {
@@ -276,6 +283,8 @@ int compare_unsigned(V1 v1, V2 v2) {
         }
         v1.remove_prefix(n);
         v2.remove_prefix(n);
+        skip_empty_fragments(v1);
+        skip_empty_fragments(v2);
     }
     return v1.size_bytes() - v2.size_bytes();
 }
@@ -295,6 +304,8 @@ void write_fragmented(Dest& dest, Src src) {
         memcpy(dest.current_fragment().data(), src.current_fragment().data(), n);
         dest.remove_prefix(n);
         src.remove_prefix(n);
+        skip_empty_fragments(dest);
+        skip_empty_fragments(src);
     }
 }
 
@@ -308,6 +319,8 @@ void copy_fragmented_view(Dest dest, Src src) {
         memcpy(dest.current_fragment().data(), src.current_fragment().data(), n);
         dest.remove_prefix(n);
         src.remove_prefix(n);
+        skip_empty_fragments(dest);
+        skip_empty_fragments(src);
     }
 }
 
@@ -398,4 +411,24 @@ void write_native(Out& out, std::type_identity_t<T> v) {
     } else {
         write_fragmented(out, single_fragmented_view(bytes_view(p, sizeof(v))));
     }
+}
+
+inline sstring::iterator fragment_to_hex(sstring::iterator out, bytes_view frag) {
+    static constexpr char digits[] = "0123456789abcdef";
+    for (auto byte : frag) {
+        uint8_t x = static_cast<uint8_t>(byte);
+        *out++ = digits[x >> 4];
+        *out++ = digits[x & 0xf];
+    }
+    return out;
+}
+
+template<FragmentedView View>
+sstring to_hex(const View& b) {
+    sstring out = uninitialized_string(b.size_bytes() * 2);
+    auto it = out.begin();
+    for (auto frag : fragment_range(b)) {
+        it = fragment_to_hex(it, frag);
+    }
+    return out;
 }

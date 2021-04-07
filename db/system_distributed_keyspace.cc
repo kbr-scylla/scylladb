@@ -169,22 +169,22 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
 
     // We use min_timestamp so that the default keyspace metadata will lose with any manual adjustments.
     // See issue #2129.
-    return ignore_existing([this] {
+    co_await ignore_existing([this] {
         auto ksm = keyspace_metadata::new_keyspace(
                 NAME,
                 "org.apache.cassandra.locator.SimpleStrategy",
                 {{"replication_factor", "3"}},
-                true);
+                true /* durable_writes */);
         return _mm.announce_new_keyspace(ksm, api::min_timestamp);
-    }).then([this, tables = std::move(tables)] () mutable {
-        return do_with(std::vector<schema_ptr>{std::move(tables)}, [this] (std::vector<schema_ptr>& tables) {
-            return do_for_each(tables, [this] (schema_ptr table) {
-                return ignore_existing([this, table = std::move(table)] {
-                    return _mm.announce_new_column_family(std::move(table), api::min_timestamp);
-                });
-            });
+    });
+
+    for (auto&& table : tables) {
+        co_await ignore_existing([this, table = std::move(table)] {
+            return _mm.announce_new_column_family(std::move(table), api::min_timestamp);
         });
-    }).then([this] { _started = true; });
+    }
+
+    _started = true;
 }
 
 future<> system_distributed_keyspace::start_workload_prioritization() {
@@ -201,9 +201,10 @@ future<> system_distributed_keyspace::start_workload_prioritization() {
 future<> system_distributed_keyspace::start() {
     if (this_shard_id() != 0) {
         _started = true;
-        return make_ready_future<>();
+        co_return;
     }
-    return create_tables(all_tables(_qp.db()));
+
+    co_await create_tables(all_tables(_qp.db()));
 }
 
 future<> system_distributed_keyspace::stop() {
@@ -371,19 +372,6 @@ system_distributed_keyspace::read_cdc_topology_description(
     });
 }
 
-future<>
-system_distributed_keyspace::expire_cdc_topology_description(
-        db_clock::time_point streams_ts,
-        db_clock::time_point expiration_time,
-        context ctx) {
-    return _qp.execute_internal(
-            format("UPDATE {}.{} SET expired = ? WHERE time = ?", NAME, CDC_TOPOLOGY_DESCRIPTION),
-            quorum_if_many(ctx.num_token_owners),
-            internal_distributed_query_state(),
-            { expiration_time, streams_ts },
-            false).discard_result();
-}
-
 static future<std::vector<mutation>> get_cdc_streams_descriptions_v2_mutation(
         const database& db,
         db_clock::time_point time,
@@ -447,19 +435,6 @@ system_distributed_keyspace::create_cdc_desc(
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { CDC_TIMESTAMPS_KEY, time },
-            false).discard_result();
-}
-
-future<>
-system_distributed_keyspace::expire_cdc_desc(
-        db_clock::time_point streams_ts,
-        db_clock::time_point expiration_time,
-        context ctx) {
-    return _qp.execute_internal(
-            format("UPDATE {}.{} SET expired = ? WHERE time = ?", NAME, CDC_TIMESTAMPS),
-            quorum_if_many(ctx.num_token_owners),
-            internal_distributed_query_state(),
-            { expiration_time, streams_ts },
             false).discard_result();
 }
 

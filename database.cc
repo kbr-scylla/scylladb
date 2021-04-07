@@ -15,6 +15,7 @@
 #include <seastar/core/future-util.hh>
 #include "db/commitlog/commitlog_entry.hh"
 #include "db/system_keyspace.hh"
+#include "db/system_distributed_keyspace.hh"
 #include "db/commitlog/commitlog.hh"
 #include "db/config.hh"
 #include "to_string.hh"
@@ -736,10 +737,8 @@ void database::set_format(sstables::sstable_version_types format) {
 void database::set_format_by_config() {
     if (_cfg.enable_sstables_md_format()) {
         set_format(sstables::sstable_version_types::md);
-    } else if (_cfg.enable_sstables_mc_format()) {
-        set_format(sstables::sstable_version_types::mc);
     } else {
-        set_format(sstables::sstable_version_types::la);
+        set_format(sstables::sstable_version_types::mc);
     }
 }
 

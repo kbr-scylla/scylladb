@@ -294,22 +294,13 @@ operator<(const emptyable<T>& me1, const emptyable<T>& me2) {
 
 // Checks whether T::empty() const exists and returns bool
 template <typename T>
-class has_empty {
-    template <typename X>
-    constexpr static auto check(const X* x) -> std::enable_if_t<std::is_same<bool, decltype(x->empty())>::value, bool> {
-        return true;
-    }
-    template <typename X>
-    constexpr static auto check(...) -> bool {
-        return false;
-    }
-public:
-    constexpr static bool value = check<T>(nullptr);
+concept has_empty = requires (T obj) {
+    { obj.empty() } -> std::same_as<bool>;
 };
 
 template <typename T>
 using maybe_empty =
-        std::conditional_t<has_empty<T>::value, T, emptyable<T>>;
+        std::conditional_t<has_empty<T>, T, emptyable<T>>;
 
 class abstract_type;
 class data_value;
@@ -703,6 +694,7 @@ inline bool operator!=(const data_value& x, const data_value& y)
 }
 
 using bytes_view_opt = std::optional<bytes_view>;
+using managed_bytes_view_opt = std::optional<managed_bytes_view>;
 
 static inline
 bool optional_less_compare(data_type t, bytes_view_opt e1, bytes_view_opt e2) {
@@ -738,7 +730,7 @@ int tri_compare(data_type t, managed_bytes_view e1, managed_bytes_view e2) {
 
 inline
 int
-tri_compare_opt(data_type t, bytes_view_opt v1, bytes_view_opt v2) {
+tri_compare_opt(data_type t, managed_bytes_view_opt v1, managed_bytes_view_opt v2) {
     if (!v1 || !v2) {
         return int(bool(v1)) - int(bool(v2));
     } else {
@@ -857,6 +849,9 @@ public:
     bool operator()(const bytes& v1, const bytes& v2) const {
         return _type->less(v1, v2);
     }
+    bool operator()(const managed_bytes& v1, const managed_bytes& v2) const {
+        return _type->compare(v1, v2) < 0;
+    }
 };
 
 inline
@@ -870,6 +865,9 @@ class serialized_tri_compare {
 public:
     serialized_tri_compare(data_type type) : _type(type) {}
     int operator()(const bytes_view& v1, const bytes_view& v2) const {
+        return _type->compare(v1, v2);
+    }
+    int operator()(const managed_bytes_view& v1, const managed_bytes_view& v2) const {
         return _type->compare(v1, v2);
     }
 };
@@ -1063,8 +1061,6 @@ to_bytes_opt(bytes_view_opt bv) {
     return std::nullopt;
 }
 
-std::vector<bytes_opt> to_bytes_opt_vec(const std::vector<bytes_view_opt>&);
-
 inline
 bytes_view_opt
 as_bytes_view_opt(const bytes_opt& bv) {
@@ -1202,8 +1198,17 @@ inline sstring read_simple_short_string(bytes_view& v) {
 size_t collection_size_len(cql_serialization_format sf);
 size_t collection_value_len(cql_serialization_format sf);
 void write_collection_size(bytes::iterator& out, int size, cql_serialization_format sf);
+void write_collection_size(managed_bytes_mutable_view&, int size, cql_serialization_format sf);
 void write_collection_value(bytes::iterator& out, cql_serialization_format sf, bytes_view val_bytes);
-void write_collection_value(bytes::iterator& out, cql_serialization_format sf, data_type type, const data_value& value);
+void write_collection_value(managed_bytes_mutable_view&, cql_serialization_format sf, bytes_view val_bytes);
+void write_collection_value(managed_bytes_mutable_view&, cql_serialization_format sf, const managed_bytes_view& val_bytes);
+
+// Splits a serialized collection into a vector of elements, but does not recursively deserialize the elements.
+// Does not perform validation.
+template <FragmentedView View>
+std::vector<managed_bytes> partially_deserialize_listlike(View in, cql_serialization_format sf);
+template <FragmentedView View>
+std::vector<std::pair<managed_bytes, managed_bytes>> partially_deserialize_map(View in, cql_serialization_format sf);
 
 using user_type = shared_ptr<const user_type_impl>;
 using tuple_type = shared_ptr<const tuple_type_impl>;

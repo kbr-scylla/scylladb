@@ -26,6 +26,7 @@
 #include "hashers.hh"
 #include "locator/network_topology_strategy.hh"
 #include "utils/bit_cast.hh"
+#include "service/migration_manager.hh"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/split.hpp>

@@ -171,6 +171,8 @@ fi
 # change directory to the package's root directory
 cd "$(dirname "$0")"
 
+product="$(cat ./SCYLLA-PRODUCT-FILE)"
+
 if [ -z "$prefix" ]; then
     if $nonroot; then
         prefix=~/scylladb
@@ -317,6 +319,11 @@ ln -srf "$rprefix/scyllatop/scyllatop.py" "$rprefix/bin/scyllatop"
 
 SBINFILES=$(cd dist/common/scripts/; ls scylla_*setup node_health_check scylla_ec2_check scylla_kernel_check)
 SBINFILES+=" $(cd seastar/scripts; ls seastar-cpu-map.sh)"
+
+cat << EOS > "$rprefix"/scripts/scylla_product.py
+PRODUCT="$product"
+EOS
+
 if ! $nonroot; then
     install -d -m755 "$retc"/systemd/system/scylla-server.service.d
     install -m644 dist/common/systemd/scylla-server.service.d/dependencies.conf -Dt "$retc"/systemd/system/scylla-server.service.d
@@ -365,6 +372,10 @@ EOS
 else
     install -m755 -d "$rdata"/saved_caches
     install -d -m755 "$rsystemd"/scylla-server.service.d
+
+    cat << EOS > "$rprefix"/scripts/scylla_sysconfdir.py
+SYSCONFDIR="$prefix/$sysconfdir"
+EOS
     if [ -d /var/log/journal ]; then
         cat << EOS > "$rsystemd"/scylla-server.service.d/nonroot.conf
 [Service]
@@ -393,9 +404,6 @@ StandardOutput=
 StandardOutput=file:$rprefix/scylla-server.log
 StandardError=
 StandardError=inherit
-EOS
-        cat << EOS > "$rprefix"/scripts/scylla_sysconfdir.py
-SYSCONFDIR="$sysconfdir"
 EOS
     fi
 

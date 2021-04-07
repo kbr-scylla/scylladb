@@ -15,6 +15,7 @@
 #include <seastar/http/exception.hh>
 #include "utils/logalloc.hh"
 #include "log.hh"
+#include "database.hh"
 
 namespace api {
 

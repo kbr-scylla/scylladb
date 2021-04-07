@@ -19,31 +19,31 @@
 struct tuple_deserializing_iterator {
 public:
     using iterator_category = std::input_iterator_tag;
-    using value_type = const bytes_view_opt;
+    using value_type = const managed_bytes_view_opt;
     using difference_type = std::ptrdiff_t;
-    using pointer = const bytes_view_opt*;
-    using reference = const bytes_view_opt&;
+    using pointer = const managed_bytes_view_opt*;
+    using reference = const managed_bytes_view_opt&;
 private:
-    bytes_view _v;
-    bytes_view_opt _current;
+    managed_bytes_view _v;
+    managed_bytes_view_opt _current;
 public:
     struct end_tag {};
-    tuple_deserializing_iterator(bytes_view v) : _v(v) {
+    tuple_deserializing_iterator(managed_bytes_view v) : _v(v) {
         parse();
     }
-    tuple_deserializing_iterator(end_tag, bytes_view v) : _v(v) {
+    tuple_deserializing_iterator(end_tag, managed_bytes_view v) : _v(v) {
         _v.remove_prefix(_v.size());
     }
-    static tuple_deserializing_iterator start(bytes_view v) {
+    static tuple_deserializing_iterator start(managed_bytes_view v) {
         return tuple_deserializing_iterator(v);
     }
-    static tuple_deserializing_iterator finish(bytes_view v) {
+    static tuple_deserializing_iterator finish(managed_bytes_view v) {
         return tuple_deserializing_iterator(end_tag(), v);
     }
-    const bytes_view_opt& operator*() const {
+    const managed_bytes_view_opt& operator*() const {
         return _current;
     }
-    const bytes_view_opt* operator->() const {
+    const managed_bytes_view_opt* operator->() const {
         return &_current;
     }
     tuple_deserializing_iterator& operator++() {
@@ -91,11 +91,29 @@ std::optional<View> read_tuple_element(View& v) {
     return read_simple_bytes(v, s);
 }
 
+template <FragmentedView View>
+bytes_opt get_nth_tuple_element(View v, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (v.empty()) {
+            return std::nullopt;
+        }
+        read_tuple_element(v);
+    }
+    if (v.empty()) {
+        return std::nullopt;
+    }
+    auto el = read_tuple_element(v);
+    if (el) {
+        return linearized(*el);
+    }
+    return std::nullopt;
+}
+
 class tuple_type_impl : public concrete_type<std::vector<data_value>> {
     using intern = type_interning_helper<tuple_type_impl, std::vector<data_type>>;
 protected:
     std::vector<data_type> _types;
-    static boost::iterator_range<tuple_deserializing_iterator> make_range(bytes_view v) {
+    static boost::iterator_range<tuple_deserializing_iterator> make_range(managed_bytes_view v) {
         return { tuple_deserializing_iterator::start(v), tuple_deserializing_iterator::finish(v) };
     }
     tuple_type_impl(kind k, sstring name, std::vector<data_type> types, bool freeze_inner);
@@ -112,7 +130,30 @@ public:
     const std::vector<data_type>& all_types() const {
         return _types;
     }
-    std::vector<bytes_view_opt> split(bytes_view v) const;
+    std::vector<bytes_opt> split(FragmentedView auto v) const {
+        std::vector<bytes_opt> elements;
+        while (!v.empty()) {
+            auto fragmented_element_optional = read_tuple_element(v);
+            if (fragmented_element_optional) {
+                elements.push_back(linearized(*fragmented_element_optional));
+            } else {
+                elements.push_back(std::nullopt);
+            }
+        }
+        return elements;
+    }
+    std::vector<managed_bytes_opt> split_fragmented(FragmentedView auto v) const {
+        std::vector<managed_bytes_opt> elements;
+        while (!v.empty()) {
+            auto fragmented_element_optional = read_tuple_element(v);
+            if (fragmented_element_optional) {
+                elements.push_back(managed_bytes(*fragmented_element_optional));
+            } else {
+                elements.push_back(std::nullopt);
+            }
+        }
+        return elements;
+    }
     template <typename RangeOf_bytes_opt>  // also accepts bytes_view_opt
     static bytes build_value(RangeOf_bytes_opt&& range) {
         auto item_size = [] (auto&& v) { return 4 + (v ? v->size() : 0); };
@@ -121,13 +162,40 @@ public:
         auto out = ret.begin();
         auto put = [&out] (auto&& v) {
             if (v) {
-                write(out, int32_t(v->size()));
-                out = std::copy(v->begin(), v->end(), out);
+                using val_type = std::remove_cvref_t<decltype(*v)>;
+                if constexpr (FragmentedView<val_type>) {
+                    int32_t size = v->size_bytes();
+                    write(out, size);
+                    read_fragmented(*v, size, out);
+                    out += size;
+                } else {
+                    write(out, int32_t(v->size()));
+                    out = std::copy(v->begin(), v->end(), out);
+                }
             } else {
                 write(out, int32_t(-1));
             }
         };
         boost::range::for_each(range, put);
+        return ret;
+    }
+    template <typename Range> // range of managed_bytes_opt or managed_bytes_view_opt
+    requires requires (Range it) { {it.begin()->value()} -> std::convertible_to<managed_bytes_view>; }
+    static managed_bytes build_value_fragmented(Range&& range) {
+        size_t size = 0;
+        for (auto&& v : range) {
+            size += 4 + (v ? v->size() : 0);
+        }
+        auto ret = managed_bytes(managed_bytes::initialized_later(), size);
+        auto out = managed_bytes_mutable_view(ret);
+        for (auto&& v : range) {
+            if (v) {
+                write<int32_t>(out, v->size());
+                write_fragmented(out, managed_bytes_view(*v));
+            } else {
+                write<int32_t>(out, -1);
+            }
+        }
         return ret;
     }
 private:
