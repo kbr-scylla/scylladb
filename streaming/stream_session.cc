@@ -80,13 +80,13 @@ static auto get_session(utils::UUID plan_id, gms::inet_address from, const char*
     auto sr = get_stream_result_future(plan_id);
     if (!sr) {
         auto err = format("[Stream #{}] GOT {} from {}: Can not find stream_manager", plan_id, verb, from);
-        sslog.debug(err.c_str());
+        sslog.debug("{}", err.c_str());
         throw std::runtime_error(err);
     }
     auto coordinator = sr->get_coordinator();
     if (!coordinator) {
         auto err = format("[Stream #{}] GOT {} from {}: Can not find coordinator", plan_id, verb, from);
-        sslog.debug(err.c_str());
+        sslog.debug("{}", err.c_str());
         throw std::runtime_error(err);
     }
     return coordinator->get_or_create_session(from);
@@ -370,8 +370,8 @@ future<prepare_message> stream_session::prepare(std::vector<stream_request> requ
             try {
                 db.find_column_family(ks, cf);
             } catch (no_such_column_family&) {
-                auto err = format("[Stream #{{}}] prepare requested ks={{}} cf={{}} does not exist", plan_id, ks, cf);
-                sslog.warn(err.c_str());
+                auto err = format("[Stream #{}] prepare requested ks={} cf={} does not exist", plan_id, ks, cf);
+                sslog.warn("{}", err.c_str());
                 throw std::runtime_error(err);
             }
         }
@@ -384,8 +384,8 @@ future<prepare_message> stream_session::prepare(std::vector<stream_request> requ
         try {
             db.find_column_family(cf_id);
         } catch (no_such_column_family&) {
-            auto err = format("[Stream #{{}}] prepare cf_id={} does not exist", plan_id, cf_id);
-            sslog.warn(err.c_str());
+            auto err = format("[Stream #{}] prepare cf_id={} does not exist", plan_id, cf_id);
+            sslog.warn("{}", err.c_str());
             throw std::runtime_error(err);
         }
         prepare_receiving(summary);
