@@ -961,7 +961,7 @@ cql_server::connection::process_on_shard(unsigned shard, uint16_t stream, fragme
                                               (bytes_ostream& linearization_buffer, service::client_state& client_state) mutable {
             request_reader in(is, linearization_buffer);
             return process_fn(client_state, server._query_processor, in, stream, _version, _cql_serialization_format,
-                    /* FIXME */empty_service_permit(), std::move(trace_state), false, server._sl_controller).then([] (auto msg) {
+                    /* FIXME */empty_service_permit(), std::move(trace_state), false, _server._sl_controller).then([] (auto msg) {
                 // result here has to be foreign ptr
                 return std::get<foreign_ptr<std::unique_ptr<cql_server::response>>>(std::move(msg));
             });
@@ -990,9 +990,7 @@ cql_server::connection::process(uint16_t stream, request_reader in, service::cli
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_query_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        service_permit permit,
-        tracing::trace_state_ptr trace_state,
-        bool init_trace,
+        service_permit permit, tracing::trace_state_ptr trace_state, bool init_trace,
         qos::service_level_controller& sl_controller) {
     auto query = in.read_long_string_view();
     auto q_state = std::make_unique<cql_query_state>(client_state, trace_state, std::move(permit), sl_controller);
@@ -1060,8 +1058,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_pr
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_execute_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        service_permit permit,
-        tracing::trace_state_ptr trace_state, bool init_trace,
+        service_permit permit, tracing::trace_state_ptr trace_state, bool init_trace,
         qos::service_level_controller& sl_controller) {
     cql3::prepared_cache_key_type cache_key(in.read_short_bytes());
     auto& id = cql3::prepared_cache_key_type::cql_id(cache_key);
@@ -1141,8 +1138,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>> cql_server::connectio
 static future<std::variant<foreign_ptr<std::unique_ptr<cql_server::response>>, unsigned>>
 process_batch_internal(service::client_state& client_state, distributed<cql3::query_processor>& qp, request_reader in,
         uint16_t stream, cql_protocol_version_type version, cql_serialization_format serialization_format,
-        service_permit permit,
-        tracing::trace_state_ptr trace_state, bool init_trace,
+        service_permit permit, tracing::trace_state_ptr trace_state, bool init_trace,
         qos::service_level_controller& sl_controller) {
     if (version == 1) {
         throw exceptions::protocol_exception("BATCH messages are not support in version 1 of the protocol");

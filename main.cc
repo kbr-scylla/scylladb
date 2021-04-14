@@ -79,6 +79,7 @@
 #include "alternator/tags_extension.hh"
 #include "alternator/rmw_operation.hh"
 #include "db/paxos_grace_seconds_extension.hh"
+#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 
 #include "service/raft/raft_services.hh"
 
@@ -1183,6 +1184,11 @@ int main(int ac, char** av) {
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return ss.join_cluster();
+            }).get();
+
+            sl_controller.invoke_on_all([] (qos::service_level_controller& controller) {
+                controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+                        ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
             }).get();
 
             supervisor::notify("starting tracing");

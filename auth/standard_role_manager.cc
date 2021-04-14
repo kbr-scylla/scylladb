@@ -47,7 +47,7 @@ namespace role_attributes_table {
 constexpr std::string_view name{"role_attributes", 15};
 
 static std::string_view qualified_name() noexcept {
-    static const sstring instance = make_sstring(AUTH_KS, ".", name);
+    static const sstring instance = format("{}.{}", AUTH_KS, name);
     return instance;
 }
 static std::string_view creation_query() noexcept {

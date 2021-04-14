@@ -103,8 +103,6 @@ public:
 
     future<db_clock::time_point> cdc_current_generation_timestamp(context);
 
-    future<std::map<db_clock::time_point, cdc::streams_version>> cdc_get_versioned_streams(context);
-
     future<qos::service_levels_info> get_service_levels() const;
     future<qos::service_levels_info> get_service_level(sstring service_level_name) const;
     future<> set_service_level(sstring service_level_name, qos::service_level_options slo) const;

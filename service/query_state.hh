@@ -86,6 +86,7 @@ public:
     qos::service_level_controller& get_service_level_controller() const {
         return _sl_controller->get();
     }
+
 };
 
 }

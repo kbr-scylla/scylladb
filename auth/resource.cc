@@ -174,6 +174,18 @@ std::ostream& operator<<(std::ostream& os, const resource& r) {
     return os;
 }
 
+service_level_resource_view::service_level_resource_view(const resource &r) :
+    _resource(r) {
+    if (r._kind != resource_kind::service_level) {
+        throw resource_kind_mismatch(resource_kind::service_level, r._kind);
+    }
+}
+
+std::ostream &operator<<(std::ostream &os, const service_level_resource_view &v) {
+    os << "<all service levels>";
+    return os;
+}
+
 data_resource_view::data_resource_view(const resource& r) : _resource(r) {
     if (r._kind != resource_kind::data) {
         throw resource_kind_mismatch(resource_kind::data, r._kind);
@@ -234,18 +246,6 @@ std::ostream& operator<<(std::ostream& os, const role_resource_view& v) {
         os << "<role " << *role << '>';
     }
 
-    return os;
-}
-
-service_level_resource_view::service_level_resource_view(const resource &r) :
-    _resource(r) {
-    if (r._kind != resource_kind::service_level) {
-        throw resource_kind_mismatch(resource_kind::service_level, r._kind);
-    }
-}
-
-std::ostream &operator<<(std::ostream &os, const service_level_resource_view &v) {
-    os << "<all service levels>";
     return os;
 }
 
