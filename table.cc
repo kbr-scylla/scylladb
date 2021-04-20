@@ -1316,16 +1316,7 @@ future<> table::write_schema_as_cql(database& db, sstring dir) const {
 future<> table::snapshot(database& db, sstring name) {
     return flush().then([this, &db, name = std::move(name)]() {
        return with_semaphore(_sstable_deletion_sem, 1, [this, &db, name = std::move(name)]() {
-        // If the SSTables are shared, link this sstable to the snapshot directory only by one of the shards that own it.
-        auto all = _sstables->all();
-        std::vector<sstables::shared_sstable> tables;
-        tables.reserve(all->size());
-        for (auto& sst : *all) {
-            const auto& shards = sst->get_shards_for_this_sstable();
-            if (shards.size() <= 1 || shards[0] == this_shard_id()) {
-                tables.emplace_back(sst);
-            }
-        }
+        auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables->all());
         auto jsondir = _config.datadir + "/snapshots/" + name;
         return do_with(std::move(tables), std::move(jsondir), [this, &db] (std::vector<sstables::shared_sstable>& tables, const sstring& jsondir) {
             return io_check([&jsondir] { return recursive_touch_directory(jsondir); }).then([this, &db, &jsondir, &tables] {
@@ -1906,33 +1897,75 @@ table::query(schema_ptr s,
         query::result_memory_limiter& memory_limiter,
         db::timeout_clock::time_point timeout,
         query::querier_cache_context cache_ctx) {
+    if (cmd.get_row_limit() == 0 || cmd.slice.partition_row_limit() == 0 || cmd.partition_limit == 0) {
+        co_return make_lw_shared<query::result>();
+    }
+
     _async_gate.enter();
-    auto leave = defer([&] { _async_gate.leave(); });
     utils::latency_counter lc;
     _stats.reads.set_latency(lc);
-    const auto short_read_allowed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
-    auto f = opts.request == query::result_request::only_digest
-             ? memory_limiter.new_digest_read(*cmd.max_result_size, short_read_allowed) : memory_limiter.new_data_read(*cmd.max_result_size, short_read_allowed);
-    return f.then([this, lc, s = std::move(s), &cmd, class_config, opts, &partition_ranges,
-            trace_state = std::move(trace_state), timeout, cache_ctx = std::move(cache_ctx),
-            leave = std::move(leave)] (query::result_memory_accounter accounter) mutable {
-        auto qs_ptr = std::make_unique<query_state>(std::move(s), cmd, opts, partition_ranges, std::move(accounter));
-        auto& qs = *qs_ptr;
-        return do_until(std::bind(&query_state::done, &qs), [this, &qs, class_config, trace_state = std::move(trace_state), timeout, cache_ctx = std::move(cache_ctx)] {
-            auto&& range = *qs.current_partition_range++;
-            return data_query(qs.schema, as_mutation_source(), range, qs.cmd.slice, qs.remaining_rows(),
-                              qs.remaining_partitions(), qs.cmd.timestamp, qs.builder, timeout, class_config, trace_state, cache_ctx);
-        }).then([qs_ptr = std::move(qs_ptr), &qs] {
-            return make_ready_future<lw_shared_ptr<query::result>>(
-                    make_lw_shared<query::result>(qs.builder.build()));
-        }).finally([lc, this, leave = std::move(leave)]() mutable {
-            _stats.reads.mark(lc);
-            if (lc.is_start()) {
-                _stats.estimated_read.add(lc.latency());
-            }
-            // "leave" is destroyed here
-        });
+
+    auto finally = defer([&] () noexcept {
+        _stats.reads.mark(lc);
+        if (lc.is_start()) {
+            _stats.estimated_read.add(lc.latency());
+        }
+        _async_gate.leave();
     });
+
+    const auto short_read_allowed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
+    auto accounter = co_await (opts.request == query::result_request::only_digest
+             ? memory_limiter.new_digest_read(*cmd.max_result_size, short_read_allowed) : memory_limiter.new_data_read(*cmd.max_result_size, short_read_allowed));
+
+    query_state qs(s, cmd, opts, partition_ranges, std::move(accounter));
+
+    while (!qs.done()) {
+        auto&& range = *qs.current_partition_range++;
+
+        auto querier_opt = cache_ctx.lookup_data_querier(*s, range, qs.cmd.slice, trace_state);
+        auto q = querier_opt
+                ? std::move(*querier_opt)
+                : query::data_querier(as_mutation_source(), s, class_config.semaphore.make_permit(s.get(), "data-query"), range, qs.cmd.slice,
+                        service::get_local_sstable_query_read_priority(), trace_state);
+
+        co_await q.consume_page(query_result_builder(*s, qs.builder), qs.remaining_rows(), qs.remaining_partitions(), qs.cmd.timestamp, timeout,
+                class_config.max_memory_for_unlimited_query);
+
+        if (q.are_limits_reached() || qs.builder.is_short_read()) {
+            cache_ctx.insert(std::move(q), std::move(trace_state));
+        }
+    }
+
+    co_return make_lw_shared<query::result>(qs.builder.build());
+}
+
+future<reconcilable_result>
+table::mutation_query(schema_ptr s,
+        const query::read_command& cmd,
+        query::query_class_config class_config,
+        const dht::partition_range& range,
+        tracing::trace_state_ptr trace_state,
+        query::result_memory_accounter accounter,
+        db::timeout_clock::time_point timeout,
+        query::querier_cache_context cache_ctx) {
+    if (cmd.get_row_limit() == 0 || cmd.slice.partition_row_limit() == 0 || cmd.partition_limit == 0) {
+        co_return reconcilable_result();
+    }
+
+    auto querier_opt = cache_ctx.lookup_mutation_querier(*s, range, cmd.slice, trace_state);
+    auto q = querier_opt
+            ? std::move(*querier_opt)
+            : query::mutation_querier(as_mutation_source(), s, class_config.semaphore.make_permit(s.get(), "mutation-query"), range, cmd.slice,
+                    service::get_local_sstable_query_read_priority(), trace_state);
+
+    auto rrb = reconcilable_result_builder(*s, cmd.slice, std::move(accounter));
+    auto r = co_await q.consume_page(std::move(rrb), cmd.get_row_limit(), cmd.partition_limit, cmd.timestamp, timeout, class_config.max_memory_for_unlimited_query);
+
+    if (q.are_limits_reached() || r.is_short_read()) {
+        cache_ctx.insert(std::move(q), std::move(trace_state));
+    }
+
+    co_return r;
 }
 
 mutation_source

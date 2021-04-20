@@ -38,7 +38,7 @@ def get_base_class_offset(gdb_type, base_class_name):
     name_pattern = re.escape(base_class_name) + "(<.*>)?$"
     for field in gdb_type.fields():
         if field.is_base_class and re.match(name_pattern, field.name):
-            return field.bitpos / 8
+            return int(field.bitpos / 8)
 
 
 class intrusive_list:
@@ -1101,7 +1101,7 @@ class scylla_task_histogram(gdb.Command):
                 help="Show only the top COUNT elements of the histogram. Defaults to 30. Set to 0 to show all items. Ignored when `--all` is used.")
         parser.add_argument("-a", "--all", action="store_true", default=False,
                 help="Sample all pages and show all results. Equivalent to -m=0 -c=0.")
-        parser.add_argument("-s", "--size", action="store", default=0,
+        parser.add_argument("-s", "--size", type=int, action="store", default=0,
                 help="The size of objects to sample. When set, only objects of this size will be sampled. A size of 0 (the default value) means no size restrictions.")
         try:
             args = parser.parse_args(arg.split())
@@ -1723,7 +1723,7 @@ class scylla_memory(gdb.Command):
             pages_in_use = 0
             use_count = 0
             for s in sc.spans():
-                if s.pool() == sp.address:
+                if not s.is_free() and s.pool() == sp.address:
                     pages_in_use += s.size()
                     use_count += int(s.used_span_size() * page_size / object_size)
             memory = pages_in_use * page_size

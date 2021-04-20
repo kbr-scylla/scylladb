@@ -28,6 +28,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/sleep.hh>
 #include "schema_registry.hh"
 #include "service/migration_manager.hh"
 

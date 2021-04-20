@@ -11,13 +11,12 @@
 #ifndef DATABASE_HH_
 #define DATABASE_HH_
 
-#include "dht/i_partitioner.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "index/secondary_index_manager.hh"
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/execution_stage.hh>
-#include <seastar/net/byteorder.hh>
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "db_clock.hh"
@@ -25,51 +24,32 @@
 #include <chrono>
 #include <seastar/core/distributed.hh>
 #include <functional>
-#include <cstdint>
 #include <unordered_map>
 #include <map>
 #include <set>
-#include <iosfwd>
 #include <boost/functional/hash.hpp>
 #include <boost/range/algorithm/find.hpp>
 #include <optional>
 #include <string.h>
 #include "types.hh"
-#include "compound.hh"
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
-#include "cql3/column_specification.hh"
 #include "db/commitlog/replay_position.hh"
 #include <limits>
-#include <cstddef>
 #include "schema_fwd.hh"
 #include "db/view/view.hh"
-#include "db/schema_features.hh"
 #include "gms/feature.hh"
-#include "timestamp.hh"
-#include "tombstone.hh"
-#include "atomic_cell.hh"
-#include "query-request.hh"
-#include "keys.hh"
 #include "memtable.hh"
-#include <list>
 #include "mutation_reader.hh"
 #include "row_cache.hh"
 #include "compaction_strategy.hh"
-#include "utils/exponential_backoff_retry.hh"
-#include "utils/histogram.hh"
 #include "utils/estimated_histogram.hh"
 #include "sstables/sstable_set.hh"
-#include "sstables/progress_monitor.hh"
-#include "sstables/version.hh"
-#include <seastar/core/rwlock.hh>
-#include <seastar/core/shared_future.hh>
 #include <seastar/core/metrics_registration.hh>
 #include "tracing/trace_state.hh"
 #include "db/view/view_stats.hh"
 #include "db/view/view_update_backlog.hh"
 #include "db/view/row_locking.hh"
-#include "lister.hh"
 #include "utils/phased_barrier.hh"
 #include "backlog_controller.hh"
 #include "dirty_memory_manager.hh"
@@ -84,7 +64,6 @@
 #include "user_types_metadata.hh"
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
-#include "utils/updateable_value.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -763,6 +742,27 @@ public:
         db::timeout_clock::time_point timeout,
         query::querier_cache_context cache_ctx = { });
 
+    // Performs a query on given data source returning data in reconcilable form.
+    //
+    // Reads at most row_limit rows. If less rows are returned, the data source
+    // didn't have more live data satisfying the query.
+    //
+    // Any cells which have expired according to query_time are returned as
+    // deleted cells and do not count towards live data. The mutations are
+    // compact, meaning that any cell which is covered by higher-level tombstone
+    // is absent in the results.
+    //
+    // 'source' doesn't have to survive deferring.
+    future<reconcilable_result>
+    mutation_query(schema_ptr s,
+            const query::read_command& cmd,
+            query::query_class_config class_config,
+            const dht::partition_range& range,
+            tracing::trace_state_ptr trace_state,
+            query::result_memory_accounter accounter,
+            db::timeout_clock::time_point timeout,
+            query::querier_cache_context cache_ctx = { });
+
     void start();
     future<> stop();
     future<> flush(std::optional<db::replay_position> = {});
@@ -1278,7 +1278,16 @@ private:
         db::timeout_clock::time_point,
         query::querier_cache_context> _data_query_stage;
 
-    mutation_query_stage _mutation_query_stage;
+    inheriting_concrete_execution_stage<future<reconcilable_result>,
+        table*,
+        schema_ptr,
+        const query::read_command&,
+        query::query_class_config,
+        const dht::partition_range&,
+        tracing::trace_state_ptr,
+        query::result_memory_accounter,
+        db::timeout_clock::time_point,
+        query::querier_cache_context> _mutation_query_stage;
 
     inheriting_concrete_execution_stage<
             future<>,

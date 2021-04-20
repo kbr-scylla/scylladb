@@ -11,82 +11,46 @@
 #include "log.hh"
 #include "lister.hh"
 #include "database.hh"
-#include "unimplemented.hh"
 #include <seastar/core/future-util.hh>
-#include "db/commitlog/commitlog_entry.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/commitlog/commitlog.hh"
 #include "db/config.hh"
 #include "to_string.hh"
-#include "query-result-writer.hh"
-#include "cql3/column_identifier.hh"
 #include "cql3/functions/functions.hh"
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
-#include <seastar/core/sleep.hh>
-#include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics.hh>
-#include <seastar/core/execution_stage.hh>
-#include <seastar/util/bool_class.hh>
 #include <seastar/util/defer.hh>
-#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include "sstables/compaction.hh"
-#include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/adaptor/map.hpp>
-#include "locator/simple_snitch.hh"
-#include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
-#include <boost/function_output_iterator.hpp>
-#include <boost/range/algorithm/heap_algorithm.hpp>
-#include <boost/range/algorithm/remove_if.hpp>
-#include <boost/range/algorithm/find.hpp>
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/algorithm/sort.hpp>
-#include <boost/range/adaptor/map.hpp>
 #include <boost/container/static_vector.hpp>
 #include "frozen_mutation.hh"
 #include <seastar/core/do_with.hh>
 #include "service/migration_manager.hh"
 #include "message/messaging_service.hh"
-#include "mutation_query.hh"
-#include <seastar/core/fstream.hh>
-#include <seastar/core/enum.hh>
-#include "utils/latency.hh"
-#include "schema_registry.hh"
-#include "service/priority_manager.hh"
 #include "cell_locking.hh"
-#include "db/view/row_locking.hh"
 #include "view_info.hh"
-#include "memtable-sstable.hh"
 #include "db/schema_tables.hh"
-#include "db/query_context.hh"
 #include "sstables/compaction_manager.hh"
-#include "sstables/compaction_backlog_manager.hh"
-#include "sstables/progress_monitor.hh"
-#include "auth/common.hh"
-#include "tracing/trace_keyspace_helper.hh"
 #include "gms/feature_service.hh"
 
-#include "checked-file-impl.hh"
-#include "utils/disk-error-handler.hh"
 #include "utils/human_readable.hh"
 
 #include "db/timeout_clock.hh"
 #include "db/large_data_handler.hh"
 #include "db/data_listeners.hh"
-#include "distributed_loader.hh"
 
 #include "user_types_metadata.hh"
 #include <seastar/core/shared_ptr_incomplete.hh>
 #include <seastar/util/memory_diagnostics.hh>
-#include <seastar/core/coroutine.hh>
-
-#include "schema_builder.hh"
 
 using namespace std::chrono_literals;
 using namespace db;
@@ -364,7 +328,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_memory_system_concurrent_reads(),
             "_system_read_concurrency_sem")
     , _data_query_stage("data_query", &column_family::query)
-    , _mutation_query_stage()
+    , _mutation_query_stage("mutation_query", &column_family::mutation_query)
     , _apply_stage("db_apply", &database::do_apply)
     , _version(empty_version)
     , _compaction_manager(make_compaction_manager(_cfg, dbcfg, as))
@@ -1124,7 +1088,8 @@ void keyspace::mark_as_populated() {
 
 
 static bool is_system_table(const schema& s) {
-    return s.ks_name() == db::system_keyspace::NAME || s.ks_name() == db::system_distributed_keyspace::NAME;
+    return s.ks_name() == db::system_keyspace::NAME || s.ks_name() == db::system_distributed_keyspace::NAME
+        || s.ks_name() == db::system_distributed_keyspace::NAME_EVERYWHERE;
 }
 
 column_family::config
@@ -1451,17 +1416,14 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     auto& semaphore = get_reader_concurrency_semaphore();
     auto class_config = query::query_class_config{.semaphore = semaphore, .max_memory_for_unlimited_query = *cmd.max_result_size};
     query::querier_cache_context cache_ctx(_querier_cache, cmd.query_uuid, cmd.is_first_page);
-    return _mutation_query_stage(std::move(s),
-            cf.as_mutation_source(),
-            seastar::cref(range),
-            seastar::cref(cmd.slice),
-            cmd.get_row_limit(),
-            cmd.partition_limit,
-            cmd.timestamp,
-            timeout,
+    return _mutation_query_stage(&cf,
+            std::move(s),
+            seastar::cref(cmd),
             class_config,
-            std::move(accounter),
+            seastar::cref(range),
             std::move(trace_state),
+            std::move(accounter),
+            timeout,
             std::move(cache_ctx)).then_wrapped([this, s = _stats, &semaphore, hit_rate = cf.get_global_cache_hit_rate(), op = cf.read_in_progress()] (auto f) {
         if (f.failed()) {
             ++semaphore.get_stats().total_failed_reads;

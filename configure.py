@@ -21,15 +21,52 @@ tempfile.tempdir = f"{outdir}/tmp"
 
 configure_args = str.join(' ', [shlex.quote(x) for x in sys.argv[1:]])
 
-for line in open('/etc/os-release'):
-    key, _, value = line.partition('=')
-    value = value.strip().strip('"')
-    if key == 'ID':
-        os_ids = [value]
-    if key == 'ID_LIKE':
-        os_ids += value.split(' ')
-    if key == 'VERSION_ID':
-        os_version = value
+if os.path.exists('/etc/os-release'):
+    for line in open('/etc/os-release'):
+        key, _, value = line.partition('=')
+        value = value.strip().strip('"')
+        if key == 'ID':
+            os_ids = [value]
+        if key == 'ID_LIKE':
+            os_ids += value.split(' ')
+        if key == 'VERSION_ID':
+            os_version = value
+    if not os_ids:
+        os_ids = ['linux']  # default ID per os-release(5)
+else:
+    os_ids = ['unknown']
+
+distro_extra_cflags = ''
+distro_extra_ldflags = ''
+distro_extra_cmake_args = []
+employ_ld_trickery = True
+
+# distro-specific setup
+def distro_setup_nix():
+    global os_ids, employ_ld_trickery
+    global distro_extra_ldflags, distro_extra_cflags, distro_extra_cmake_args
+
+    os_ids = ['linux']
+    employ_ld_trickery = False
+
+    libdirs = list(dict.fromkeys(os.environ.get('CMAKE_LIBRARY_PATH').split(':')))
+    incdirs = list(dict.fromkeys(os.environ.get('CMAKE_INCLUDE_PATH').split(':')))
+
+    # add nix {lib,inc}dirs to relevant flags, mimicing nix versions of cmake & autotools.
+    # also add rpaths to make sure that any built executables can run in place.
+    distro_extra_ldflags = ' '.join([ '-rpath ' + path + ' -L' + path for path in libdirs ]);
+    distro_extra_cflags = ' '.join([ '-isystem ' + path for path in incdirs ])
+
+    # indexers like clangd may or may not know which stdc++ or glibc
+    # the compiler was configured with, so make the relevant paths
+    # explicit on each compilation command line:
+    implicit_cflags = os.environ.get('IMPLICIT_CFLAGS').strip()
+    distro_extra_cflags += ' ' + implicit_cflags
+    # also propagate to cmake-built dependencies:
+    distro_extra_cmake_args = ['-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES:INTERNAL=' + implicit_cflags]
+
+if os.environ.get('NIX_BUILD_TOP'):
+        distro_setup_nix()
 
 # distribution "internationalization", converting package names.
 # Fedora name is key, values is distro -> package name dict. 
@@ -87,15 +124,17 @@ def have_pkg(package):
 
 
 def pkg_config(package, *options):
+    pkg_config_path = os.environ.get('PKG_CONFIG_PATH', '')
     # Add the directory containing the package to the search path, if a file is
     # specified instead of a name.
     if package.endswith('.pc'):
         local_path = os.path.dirname(package)
-        env = { 'PKG_CONFIG_PATH' : '{}:{}'.format(local_path, os.environ.get('PKG_CONFIG_PATH', '')) }
-    else:
-        env = None
+        pkg_config_path = '{}:{}'.format(local_path, pkg_config_path)
 
-    output = subprocess.check_output(['pkg-config'] + list(options) + [package], env=env)
+    output = subprocess.check_output(['pkg-config'] + list(options) + [package],
+                                     env = {**os.environ,
+                                            'PKG_CONFIG_PATH': pkg_config_path})
+
     return output.decode('utf-8').strip()
 
 
@@ -1139,6 +1178,7 @@ perf_tests_seastar_deps = [
 
 for t in perf_tests:
     deps[t] = [t + '.cc'] + scylla_tests_dependencies + perf_tests_seastar_deps
+    deps[t] += ['test/perf/perf.cc']
 
 deps['test/boost/sstable_test'] += ['test/lib/normalizing_reader.cc']
 deps['test/boost/sstable_datafile_test'] += ['test/lib/normalizing_reader.cc']
@@ -1162,7 +1202,9 @@ deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
 deps['test/boost/anchorless_list_test'] = ['test/boost/anchorless_list_test.cc']
 deps['test/perf/perf_fast_forward'] += ['release.cc']
-deps['test/perf/perf_simple_query'] += ['release.cc']
+deps['test/perf/perf_simple_query'] += ['release.cc', 'test/perf/perf.cc']
+deps['test/perf/perf_row_cache_reads'] += ['test/perf/perf.cc']
+deps['test/perf/perf_row_cache_update'] += ['test/perf/perf.cc']
 deps['test/boost/reusable_buffer_test'] = [
     "test/boost/reusable_buffer_test.cc",
     "test/lib/log.cc",
@@ -1407,9 +1449,12 @@ for m in ['debug', 'release', 'sanitize']:
 
 gcc_linker_output = subprocess.check_output(['gcc', '-###', '/dev/null', '-o', 't'], stderr=subprocess.STDOUT).decode('utf-8')
 original_dynamic_linker = re.search('-dynamic-linker ([^ ]*)', gcc_linker_output).groups()[0]
-# gdb has a SO_NAME_MAX_PATH_SIZE of 512, so limit the path size to
-# that. The 512 includes the null at the end, hence the 511 bellow.
-dynamic_linker = '/' * (511 - len(original_dynamic_linker)) + original_dynamic_linker
+if employ_ld_trickery:
+    # gdb has a SO_NAME_MAX_PATH_SIZE of 512, so limit the path size to
+    # that. The 512 includes the null at the end, hence the 511 bellow.
+    dynamic_linker = '/' * (511 - len(original_dynamic_linker)) + original_dynamic_linker
+else:
+    dynamic_linker = original_dynamic_linker
 
 forced_ldflags = '-Wl,'
 
@@ -1458,7 +1503,7 @@ def configure_seastar(build_dir, mode):
         '-DSeastar_CXX_DIALECT=gnu++20',
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
-    ]
+    ] + distro_extra_cmake_args
 
     if args.stack_guards is not None:
         stack_guards = 'ON' if args.stack_guards else 'OFF'
@@ -1523,7 +1568,7 @@ def configure_abseil(build_dir, mode):
         '-DCMAKE_C_COMPILER={}'.format(args.cc),
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_CXX_FLAGS_{}={}'.format(cmake_mode.upper(), abseil_cflags),
-    ]
+    ] + distro_extra_cmake_args
 
     abseil_cmd = ['cmake', '-G', 'Ninja', real_relpath('abseil', abseil_build_dir)] + abseil_cmake_args
 
@@ -1579,7 +1624,7 @@ if any(filter(thrift_version.startswith, thrift_boost_versions)):
 for pkg in pkgs:
     args.user_cflags += ' ' + pkg_config(pkg, '--cflags')
     libs += ' ' + pkg_config(pkg, '--libs')
-args.user_cflags += '-I abseil'
+args.user_cflags += ' -Iabseil'
 user_cflags = args.user_cflags + ' -fvisibility=hidden'
 user_ldflags = args.user_ldflags + ' -fvisibility=hidden'
 if args.staticcxx:
@@ -1645,9 +1690,9 @@ with open(buildfile_tmp, 'w') as f:
         configure_args = {configure_args}
         builddir = {outdir}
         cxx = {cxx}
-        cxxflags = --std=gnu++20 {user_cflags} {warnings} {defines}
-        ldflags = {linker_flags} {user_ldflags}
-        ldflags_build = {linker_flags}
+        cxxflags = --std=gnu++20 {user_cflags} {distro_extra_cflags} {warnings} {defines}
+        ldflags = {linker_flags} {user_ldflags} {distro_extra_ldflags}
+        ldflags_build = {linker_flags} {distro_extra_ldflags}
         libs = {libs}
         pool link_pool
             depth = {link_pool_depth}

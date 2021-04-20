@@ -25,6 +25,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/sleep.hh>
 #include "dht/range_streamer.hh"
 #include "utils/fb_utilities.hh"
 #include "locator/snitch_base.hh"

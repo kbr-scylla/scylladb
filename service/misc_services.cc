@@ -27,6 +27,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/sleep.hh>
 #include "load_meter.hh"
 #include "load_broadcaster.hh"
 #include "cache_hitrate_calculator.hh"

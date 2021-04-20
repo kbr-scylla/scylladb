@@ -178,6 +178,15 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
         return _mm.announce_new_keyspace(ksm, api::min_timestamp);
     });
 
+    co_await ignore_existing([this] {
+        auto ksm = keyspace_metadata::new_keyspace(
+                NAME_EVERYWHERE,
+                "org.apache.cassandra.locator.EverywhereStrategy",
+                {},
+                true /* durable_writes */);
+        return _mm.announce_new_keyspace(ksm, api::min_timestamp);
+    });
+
     for (auto&& table : tables) {
         co_await ignore_existing([this, table = std::move(table)] {
             return _mm.announce_new_column_family(std::move(table), api::min_timestamp);
