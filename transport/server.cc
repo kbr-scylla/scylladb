@@ -516,16 +516,6 @@ cql_server::connection::connection(cql_server& server, socket_address server_add
 cql_server::connection::~connection() {
 }
 
-future<> cql_server::connection::process_until_tenant_switch() {
-    _tenant_switch = false;
-    {
-        return do_until([this] {
-            return _read_buf.eof() || _tenant_switch;
-        }, [this] {
-            return process_request();
-        });
-    }
-}
 void cql_server::connection::on_connection_close()
 {
     _server._notifier->unregister_connection(this);
