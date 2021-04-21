@@ -13,6 +13,7 @@
 #include <vector>
 #include <random>
 #include <string>
+#include <seastar/core/thread.hh>
 #include "utils/logalloc.hh"
 
 struct stress_config {

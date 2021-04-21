@@ -14,7 +14,6 @@
 #include <seastar/core/seastar.hh>
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "service/migration_listener.hh"
-#include "service/storage_proxy.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/values.hh"
 #include "auth/authenticator.hh"
@@ -28,8 +27,10 @@
 #include "utils/fragmented_temporary_buffer.hh"
 #include "service_permit.hh"
 #include <seastar/core/sharded.hh>
+#include <seastar/core/execution_stage.hh>
 #include "utils/updateable_value.hh"
 #include "service/qos/service_level_controller.hh"
+#include "generic_server.hh"
 
 namespace scollectd {
 
@@ -108,7 +109,7 @@ struct cql_server_config {
     smp_service_group bounce_request_smp_service_group = default_smp_service_group();
 };
 
-class cql_server : public seastar::peering_sharded_service<cql_server> {
+class cql_server : public seastar::peering_sharded_service<cql_server>, public generic_server::server {
 private:
     struct transport_stats {
         // server stats
@@ -136,7 +137,6 @@ private:
 
     static constexpr cql_protocol_version_type current_version = cql_serialization_format::latest_version;
 
-    std::vector<server_socket> _listeners;
     distributed<cql3::query_processor>& _query_processor;
     cql_server_config _config;
     size_t _max_request_size;
@@ -153,9 +153,6 @@ public:
             service::migration_notifier& mn, database& db, service::memory_limiter& ml,
             cql_server_config config,
             qos::service_level_controller& sl_controller);
-    future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool is_shard_aware = false, bool keepalive = false);
-    future<> do_accepts(int which, bool keepalive, socket_address server_addr);
-    future<> stop();
 public:
     using response = cql_transport::response;
 private:
@@ -163,15 +160,11 @@ private:
     friend class connection;
     friend std::unique_ptr<cql_server::response> make_result(int16_t stream, messages::result_message& msg,
             const tracing::trace_state_ptr& tr_state, cql_protocol_version_type version, bool skip_metadata);
-    class connection : public boost::intrusive::list_base_hook<> {
+
+    class connection : public generic_server::connection {
         cql_server& _server;
         socket_address _server_addr;
-        connected_socket _fd;
-        input_stream<char> _read_buf;
-        output_stream<char> _write_buf;
         fragmented_temporary_buffer::reader _buffer_reader;
-        seastar::gate _pending_requests_gate;
-        future<> _ready_to_respond = make_ready_future<>();
         cql_protocol_version_type _version = 0;
         cql_compression _compression = cql_compression::none;
         cql_serialization_format _cql_serialization_format = cql_serialization_format::latest();
@@ -198,10 +191,10 @@ private:
         static thread_local execution_stage_type _process_request_stage;
     public:
         connection(cql_server& server, socket_address server_addr, connected_socket&& fd, socket_address addr);
-        ~connection();
-        future<> process();
-        future<> process_request();
-        future<> shutdown();
+        virtual ~connection();
+        future<> process_request() override;
+        void handle_error(future<>&& f) override;
+        void on_connection_close() override;
         static std::tuple<net::inet_address, int, client_type> make_client_key(const service::client_state& cli_state);
         client_data make_client_data() const;
         const service::client_state& get_client_state() const { return _client_state; }
@@ -260,23 +253,13 @@ private:
     };
 
     friend class type_codec;
-private:
-    bool _stopping = false;
-    promise<> _all_connections_stopped;
-    future<> _stopped = _all_connections_stopped.get_future();
-    boost::intrusive::list<connection> _connections_list;
-    uint64_t _total_connections = 0;
-    uint64_t _current_connections = 0;
-    uint64_t _connections_being_accepted = 0;
-private:
-    future<> advertise_new_connection(shared_ptr<connection> conn);
-    future<> unadvertise_connection(shared_ptr<connection> conn);
 
-    void maybe_idle() {
-        if (_stopping && !_connections_being_accepted && !_current_connections) {
-            _all_connections_stopped.set_value();
-        }
-    }
+private:
+    shared_ptr<generic_server::connection> make_connection(socket_address server_addr, connected_socket&& fd, socket_address addr);
+    future<> on_stop() override;
+    future<> advertise_new_connection(shared_ptr<generic_server::connection> conn) override;
+    future<> unadvertise_connection(shared_ptr<generic_server::connection> conn) override;
+
     const ::timeout_config& timeout_config() { return _config.timeout_config; }
 };
 

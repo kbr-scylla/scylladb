@@ -8,6 +8,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#pragma once
+
 #include <boost/intrusive/parent_from_member.hpp>
 #include <seastar/util/defer.hh>
 #include <seastar/util/alloc_failure_injector.hh>

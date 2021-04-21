@@ -31,6 +31,7 @@
 #include "sstables/compaction_manager.hh"
 #include "message/messaging_service.hh"
 #include "service/storage_service.hh"
+#include "service/storage_proxy.hh"
 #include "auth/service.hh"
 #include "auth/common.hh"
 #include "db/config.hh"

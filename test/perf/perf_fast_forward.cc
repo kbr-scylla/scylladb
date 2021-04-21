@@ -9,6 +9,8 @@
  */
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/join.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/range/irange.hpp>
 #include <boost/range/algorithm_ext.hpp>
@@ -34,6 +36,7 @@
 
 using namespace std::chrono_literals;
 using namespace seastar;
+namespace fs = std::filesystem;
 using int_range = nonwrapping_range<int>;
 
 reactor::io_stats s;

@@ -10,6 +10,9 @@
 
 #pragma once
 
+#include <stddef.h>
+#include "utils/bptree.hh"
+
 namespace bplus {
 
 template <typename K, typename T, typename Less, size_t NodeSize>

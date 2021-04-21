@@ -12,6 +12,7 @@
 #include "redis/service.hh"
 #include "redis/keyspace_utils.hh"
 #include "redis/server.hh"
+#include "service/storage_proxy.hh"
 #include "db/config.hh"
 #include "log.hh"
 #include "auth/common.hh"
@@ -90,7 +91,7 @@ future<> redis_service::listen(seastar::sharded<auth::service>& auth_service, db
 
             return f.then([server, configs = std::move(configs), keepalive] {
                 return parallel_for_each(configs, [server, keepalive](const listen_cfg & cfg) {
-                    return server->invoke_on_all(&redis_transport::redis_server::listen, cfg.addr, cfg.cred, keepalive).then([cfg] {
+                    return server->invoke_on_all(&redis_transport::redis_server::listen, cfg.addr, cfg.cred, false, keepalive).then([cfg] {
                         slogger.info("Starting listening for REDIS clients on {} ({})", cfg.addr, cfg.cred ? "encrypted" : "unencrypted");
                     });
                 });

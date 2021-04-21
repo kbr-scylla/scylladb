@@ -10,6 +10,10 @@
 
 #pragma once
 
+#include <fmt/core.h>
+#include <cassert>
+#include "utils/bptree.hh"
+
 /*
  * Helper class that helps to check that tree
  * - works with keys without default contstuctor

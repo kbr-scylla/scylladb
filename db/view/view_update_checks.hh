@@ -10,9 +10,13 @@
 
 #pragma once
 
+#include <seastar/core/future.hh>
 #include "streaming/stream_reason.hh"
 #include <boost/range/adaptor/map.hpp>
 #include <boost/algorithm/cxx11/any_of.hpp>
+#include "seastarx.hh"
+
+class table;
 
 namespace db {
 

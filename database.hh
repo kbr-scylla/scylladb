@@ -1210,6 +1210,7 @@ struct string_pair_eq {
 //   use shard_of() for data
 
 class database {
+    friend class database_test;
 public:
     enum class table_kind {
         system,

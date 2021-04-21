@@ -49,7 +49,6 @@
 
 #include "unimplemented.hh"
 #include "validation.hh"
-#include "service/storage_proxy.hh"
 
 #include <memory>
 #include <optional>

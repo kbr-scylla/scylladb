@@ -21,15 +21,16 @@
 #include "auth/service.hh"
 #include "cql3/values.hh"
 #include "service/client_state.hh"
-#include "service/storage_proxy.hh"
 #include "service_permit.hh"
 #include "timeout_config.hh"
 #include "utils/estimated_histogram.hh"
 #include "utils/fragmented_temporary_buffer.hh"
+#include "generic_server.hh"
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
+#include <seastar/core/execution_stage.hh>
 #include <seastar/net/tls.hh>
 
 #include <memory>
@@ -37,6 +38,12 @@
 db::consistency_level make_consistency_level(const sstring&);
 
 class redis_exception;
+
+namespace service {
+
+class storage_proxy;
+
+}
 
 namespace redis_transport {
 
@@ -48,8 +55,7 @@ struct redis_server_config {
     size_t _total_redis_db_count;
 };
 
-class redis_server {
-    std::vector<server_socket> _listeners;
+class redis_server : public generic_server::server {
     seastar::sharded<service::storage_proxy>& _proxy;
     seastar::sharded<redis::query_processor>& _query_processor;
     redis_server_config _config;
@@ -62,9 +68,6 @@ class redis_server {
 
 public:
     redis_server(seastar::sharded<service::storage_proxy>& proxy, seastar::sharded<redis::query_processor>& qp, auth::service& auth_service, redis_server_config config);
-    future<> listen(socket_address addr, std::shared_ptr<seastar::tls::credentials_builder> = {}, bool keepalive = false);
-    future<> do_accepts(int which, bool keepalive, socket_address server_addr);
-    future<> stop();
 
     struct result {
         result(redis::redis_message&& m) : _data(make_foreign(std::make_unique<redis::redis_message>(std::move(m)))) {}
@@ -76,16 +79,11 @@ public:
     using response_type = result;
 
 private:
-    class connection : public boost::intrusive::list_base_hook<> {
+    class connection : public generic_server::connection {
         redis_server& _server;
         socket_address _server_addr;
-        connected_socket _fd;
-        input_stream<char> _read_buf;
-        output_stream<char> _write_buf;
         redis_protocol_parser _parser;
-        seastar::gate _pending_requests_gate;
         redis::redis_options _options;
-        future<> _ready_to_respond = make_ready_future<>();
 
         using execution_stage_type = inheriting_concrete_execution_stage<
                 future<redis_server::result>,
@@ -97,28 +95,20 @@ private:
         static thread_local execution_stage_type _process_request_stage;
     public:
         connection(redis_server& server, socket_address server_addr, connected_socket&& fd, socket_address addr);
-        ~connection();
-        future<> process();
-        future<> process_request();
+        virtual ~connection();
+        future<> process_request() override;
+        void handle_error(future<>&& f) override;
         void write_reply(const redis_exception&);
         void write_reply(redis_server::result result);
-        future<> shutdown();
     private:
         const ::timeout_config& timeout_config() { return _server.timeout_config(); }
         future<result> process_request_one(redis::request&& request, redis::redis_options&, service_permit permit);
         future<result> process_request_internal();
     };
 
-    bool _stopping = false;
-    promise<> _all_connections_stopped;
-    future<> _stopped = _all_connections_stopped.get_future();
-    boost::intrusive::list<connection> _connections_list;
+    shared_ptr<generic_server::connection> make_connection(socket_address server_addr, connected_socket&& fd, socket_address addr);
+    future<> unadvertise_connection(shared_ptr<generic_server::connection> conn) override;
 
-    void maybe_idle() {
-        if (_stopping && !_stats._connections_being_accepted && !_stats._current_connections) {
-            _all_connections_stopped.set_value();
-        }
-    }
     const ::timeout_config& timeout_config() { return _config._timeout_config; }
 };
 }
