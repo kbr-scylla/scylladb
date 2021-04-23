@@ -74,28 +74,40 @@ void service_level_controller::set_distributed_data_accessor(service_level_distr
     }
 }
 
-future<> service_level_controller::stop() {
-    // unregister from the service level distributed data accessor.
-    _sl_data_accessor = nullptr;
-    //unregister from the priority manager
-    service::get_local_priority_manager().set_service_level_controller(nullptr);
-    if (this_shard_id() == global_controller) {
-        // abort the loop of the distributed data checking if it is running
+future<> service_level_controller::drain() {
+    if (this_shard_id() != global_controller) {
+        return make_ready_future();
+    }
+    // abort the loop of the distributed data checking if it is running
+    if (!_global_controller_db->dist_data_update_aborter.abort_requested()) {
         _global_controller_db->dist_data_update_aborter.request_abort();
-        _global_controller_db->notifications_serializer.broken();
-        return _global_controller_db->distributed_data_update.then([this] {
-            return ::parallel_for_each(_service_levels_db.begin(), _service_levels_db.end(), [this] (auto&& sl_record) {
-                return ::destroy_scheduling_group(sl_record.second.sg);
-            });
-        }).then([this] () {
-            return ::do_until([this] () { return _global_controller_db->deleted_scheduling_groups.empty(); }, [this] () {
-                return ::destroy_scheduling_group(_global_controller_db->deleted_scheduling_groups.top()).then([this] () {
-                    _global_controller_db->deleted_scheduling_groups.pop();
-                });
+    }
+    _global_controller_db->notifications_serializer.broken();
+    return std::exchange(_global_controller_db->distributed_data_update, make_ready_future<>()).then([this] {
+        return ::parallel_for_each(_service_levels_db.begin(), _service_levels_db.end(), [this] (auto&& sl_record) {
+            return ::destroy_scheduling_group(sl_record.second.sg);
+        });
+    }).then([this] () {
+        return ::do_until([this] () { return _global_controller_db->deleted_scheduling_groups.empty(); }, [this] () {
+            return ::destroy_scheduling_group(_global_controller_db->deleted_scheduling_groups.top()).then([this] () {
+                _global_controller_db->deleted_scheduling_groups.pop();
             });
         });
-    }
-    return make_ready_future();
+    }).then_wrapped([] (future<> f) {
+        //unregister from the priority manager
+        service::get_local_priority_manager().set_service_level_controller(nullptr);
+        try {
+            f.get();
+        } catch (const broken_semaphore& ignored) {
+        } catch (const sleep_aborted& ignored) {
+        } catch (const exceptions::unavailable_exception& ignored) {
+        } catch (const exceptions::read_timeout_exception& ignored) {
+        }
+    });
+}
+
+future<> service_level_controller::stop() {
+    return drain();
 }
 
 void service_level_controller::register_with_priority_manager() {
@@ -108,79 +120,81 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
         return make_ready_future();
     }
 
-    return container().invoke_on(global_controller, [] (service_level_controller& sl_controller) {
-        return with_semaphore(sl_controller._global_controller_db->notifications_serializer, 1, [&sl_controller] () {
-            return async([&sl_controller] () {
-                service_levels_info service_levels;
-                try {
-                    service_levels = sl_controller._sl_data_accessor->get_service_levels().get0();
-                } catch (...) {
-                    sl_logger.warn("update_service_levels_from_distributed_data: an error occurred"
-                            " while retrieving configuration ({})", std::current_exception());
-                    return;
-                }
-                service_levels_info service_levels_for_add_or_update;
-                service_levels_info service_levels_for_delete;
+    if (this_shard_id() != global_controller) {
+        return make_ready_future();
+    }
 
-                auto current_it = sl_controller._service_levels_db.begin();
-                auto new_state_it = service_levels.begin();
+    return with_semaphore(_global_controller_db->notifications_serializer, 1, [this] () {
+        return async([this] () {
+            service_levels_info service_levels;
+            try {
+                service_levels = _sl_data_accessor->get_service_levels().get0();
+            } catch (...) {
+                sl_logger.warn("update_service_levels_from_distributed_data: an error occurred"
+                        " while retrieving configuration ({})", std::current_exception());
+                return;
+            }
+            service_levels_info service_levels_for_add_or_update;
+            service_levels_info service_levels_for_delete;
 
-                // we want to detect 3 kinds of objects in one pass -
-                // 1. new service levels that have been added to the distributed keyspace
-                // 2. existing service levels that have changed
-                // 3. removed service levels
-                // this loop is batching together add/update operation and remove operation
-                // then they are all executed together.The reason for this is to allow for
-                // firstly delete all that there is to be deleted and only then adding new
-                // service levels.
-                while (current_it != sl_controller._service_levels_db.end() && new_state_it != service_levels.end()) {
-                    if (current_it->first == new_state_it->first) {
-                        //the service level exists on both the cureent and new state.
-                       if (current_it->second.slo != new_state_it->second) {
-                           // The service level configuration is different
-                           // in the new state and the old state, meaning it needs to be updated.
-                           sl_logger.info("service level \"{}\" was updated from {} to {} shares.",
-                                   new_state_it->first.c_str(), current_it->second.slo.shares, new_state_it->second.shares);
-                           service_levels_for_add_or_update.insert(*new_state_it);
-                       }
-                       current_it++;
-                       new_state_it++;
-                   } else if (current_it->first < new_state_it->first) {
-                       //The service level does not exists in the new state so it needs to be
-                       //removed, but only if it is not static since static configurations dont
-                       //come from the distributed keyspace but from code.
-                       if (!current_it->second.is_static) {
-                           sl_logger.info("service level \"{}\" was deleted.", current_it->first.c_str());
-                           service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
-                       }
-                       current_it++;
-                   } else { /*new_it->first < current_it->first */
-                       // The service level exits in the new state but not in the old state
-                       // so it needs to be added.
-                       sl_logger.info("service level \"{}\" was added.", new_state_it->first.c_str());
-                       service_levels_for_add_or_update.insert(*new_state_it);
-                       new_state_it++;
-                   }
-                }
+            auto current_it = _service_levels_db.begin();
+            auto new_state_it = service_levels.begin();
 
-                for (; current_it != sl_controller._service_levels_db.end(); current_it++) {
+            // we want to detect 3 kinds of objects in one pass -
+            // 1. new service levels that have been added to the distributed keyspace
+            // 2. existing service levels that have changed
+            // 3. removed service levels
+            // this loop is batching together add/update operation and remove operation
+            // then they are all executed together.The reason for this is to allow for
+            // firstly delete all that there is to be deleted and only then adding new
+            // service levels.
+            while (current_it != _service_levels_db.end() && new_state_it != service_levels.end()) {
+                if (current_it->first == new_state_it->first) {
+                    //the service level exists on both the cureent and new state.
+                    if (current_it->second.slo != new_state_it->second) {
+                        // The service level configuration is different
+                        // in the new state and the old state, meaning it needs to be updated.
+                        sl_logger.info("service level \"{}\" was updated from {} to {} shares.",
+                                new_state_it->first.c_str(), current_it->second.slo.shares, new_state_it->second.shares);
+                        service_levels_for_add_or_update.insert(*new_state_it);
+                    }
+                    current_it++;
+                    new_state_it++;
+                } else if (current_it->first < new_state_it->first) {
+                    //The service level does not exists in the new state so it needs to be
+                    //removed, but only if it is not static since static configurations dont
+                    //come from the distributed keyspace but from code.
                     if (!current_it->second.is_static) {
                         sl_logger.info("service level \"{}\" was deleted.", current_it->first.c_str());
                         service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
                     }
-                }
-                for (; new_state_it != service_levels.end(); new_state_it++) {
+                    current_it++;
+                } else { /*new_it->first < current_it->first */
+                    // The service level exits in the new state but not in the old state
+                    // so it needs to be added.
                     sl_logger.info("service level \"{}\" was added.", new_state_it->first.c_str());
-                    service_levels_for_add_or_update.emplace(new_state_it->first, new_state_it->second);
+                    service_levels_for_add_or_update.insert(*new_state_it);
+                    new_state_it++;
                 }
+            }
 
-                for (auto&& sl : service_levels_for_delete) {
-                    sl_controller.do_remove_service_level(sl.first, false).get();
+            for (; current_it != _service_levels_db.end(); current_it++) {
+                if (!current_it->second.is_static) {
+                    sl_logger.info("service level \"{}\" was deleted.", current_it->first.c_str());
+                    service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
                 }
-                for (auto&& sl : service_levels_for_add_or_update) {
-                    sl_controller.do_add_service_level(sl.first, sl.second).get();
-                }
-            });
+            }
+            for (; new_state_it != service_levels.end(); new_state_it++) {
+                sl_logger.info("service level \"{}\" was added.", new_state_it->first.c_str());
+                service_levels_for_add_or_update.emplace(new_state_it->first, new_state_it->second);
+            }
+
+            for (auto&& sl : service_levels_for_delete) {
+                do_remove_service_level(sl.first, false).get();
+            }
+            for (auto&& sl : service_levels_for_add_or_update) {
+                do_add_service_level(sl.first, sl.second).get();
+            }
         });
     });
 }
@@ -301,39 +315,39 @@ std::optional<sstring> service_level_controller::get_active_service_level() {
 }
 
 void service_level_controller::update_from_distributed_data(std::chrono::duration<float> interval) {
-    // FIXME: ignored future
-    (void)container().invoke_on(global_controller, [interval] (service_level_controller& global_sl) {
-        if (global_sl._global_controller_db->distributed_data_update.available()) {
-            sl_logger.info("update_from_distributed_data: starting configuration polling loop");
-            global_sl._global_controller_db->distributed_data_update = repeat([interval, &global_sl] {
-                return sleep_abortable<steady_clock_type>(std::chrono::duration_cast<steady_clock_type::duration>(interval),
-                        global_sl._global_controller_db->dist_data_update_aborter).then_wrapped([&global_sl] (future<>&& f) {
-                    try {
-                        f.get();
-                        return global_sl.update_service_levels_from_distributed_data().then_wrapped([] (future<>&& f){
-                            try {
-                                f.get();
-                            } catch (...) {
-                                sl_logger.warn("update_from_distributed_data: exception occurred in distributed"
-                                        " data check loop: {}", std::current_exception());
-                            }
-                            return stop_iteration::no;
-                        });
-                    } catch (const sleep_aborted& e) {
-                        sl_logger.info("update_from_distributed_data: configuration polling loop aborted");
-                        return make_ready_future<seastar::bool_class<seastar::stop_iteration_tag>>(stop_iteration::yes);
-                    }
-                });
-            }).then_wrapped([] (future<>&& f) {
+    if (this_shard_id() != global_controller) {
+        throw std::runtime_error(format("Service level updates from distributed data can only be activated on shard {}", global_controller));
+    }
+    if (_global_controller_db->distributed_data_update.available()) {
+        sl_logger.info("update_from_distributed_data: starting configuration polling loop");
+        _global_controller_db->distributed_data_update = repeat([this, interval] {
+            return sleep_abortable<steady_clock_type>(std::chrono::duration_cast<steady_clock_type::duration>(interval),
+                    _global_controller_db->dist_data_update_aborter).then_wrapped([this] (future<>&& f) {
                 try {
                     f.get();
-                } catch (...) {
-                    sl_logger.error("update_from_distributed_data: polling loop stopped unexpectedly by: {}",
-                            std::current_exception());
+                    return update_service_levels_from_distributed_data().then_wrapped([] (future<>&& f){
+                        try {
+                            f.get();
+                        } catch (...) {
+                            sl_logger.warn("update_from_distributed_data: exception occurred in distributed"
+                                    " data check loop: {}", std::current_exception());
+                        }
+                        return stop_iteration::no;
+                    });
+                } catch (const sleep_aborted& e) {
+                    sl_logger.info("update_from_distributed_data: configuration polling loop aborted");
+                    return make_ready_future<seastar::bool_class<seastar::stop_iteration_tag>>(stop_iteration::yes);
                 }
             });
-        }
-    });
+        }).then_wrapped([] (future<>&& f) {
+            try {
+                f.get();
+            } catch (...) {
+                sl_logger.error("update_from_distributed_data: polling loop stopped unexpectedly by: {}",
+                        std::current_exception());
+            }
+        });
+    }
 }
 
 future<> service_level_controller::add_distributed_service_level(sstring name, service_level_options slo, bool if_not_exists) {
