@@ -80,10 +80,9 @@ public:
     class resource_units;
 
     enum class state {
-        registered, // read is registered, but didn't attempt admission yet
         waiting, // waiting for admission
-        admitted,
-        inactive, // un-admitted reads that are registered as inactive
+        active,
+        inactive,
     };
 
     class impl;
@@ -124,6 +123,8 @@ public:
     resource_units consume_resources(reader_resources res);
 
     reader_resources consumed_resources() const;
+
+    sstring description() const;
 };
 
 class reader_permit::resource_units {

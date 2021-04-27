@@ -589,6 +589,8 @@ arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', typ
 arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
 arg_parser.add_argument('--clang-inline-threshold', action='store', type=int, dest='clang_inline_threshold', default=-1,
                         help="LLVM-specific inline threshold compilation parameter")
+arg_parser.add_argument('--coverage', dest='coverage', action='store_true',
+                        help='Enable coverage report generation for tests. Only clang is supported at the moment. See HACKING.md for more information.')
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -873,7 +875,6 @@ scylla_core = (['database.cc',
                 'locator/gce_snitch.cc',
                 'message/messaging_service.cc',
                 'service/client_state.cc',
-                'service/migration_task.cc',
                 'service/storage_service.cc',
                 'service/misc_services.cc',
                 'service/pager/paging_state.cc',
@@ -1470,6 +1471,11 @@ forced_ldflags += f'--dynamic-linker={dynamic_linker}'
 args.user_ldflags = forced_ldflags + ' ' + args.user_ldflags
 
 args.user_cflags += f" -ffile-prefix-map={curdir}=."
+
+if args.coverage:
+    #FIXME: works with clang only
+    args.user_cflags = args.user_cflags + ' ' + '-fprofile-instr-generate -fcoverage-mapping'
+    args.user_ldflags = args.user_ldflags + ' ' + '-fprofile-instr-generate -fcoverage-mapping'
 
 seastar_cflags = args.user_cflags
 

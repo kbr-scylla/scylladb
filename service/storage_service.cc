@@ -91,7 +91,8 @@ static logging::logger slogger("storage_service");
 distributed<storage_service> _the_storage_service;
 
 storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn,
+        sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config,
+        sharded<service::migration_notifier>& mn, sharded<service::migration_manager>& mm,
         locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service, sharded<qos::service_level_controller>& sl_controller, bool for_testing)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
@@ -99,6 +100,7 @@ storage_service::storage_service(abort_source& abort_source, distributed<databas
         , _gossiper(gossiper)
         , _mnotifier(mn)
         , _messaging(ms)
+        , _migration_manager(mm)
         , _sl_controller(sl_controller)
         , _for_testing(for_testing)
         , _node_ops_abort_thread(node_ops_abort_thread())
@@ -240,7 +242,7 @@ void storage_service::install_schema_version_change_listener() {
 }
 
 future<> storage_service::publish_schema_version() {
-    return get_local_migration_manager().passive_announce(_db.local().get_version());
+    return _migration_manager.local().passive_announce(_db.local().get_version());
 }
 
 future<> storage_service::snitch_reconfigured() {
@@ -445,7 +447,7 @@ void storage_service::join_token_ring(int delay) {
         }
         // if our schema hasn't matched yet, keep sleeping until it does
         // (post CASSANDRA-1391 we don't expect this to be necessary very often, but it doesn't hurt to be careful)
-        while (!get_local_migration_manager().have_schema_agreement()) {
+        while (!_migration_manager.local().have_schema_agreement()) {
             set_mode(mode::JOINING, "waiting for schema information to complete", true);
             sleep_abortable(std::chrono::seconds(1), _abort_source).get();
         }
@@ -473,7 +475,7 @@ void storage_service::join_token_ring(int delay) {
             }
 
             // Check the schema and pending range again
-            while (!get_local_migration_manager().have_schema_agreement()) {
+            while (!_migration_manager.local().have_schema_agreement()) {
                 set_mode(mode::JOINING, "waiting for schema information to complete", true);
                 sleep_abortable(std::chrono::seconds(1), _abort_source).get();
             }
@@ -1153,7 +1155,7 @@ void storage_service::on_join(gms::inet_address endpoint, gms::endpoint_state ep
         on_change(endpoint, e.first, e.second);
     }
     //FIXME: discarded future.
-    (void)get_local_migration_manager().schedule_schema_pull(endpoint, ep_state).handle_exception([endpoint] (auto ep) {
+    (void)_migration_manager.local().schedule_schema_pull(endpoint, ep_state).handle_exception([endpoint] (auto ep) {
         slogger.warn("Fail to pull schema from {}: {}", endpoint, ep);
     });
 }
@@ -1161,7 +1163,7 @@ void storage_service::on_join(gms::inet_address endpoint, gms::endpoint_state ep
 void storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
     slogger.debug("endpoint={} on_alive", endpoint);
     //FIXME: discarded future.
-    (void)get_local_migration_manager().schedule_schema_pull(endpoint, state).handle_exception([endpoint] (auto ep) {
+    (void)_migration_manager.local().schedule_schema_pull(endpoint, state).handle_exception([endpoint] (auto ep) {
         slogger.warn("Fail to pull schema from {}: {}", endpoint, ep);
     });
     if (get_token_metadata().is_member(endpoint)) {
@@ -1212,7 +1214,7 @@ void storage_service::on_change(inet_address endpoint, application_state state, 
             do_update_system_peers_table(endpoint, state, value);
             if (state == application_state::SCHEMA) {
                 //FIXME: discarded future.
-                (void)get_local_migration_manager().schedule_schema_pull(endpoint, *ep_state).handle_exception([endpoint] (auto ep) {
+                (void)_migration_manager.local().schedule_schema_pull(endpoint, *ep_state).handle_exception([endpoint] (auto ep) {
                     slogger.warn("Failed to pull schema from {}: {}", endpoint, ep);
                 });
             } else if (state == application_state::RPC_READY) {
@@ -2388,7 +2390,7 @@ future<> storage_service::do_drain(bool on_shutdown) {
         }).get();
 
         set_mode(mode::DRAINING, "shutting down migration manager", false);
-        service::get_migration_manager().invoke_on_all(&service::migration_manager::stop).get();
+        _migration_manager.invoke_on_all(&service::migration_manager::stop).get();
 
         db().invoke_on_all([] (auto& db) {
             return db.commitlog()->shutdown();
@@ -2960,7 +2962,7 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name,
         _loading_new_sstables = false;
         throw;
     }
-    slogger.warn("Done loading new SSTables for keyspace={}, table={}, load_and_stream={}, primary_replica_only={}, status=succeeded",
+    slogger.info("Done loading new SSTables for keyspace={}, table={}, load_and_stream={}, primary_replica_only={}, status=succeeded",
             ks_name, cf_name, load_and_stream, primary_replica_only);
     _loading_new_sstables = false;
     co_return;
@@ -3395,9 +3397,10 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
 future<> init_storage_service(sharded<abort_source>& abort_source, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::shared_token_metadata>& stm,
+        storage_service_config config, sharded<service::migration_notifier>& mn,
+        sharded<service::migration_manager>& mm, sharded<locator::shared_token_metadata>& stm,
         sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service, sharded<qos::service_level_controller>& sl_controller) {
-    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(stm), std::ref(ms), std::ref(cdc_gen_service), std::ref(sl_controller));
+    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(mm), std::ref(stm), std::ref(ms), std::ref(cdc_gen_service), std::ref(sl_controller));
 }
 
 future<> deinit_storage_service() {

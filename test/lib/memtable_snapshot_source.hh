@@ -17,6 +17,7 @@
 #include <seastar/core/circular_buffer.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/condition-variable.hh>
+#include <seastar/util/closeable.hh>
 
 // in-memory snapshottable mutation source.
 // Must be destroyed in a seastar thread.
@@ -66,6 +67,7 @@ private:
         }
         _memtables.push_back(new_memtable());
         auto&& rd = make_combined_reader(new_mt->schema(), tests::make_permit(), std::move(readers));
+        auto close_rd = deferred_close(rd);
         consume_partitions(rd, [&] (mutation&& m) {
             new_mt->apply(std::move(m));
             return stop_iteration::no;

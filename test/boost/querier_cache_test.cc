@@ -18,6 +18,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/testing/thread_test_case.hh>
+#include <seastar/util/closeable.hh>
 
 using namespace std::chrono_literals;
 
@@ -164,6 +165,11 @@ public:
         : test_querier_cache(test_querier_cache::make_value, entry_ttl) {
     }
 
+    ~test_querier_cache() {
+        _cache.stop().get();
+        _sem.stop().get();
+    }
+
     const simple_schema& get_simple_schema() const {
         return _s;
     }
@@ -299,7 +305,10 @@ public:
             const dht::partition_range& lookup_range,
             const query::partition_slice& lookup_slice) {
 
-        _cache.lookup_data_querier(make_cache_key(lookup_key), lookup_schema, lookup_range, lookup_slice, nullptr);
+        auto querier_opt = _cache.lookup_data_querier(make_cache_key(lookup_key), lookup_schema, lookup_range, lookup_slice, nullptr);
+        if (querier_opt) {
+            querier_opt->close().get();
+        }
         BOOST_REQUIRE_EQUAL(_cache.get_stats().lookups, ++_expected_stats.lookups);
         return *this;
     }
@@ -309,13 +318,16 @@ public:
             const dht::partition_range& lookup_range,
             const query::partition_slice& lookup_slice) {
 
-        _cache.lookup_mutation_querier(make_cache_key(lookup_key), lookup_schema, lookup_range, lookup_slice, nullptr);
+        auto querier_opt = _cache.lookup_mutation_querier(make_cache_key(lookup_key), lookup_schema, lookup_range, lookup_slice, nullptr);
+        if (querier_opt) {
+            querier_opt->close().get();
+        }
         BOOST_REQUIRE_EQUAL(_cache.get_stats().lookups, ++_expected_stats.lookups);
         return *this;
     }
 
     test_querier_cache& evict_all_for_table() {
-        _cache.evict_all_for_table(get_schema()->id());
+        _cache.evict_all_for_table(get_schema()->id()).get();
         return *this;
     }
 
@@ -691,7 +703,10 @@ SEASTAR_THREAD_TEST_CASE(test_resources_based_cache_eviction) {
                 nullptr,
                 db::no_timeout).get();
 
-        BOOST_CHECK_EQUAL(db.get_querier_cache_stats().resource_based_evictions, 1);
+        // The second read might be evicted too if it consumes more
+        // memory than the first and hence triggers memory control when
+        // saved in the querier cache.
+        BOOST_CHECK_GE(db.get_querier_cache_stats().resource_based_evictions, 1);
 
         // We want to read the entire partition so that the querier
         // is not saved at the end and thus ensure it is destroyed.
@@ -756,7 +771,9 @@ SEASTAR_THREAD_TEST_CASE(test_immediate_evict_on_insert) {
 
 SEASTAR_THREAD_TEST_CASE(test_unique_inactive_read_handle) {
     reader_concurrency_semaphore sem1(reader_concurrency_semaphore::no_limits{}, "sem1");
+    auto stop_sem1 = deferred_stop(sem1);
     reader_concurrency_semaphore sem2(reader_concurrency_semaphore::no_limits{}, ""); // to see the message for an unnamed semaphore
+    auto stop_sem2 = deferred_stop(sem2);
 
     auto schema = schema_builder("ks", "cf")
         .with_column("pk", int32_type, column_kind::partition_key)

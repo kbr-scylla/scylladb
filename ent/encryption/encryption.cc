@@ -58,6 +58,7 @@
 static seastar::logger logg{"encryption"};
 
 sharded<cql3::query_processor>* hack_query_processor_for_encryption;
+sharded<service::migration_manager>* hack_migration_manager_for_encryption;
 
 namespace encryption {
 
@@ -339,7 +340,7 @@ public:
     }
 
     distributed<service::migration_manager>& get_migration_manager() const override {
-        return service::get_migration_manager();
+        return *hack_migration_manager_for_encryption;
     }
 };
 

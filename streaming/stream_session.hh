@@ -52,6 +52,10 @@ class system_distributed_keyspace;
 
 }
 
+namespace service {
+class migration_manager;
+}
+
 namespace db::view {
 
 class view_update_generator;
@@ -135,7 +139,7 @@ private:
     using UUID = utils::UUID;
     using token = dht::token;
     using ring_position = dht::ring_position;
-    static void init_messaging_service_handler(netw::messaging_service& ms);
+    static void init_messaging_service_handler(netw::messaging_service& ms, shared_ptr<service::migration_manager> mm);
     static future<> uninit_messaging_service_handler(netw::messaging_service& ms);
     static distributed<database>* _db;
     static distributed<db::system_distributed_keyspace>* _sys_dist_ks;
@@ -146,7 +150,8 @@ public:
     static database& get_local_db() { return _db->local(); }
     static distributed<database>& get_db() { return *_db; };
     static future<> init_streaming_service(distributed<database>& db, distributed<db::system_distributed_keyspace>& sys_dist_ks,
-            distributed<db::view::view_update_generator>& view_update_generator, sharded<netw::messaging_service>& ms);
+            distributed<db::view::view_update_generator>& view_update_generator, sharded<netw::messaging_service>& ms,
+            sharded<service::migration_manager>& mm);
     static future<> uninit_streaming_service();
 public:
     /**

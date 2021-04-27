@@ -11,7 +11,12 @@
 #pragma once
 
 #include  "db/config.hh"
+#include "seastar/core/sharded.hh"
 #include "seastar/core/future.hh"
+
+namespace service {
+class migration_manager;
+}
 
 namespace redis {
 
@@ -22,6 +27,6 @@ static constexpr auto HASHes          = "HASHes";
 static constexpr auto SETs            = "SETs";
 static constexpr auto ZSETs           = "ZSETs";
 
-seastar::future<> maybe_create_keyspace(db::config& cfg);
+seastar::future<> maybe_create_keyspace(seastar::sharded<service::migration_manager>& mm, db::config& cfg);
 
 }

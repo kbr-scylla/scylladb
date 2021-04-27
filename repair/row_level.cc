@@ -55,6 +55,7 @@ static bool inject_rpc_stream_error = false;
 distributed<db::system_distributed_keyspace>* _sys_dist_ks;
 distributed<db::view::view_update_generator>* _view_update_generator;
 sharded<netw::messaging_service>* _messaging;
+sharded<service::migration_manager>* _migration_manager;
 
 enum class repair_state : uint16_t {
     unknown,
@@ -481,9 +482,17 @@ public:
         });
     }
 
-    void on_end_of_stream() {
+    future<> on_end_of_stream() noexcept {
+      return _reader.close().then([this] {
         _reader = make_empty_flat_reader(_schema, _permit);
         _reader_handle.reset();
+      });
+    }
+
+    future<> close() noexcept {
+      return _reader.close().then([this] {
+        _reader_handle.reset();
+      });
     }
 
     lw_shared_ptr<const decorated_key_with_hash>& get_current_dk() {
@@ -860,8 +869,11 @@ public:
         auto f1 = _sink_source_for_get_full_row_hashes.close();
         auto f2 = _sink_source_for_get_row_diff.close();
         auto f3 = _sink_source_for_put_row_diff.close();
+        rlogger.info("repair_meta::stop");
         return when_all_succeed(std::move(gate_future), std::move(f1), std::move(f2), std::move(f3)).discard_result().finally([this] {
-            return _repair_writer->wait_for_writer_done();
+            return _repair_writer->wait_for_writer_done().finally([this] {
+                return close();
+            });
         });
     }
 
@@ -888,7 +900,7 @@ public:
             shard_config master_node_shard_config,
             table_schema_version schema_version,
             streaming::stream_reason reason) {
-        return service::get_schema_for_write(schema_version, {from, src_cpu_id}, ::_messaging->local()).then([from,
+        return _migration_manager->local().get_schema_for_write(schema_version, {from, src_cpu_id}, ::_messaging->local()).then([from,
                 repair_meta_id,
                 range,
                 algo,
@@ -1053,6 +1065,10 @@ public:
         return std::pair<std::optional<repair_sync_boundary>, bool>(sync_boundary_min, already_synced);
     }
 
+    future<> close() noexcept {
+        return _repair_reader.close();
+    }
+
 private:
     future<uint64_t> do_estimate_partitions_on_all_shards() {
         return estimate_partitions(_db, _schema->ks_name(), _schema->cf_name(), _range);
@@ -1181,15 +1197,17 @@ private:
                 _gate.check();
                 return _repair_reader.read_mutation_fragment().then([this, &cur_size, &new_rows_size, &cur_rows] (mutation_fragment_opt mfopt) mutable {
                     if (!mfopt) {
-                        _repair_reader.on_end_of_stream();
+                      return _repair_reader.on_end_of_stream().then([] {
                         return stop_iteration::yes;
+                      });
                     }
-                    return handle_mutation_fragment(*mfopt, cur_size, new_rows_size, cur_rows);
+                    return make_ready_future<stop_iteration>(handle_mutation_fragment(*mfopt, cur_size, new_rows_size, cur_rows));
                 });
             }).then_wrapped([this, &cur_rows, &new_rows_size] (future<> fut) mutable {
                 if (fut.failed()) {
-                    _repair_reader.on_end_of_stream();
-                    return make_exception_future<value_type>(fut.get_exception());
+                    return make_exception_future<value_type>(fut.get_exception()).finally([this] {
+                        return _repair_reader.on_end_of_stream();
+                    });
                 }
                 _repair_reader.pause();
                 return make_ready_future<value_type>(value_type(std::move(cur_rows), new_rows_size));
@@ -2268,10 +2286,11 @@ static future<> repair_get_full_row_hashes_with_rpc_stream_handler(
 }
 
 future<> row_level_repair_init_messaging_service_handler(repair_service& rs, distributed<db::system_distributed_keyspace>& sys_dist_ks,
-        distributed<db::view::view_update_generator>& view_update_generator, sharded<netw::messaging_service>& ms) {
+        distributed<db::view::view_update_generator>& view_update_generator, sharded<netw::messaging_service>& ms, sharded<service::migration_manager>& mm) {
     _sys_dist_ks = &sys_dist_ks;
     _view_update_generator = &view_update_generator;
     _messaging = &ms;
+    _migration_manager = &mm;
     return ms.invoke_on_all([] (auto& ms) {
         ms.register_repair_get_row_diff_with_rpc_stream([&ms] (const rpc::client_info& cinfo, uint64_t repair_meta_id, rpc::source<repair_hash_with_cmd> source) {
             auto src_cpu_id = cinfo.retrieve_auxiliary<uint32_t>("src_cpu_id");
@@ -2802,6 +2821,11 @@ public:
                     _all_live_peer_nodes,
                     _all_live_peer_nodes.size(),
                     this);
+            auto auto_close_master = defer([&master] {
+                master.close().handle_exception([] (std::exception_ptr ep) {
+                    rlogger.warn("Failed auto-closing Row Level Repair (Master): {}. Ignored.", ep);
+                }).get();
+            });
 
             rlogger.debug(">>> Started Row Level Repair (Master): local={}, peers={}, repair_meta_id={}, keyspace={}, cf={}, schema_version={}, range={}, seed={}, max_row_buf_size={}",
                     master.myip(), _all_live_peer_nodes, master.repair_meta_id(), _ri.keyspace, _cf_name, schema_version, _range, _seed, max_row_buf_size);
@@ -2860,7 +2884,7 @@ public:
             }
 
             parallel_for_each(nodes_to_stop, [&] (const gms::inet_address& node) {
-                master.set_repair_state(repair_state::row_level_stop_finished, node);
+                master.set_repair_state(repair_state::row_level_stop_started, node);
                 return master.repair_row_level_stop(node, _ri.keyspace, _cf_name, _range).then([node, &master] {
                     master.set_repair_state(repair_state::row_level_stop_finished, node);
                 });

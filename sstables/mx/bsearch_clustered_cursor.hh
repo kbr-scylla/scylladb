@@ -504,7 +504,7 @@ public:
         });
     }
 
-    future<> close() override {
+    future<> close() noexcept override {
         return make_ready_future<>();
     }
 };

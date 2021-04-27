@@ -90,6 +90,7 @@ class gossiper;
 namespace service {
 
 class storage_service;
+class migration_manager;
 
 extern distributed<storage_service> _the_storage_service;
 inline distributed<storage_service>& get_storage_service() {
@@ -158,6 +159,7 @@ private:
     gms::gossiper& _gossiper;
     sharded<service::migration_notifier>& _mnotifier;
     sharded<netw::messaging_service>& _messaging;
+    sharded<service::migration_manager>& _migration_manager;
     sharded<qos::service_level_controller>& _sl_controller;
     // Note that this is obviously only valid for the current shard. Users of
     // this facility should elect a shard to be the coordinator based on any
@@ -196,7 +198,7 @@ private:
     void node_ops_singal_abort(std::optional<utils::UUID> ops_uuid);
     future<> node_ops_abort_thread();
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<service::migration_manager>& mm, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
 
     // Needed by distributed<>
     future<> stop();
@@ -892,7 +894,8 @@ private:
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn, sharded<locator::shared_token_metadata>& stm,
+        storage_service_config config, sharded<service::migration_notifier>& mn,
+        sharded<service::migration_manager>& mm, sharded<locator::shared_token_metadata>& stm,
         sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
