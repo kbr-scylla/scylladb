@@ -212,7 +212,7 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(column_fa
     int64_t n = 0;
 
     sstables.reserve(cf.sstables_count());
-    for (auto& entry : *cf.get_sstables()) {
+    for (auto all_sstables = cf.get_sstables(); auto entry : *all_sstables) {
         sstables.push_back(entry);
     }
 
