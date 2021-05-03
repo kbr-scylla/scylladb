@@ -565,9 +565,10 @@ public:
     };
 
     static sstables::offstrategy is_offstrategy_supported(streaming::stream_reason reason) {
-        std::unordered_set<streaming::stream_reason> operations_supported = {
+        static const std::unordered_set<streaming::stream_reason> operations_supported = {
             streaming::stream_reason::bootstrap,
             streaming::stream_reason::replace,
+            streaming::stream_reason::removenode,
         };
         return sstables::offstrategy(operations_supported.contains(reason));
     }
@@ -869,7 +870,7 @@ public:
         auto f1 = _sink_source_for_get_full_row_hashes.close();
         auto f2 = _sink_source_for_get_row_diff.close();
         auto f3 = _sink_source_for_put_row_diff.close();
-        rlogger.info("repair_meta::stop");
+        rlogger.debug("repair_meta::stop");
         return when_all_succeed(std::move(gate_future), std::move(f1), std::move(f2), std::move(f3)).discard_result().finally([this] {
             return _repair_writer->wait_for_writer_done().finally([this] {
                 return close();

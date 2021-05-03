@@ -45,7 +45,7 @@ static bool operator==(const log_entry& lhs, const log_entry& rhs) {
 
 } // namespace raft
 
-static constexpr uint64_t group_id = 0;
+static constexpr raft::group_id gid;
 
 // Create a test log with entries of each kind to test that these get
 // serialized/deserialized properly
@@ -75,7 +75,7 @@ static std::vector<raft::log_entry_ptr> create_test_log() {
 SEASTAR_TEST_CASE(test_store_load_term_and_vote) {
     return do_with_cql_env([] (cql_test_env& env) -> future<> {
         cql3::query_processor& qp = env.local_qp();
-        raft_sys_table_storage storage(qp, group_id);
+        raft_sys_table_storage storage(qp, gid);
 
         raft::term_t vote_term(1);
         raft::server_id vote_id{.id = utils::make_random_uuid()};
@@ -91,7 +91,7 @@ SEASTAR_TEST_CASE(test_store_load_term_and_vote) {
 SEASTAR_TEST_CASE(test_store_load_snapshot) {
     return do_with_cql_env([] (cql_test_env& env) -> future<> {
         cql3::query_processor& qp = env.local_qp();
-        raft_sys_table_storage storage(qp, group_id);
+        raft_sys_table_storage storage(qp, gid);
 
         raft::term_t snp_term(1);
         raft::index_t snp_idx(1);
@@ -117,7 +117,7 @@ SEASTAR_TEST_CASE(test_store_load_snapshot) {
 SEASTAR_TEST_CASE(test_store_load_log_entries) {
     return do_with_cql_env([] (cql_test_env& env) -> future<> {
         cql3::query_processor& qp = env.local_qp();
-        raft_sys_table_storage storage(qp, group_id);
+        raft_sys_table_storage storage(qp, gid);
 
         std::vector<raft::log_entry_ptr> entries = create_test_log();
         co_await storage.store_log_entries(entries);
@@ -133,7 +133,7 @@ SEASTAR_TEST_CASE(test_store_load_log_entries) {
 SEASTAR_TEST_CASE(test_truncate_log) {
     return do_with_cql_env([] (cql_test_env& env) -> future<> {
         cql3::query_processor& qp = env.local_qp();
-        raft_sys_table_storage storage(qp, group_id);
+        raft_sys_table_storage storage(qp, gid);
 
         std::vector<raft::log_entry_ptr> entries = create_test_log();
         co_await storage.store_log_entries(entries);
@@ -151,7 +151,7 @@ SEASTAR_TEST_CASE(test_truncate_log) {
 SEASTAR_TEST_CASE(test_store_snapshot_truncate_log_tail) {
     return do_with_cql_env([] (cql_test_env& env) -> future<> {
         cql3::query_processor& qp = env.local_qp();
-        raft_sys_table_storage storage(qp, group_id);
+        raft_sys_table_storage storage(qp, gid);
 
         std::vector<raft::log_entry_ptr> entries = create_test_log();
         co_await storage.store_log_entries(entries);

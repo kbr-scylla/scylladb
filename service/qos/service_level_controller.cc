@@ -13,7 +13,7 @@
 #include <seastar/core/reactor.hh>
 
 namespace qos {
-logging::logger sl_logger("workload prioritization");
+static logging::logger sl_logger("service_level_controller");
 
 sstring service_level_controller::default_service_level_name = "default";
 
