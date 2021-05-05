@@ -18,6 +18,7 @@
 #include <seastar/core/app-template.hh>
 #include <seastar/testing/test_runner.hh>
 #include "test/lib/random_utils.hh"
+#include "db/config.hh"
 
 #include "schema_builder.hh"
 #include "release.hh"
@@ -246,6 +247,15 @@ void write_json_result(std::string result_file, const test_config& cfg, perf_res
     out << results;
 }
 
+/// If app configuration contains the named parameter, store its value into \p store.
+static void set_from_cli(const char* name, app_template& app, utils::config_file::named_value<sstring>& store) {
+    const auto& cfg = app.configuration();
+    auto found = cfg.find(name);
+    if (found != cfg.end()) {
+        store(found->second.as<std::string>());
+    }
+}
+
 int main(int argc, char** argv) {
     namespace bpo = boost::program_options;
     app_template app;
@@ -261,6 +271,10 @@ int main(int argc, char** argv) {
         ("counters", "test counters")
         ("flush", "flush memtables before test")
         ("json-result", bpo::value<std::string>(), "name of the json result file")
+        ("audit", bpo::value<std::string>(), "value for audit config entry")
+        ("audit-keyspaces", bpo::value<std::string>(), "value for audit_keyspaces config entry")
+        ("audit-tables", bpo::value<std::string>(), "value for audit_tables config entry")
+        ("audit-categories", bpo::value<std::string>(), "value for audit_categories config entry")
         ;
 
     set_abort_on_internal_error(true);
@@ -272,6 +286,12 @@ int main(int argc, char** argv) {
         return smp::invoke_on_all([seed] {
             seastar::testing::local_random_engine.seed(seed + this_shard_id());
         }).then([&app] {
+            cql_test_config testcfg;
+            testcfg.db_config = ::make_shared<db::config>();
+            set_from_cli("audit", app, testcfg.db_config->audit);
+            set_from_cli("audit-keyspaces", app, testcfg.db_config->audit_keyspaces);
+            set_from_cli("audit-tables", app, testcfg.db_config->audit_tables);
+            set_from_cli("audit-categories", app, testcfg.db_config->audit_categories);
           return do_with_cql_env_thread([&app] (auto&& env) {
             auto cfg = test_config();
             cfg.partitions = app.configuration()["partitions"].as<unsigned>();
@@ -290,6 +310,13 @@ int main(int argc, char** argv) {
             if (app.configuration().contains("operations-per-shard")) {
                 cfg.operations_per_shard = app.configuration()["operations-per-shard"].as<unsigned>();
             }
+            audit::audit::create_audit(env.local_db().get_config()).handle_exception([&] (auto&& e) {
+                fmt::print("audit creation failed: {}", e);
+            }).get();
+            audit::audit::start_audit(env.local_db().get_config(), env.qp()).get();
+            auto audit_stop = defer([] {
+                audit::audit::stop_audit().get();
+            });
             auto results = do_test(env, cfg);
 
             auto compare_throughput = [] (perf_result a, perf_result b) { return a.throughput < b.throughput; };
@@ -309,7 +336,7 @@ int main(int argc, char** argv) {
             if (app.configuration().contains("json-result")) {
                 write_json_result(app.configuration()["json-result"].as<std::string>(), cfg, median_result, mad, max, min);
             }
-          });
+          }, testcfg);
         });
     });
 }
