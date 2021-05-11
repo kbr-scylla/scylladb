@@ -615,42 +615,51 @@ public:
         auto cfg_file = config_name(filename);
 
         if (flags == open_flags::ro) {
-            return read_text_file_fully(cfg_file).then([f, this, filename](temporary_buffer<char> buf) {
-                std::istringstream ss(std::string(buf.begin(), buf.end()));
-                options opts;
-                std::string line;
-                bool has_eof = false;
-                while (std::getline(ss, line)) {
-                    std::smatch m;
-                    if (std::regex_match(line, m, prop_expr)) {
-                        auto k = m[1].str();
-                        auto v = m[2].str();
-                        opts[k] = v;
-                    } else if (line == end_of_file_mark) {
-                        has_eof = true;
-                    }
-                }
-
-                // #1682 - if we crashed while writing the options file,
-                // it is quite possible that we are eventually trying to
-                // open + replay an (empty) CL file, but cannot read the
-                // properties now, since _our_ metadata is empty/truncated
-                if (!has_eof) {
-                    // just return the unwrapped file.
-                    logg.info("Commitlog segment {} has incomplete encryption info. Opening unencrypted.", filename);
+            return file_exists(cfg_file).then([=, this](bool exists) {
+                if (!exists) {
+                    // #1681 if file system errors caused the options file to simply not exist,
+                    // we can at least hope that the file itself is not very encrypted either. 
+                    // But who knows. Will probably cause data corruption.
+                    logg.info("Commitlog segment {} has no encryption info. Opening unencrypted.", filename);
                     return make_ready_future<file>(std::move(f));
                 }
-                opt_bytes id;
-                if (opts.count(id_key)) {
-                    id = base64_decode(opts[id_key]);
-                }
+                return read_text_file_fully(cfg_file).then([f, this, filename](temporary_buffer<char> buf) {
+                    std::istringstream ss(std::string(buf.begin(), buf.end()));
+                    options opts;
+                    std::string line;
+                    bool has_eof = false;
+                    while (std::getline(ss, line)) {
+                        std::smatch m;
+                        if (std::regex_match(line, m, prop_expr)) {
+                            auto k = m[1].str();
+                            auto v = m[2].str();
+                            opts[k] = v;
+                        } else if (line == end_of_file_mark) {
+                            has_eof = true;
+                        }
+                    }
 
-                auto provider = _ctxt->get_provider(opts);
+                    // #1682 - if we crashed while writing the options file,
+                    // it is quite possible that we are eventually trying to
+                    // open + replay an (empty) CL file, but cannot read the
+                    // properties now, since _our_ metadata is empty/truncated
+                    if (!has_eof) {
+                        // just return the unwrapped file.
+                        logg.info("Commitlog segment {} has incomplete encryption info. Opening unencrypted.", filename);
+                        return make_ready_future<file>(std::move(f));
+                    }
+                    opt_bytes id;
+                    if (opts.count(id_key)) {
+                        id = base64_decode(opts[id_key]);
+                    }
 
-                logg.debug("Open commitlog segment {} using {} (id: {})", filename, *provider, id);
+                    auto provider = _ctxt->get_provider(opts);
 
-                return provider->key(get_key_info(opts), id).then([f](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k) {
-                    return make_ready_future<file>(make_encrypted_file(f, std::get<0>(k)));
+                    logg.debug("Open commitlog segment {} using {} (id: {})", filename, *provider, id);
+
+                    return provider->key(get_key_info(opts), id).then([f](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k) {
+                        return make_ready_future<file>(make_encrypted_file(f, std::get<0>(k)));
+                    });
                 });
             });
         } else {
