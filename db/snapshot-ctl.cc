@@ -29,6 +29,7 @@
 
 #include <boost/range/adaptors.hpp>
 #include "db/snapshot-ctl.hh"
+#include "database.hh"
 
 namespace db {
 

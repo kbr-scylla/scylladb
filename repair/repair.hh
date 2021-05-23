@@ -44,14 +44,6 @@ namespace service {
 class migration_manager;
 }
 
-future<> repair_init_messaging_service_handler(repair_service& rs,
-        distributed<db::system_distributed_keyspace>& sys_dist_ks,
-        distributed<db::view::view_update_generator>& view_update_generator,
-        sharded<database>& db,
-        sharded<netw::messaging_service>& ms,
-        sharded<service::migration_manager>& mm);
-future<> repair_uninit_messaging_service_handler();
-
 class repair_exception : public std::exception {
 private:
     sstring _what;
@@ -80,13 +72,6 @@ struct node_ops_info {
     void check_abort();
 };
 
-// The tokens are the tokens assigned to the bootstrap node.
-future<> bootstrap_with_repair(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms, locator::token_metadata_ptr tmptr, std::unordered_set<dht::token> bootstrap_tokens);
-future<> decommission_with_repair(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms, locator::token_metadata_ptr tmptr);
-future<> removenode_with_repair(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms, locator::token_metadata_ptr tmptr, gms::inet_address leaving_node, shared_ptr<node_ops_info> ops);
-future<> rebuild_with_repair(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms, locator::token_metadata_ptr tmptr, sstring source_dc);
-future<> replace_with_repair(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms, locator::token_metadata_ptr tmptr, std::unordered_set<dht::token> replacing_tokens);
-
 future<> abort_repair_node_ops(utils::UUID ops_uuid);
 
 // NOTE: repair_start() can be run on any node, but starts a node-global
@@ -96,7 +81,7 @@ future<> abort_repair_node_ops(utils::UUID ops_uuid);
 // repair_get_status(). The returned future<int> becomes available quickly,
 // as soon as repair_get_status() can be used - it doesn't wait for the
 // repair to complete.
-future<int> repair_start(seastar::sharded<database>& db, seastar::sharded<netw::messaging_service>& ms,
+future<int> repair_start(seastar::sharded<repair_service>& repair,
         sstring keyspace, std::unordered_map<sstring, sstring> options);
 
 // TODO: Have repair_progress contains a percentage progress estimator
@@ -180,6 +165,9 @@ class repair_info {
 public:
     seastar::sharded<database>& db;
     seastar::sharded<netw::messaging_service>& messaging;
+    sharded<db::system_distributed_keyspace>& sys_dist_ks;
+    sharded<db::view::view_update_generator>& view_update_generator;
+    service::migration_manager& mm;
     const dht::sharder& sharder;
     sstring keyspace;
     dht::token_range_vector ranges;
@@ -218,8 +206,7 @@ public:
     std::unordered_set<sstring> dropped_tables;
     std::optional<utils::UUID> _ops_uuid;
 public:
-    repair_info(seastar::sharded<database>& db_,
-            seastar::sharded<netw::messaging_service>& ms_,
+    repair_info(repair_service& repair,
             const sstring& keyspace_,
             const dht::token_range_vector& ranges_,
             std::vector<utils::UUID> table_ids_,
@@ -247,6 +234,8 @@ public:
     const std::optional<utils::UUID>& ops_uuid() const {
         return _ops_uuid;
     };
+
+    future<> repair_range(const dht::token_range& range);
 };
 
 // The repair_tracker tracks ongoing repair operations and their progress.
@@ -459,21 +448,56 @@ enum class node_ops_cmd : uint32_t {
      replace_heartbeat,
      replace_abort,
      replace_done,
+     decommission_prepare,
+     decommission_heartbeat,
+     decommission_abort,
+     decommission_done,
+     bootstrap_prepare,
+     bootstrap_heartbeat,
+     bootstrap_abort,
+     bootstrap_done,
+     query_pending_ops,
 };
 
 // The cmd and ops_uuid are mandatory for each request.
 // The ignore_nodes and leaving_node are optional.
 struct node_ops_cmd_request {
+    // Mandatory field, set by all cmds
     node_ops_cmd cmd;
+    // Mandatory field, set by all cmds
     utils::UUID ops_uuid;
+    // Optional field, list nodes to ignore, set by all cmds
     std::list<gms::inet_address> ignore_nodes;
+    // Optional field, list leaving nodes, set by decommission and removenode cmd
     std::list<gms::inet_address> leaving_nodes;
-    // Map existing nodes to replacing nodes
+    // Optional field, map existing nodes to replacing nodes, set by replace cmd
     std::unordered_map<gms::inet_address, gms::inet_address> replace_nodes;
+    // Optional field, map bootstrapping nodes to bootstrap tokens, set by bootstrap cmd
+    std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap_nodes;
+    node_ops_cmd_request(node_ops_cmd command,
+            utils::UUID uuid,
+            std::list<gms::inet_address> ignore = {},
+            std::list<gms::inet_address> leaving = {},
+            std::unordered_map<gms::inet_address, gms::inet_address> replace = {},
+            std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap = {})
+        : cmd(command)
+        , ops_uuid(std::move(uuid))
+        , ignore_nodes(std::move(ignore))
+        , leaving_nodes(std::move(leaving))
+        , replace_nodes(std::move(replace))
+        , bootstrap_nodes(std::move(bootstrap)) {
+    }
 };
 
 struct node_ops_cmd_response {
+    // Mandatory field, set by all cmds
     bool ok;
+    // Optional field, set by query_pending_ops cmd
+    std::list<utils::UUID> pending_ops;
+    node_ops_cmd_response(bool o, std::list<utils::UUID> pending = {})
+        : ok(o)
+        , pending_ops(std::move(pending)) {
+    }
 };
 
 namespace std {

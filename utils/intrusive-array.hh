@@ -81,6 +81,7 @@ class intrusive_array {
         std::abort();
     }
 
+public:
     size_t storage_size() const noexcept {
         size_t nr = number_of_elements();
         if (_data[0].object.with_train()) {
@@ -89,7 +90,6 @@ class intrusive_array {
         return nr * sizeof(T);
     }
 
-public:
     using iterator = T*;
     using const_iterator = const T*;
 
@@ -322,10 +322,6 @@ public:
     }
 
     size_t size() const noexcept { return number_of_elements(); }
-
-    friend size_t size_for_allocation_strategy(const intrusive_array& obj) noexcept {
-        return obj.storage_size();
-    }
 
     static intrusive_array& from_element(T* ptr, int& idx) noexcept {
         idx = 0;

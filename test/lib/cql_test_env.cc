@@ -26,6 +26,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/core/coroutine.hh>
 #include "utils/UUID_gen.hh"
 #include "service/migration_manager.hh"
 #include "sstables/compaction_manager.hh"
@@ -41,6 +42,7 @@
 #include "test/lib/reader_permit.hh"
 #include "db/query_context.hh"
 #include "test/lib/test_services.hh"
+#include "test/lib/log.hh"
 #include "unit_test_service_levels_accessor.hh"
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
@@ -54,9 +56,30 @@
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/sstables-format-selector.hh"
+#include "repair/row_level.hh"
 #include "debug.hh"
 
 using namespace std::chrono_literals;
+
+namespace {
+
+
+} // anonymous namespace
+
+future<scheduling_groups> get_scheduling_groups() {
+    static std::optional<scheduling_groups> _scheduling_groups;
+    if (!_scheduling_groups) {
+        _scheduling_groups.emplace();
+        _scheduling_groups->compaction_scheduling_group = co_await create_scheduling_group("compaction", 1000);
+        _scheduling_groups->memory_compaction_scheduling_group = co_await create_scheduling_group("mem_compaction", 1000);
+        _scheduling_groups->streaming_scheduling_group = co_await create_scheduling_group("streaming", 200);
+        _scheduling_groups->statement_scheduling_group = co_await create_scheduling_group("statement", 1000);
+        _scheduling_groups->memtable_scheduling_group = co_await create_scheduling_group("memtable", 1000);
+        _scheduling_groups->memtable_to_cache_scheduling_group = co_await create_scheduling_group("memtable_to_cache", 200);
+        _scheduling_groups->gossip_scheduling_group = co_await create_scheduling_group("gossip", 1000);
+    }
+    co_return *_scheduling_groups;
+}
 
 cql_test_config::cql_test_config()
     : cql_test_config(make_shared<db::config>())
@@ -121,8 +144,8 @@ private:
     struct core_local_state {
         service::client_state client_state;
 
-        core_local_state(auth::service& auth_service)
-            : client_state(service::client_state::external_tag{}, auth_service, infinite_timeout_config)
+        core_local_state(auth::service& auth_service, qos::service_level_controller& sl_controller)
+            : client_state(service::client_state::external_tag{}, auth_service, &sl_controller, infinite_timeout_config)
         {
             client_state.set_login(auth::authenticated_user(testing_superuser));
         }
@@ -137,7 +160,7 @@ private:
         if (_db.local().has_keyspace(ks_name)) {
             _core_local.local().client_state.set_keyspace(_db.local(), ks_name);
         }
-        return ::make_shared<service::query_state>(_core_local.local().client_state, empty_service_permit(), _sl_controller.local());
+        return ::make_shared<service::query_state>(_core_local.local().client_state, empty_service_permit());
     }
 public:
     single_node_cql_env(
@@ -164,6 +187,7 @@ public:
     { }
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(sstring_view text) override {
+        testlog.trace("{}(\"{}\")", __FUNCTION__, text);
         auto qs = make_query_state();
         return local_qp().execute_direct(text, *qs, cql3::query_options::DEFAULT).finally([qs] {});
     }
@@ -172,6 +196,7 @@ public:
         sstring_view text,
         std::unique_ptr<cql3::query_options> qo) override
     {
+        testlog.trace("{}(\"{}\")", __FUNCTION__, text);
         auto qs = make_query_state();
         auto& lqo = *qo;
         return local_qp().execute_direct(text, *qs, lqo).finally([qs, qo = std::move(qo)] {});
@@ -347,8 +372,14 @@ public:
         return _mm;
     }
 
+    virtual future<> refresh_client_state() override {
+        return _core_local.invoke_on_all([] (core_local_state& state) {
+            return state.client_state.maybe_update_per_service_level_params();
+        });
+    }
+
     future<> start() {
-        return _core_local.start(std::ref(_auth_service));
+        return _core_local.start(std::ref(_auth_service), std::ref(_sl_controller));
     }
 
     future<> stop() {
@@ -446,7 +477,7 @@ public:
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto sl_controller = sharded<qos::service_level_controller>();
-            sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
             sl_controller.invoke_on_all([&sys_dist_ks, &sl_controller] (qos::service_level_controller& service) {
@@ -487,11 +518,12 @@ public:
 
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<cdc::generation_service> cdc_generation_service;
+            sharded<repair_service> repair;
 
             auto& ss = service::get_storage_service();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            ss.start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(mm), std::ref(token_metadata), std::ref(ms), std::ref(cdc_generation_service), std::ref(sl_controller), true).get();
+            ss.start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm), std::ref(token_metadata), std::ref(ms), std::ref(cdc_generation_service), std::ref(repair), std::ref(sl_controller), true).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             sharded<semaphore> sst_dir_semaphore;
@@ -506,6 +538,16 @@ public:
             } else {
                 dbcfg.available_memory = memory::stats().total_memory();
             }
+
+            auto scheduling_groups = get_scheduling_groups().get();
+            dbcfg.compaction_scheduling_group = scheduling_groups.compaction_scheduling_group;
+            dbcfg.memory_compaction_scheduling_group = scheduling_groups.memory_compaction_scheduling_group;
+            dbcfg.streaming_scheduling_group = scheduling_groups.streaming_scheduling_group;
+            dbcfg.statement_scheduling_group = scheduling_groups.statement_scheduling_group;
+            dbcfg.memtable_scheduling_group = scheduling_groups.memtable_scheduling_group;
+            dbcfg.memtable_to_cache_scheduling_group = scheduling_groups.memtable_to_cache_scheduling_group;
+            dbcfg.gossip_scheduling_group = scheduling_groups.gossip_scheduling_group;
+
             db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources), std::ref(sst_dir_semaphore)).get();
             auto stop_db = defer([&db] {
                 db.stop().get();
@@ -600,7 +642,7 @@ public:
 
             sharded<cdc::cdc_service> cdc;
             auto get_cdc_metadata = [] (cdc::generation_service& svc) { return std::ref(svc.get_cdc_metadata()); };
-            cdc.start(std::ref(proxy), sharded_parameter(get_cdc_metadata, std::ref(cdc_generation_service))).get();
+            cdc.start(std::ref(proxy), sharded_parameter(get_cdc_metadata, std::ref(cdc_generation_service)), std::ref(mm_notif)).get();
             auto stop_cdc_service = defer([&] {
                 cdc.stop().get();
             });
@@ -664,7 +706,9 @@ public:
                 env.create_keyspace(ks_name).get();
             }
 
-            func(env).get();
+            with_scheduling_group(dbcfg.statement_scheduling_group, [&func, &env] {
+                return func(env);
+            }).get();
         });
     }
 

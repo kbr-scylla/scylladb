@@ -141,8 +141,8 @@ public:
             auth::service& ser = _auth_service.local();
             return auth::get_roles(ser, *usr).then([this] (auth::role_set roles) {
                 return find_service_level(roles);
-            }).then([this, func = std::move(func)] (sstring service_level_name) mutable {
-                return with_service_level(service_level_name, std::move(func));
+            }).then([this, func = std::move(func)] (std::optional<service_level_options> opts) mutable {
+                return with_service_level(opts->shares_name.value_or(default_service_level_name), std::move(func));
             });
         } else {
             return with_service_level(default_service_level_name, std::move(func));
@@ -215,6 +215,29 @@ public:
     future<service_levels_info> get_distributed_service_level(sstring service_level_name);
 
     /**
+     * Returns the service level options **in effect** for a user having the given
+     * collection of roles.
+     * @param roles - the collection of roles to consider
+     * @return the effective service level options - they may in particular be a combination
+     *         of options from multiple service levels
+     */
+    future<std::optional<service_level_options>> find_service_level(auth::role_set roles);
+
+    /**
+     * Gets the service level data by name.
+     * @param service_level_name - the name of the requested service level
+     * @return the service level data if it exists (in the local controller) or
+     * get_service_level("default") otherwise.
+     */
+    service_level& get_service_level(sstring service_level_name) {
+        auto sl_it = _service_levels_db.find(service_level_name);
+        if (sl_it == _service_levels_db.end() || sl_it->second.marked_for_deletion) {
+            sl_it = _service_levels_db.find(default_service_level_name);
+        }
+        return sl_it->second;
+    }
+
+    /**
      * Returns true if `service_level_name` is recognised as a
      * service level name and false otherwise.
      *
@@ -223,7 +246,6 @@ public:
      bool has_service_level(sstring service_level_name) {
          return _service_levels_db.contains(service_level_name);
      }
-
 
 private:
     /**
@@ -245,16 +267,6 @@ private:
      */
     future<> do_remove_service_level(sstring name, bool remove_static);
 
-
-
-    /**
-     * Returns the service level **in effect** for a user having the given
-     * collection of roles.
-     * @param roles - the collection of roles to consider
-     * @return the name of the service level in effect.
-     */
-    future<sstring> find_service_level(auth::role_set roles);
-
     /**
      * The notify functions are used by the global service level controller
      * to propagate configuration changes to the local controllers.
@@ -265,20 +277,6 @@ private:
     future<> notify_service_level_added(sstring name, service_level sl_data);
     future<> notify_service_level_updated(sstring name, service_level_options slo);
     future<> notify_service_level_removed(sstring name);
-
-    /**
-     * Gets the service level data by name.
-     * @param service_level_name - the name of the requested service level
-     * @return the service level data if it exists (in the local controller) or
-     * get_service_level("default") otherwise.
-     */
-    service_level& get_service_level(sstring service_level_name) {
-        auto sl_it = _service_levels_db.find(service_level_name);
-        if (sl_it == _service_levels_db.end() || sl_it->second.marked_for_deletion) {
-            sl_it = _service_levels_db.find(default_service_level_name);
-        }
-        return sl_it->second;
-    }
 
     /**
      * Register this service_level_controller with the local priority

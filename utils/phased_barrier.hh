@@ -40,7 +40,13 @@ public:
         operation(lw_shared_ptr<gate> g) : _gate(std::move(g)) {}
         operation(const operation&) = delete;
         operation(operation&&) = default;
-        operation& operator=(operation&&) = default;
+        operation& operator=(operation&& o) noexcept {
+            if (this != &o) {
+                this->~operation();
+                new (this) operation(std::move(o));
+            }
+            return *this;
+        }
         ~operation() {
             if (_gate) {
                 _gate->leave();
@@ -58,11 +64,15 @@ public:
     // Starts a new phase and waits for all operations started in any of the earlier phases.
     // It is fine to start multiple awaits in parallel.
     // Strong exception guarantees.
-    future<> advance_and_await() {
+    future<> advance_and_await() noexcept {
+      try {
         auto new_gate = make_lw_shared<gate>();
         ++_phase;
         auto old_gate = std::exchange(_gate, std::move(new_gate));
         return old_gate->close().then([old_gate, op = start()] {});
+      } catch (...) {
+        return current_exception_as_future();
+      }
     }
 
     // Returns current phase number. The smallest value returned is 0.

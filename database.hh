@@ -914,7 +914,7 @@ public:
         return _pending_writes_phaser.start();
     }
 
-    future<> await_pending_writes() {
+    future<> await_pending_writes() noexcept {
         return _pending_writes_phaser.advance_and_await();
     }
 
@@ -926,7 +926,7 @@ public:
         return _pending_reads_phaser.start();
     }
 
-    future<> await_pending_reads() {
+    future<> await_pending_reads() noexcept {
         return _pending_reads_phaser.advance_and_await();
     }
 
@@ -938,7 +938,7 @@ public:
         return _pending_streams_phaser.start();
     }
 
-    future<> await_pending_streams() {
+    future<> await_pending_streams() noexcept {
         return _pending_streams_phaser.advance_and_await();
     }
 
@@ -946,11 +946,11 @@ public:
         return _pending_streams_phaser.operations_in_progress();
     }
 
-    future<> await_pending_flushes() {
+    future<> await_pending_flushes() noexcept {
         return _pending_flushes_phaser.advance_and_await();
     }
 
-    future<> await_pending_ops() {
+    future<> await_pending_ops() noexcept {
         return when_all(await_pending_reads(), await_pending_writes(), await_pending_streams(), await_pending_flushes()).discard_result();
     }
 
@@ -1586,6 +1586,10 @@ public:
     bool supports_infinite_bound_range_deletions() {
         return _supports_infinite_bound_range_deletions;
     }
+
+    // Get the maximum result size for an unlimited query, appropriate for the
+    // query class, which is deduced from the current scheduling group.
+    query::max_result_size get_unlimited_query_max_result_size() const;
 
     // Get the reader concurrency semaphore, appropriate for the query class,
     // which is deduced from the current scheduling group.

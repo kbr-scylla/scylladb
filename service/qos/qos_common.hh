@@ -10,9 +10,11 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/core/print.hh>
 #include <map>
+#include <stdexcept>
+#include <variant>
+#include <seastar/core/lowres_clock.hh>
+#include <optional>
 #include "exceptions/exceptions.hh"
-
-
 
 namespace qos {
 
@@ -21,15 +23,31 @@ namespace qos {
  *  a service level.
  */
 struct service_level_options {
-    int shares;
-};
+    struct unset_marker {
+        bool operator==(const unset_marker&) const { return true; };
+        bool operator!=(const unset_marker&) const { return false; };
+    };
+    struct delete_marker {
+        bool operator==(const delete_marker&) const { return true; };
+        bool operator!=(const delete_marker&) const { return false; };
+    };
 
-/**
- * The service level options comparison operators helps to determine if
- * a change was introduced to the service level.
- */
-bool operator==(const service_level_options& lhs, const service_level_options& rhs);
-bool operator!=(const service_level_options& lhs, const service_level_options& rhs);
+    using timeout_type = std::variant<unset_marker, delete_marker, lowres_clock::duration>;
+    timeout_type timeout = unset_marker{};
+
+    using shares_type = std::variant<unset_marker, delete_marker, int32_t>;
+    shares_type shares = unset_marker{};
+
+    std::optional<sstring> shares_name; // service level name, if shares is set
+
+    service_level_options replace_defaults(const service_level_options& other) const;
+    // Merges the values of two service level options. The semantics depends
+    // on the type of the parameter - e.g. for timeouts, a min value is preferred.
+    service_level_options merge_with(const service_level_options& other) const;
+
+    bool operator==(const service_level_options& other) const = default;
+    bool operator!=(const service_level_options& other) const = default;
+};
 
 using service_levels_info = std::map<sstring, service_level_options>;
 

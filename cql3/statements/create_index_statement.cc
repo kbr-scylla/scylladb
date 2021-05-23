@@ -278,6 +278,13 @@ create_index_statement::announce_migration(query_processor& qp) const {
         }
         accepted_name = db.get_available_index_name(keyspace(), column_family(), index_name_root);
     }
+    auto index_table_name = secondary_index::index_table_name(accepted_name);
+    if (db.has_schema(keyspace(), index_table_name)) {
+        return make_exception_future<::shared_ptr<cql_transport::event::schema_change>>(
+            exceptions::invalid_request_exception(format("Index {} cannot be created, because table {} already exists",
+                    accepted_name, index_table_name))
+        );
+    }
     index_metadata_kind kind;
     index_options_map index_options;
     if (_properties->is_custom) {
@@ -300,7 +307,7 @@ create_index_statement::announce_migration(query_processor& qp) const {
     schema_builder builder{schema};
     builder.with_index(index);
     return qp.get_migration_manager().announce_column_family_update(
-            builder.build(), false, {}).then([this]() {
+            builder.build(), false, {}, std::nullopt).then([this]() {
         using namespace cql_transport;
         return ::make_shared<event::schema_change>(
                 event::schema_change::change_type::UPDATED,

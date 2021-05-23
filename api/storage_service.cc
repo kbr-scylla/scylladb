@@ -182,8 +182,8 @@ void unset_rpc_controller(http_context& ctx, routes& r) {
     ss::is_rpc_server_running.unset(r);
 }
 
-void set_repair(http_context& ctx, routes& r, sharded<netw::messaging_service>& ms) {
-    ss::repair_async.set(r, [&ctx, &ms](std::unique_ptr<request> req) {
+void set_repair(http_context& ctx, routes& r, sharded<repair_service>& repair) {
+    ss::repair_async.set(r, [&ctx, &repair](std::unique_ptr<request> req) {
         static std::vector<sstring> options = {"primaryRange", "parallelism", "incremental",
                 "jobThreads", "ranges", "columnFamilies", "dataCenters", "hosts", "ignore_nodes", "trace",
                 "startToken", "endToken" };
@@ -199,7 +199,7 @@ void set_repair(http_context& ctx, routes& r, sharded<netw::messaging_service>& 
         // returns immediately, not waiting for the repair to finish. The user
         // then has other mechanisms to track the ongoing repair's progress,
         // or stop it.
-        return repair_start(ctx.db, ms, validate_keyspace(ctx, req->param),
+        return repair_start(repair, validate_keyspace(ctx, req->param),
                 options_map).then([] (int i) {
                     return make_ready_future<json::json_return_type>(i);
                 });
@@ -404,7 +404,7 @@ void set_storage_service(http_context& ctx, routes& r) {
         auto keyspace = validate_keyspace(ctx, req->param);
         std::vector<ss::maplist_mapper> res;
         return make_ready_future<json::json_return_type>(stream_range_as_array(service::get_local_storage_service().get_range_to_address_map(keyspace),
-                [](const std::pair<dht::token_range, std::vector<gms::inet_address>>& entry){
+                [](const std::pair<dht::token_range, inet_address_vector_replica_set>& entry){
             ss::maplist_mapper m;
             if (entry.first.start()) {
                 m.key.push(entry.first.start().value().value().to_sstring());
@@ -1231,7 +1231,26 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
     });
 
     ss::scrub.set(r, wrap_ks_cf(ctx, [&snap_ctl] (http_context& ctx, std::unique_ptr<request> req, sstring keyspace, std::vector<sstring> column_families) {
-        const auto skip_corrupted = req_param<bool>(*req, "skip_corrupted", false);
+        auto scrub_mode = sstables::compaction_options::scrub::mode::abort;
+
+        const sstring scrub_mode_str = req_param<sstring>(*req, "scrub_mode", "");
+        if (scrub_mode_str == "") {
+            const auto skip_corrupted = req_param<bool>(*req, "skip_corrupted", false);
+
+            if (skip_corrupted) {
+                scrub_mode = sstables::compaction_options::scrub::mode::skip;
+            }
+        } else {
+            if (scrub_mode_str == "ABORT") {
+                scrub_mode = sstables::compaction_options::scrub::mode::abort;
+            } else if (scrub_mode_str == "SKIP") {
+                scrub_mode = sstables::compaction_options::scrub::mode::skip;
+            } else if (scrub_mode_str == "SEGREGATE") {
+                scrub_mode = sstables::compaction_options::scrub::mode::segregate;
+            } else {
+                throw std::invalid_argument(fmt::format("Unknown argument for 'scrub_mode' parameter: {}", scrub_mode_str));
+            }
+        }
 
         auto f = make_ready_future<>();
         if (!req_param<bool>(*req, "disable_snapshot", false)) {
@@ -1241,12 +1260,12 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
             });
         }
 
-        return f.then([&ctx, keyspace, column_families, skip_corrupted] {
+        return f.then([&ctx, keyspace, column_families, scrub_mode] {
             return ctx.db.invoke_on_all([=] (database& db) {
                 return do_for_each(column_families, [=, &db](sstring cfname) {
                     auto& cm = db.get_compaction_manager();
                     auto& cf = db.find_column_family(keyspace, cfname);
-                    return cm.perform_sstable_scrub(&cf, skip_corrupted);
+                    return cm.perform_sstable_scrub(&cf, scrub_mode);
                 });
             });
         }).then([]{

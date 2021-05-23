@@ -8,6 +8,7 @@
 #include "cql3/statements/list_service_level_statement.hh"
 #include "service/qos/service_level_controller.hh"
 #include "transport/messages/result_message.hh"
+#include "utils/overloaded_functor.hh"
 
 namespace cql3 {
 
@@ -43,7 +44,10 @@ list_service_level_statement::execute(query_processor& qp,
                 type);
     };
 
-    static thread_local const std::vector<lw_shared_ptr<column_specification>> metadata({make_column("service_level", utf8_type), make_column("shares", int32_type)});
+    static thread_local const std::vector<lw_shared_ptr<column_specification>> metadata({make_column("service_level", utf8_type),
+        make_column("timeout", duration_type),
+        make_column("shares", int32_type),
+    });
 
     return make_ready_future().then([this, &state] () {
                                   if (_describe_all) {
@@ -53,11 +57,39 @@ list_service_level_statement::execute(query_processor& qp,
                                   }
                               })
             .then([this] (qos::service_levels_info sl_info) {
+                auto d = [] (const qos::service_level_options::timeout_type& duration) -> bytes_opt {
+                    return std::visit(overloaded_functor{
+                        [&] (const qos::service_level_options::unset_marker&) {
+                            return bytes_opt();
+                        },
+                        [&] (const qos::service_level_options::delete_marker&) {
+                            return bytes_opt();
+                        },
+                        [&] (const lowres_clock::duration& d) -> bytes_opt {
+                            auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+                            return duration_type->decompose(cql_duration(months_counter{0}, days_counter{0}, nanoseconds_counter{nanos}));
+                        },
+                    }, duration);
+                };
+                auto dd = [] <typename T> (const std::variant<qos::service_level_options::unset_marker, qos::service_level_options::delete_marker, T>& v) -> bytes_opt {
+                    return std::visit(overloaded_functor{
+                        [&] (const qos::service_level_options::unset_marker&) {
+                            return bytes_opt();
+                        },
+                        [&] (const qos::service_level_options::delete_marker&) {
+                            return bytes_opt();
+                        },
+                        [&] (const T& v) -> bytes_opt {
+                            return data_type_for<T>()->decompose(v);
+                        },
+                    }, v);
+                };
                 auto rs = std::make_unique<result_set>(metadata);
-                for (auto &&sl : sl_info) {
+                for (auto &&[sl_name, slo] : sl_info) {
                     rs->add_row(std::vector<bytes_opt>{
-                            utf8_type->decompose(sl.first),
-                            int32_type->decompose(sl.second.shares)});
+                            utf8_type->decompose(sl_name), d(slo.timeout),
+                            dd(slo.shares),
+                        });
                 }
 
                 auto rows = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(std::move(rs))));

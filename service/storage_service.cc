@@ -71,6 +71,7 @@
 #include "cdc/generation.hh"
 #include "cdc/generation_service.hh"
 #include "repair/repair.hh"
+#include "repair/row_level.hh"
 #include "service/priority_manager.hh"
 #include "utils/generation-number.hh"
 #include <seastar/core/coroutine.hh>
@@ -92,15 +93,16 @@ distributed<storage_service> _the_storage_service;
 
 storage_service::storage_service(abort_source& abort_source, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, gms::feature_service& feature_service, storage_service_config config,
-        sharded<service::migration_notifier>& mn, sharded<service::migration_manager>& mm,
-        locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service, sharded<qos::service_level_controller>& sl_controller, bool for_testing)
+        sharded<service::migration_manager>& mm,
+        locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service,
+        sharded<repair_service>& repair, sharded<qos::service_level_controller>& sl_controller, bool for_testing)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
         , _db(db)
         , _gossiper(gossiper)
-        , _mnotifier(mn)
         , _messaging(ms)
         , _migration_manager(mm)
+        , _repair(repair)
         , _sl_controller(sl_controller)
         , _for_testing(for_testing)
         , _node_ops_abort_thread(node_ops_abort_thread())
@@ -692,11 +694,15 @@ void storage_service::bootstrap() {
 
         // Update pending ranges now, so we correctly count ourselves as a pending replica
         // when inserting the new CDC generation.
+      if (!is_repair_based_node_ops_enabled()) {
+        // When is_repair_based_node_ops_enabled is true, the bootstrap node
+        // will use node_ops_cmd to bootstrap, node_ops_cmd will update the pending ranges.
         mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
             auto endpoint = get_broadcast_address();
             tmptr->add_bootstrap_tokens(_bootstrap_tokens, endpoint);
             return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
         }).get();
+      }
 
         // After we pick a generation timestamp, we start gossiping it, and we stick with it.
         // We don't do any other generation switches (unless we crash before complecting bootstrap).
@@ -706,6 +712,9 @@ void storage_service::bootstrap() {
                 _bootstrap_tokens, get_token_metadata_ptr(), _gossiper,
                 _sys_dist_ks.local(), get_ring_delay(), !_for_testing && !is_first_node()).get0();
 
+      if (!is_repair_based_node_ops_enabled()) {
+        // When is_repair_based_node_ops_enabled is true, the bootstrap node
+        // will use node_ops_cmd to bootstrap, bootstrapping gossip status is not needed for bootstrap.
         _gossiper.add_local_application_state({
             // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.
             { gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens) },
@@ -715,22 +724,11 @@ void storage_service::bootstrap() {
 
         set_mode(mode::JOINING, format("sleeping {} ms for pending range setup", get_ring_delay().count()), true);
         _gossiper.wait_for_range_setup().get();
+     }
     } else {
         // Wait until we know tokens of existing node before announcing replacing status.
         set_mode(mode::JOINING, sprint("Wait until local node knows tokens of peer nodes"), true);
         _gossiper.wait_for_range_setup().get();
-
-      if (!is_repair_based_node_ops_enabled()) {
-        set_mode(mode::JOINING, sprint("Announce tokens and status of the replacing node"), true);
-        _gossiper.add_local_application_state({
-            { gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens) },
-            { gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(_cdc_gen_id) },
-            { gms::application_state::STATUS, versioned_value::hibernate(true) },
-        }).get();
-        _gossiper.advertise_myself().get();
-        set_mode(mode::JOINING, format("Wait until peer nodes know the bootstrap tokens of local node"), true);
-        _gossiper.wait_for_range_setup().get();
-       }
         auto replace_addr = db().local().get_replace_address();
         if (replace_addr) {
             slogger.debug("Removing replaced endpoint {} from system.peers", *replace_addr);
@@ -749,14 +747,14 @@ void storage_service::bootstrap() {
         if (db().local().is_replacing()) {
             run_replace_ops();
         } else {
-            bootstrap_with_repair(_db, _messaging, get_token_metadata_ptr(), _bootstrap_tokens).get();
+            run_bootstrap_ops();
         }
     } else {
-        dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
         // Does the actual streaming of newly replicated token ranges.
         if (db().local().is_replacing()) {
-            bs.bootstrap(streaming::stream_reason::replace).get();
+            run_replace_ops();
         } else {
+            dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
             bs.bootstrap(streaming::stream_reason::bootstrap).get();
         }
     }
@@ -781,12 +779,12 @@ storage_service::get_rpc_address(const inet_address& endpoint) const {
     return boost::lexical_cast<std::string>(endpoint);
 }
 
-std::unordered_map<dht::token_range, std::vector<inet_address>>
+std::unordered_map<dht::token_range, inet_address_vector_replica_set>
 storage_service::get_range_to_address_map(const sstring& keyspace) const {
     return get_range_to_address_map(keyspace, get_token_metadata().sorted_tokens());
 }
 
-std::unordered_map<dht::token_range, std::vector<inet_address>>
+std::unordered_map<dht::token_range, inet_address_vector_replica_set>
 storage_service::get_range_to_address_map_in_local_dc(
         const sstring& keyspace) const {
     std::function<bool(const inet_address&)> filter =  [this](const inet_address& address) {
@@ -794,7 +792,7 @@ storage_service::get_range_to_address_map_in_local_dc(
     };
 
     auto orig_map = get_range_to_address_map(keyspace, get_tokens_in_local_dc());
-    std::unordered_map<dht::token_range, std::vector<inet_address>> filtered_map;
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> filtered_map;
     for (auto entry : orig_map) {
         auto& addresses = filtered_map[entry.first];
         addresses.reserve(entry.second.size());
@@ -823,7 +821,7 @@ storage_service::is_local_dc(const inet_address& targetHost) const {
     return remote_dc == local_dc;
 }
 
-std::unordered_map<dht::token_range, std::vector<inet_address>>
+std::unordered_map<dht::token_range, inet_address_vector_replica_set>
 storage_service::get_range_to_address_map(const sstring& keyspace,
         const std::vector<token>& sorted_tokens) const {
     sstring ks = keyspace;
@@ -837,6 +835,19 @@ storage_service::get_range_to_address_map(const sstring& keyspace,
         ks = keyspaces[0];
     }
     return construct_range_to_endpoint_map(ks, get_all_ranges(sorted_tokens));
+}
+
+void storage_service::handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node) {
+    try {
+        slogger.info("handle_state_replacing: Waiting for replacing node {} to be alive on all shards", replacing_node);
+        _gossiper.wait_alive({replacing_node}, std::chrono::milliseconds(5 * 1000));
+        slogger.info("handle_state_replacing: Replacing node {} is now alive on all shards", replacing_node);
+    } catch (...) {
+        slogger.warn("handle_state_replacing: Failed to wait for replacing node {} to be alive on all shards: {}",
+                replacing_node, std::current_exception());
+    }
+    slogger.info("handle_state_replacing: Update pending ranges for replacing node {}", replacing_node);
+    update_pending_ranges(tmptr, format("handle_state_replacing {}", replacing_node)).get();
 }
 
 void storage_service::handle_state_replacing(inet_address replacing_node) {
@@ -859,7 +870,13 @@ void storage_service::handle_state_replacing(inet_address replacing_node) {
     slogger.info("Node {} is replacing existing node {} with host_id={}, existing_tokens={}, replacing_tokens={}",
             replacing_node, existing_node, host_id, existing_tokens, replacing_tokens);
     tmptr->add_replacing_endpoint(existing_node, replacing_node);
-    update_pending_ranges(tmptr, format("handle_state_replacing {}", replacing_node)).get();
+    if (_gossiper.is_alive(replacing_node)) {
+        slogger.info("handle_state_replacing: Replacing node {} is already alive, update pending ranges", replacing_node);
+        handle_state_replacing_update_pending_ranges(tmptr, replacing_node);
+    } else {
+        slogger.info("handle_state_replacing: Replacing node {} is not alive yet, delay update pending ranges", replacing_node);
+        _replacing_nodes_pending_ranges_updater.insert(replacing_node);
+    }
     replicate_to_all_cores(std::move(tmptr)).get();
 }
 
@@ -1168,6 +1185,14 @@ void storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_state s
     });
     if (get_token_metadata().is_member(endpoint)) {
         notify_up(endpoint);
+    }
+    if (_replacing_nodes_pending_ranges_updater.contains(endpoint)) {
+        _replacing_nodes_pending_ranges_updater.erase(endpoint);
+        slogger.info("Trigger pending ranges updater for replacing node {}", endpoint);
+        auto tmlock = get_token_metadata_lock().get0();
+        auto tmptr = get_mutable_token_metadata_ptr().get0();
+        handle_state_replacing_update_pending_ranges(tmptr, endpoint);
+        replicate_to_all_cores(std::move(tmptr)).get();
     }
 }
 
@@ -1840,6 +1865,7 @@ future<> storage_service::do_stop_stream_manager() {
 future<> storage_service::decommission() {
     return run_with_api_lock(sstring("decommission"), [] (storage_service& ss) {
         return seastar::async([&ss] {
+            auto uuid = utils::make_random_uuid();
             auto tmptr = ss.get_token_metadata_ptr();
             auto& db = ss.db().local();
             auto endpoint = ss.get_broadcast_address();
@@ -1868,15 +1894,105 @@ future<> storage_service::decommission() {
             }
 
             slogger.info("DECOMMISSIONING: starts");
-            ss.start_leaving().get();
-            // FIXME: long timeout = Math.max(RING_DELAY, BatchlogManager.instance.getBatchlogTimeout());
-            auto timeout = ss.get_ring_delay();
-            ss.set_mode(mode::LEAVING, format("sleeping {} ms for batch processing and pending range setup", timeout.count()), true);
-            sleep_abortable(timeout, ss._abort_source).get();
+            auto leaving_nodes = std::list<gms::inet_address>{endpoint};
+            // TODO: wire ignore_nodes provided by user
+            std::list<gms::inet_address> ignore_nodes;
 
-            slogger.info("DECOMMISSIONING: unbootstrap starts");
-            ss.unbootstrap();
-            slogger.info("DECOMMISSIONING: unbootstrap done");
+            future<> heartbeat_updater = make_ready_future<>();
+            auto heartbeat_updater_done = make_lw_shared<bool>(false);
+
+            // Step 1: Decide who needs to sync data
+            std::vector<gms::inet_address> nodes;
+            for (const auto& x : tmptr->get_endpoint_to_host_id_map_for_reading()) {
+                seastar::thread::maybe_yield();
+                if (std::find(ignore_nodes.begin(), ignore_nodes.end(), x.first) == ignore_nodes.end()) {
+                    nodes.push_back(x.first);
+                }
+            }
+            slogger.info("decommission[{}]: Started decommission operation, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
+
+            // Step 2: Prepare to sync data
+            std::unordered_set<gms::inet_address> nodes_unknown_verb;
+            std::unordered_set<gms::inet_address> nodes_down;
+            auto req = node_ops_cmd_request{node_ops_cmd::decommission_prepare, uuid, ignore_nodes, leaving_nodes, {}};
+            try {
+                parallel_for_each(nodes, [&ss, &req, &nodes_unknown_verb, &nodes_down, uuid] (const gms::inet_address& node) {
+                    return ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                        slogger.debug("decommission[{}]: Got prepare response from node={}", uuid, node);
+                    }).handle_exception_type([&nodes_unknown_verb, node, uuid] (seastar::rpc::unknown_verb_error&) {
+                        slogger.warn("decommission[{}]: Node {} does not support decommission verb", uuid, node);
+                        nodes_unknown_verb.emplace(node);
+                    }).handle_exception_type([&nodes_down, node, uuid] (seastar::rpc::closed_error&) {
+                        slogger.warn("decommission[{}]: Node {} is down for node_ops_cmd verb", uuid, node);
+                        nodes_down.emplace(node);
+                    });
+                }).get();
+                if (!nodes_unknown_verb.empty()) {
+                    auto msg = format("decommission[{}]: Nodes={} do not support decommission verb. Please upgrade your cluster and run decommission again.", uuid, nodes_unknown_verb);
+                    slogger.warn("{}", msg);
+                    throw std::runtime_error(msg);
+                }
+                if (!nodes_down.empty()) {
+                    auto msg = format("decommission[{}]: Nodes={} needed for decommission operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, run nodetool decommission --ignore-dead-nodes <list_of_dead_nodes>. E.g., nodetool decommission --ignore-dead-nodes 127.0.0.1,127.0.0.2", uuid, nodes_down);
+                    slogger.warn("{}", msg);
+                    throw std::runtime_error(msg);
+                }
+
+                // Step 3: Start heartbeat updater
+                heartbeat_updater = seastar::async([&ss, &nodes, uuid, heartbeat_updater_done] {
+                    slogger.debug("decommission[{}]: Started heartbeat_updater", uuid);
+                    while (!(*heartbeat_updater_done)) {
+                        auto req = node_ops_cmd_request{node_ops_cmd::decommission_heartbeat, uuid, {}, {}, {}};
+                        parallel_for_each(nodes, [&ss, &req, uuid] (const gms::inet_address& node) {
+                            return ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                                slogger.debug("decommission[{}]: Got heartbeat response from node={}", uuid, node);
+                                return make_ready_future<>();
+                            });
+                        }).handle_exception([uuid] (std::exception_ptr ep) {
+                            slogger.warn("decommission[{}]: Failed to send heartbeat: {}", uuid, ep);
+                        }).get();
+                        int nr_seconds = 10;
+                        while (!(*heartbeat_updater_done) && nr_seconds--) {
+                            sleep(std::chrono::seconds(1)).get();
+                        }
+                    }
+                    slogger.debug("decommission[{}]: Stopped heartbeat_updater", uuid);
+                });
+                auto stop_heartbeat_updater = defer([&] {
+                    *heartbeat_updater_done = true;
+                    heartbeat_updater.get();
+                });
+
+                // Step 5: Start to sync data
+                slogger.info("DECOMMISSIONING: unbootstrap starts");
+                ss.unbootstrap();
+                slogger.info("DECOMMISSIONING: unbootstrap done");
+
+                // Step 6: Finish
+                req.cmd = node_ops_cmd::decommission_done;
+                parallel_for_each(nodes, [&ss, &req, uuid] (const gms::inet_address& node) {
+                    return ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                        slogger.debug("decommission[{}]: Got done response from node={}", uuid, node);
+                        return make_ready_future<>();
+                    });
+                }).get();
+                slogger.info("decommission[{}]: Finished decommission operation, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
+            } catch (...) {
+                slogger.warn("decommission[{}]: Abort decommission operation started, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
+                // we need to revert the effect of prepare verb the decommission ops is failed
+                req.cmd = node_ops_cmd::decommission_abort;
+                parallel_for_each(nodes, [&ss, &req, &nodes_unknown_verb, &nodes_down, uuid] (const gms::inet_address& node) {
+                    if (nodes_unknown_verb.contains(node) || nodes_down.contains(node)) {
+                        // No need to revert previous prepare cmd for those who do not apply prepare cmd.
+                        return make_ready_future<>();
+                    }
+                    return ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                        slogger.debug("decommission[{}]: Got abort response from node={}", uuid, node);
+                    });
+                }).get();
+                slogger.warn("decommission[{}]: Abort decommission operation finished, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
+                throw;
+            }
 
             ss.shutdown_client_servers();
             slogger.info("DECOMMISSIONING: shutdown rpc and cql server done");
@@ -1898,6 +2014,146 @@ future<> storage_service::decommission() {
             // let op be responsible for killing the process
         });
     });
+}
+
+// Runs inside seastar::async context
+void storage_service::run_bootstrap_ops() {
+    auto uuid = utils::make_random_uuid();
+    // TODO: Specify ignore_nodes
+    std::list<gms::inet_address> ignore_nodes;
+    std::list<gms::inet_address> sync_nodes;
+
+    auto start_time = std::chrono::steady_clock::now();
+    for (;;) {
+        sync_nodes.clear();
+        // Step 1: Decide who needs to sync data for bootstrap operation
+        for (const auto& x :_gossiper.endpoint_state_map) {
+            seastar::thread::maybe_yield();
+            const auto& node = x.first;
+            slogger.info("bootstrap[{}]: Check node={}, status={}", uuid, node, _gossiper.get_gossip_status(node));
+            if (node != get_broadcast_address() &&
+                    _gossiper.is_normal_ring_member(node) &&
+                    std::find(ignore_nodes.begin(), ignore_nodes.end(), x.first) == ignore_nodes.end()) {
+                sync_nodes.push_back(node);
+            }
+        }
+        sync_nodes.push_front(get_broadcast_address());
+
+        // Step 2: Wait until no pending node operations
+        std::unordered_map<gms::inet_address, std::list<utils::UUID>> pending_ops;
+        auto req = node_ops_cmd_request(node_ops_cmd::query_pending_ops, uuid);
+        parallel_for_each(sync_nodes, [this, req, uuid, &pending_ops] (const gms::inet_address& node) {
+            return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node, &pending_ops] (node_ops_cmd_response resp) {
+                slogger.debug("bootstrap[{}]: Got query_pending_ops response from node={}, resp.pending_ops={}", uuid, node, resp.pending_ops);
+                if (!resp.pending_ops.empty()) {
+                    pending_ops.emplace(node, resp.pending_ops);
+                }
+                return make_ready_future<>();
+            });
+        }).handle_exception([uuid] (std::exception_ptr ep) {
+            slogger.warn("bootstrap[{}]: Failed to query_pending_ops : {}", uuid, ep);
+        }).get();
+        if (pending_ops.empty()) {
+            break;
+        } else {
+            if (std::chrono::steady_clock::now() > start_time + std::chrono::seconds(60)) {
+                throw std::runtime_error(format("bootstrap[{}]: Found pending node ops = {}, reject bootstrap", uuid, pending_ops));
+            }
+            slogger.warn("bootstrap[{}]: Found pending node ops = {}, sleep 5 seconds and check again", uuid, pending_ops);
+            sleep_abortable(std::chrono::seconds(5), _abort_source).get();
+        }
+    }
+
+    std::unordered_set<gms::inet_address> nodes_unknown_verb;
+    std::unordered_set<gms::inet_address> nodes_down;
+    std::unordered_set<gms::inet_address> nodes_aborted;
+    auto tokens = std::list<dht::token>(_bootstrap_tokens.begin(), _bootstrap_tokens.end());
+    std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap_nodes = {
+        {get_broadcast_address(), tokens},
+    };
+    auto req = node_ops_cmd_request(node_ops_cmd::bootstrap_prepare, uuid, ignore_nodes, {}, {}, bootstrap_nodes);
+    slogger.info("bootstrap[{}]: Started bootstrap operation, bootstrap_nodes={}, sync_nodes={}, ignore_nodes={}", uuid, bootstrap_nodes, sync_nodes, ignore_nodes);
+    future<> heartbeat_updater = make_ready_future<>();
+    auto heartbeat_updater_done = make_lw_shared<bool>(false);
+    try {
+        // Step 3: Prepare to sync data
+        parallel_for_each(sync_nodes, [this, &req, &nodes_unknown_verb, &nodes_down, uuid] (const gms::inet_address& node) {
+            return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                slogger.debug("bootstrap[{}]: Got node_ops_cmd::bootstrap_prepare response from node={}", uuid, node);
+            }).handle_exception_type([&nodes_unknown_verb, node, uuid] (seastar::rpc::unknown_verb_error&) {
+                slogger.warn("bootstrap[{}]: Node {} does not support node_ops_cmd verb", uuid, node);
+                nodes_unknown_verb.emplace(node);
+            }).handle_exception_type([&nodes_down, node, uuid] (seastar::rpc::closed_error&) {
+                slogger.warn("bootstrap[{}]: Node {} is down for node_ops_cmd verb", uuid, node);
+                nodes_down.emplace(node);
+            });
+        }).get();
+        if (!nodes_unknown_verb.empty()) {
+            auto msg = format("bootstrap[{}]: Nodes={} do not support bootstrap verb. Please upgrade your cluster and run bootstrap again.", uuid, nodes_unknown_verb);
+            slogger.warn("{}", msg);
+            throw std::runtime_error(msg);
+        }
+        if (!nodes_down.empty()) {
+            auto msg = format("bootstrap[{}]: Nodes={} needed for bootstrap operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, add --ignore-dead-nodes <list_of_dead_nodes>. E.g., scylla --ignore-dead-nodes 127.0.0.1,127.0.0.2", uuid, nodes_down);
+            slogger.warn("{}", msg);
+            throw std::runtime_error(msg);
+        }
+
+        // Step 4: Start heartbeat updater
+        heartbeat_updater = seastar::async([this, &sync_nodes, uuid, heartbeat_updater_done] {
+            slogger.debug("bootstrap[{}]: Started heartbeat_updater", uuid);
+            while (!(*heartbeat_updater_done)) {
+                auto req = node_ops_cmd_request(node_ops_cmd::bootstrap_heartbeat, uuid);
+                parallel_for_each(sync_nodes, [this, req, uuid] (const gms::inet_address& node) {
+                    return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                        slogger.debug("bootstrap[{}]: Got heartbeat response from node={}", uuid, node);
+                        return make_ready_future<>();
+                    });
+                }).handle_exception([uuid] (std::exception_ptr ep) {
+                    slogger.warn("bootstrap[{}]: Failed to send heartbeat: {}", uuid, ep);
+                }).get();
+                int nr_seconds = 10;
+                while (!(*heartbeat_updater_done) && nr_seconds--) {
+                    sleep(std::chrono::seconds(1)).get();
+                }
+            }
+            slogger.debug("bootstrap[{}]: Stopped heartbeat_updater", uuid);
+        });
+        auto stop_heartbeat_updater = defer([&] {
+            *heartbeat_updater_done = true;
+            heartbeat_updater.get();
+        });
+
+        // Step 5: Sync data for bootstrap
+        _repair.local().bootstrap_with_repair(get_token_metadata_ptr(), _bootstrap_tokens).get();
+
+        // Step 6: Finish
+        req.cmd = node_ops_cmd::bootstrap_done;
+        parallel_for_each(sync_nodes, [this, &req, &nodes_aborted, uuid] (const gms::inet_address& node) {
+            return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([&nodes_aborted, uuid, node] (node_ops_cmd_response resp) {
+                nodes_aborted.emplace(node);
+                slogger.debug("bootstrap[{}]: Got done response from node={}", uuid, node);
+                return make_ready_future<>();
+            });
+        }).get();
+    } catch (...) {
+        slogger.error("bootstrap[{}]: Abort bootstrap operation started, bootstrap_nodes={}, sync_nodes={}, ignore_nodes={}: {}",
+                uuid, bootstrap_nodes, sync_nodes, ignore_nodes, std::current_exception());
+        // we need to revert the effect of prepare verb the bootstrap ops is failed
+        req.cmd = node_ops_cmd::bootstrap_abort;
+        parallel_for_each(sync_nodes, [this, &req, &nodes_unknown_verb, &nodes_down, &nodes_aborted, uuid] (const gms::inet_address& node) {
+            if (nodes_unknown_verb.contains(node) || nodes_down.contains(node) || nodes_aborted.contains(node)) {
+                // No need to revert previous prepare cmd for those who do not apply prepare cmd.
+                return make_ready_future<>();
+            }
+            return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node] (node_ops_cmd_response resp) {
+                slogger.debug("bootstrap[{}]: Got abort response from node={}", uuid, node);
+            });
+        }).get();
+        slogger.error("bootstrap[{}]: Abort bootstrap operation finished, bootstrap_nodes={}, sync_nodes={}, ignore_nodes={}: {}",
+                uuid, bootstrap_nodes, sync_nodes, ignore_nodes, std::current_exception());
+        throw;
+    }
 }
 
 // Runs inside seastar::async context
@@ -2009,7 +2265,14 @@ void storage_service::run_replace_ops() {
 
 
         // Step 7: Sync data for replace
-        replace_with_repair(_db, _messaging, get_token_metadata_ptr(), _bootstrap_tokens).get();
+        if (is_repair_based_node_ops_enabled()) {
+            slogger.info("replace[{}]: Using repair based node ops to sync data", uuid);
+            _repair.local().replace_with_repair(get_token_metadata_ptr(), _bootstrap_tokens).get();
+        } else {
+            slogger.info("replace[{}]: Using streaming based node ops to sync data", uuid);
+            dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
+            bs.bootstrap(streaming::stream_reason::replace).get();
+        }
 
 
         // Step 8: Finish
@@ -2177,7 +2440,8 @@ future<> storage_service::removenode(sstring host_id_string, std::list<gms::inet
 void storage_service::node_ops_cmd_check(gms::inet_address coordinator, const node_ops_cmd_request& req) {
     auto ops_uuids = boost::copy_range<std::vector<utils::UUID>>(_node_ops| boost::adaptors::map_keys);
     std::string msg;
-    if (req.cmd == node_ops_cmd::removenode_prepare || req.cmd == node_ops_cmd::replace_prepare) {
+    if (req.cmd == node_ops_cmd::removenode_prepare || req.cmd == node_ops_cmd::replace_prepare ||
+            req.cmd == node_ops_cmd::decommission_prepare || req.cmd == node_ops_cmd::bootstrap_prepare) {
         // Peer node wants to start a new node operation. Make sure no pending node operation is in progress.
         if (!_node_ops.empty()) {
             msg = format("node_ops_cmd_check: Node {} rejected node_ops_cmd={} from node={} with ops_uuid={}, pending_node_ops={}, pending node ops is in progress",
@@ -2207,6 +2471,14 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
         return seastar::async([&ss, coordinator, req = std::move(req)] () mutable {
             auto ops_uuid = req.ops_uuid;
             slogger.debug("node_ops_cmd_handler cmd={}, ops_uuid={}", uint32_t(req.cmd), ops_uuid);
+
+            if (req.cmd == node_ops_cmd::query_pending_ops) {
+                bool ok = true;
+                auto ops_uuids = boost::copy_range<std::list<utils::UUID>>(ss._node_ops| boost::adaptors::map_keys);
+                node_ops_cmd_response resp(ok, ops_uuids);
+                slogger.debug("node_ops_cmd_handler: Got query_pending_ops request from {}, pending_ops={}", coordinator, ops_uuids);
+                return resp;
+            }
 
             ss.node_ops_cmd_check(coordinator, req);
 
@@ -2249,9 +2521,48 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
                 auto ops = it->second.get_ops_info();
                 for (auto& node : req.leaving_nodes) {
                     slogger.info("removenode[{}]: Started to sync data for removing node={}, coordinator={}", req.ops_uuid, node, coordinator);
-                    removenode_with_repair(ss._db, ss._messaging, ss.get_token_metadata_ptr(), node, ops).get();
+                    ss._repair.local().removenode_with_repair(ss.get_token_metadata_ptr(), node, ops).get();
                 }
             } else if (req.cmd == node_ops_cmd::removenode_abort) {
+                ss.node_ops_abort(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::decommission_prepare) {
+                if (req.leaving_nodes.size() > 1) {
+                    auto msg = format("decommission[{}]: Could not decommission more than one node at a time: leaving_nodes={}", req.ops_uuid, req.leaving_nodes);
+                    slogger.warn("{}", msg);
+                    throw std::runtime_error(msg);
+                }
+                ss.mutate_token_metadata([coordinator, &req, &ss] (mutable_token_metadata_ptr tmptr) mutable {
+                    for (auto& node : req.leaving_nodes) {
+                        slogger.info("decommission[{}]: Added node={} as leaving node, coordinator={}", req.ops_uuid, node, coordinator);
+                        tmptr->add_leaving_endpoint(node);
+                    }
+                    return ss.update_pending_ranges(tmptr, format("decommission {}", req.leaving_nodes));
+                }).get();
+                auto ops = seastar::make_shared<node_ops_info>(node_ops_info{ops_uuid, false, std::move(req.ignore_nodes)});
+                auto meta = node_ops_meta_data(ops_uuid, coordinator, std::move(ops), [&ss, coordinator, req = std::move(req)] () mutable {
+                    return ss.mutate_token_metadata([&ss, coordinator, req = std::move(req)] (mutable_token_metadata_ptr tmptr) mutable {
+                        for (auto& node : req.leaving_nodes) {
+                            slogger.info("decommission[{}]: Removed node={} as leaving node, coordinator={}", req.ops_uuid, node, coordinator);
+                            tmptr->del_leaving_endpoint(node);
+                        }
+                        return ss.update_pending_ranges(tmptr, format("decommission {}", req.leaving_nodes));
+                    });
+                },
+                [&ss, ops_uuid] () mutable { ss.node_ops_singal_abort(ops_uuid); });
+                ss._node_ops.emplace(ops_uuid, std::move(meta));
+            } else if (req.cmd == node_ops_cmd::decommission_heartbeat) {
+                slogger.debug("decommission[{}]: Updated heartbeat from coordinator={}", req.ops_uuid,  coordinator);
+                ss.node_ops_update_heartbeat(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::decommission_done) {
+                slogger.info("decommission[{}]: Marked ops done from coordinator={}", req.ops_uuid, coordinator);
+                slogger.debug("Triggering off-strategy compaction for all non-system tables on decommission completion");
+                ss.db().invoke_on_all([](database &db) {
+                    for (auto& table : db.get_non_system_column_families()) {
+                        table->trigger_offstrategy_compaction();
+                    }
+                }).get();
+                ss.node_ops_done(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::decommission_abort) {
                 ss.node_ops_abort(ops_uuid);
             } else if (req.cmd == node_ops_cmd::replace_prepare) {
                 // Mark the replacing node as replacing
@@ -2307,13 +2618,51 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
                 ss.node_ops_done(ops_uuid);
             } else if (req.cmd == node_ops_cmd::replace_abort) {
                 ss.node_ops_abort(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::bootstrap_prepare) {
+                // Mark the bootstrap node as bootstrapping
+                if (req.bootstrap_nodes.size() > 1) {
+                    auto msg = format("bootstrap[{}]: Could not bootstrap more than one node at a time: bootstrap_nodes={}", req.ops_uuid, req.bootstrap_nodes);
+                    slogger.warn("{}", msg);
+                    throw std::runtime_error(msg);
+                }
+                ss.mutate_token_metadata([coordinator, &req, &ss] (mutable_token_metadata_ptr tmptr) mutable {
+                    for (auto& x: req.bootstrap_nodes) {
+                        auto& endpoint = x.first;
+                        auto tokens = std::unordered_set<dht::token>(x.second.begin(), x.second.end());
+                        slogger.info("bootstrap[{}]: Added node={} as bootstrap, coordinator={}", req.ops_uuid, endpoint, coordinator);
+                        tmptr->add_bootstrap_tokens(tokens, endpoint);
+                    }
+                    return ss.update_pending_ranges(tmptr, format("bootstrap {}", req.bootstrap_nodes));
+                }).get();
+                auto ops = seastar::make_shared<node_ops_info>(node_ops_info{ops_uuid, false, std::move(req.ignore_nodes)});
+                auto meta = node_ops_meta_data(ops_uuid, coordinator, std::move(ops), [&ss, coordinator, req = std::move(req)] () mutable {
+                    return ss.mutate_token_metadata([&ss, coordinator, req = std::move(req)] (mutable_token_metadata_ptr tmptr) mutable {
+                        for (auto& x: req.bootstrap_nodes) {
+                            auto& endpoint = x.first;
+                            auto tokens = std::unordered_set<dht::token>(x.second.begin(), x.second.end());
+                            slogger.info("bootstrap[{}]: Removed node={} as bootstrap, coordinator={}", req.ops_uuid, endpoint, coordinator);
+                            tmptr->remove_bootstrap_tokens(tokens);
+                        }
+                        return ss.update_pending_ranges(tmptr, format("bootstrap {}", req.bootstrap_nodes));
+                    });
+                },
+                [&ss, ops_uuid ] { ss.node_ops_singal_abort(ops_uuid); });
+                ss._node_ops.emplace(ops_uuid, std::move(meta));
+            } else if (req.cmd == node_ops_cmd::bootstrap_heartbeat) {
+                slogger.debug("bootstrap[{}]: Updated heartbeat from coordinator={}", req.ops_uuid, coordinator);
+                ss.node_ops_update_heartbeat(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::bootstrap_done) {
+                slogger.info("bootstrap[{}]: Marked ops done from coordinator={}", req.ops_uuid, coordinator);
+                ss.node_ops_done(ops_uuid);
+            } else if (req.cmd == node_ops_cmd::bootstrap_abort) {
+                ss.node_ops_abort(ops_uuid);
             } else {
                 auto msg = format("node_ops_cmd_handler: ops_uuid={}, unknown cmd={}", req.ops_uuid, uint32_t(req.cmd));
                 slogger.warn("{}", msg);
                 throw std::runtime_error(msg);
             }
-            node_ops_cmd_response resp;
-            resp.ok = true;
+            bool ok = true;
+            node_ops_cmd_response resp(ok);
             return resp;
         });
     });
@@ -2403,7 +2752,7 @@ future<> storage_service::rebuild(sstring source_dc) {
         slogger.info("rebuild from dc: {}", source_dc == "" ? "(any dc)" : source_dc);
         auto tmptr = ss.get_token_metadata_ptr();
         if (ss.is_repair_based_node_ops_enabled()) {
-            return rebuild_with_repair(ss._db, ss._messaging, tmptr, std::move(source_dc));
+            return ss._repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
         } else {
             auto streamer = make_lw_shared<dht::range_streamer>(ss._db, tmptr, ss._abort_source,
                     ss.get_broadcast_address(), "Rebuild", streaming::stream_reason::rebuild);
@@ -2449,7 +2798,7 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
 
     slogger.debug("Node {} ranges [{}]", endpoint, ranges);
 
-    std::unordered_map<dht::token_range, std::vector<inet_address>> current_replica_endpoints;
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> current_replica_endpoints;
 
     // Find (for each range) all nodes that store replicas for these ranges as well
     auto tmptr = get_token_metadata_ptr();
@@ -2488,7 +2837,7 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
         auto rg = current_replica_endpoints.equal_range(r);
         for (auto it = rg.first; it != rg.second; it++) {
             const dht::token_range& range_ = it->first;
-            std::vector<inet_address>& current_eps = it->second;
+            inet_address_vector_replica_set& current_eps = it->second;
             slogger.debug("range={}, current_replica_endpoints={}, new_replica_endpoints={}", range_, current_eps, new_replica_endpoints);
             for (auto ep : it->second) {
                 auto beg = new_replica_endpoints.begin();
@@ -2517,7 +2866,7 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
 void storage_service::unbootstrap() {
     db::get_local_batchlog_manager().do_batch_log_replay().get();
     if (is_repair_based_node_ops_enabled()) {
-        decommission_with_repair(_db, _messaging, get_token_metadata_ptr()).get();
+        _repair.local().decommission_with_repair(get_token_metadata_ptr()).get();
     } else {
         std::unordered_map<sstring, std::unordered_multimap<dht::token_range, inet_address>> ranges_to_stream;
 
@@ -2561,13 +2910,19 @@ future<> storage_service::restore_replica_count(inet_address endpoint, inet_addr
     if (is_repair_based_node_ops_enabled()) {
         auto ops_uuid = utils::make_random_uuid();
         auto ops = seastar::make_shared<node_ops_info>(node_ops_info{ops_uuid, false, std::list<gms::inet_address>()});
-        return removenode_with_repair(_db, _messaging, get_token_metadata_ptr(), endpoint, ops).finally([this, notify_endpoint] () {
+        return _repair.local().removenode_with_repair(get_token_metadata_ptr(), endpoint, ops).finally([this, notify_endpoint] () {
             return send_replication_notification(notify_endpoint);
         });
     }
   return seastar::async([this, endpoint, notify_endpoint] {
     auto tmptr = get_token_metadata_ptr();
-    auto streamer = make_lw_shared<dht::range_streamer>(_db, tmptr, _abort_source, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
+    abort_source as;
+    auto sub = _abort_source.subscribe([&as] () noexcept {
+        if (!as.abort_requested()) {
+            as.request_abort();
+        }
+    });
+    auto streamer = make_lw_shared<dht::range_streamer>(_db, tmptr, as, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
     auto my_address = get_broadcast_address();
     auto non_system_keyspaces = _db.local().get_non_system_keyspaces();
     for (const auto& keyspace_name : non_system_keyspaces) {
@@ -2585,6 +2940,42 @@ future<> storage_service::restore_replica_count(inet_address endpoint, inet_addr
         }
         streamer->add_rx_ranges(keyspace_name, std::move(ranges_per_endpoint));
     }
+    auto status_checker = seastar::async([this, endpoint, &as] {
+        slogger.info("restore_replica_count: Started status checker for removing node {}", endpoint);
+        while (!as.abort_requested()) {
+            auto status = _gossiper.get_gossip_status(endpoint);
+            // If the node to be removed is already in removed status, it has
+            // probably been removed forcely with `nodetool removenode force`.
+            // Abort the restore_replica_count in such case to avoid streaming
+            // attempt since the user has removed the node forcely.
+            if (status == sstring(versioned_value::REMOVED_TOKEN)) {
+                slogger.info("restore_replica_count: Detected node {} has left the cluster, status={}, abort restore_replica_count for removing node {}",
+                        endpoint, status, endpoint);
+                if (!as.abort_requested()) {
+                    as.request_abort();
+                }
+                return;
+            }
+            slogger.debug("restore_replica_count: Sleep and detect removing node {}, status={}", endpoint, status);
+            sleep_abortable(std::chrono::seconds(10), as).get();
+        }
+    });
+    auto stop_status_checker = defer([endpoint, &status_checker, &as] () mutable {
+        try {
+            slogger.info("restore_replica_count: Started to stop status checker for removing node {}", endpoint);
+            if (!as.abort_requested()) {
+                as.request_abort();
+            }
+            status_checker.get();
+        } catch (const seastar::sleep_aborted& ignored) {
+            slogger.debug("restore_replica_count: Got sleep_abort to stop status checker for removing node {}: {}", endpoint, ignored);
+        } catch (...) {
+            slogger.warn("restore_replica_count: Found error in status checker for removing node {}: {}",
+                    endpoint, std::current_exception());
+        }
+        slogger.info("restore_replica_count: Finished to stop status checker for removing node {}", endpoint);
+    });
+
     streamer->stream_async().then_wrapped([this, streamer, notify_endpoint] (auto&& f) {
         try {
             f.get();
@@ -2846,7 +3237,7 @@ future<> storage_service::load_and_stream(sstring ks_name, sstring cf_name,
                 ops_uuid, nr_sst_current, nr_sst_current + sst_processed.size(), nr_sst_total, sst_names);
 
         auto start_time = std::chrono::steady_clock::now();
-        std::vector<gms::inet_address> current_targets;
+        inet_address_vector_replica_set current_targets;
         std::unordered_map<gms::inet_address, send_meta_data> metas;
         size_t num_partitions_processed = 0;
         size_t num_bytes_read = 0;
@@ -3012,19 +3403,19 @@ storage_service::get_new_source_ranges(const sstring& keyspace_name, const dht::
     auto my_address = get_broadcast_address();
     auto& ks = _db.local().find_keyspace(keyspace_name);
     auto& strat = ks.get_replication_strategy();
-    std::unordered_map<dht::token_range, std::vector<inet_address>> range_addresses = strat.get_range_addresses(tm, utils::can_yield::yes);
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> range_addresses = strat.get_range_addresses(tm, utils::can_yield::yes);
     std::unordered_multimap<inet_address, dht::token_range> source_ranges;
 
     // find alive sources for our new ranges
     for (auto r : ranges) {
-        std::vector<inet_address> possible_nodes;
+        inet_address_vector_replica_set possible_nodes;
         auto it = range_addresses.find(r);
         if (it != range_addresses.end()) {
             possible_nodes = it->second;
         }
 
         auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
-        std::vector<inet_address> sources = snitch->get_sorted_list_by_proximity(my_address, possible_nodes);
+        inet_address_vector_replica_set sources = snitch->get_sorted_list_by_proximity(my_address, possible_nodes);
 
         if (std::find(sources.begin(), sources.end(), my_address) != sources.end()) {
             auto err = format("get_new_source_ranges: sources={}, my_address={}", sources, my_address);
@@ -3054,7 +3445,7 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
     std::vector<token_range_endpoints> ranges;
     //Token.TokenFactory tf = getPartitioner().getTokenFactory();
 
-    std::unordered_map<dht::token_range, std::vector<inet_address>> range_to_address_map =
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> range_to_address_map =
             include_only_local_dc
                     ? get_range_to_address_map_in_local_dc(keyspace)
                     : get_range_to_address_map(keyspace);
@@ -3098,11 +3489,11 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
     return ranges;
 }
 
-std::unordered_map<dht::token_range, std::vector<inet_address>>
+std::unordered_map<dht::token_range, inet_address_vector_replica_set>
 storage_service::construct_range_to_endpoint_map(
         const sstring& keyspace,
         const dht::token_range_vector& ranges) const {
-    std::unordered_map<dht::token_range, std::vector<inet_address>> res;
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> res;
     for (auto r : ranges) {
         res[r] = _db.local().find_keyspace(keyspace).get_replication_strategy().get_natural_endpoints(
                 r.end() ? r.end()->value() : dht::maximum_token());
@@ -3206,8 +3597,7 @@ void storage_service::do_isolate_on_error(disk_error type)
     static std::atomic<bool> isolated = { false };
 
     if (!isolated.exchange(true)) {
-        slogger.warn("Shutting down communications due to I/O errors until operator intervention");
-        slogger.warn("{} error: {}", type == disk_error::commit ? "Commitlog" : "Disk", std::current_exception());
+        slogger.error("Shutting down communications due to I/O errors until operator intervention: {} error: {}", type == disk_error::commit ? "Commitlog" : "Disk", std::current_exception());
         // isolated protect us against multiple stops
         //FIXME: discarded future.
         (void)isolate();
@@ -3367,7 +3757,7 @@ storage_service::get_all_ranges(const std::vector<token>& sorted_tokens) const {
     return ranges;
 }
 
-std::vector<gms::inet_address>
+inet_address_vector_replica_set
 storage_service::get_natural_endpoints(const sstring& keyspace,
         const sstring& cf, const sstring& key) const {
     auto schema = _db.local().find_schema(keyspace, cf);
@@ -3376,7 +3766,7 @@ storage_service::get_natural_endpoints(const sstring& keyspace,
     return get_natural_endpoints(keyspace, token);
 }
 
-std::vector<gms::inet_address>
+inet_address_vector_replica_set
 storage_service::get_natural_endpoints(const sstring& keyspace, const token& pos) const {
     return _db.local().find_keyspace(keyspace).get_replication_strategy().get_natural_endpoints(pos);
 }
@@ -3397,10 +3787,11 @@ storage_service::view_build_statuses(sstring keyspace, sstring view_name) const 
 future<> init_storage_service(sharded<abort_source>& abort_source, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn,
+        storage_service_config config,
         sharded<service::migration_manager>& mm, sharded<locator::shared_token_metadata>& stm,
-        sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service, sharded<qos::service_level_controller>& sl_controller) {
-    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mn), std::ref(mm), std::ref(stm), std::ref(ms), std::ref(cdc_gen_service), std::ref(sl_controller));
+        sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>& cdc_gen_service,
+        sharded<repair_service>& repair, sharded<qos::service_level_controller>& sl_controller) {
+    return service::get_storage_service().start(std::ref(abort_source), std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), config, std::ref(mm), std::ref(stm), std::ref(ms), std::ref(cdc_gen_service), std::ref(repair), std::ref(sl_controller));
 }
 
 future<> deinit_storage_service() {

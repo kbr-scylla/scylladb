@@ -91,7 +91,7 @@ network_topology_strategy::network_topology_strategy(
     }
 }
 
-std::vector<inet_address>
+inet_address_vector_replica_set
 network_topology_strategy::calculate_natural_endpoints(
     const token& search_token, const token_metadata& tm, can_yield can_yield) const {
 
@@ -247,7 +247,7 @@ network_topology_strategy::calculate_natural_endpoints(
         }
     }
 
-    return std::move(replicas.get_vector());
+    return boost::copy_range<inet_address_vector_replica_set>(replicas.get_vector());
 }
 
 void network_topology_strategy::validate_options() const {

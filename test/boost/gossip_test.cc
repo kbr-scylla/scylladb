@@ -24,6 +24,7 @@
 #include <seastar/core/distributed.hh>
 #include <seastar/core/abort_source.hh>
 #include "cdc/generation_service.hh"
+#include "repair/repair.hh"
 #include "database.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "service/qos/service_level_controller.hh"
@@ -49,6 +50,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         sharded<locator::shared_token_metadata> token_metadata;
         sharded<netw::messaging_service> _messaging;
         sharded<cdc::generation_service> cdc_generation_service;
+        sharded<repair_service> repair;
         sharded<service::migration_manager> migration_manager;
         sharded<auth::service> auth_service;
 
@@ -63,7 +65,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
 
         feature_service.start(gms::feature_config_from_db_config(*cfg)).get();
         sharded<qos::service_level_controller> sl_controller;
-        sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
+        sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
         auto stop_sl_controller = defer([&] { sl_controller.stop().get(); });
 
         auto stop_feature_service = defer([&] { feature_service.stop().get(); });
@@ -80,7 +82,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         service::storage_service_config sscfg;
         sscfg.available_memory =  memory::stats().total_memory();
 
-        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm_notif), std::ref(migration_manager), std::ref(token_metadata), std::ref(_messaging), std::ref(cdc_generation_service), std::ref(sl_controller), true).get();
+        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(migration_manager), std::ref(token_metadata), std::ref(_messaging), std::ref(cdc_generation_service), std::ref(repair), std::ref(sl_controller), true).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         sharded<semaphore> sst_dir_semaphore;

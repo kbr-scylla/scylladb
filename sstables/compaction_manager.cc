@@ -303,6 +303,7 @@ future<> compaction_manager::run_custom_job(column_family* cf, sstring name, non
             cmlog.info("{} was abruptly stopped, reason: {}", name, e.what());
         } catch (...) {
             cmlog.error("{} failed: {}", name, std::current_exception());
+            throw;
         }
     });
     return task->compaction_done.get_future().then([task] {});
@@ -818,8 +819,8 @@ future<> compaction_manager::perform_sstable_upgrade(database& db, column_family
 }
 
 // Submit a column family to be scrubbed and wait for its termination.
-future<> compaction_manager::perform_sstable_scrub(column_family* cf, bool skip_corrupted) {
-    return rewrite_sstables(cf, sstables::compaction_options::make_scrub(skip_corrupted), [this] (const table& cf) {
+future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::compaction_options::scrub::mode scrub_mode) {
+    return rewrite_sstables(cf, sstables::compaction_options::make_scrub(scrub_mode), [this] (const table& cf) {
         return get_candidates(cf);
     });
 }

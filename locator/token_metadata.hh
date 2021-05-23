@@ -32,6 +32,7 @@
 #include <unordered_map>
 #include "gms/inet_address.hh"
 #include "dht/i_partitioner.hh"
+#include "inet_address_vectors.hh"
 #include "utils/UUID.hh"
 #include <optional>
 #include <memory>
@@ -316,14 +317,13 @@ public:
     token get_predecessor(token t) const;
 
     std::vector<inet_address> get_all_endpoints() const;
-    size_t get_all_endpoints_count() const;
 
     /* Returns the number of different endpoints that own tokens in the ring.
      * Bootstrapping tokens are not taken into account. */
     size_t count_normal_token_owners() const;
 
     // returns empty vector if keyspace_name not found.
-    std::vector<gms::inet_address> pending_endpoints_for(const token& token, const sstring& keyspace_name) const;
+    inet_address_vector_topology_change pending_endpoints_for(const token& token, const sstring& keyspace_name) const;
 
     /** @return an endpoint to token multimap representation of tokenToEndpointMap (a copy) */
     std::multimap<inet_address, token> get_endpoint_to_token_map_for_reading() const;

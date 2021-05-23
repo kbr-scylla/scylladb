@@ -32,6 +32,7 @@
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "locator/token_metadata.hh"
 #include "gms/gossiper.hh"
+#include "inet_address_vectors.hh"
 #include <seastar/core/distributed.hh>
 #include "dht/i_partitioner.hh"
 #include "dht/token_range_endpoints.hh"
@@ -60,6 +61,7 @@
 class node_ops_cmd_request;
 class node_ops_cmd_response;
 class node_ops_info;
+class repair_service;
 
 namespace cql_transport { class controller; }
 
@@ -93,9 +95,13 @@ class storage_service;
 class migration_manager;
 
 extern distributed<storage_service> _the_storage_service;
+// DEPRECATED, DON'T USE!
+// Pass references to services through constructor/function parameters. Don't use globals.
 inline distributed<storage_service>& get_storage_service() {
     return _the_storage_service;
 }
+// DEPRECATED, DON'T USE!
+// Pass references to services through constructor/function parameters. Don't use globals.
 inline storage_service& get_local_storage_service() {
     return _the_storage_service.local();
 }
@@ -157,9 +163,9 @@ private:
     gms::feature_service& _feature_service;
     distributed<database>& _db;
     gms::gossiper& _gossiper;
-    sharded<service::migration_notifier>& _mnotifier;
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
+    sharded<repair_service>& _repair;
     sharded<qos::service_level_controller>& _sl_controller;
     // Note that this is obviously only valid for the current shard. Users of
     // this facility should elect a shard to be the coordinator based on any
@@ -198,7 +204,7 @@ private:
     void node_ops_singal_abort(std::optional<utils::UUID> ops_uuid);
     future<> node_ops_abort_thread();
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_notifier>& mn, sharded<service::migration_manager>& mm, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
+    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_manager>& mm, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<repair_service>& repair, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
 
     // Needed by distributed<>
     future<> stop();
@@ -240,14 +246,6 @@ public:
 
     const locator::token_metadata& get_token_metadata() const noexcept {
         return *_shared_token_metadata.get();
-    }
-
-    const service::migration_notifier& get_migration_notifier() const {
-        return _mnotifier.local();
-    }
-
-    service::migration_notifier& get_migration_notifier() {
-        return _mnotifier.local();
     }
 
     future<> gossip_sharder();
@@ -374,6 +372,7 @@ private:
             const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features, bind_messaging_port do_bind = bind_messaging_port::yes);
 
     void run_replace_ops();
+    void run_bootstrap_ops();
 
 public:
     future<bool> is_initialized();
@@ -463,16 +462,16 @@ public:
      */
     sstring get_rpc_address(const inet_address& endpoint) const;
 
-    std::unordered_map<dht::token_range, std::vector<inet_address>> get_range_to_address_map(const sstring& keyspace) const;
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> get_range_to_address_map(const sstring& keyspace) const;
 
-    std::unordered_map<dht::token_range, std::vector<inet_address>> get_range_to_address_map_in_local_dc(
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> get_range_to_address_map_in_local_dc(
             const sstring& keyspace) const;
 
     std::vector<token> get_tokens_in_local_dc() const;
 
     bool is_local_dc(const inet_address& targetHost) const;
 
-    std::unordered_map<dht::token_range, std::vector<inet_address>> get_range_to_address_map(const sstring& keyspace,
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> get_range_to_address_map(const sstring& keyspace,
             const std::vector<token>& sorted_tokens) const;
 
     /**
@@ -505,7 +504,7 @@ public:
      * @param ranges
      * @return mapping of ranges to the replicas responsible for them.
     */
-    std::unordered_map<dht::token_range, std::vector<inet_address>> construct_range_to_endpoint_map(
+    std::unordered_map<dht::token_range, inet_address_vector_replica_set> construct_range_to_endpoint_map(
             const sstring& keyspace,
             const dht::token_range_vector& ranges) const;
 public:
@@ -583,6 +582,7 @@ private:
     sharded<db::view::view_update_generator>& _view_update_generator;
     locator::snitch_signal_slot_t _snitch_reconfigure;
     serialized_action _schema_version_publisher;
+    std::unordered_set<gms::inet_address> _replacing_nodes_pending_ranges_updater;
 private:
     /**
      * Handle node bootstrap
@@ -636,6 +636,8 @@ private:
      * @param endpoint node
      */
     void handle_state_replacing(inet_address endpoint);
+
+    void handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node);
 
 private:
     void excise(std::unordered_set<token> tokens, inet_address endpoint);
@@ -722,7 +724,7 @@ public:
      * @param key key for which we need to find the endpoint
      * @return the endpoint responsible for this key
      */
-    std::vector<gms::inet_address> get_natural_endpoints(const sstring& keyspace,
+    inet_address_vector_replica_set get_natural_endpoints(const sstring& keyspace,
             const sstring& cf, const sstring& key) const;
 
     /**
@@ -733,7 +735,7 @@ public:
      * @param pos position for which we need to find the endpoint
      * @return the endpoint responsible for this token
      */
-    std::vector<gms::inet_address>  get_natural_endpoints(const sstring& keyspace, const token& pos) const;
+    inet_address_vector_replica_set  get_natural_endpoints(const sstring& keyspace, const token& pos) const;
 
     /**
      * @return Vector of Token ranges (_not_ keys!) together with estimated key count,
@@ -894,9 +896,9 @@ private:
 future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
         sharded<db::system_distributed_keyspace>& sys_dist_ks,
         sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config, sharded<service::migration_notifier>& mn,
+        storage_service_config config,
         sharded<service::migration_manager>& mm, sharded<locator::shared_token_metadata>& stm,
-        sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<qos::service_level_controller>& sl_controller);
+        sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<repair_service>& repair, sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
 }

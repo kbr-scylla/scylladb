@@ -154,8 +154,16 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
                     if (current_it->second.slo != new_state_it->second) {
                         // The service level configuration is different
                         // in the new state and the old state, meaning it needs to be updated.
+                        int32_t old_shares = 1000;
+                        if (auto old_shares_p = std::get_if<int32_t>(&current_it->second.slo.shares)) {
+                            old_shares = *old_shares_p;
+                        }
+                        int32_t new_shares = 1000;
+                        if (auto new_shares_p = std::get_if<int32_t>(&new_state_it->second.shares)) {
+                            new_shares = *new_shares_p;
+                        }
                         sl_logger.info("service level \"{}\" was updated from {} to {} shares.",
-                                new_state_it->first.c_str(), current_it->second.slo.shares, new_state_it->second.shares);
+                                new_state_it->first.c_str(), old_shares, new_shares);
                         service_levels_for_add_or_update.insert(*new_state_it);
                     }
                     current_it++;
@@ -199,42 +207,38 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
     });
 }
 
-future<sstring> service_level_controller::find_service_level(auth::role_set roles) {
-    static auto sl_compare = [this] (const sstring& service_level1, const sstring& service_level2) {
-        return _service_levels_db[service_level1].slo.shares <
-                _service_levels_db[service_level2].slo.shares;
-    };
+future<std::optional<service_level_options>> service_level_controller::find_service_level(auth::role_set roles) {
+    static auto sl_compare = std::less<sstring>();
     auto& role_manager = _auth_service.local().underlying_role_manager();
 
     // converts a list of roles into the chosen service level.
     return ::map_reduce(roles.begin(), roles.end(), [&role_manager, this] (const sstring& role) {
-        return role_manager.get_attribute(role, "service_level").then_wrapped([this, role] (future<std::optional<sstring>> sl_name_fut) {
+        return role_manager.get_attribute(role, "service_level").then_wrapped([this, role] (future<std::optional<sstring>> sl_name_fut) -> std::optional<service_level_options> {
             try {
                 std::optional<sstring> sl_name = sl_name_fut.get0();
-                if (! sl_name) {
-                    return sl_name;
+                if (!sl_name) {
+                    return std::nullopt;
                 }
                 auto sl_it = _service_levels_db.find(*sl_name);
                 if ( sl_it == _service_levels_db.end()) {
-                    return std::optional<sstring>{};
-                } else {
-                   return sl_name;
+                    return std::nullopt;
                 }
-            } catch(...) { // when we fail, we act as if the attribute does not exist so the node
+                auto slo = sl_it->second.slo;
+                slo.shares_name = sl_name;
+                return slo;
+            } catch (...) { // when we fail, we act as if the attribute does not exist so the node
                            // will not be brought down.
-                return std::optional<sstring>{};
+                return std::nullopt;
             }
         });
-    }, std::optional<sstring>{}, [this] (std::optional<sstring> first, std::optional<sstring> second) {
+    }, std::optional<service_level_options>{}, [this] (std::optional<service_level_options> first, std::optional<service_level_options> second) -> std::optional<service_level_options> {
         if (!second) {
             return first;
         } else if (!first) {
             return second;
         } else {
-            return std::optional<sstring>{ sl_compare(*first, *second) ? second : first };
+            return first->merge_with(*second);
         }
-    }).then([] (std::optional<sstring> sl) {
-        return sl? *sl:default_service_level_name;
     });
 }
 
@@ -253,8 +257,12 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
     future<> f = make_ready_future();
     if (sl_it != _service_levels_db.end()) {
         if (sl_it->second.slo.shares != slo.shares) {
-            sl_it->second.sg.set_shares(slo.shares);
-            f = f.then([pc = sl_it->second.pc, shares = slo.shares] () {
+            int32_t new_shares = 1000;
+            if (auto new_shares_p = std::get_if<int32_t>(&sl_it->second.slo.shares)) {
+                new_shares = *new_shares_p;
+            }
+            sl_it->second.sg.set_shares(new_shares);
+            f = f.then([pc = sl_it->second.pc, shares = new_shares] () {
                 return engine().update_shares_for_class(pc, shares);
             });
         }
@@ -440,24 +448,40 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     sl.sg = sg;
                     return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
                         scheduling_group non_const_sg = sg;
-                        return non_const_sg.set_shares((float)sl.slo.shares);
+                        int32_t shares = 1000;
+                        if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
+                            shares = *shares_p;
+                        }
+                        return non_const_sg.set_shares((float)shares);
                     });
                 } else {
-                   return create_scheduling_group(format("service_level_sg_{}", _global_controller_db->schedg_group_cnt++), sl.slo.shares).then([&sl] (scheduling_group sg) {
+                   int32_t shares = 1000;
+                   if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
+                       shares = *shares_p;
+                   }
+                   return create_scheduling_group(format("service_level_sg_{}", _global_controller_db->schedg_group_cnt++), shares).then([&sl] (scheduling_group sg) {
                        sl.sg = sg;
                    });
                 }
             }).then([this, &sl] () mutable {
                 if (!_global_controller_db->deleted_priority_classes.empty()) {
+                    int32_t shares = 1000;
+                    if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
+                        shares = *shares_p;
+                    }
                     io_priority_class pc = _global_controller_db->deleted_priority_classes.top();
                     _global_controller_db->deleted_priority_classes.pop();
                     sl.pc = pc;
-                    return container().invoke_on_all([pc, sl] (service_level_controller& service) {
-                        return engine().update_shares_for_class(pc, sl.slo.shares);
+                    return container().invoke_on_all([pc, shares] (service_level_controller& service) {
+                        return engine().update_shares_for_class(pc, shares);
                     });
                 } else {
+                    int32_t shares = 1000;
+                    if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
+                        shares = *shares_p;
+                    }
                     sl. pc = engine().
-                            register_one_priority_class(format("service_level_pc_{}", _global_controller_db->io_priority_cnt++), sl.slo.shares);
+                            register_one_priority_class(format("service_level_pc_{}", _global_controller_db->io_priority_cnt++), shares);
                     return make_ready_future();
                 }
             }).then([this, &sl, name] () {

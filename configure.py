@@ -297,25 +297,56 @@ modes = {
         'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*40,
         'optimization-level': 'g',
+        'per_src_extra_cxxflags': {},
+        'cmake_build_type': 'Debug',
+        'can_have_debug_info': True,
+        'default': True,
+        'description': 'a mode with no optimizations, with sanitizers, and with additional debug checks enabled, used for testing',
     },
     'release': {
         'cxxflags': '-ffunction-sections -fdata-sections ',
         'cxx_ld_flags': '-Wl,--gc-sections',
         'stack-usage-threshold': 1024*13,
         'optimization-level': '3',
+        'per_src_extra_cxxflags': {},
+        'cmake_build_type': 'RelWithDebInfo',
+        'can_have_debug_info': True,
+        'default': True,
+        'description': 'a mode with optimizations and no debug checks, used for production builds',
     },
     'dev': {
         'cxxflags': '-DDEVEL -DSEASTAR_ENABLE_ALLOC_FAILURE_INJECTION -DSCYLLA_ENABLE_ERROR_INJECTION',
         'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*21,
         'optimization-level': '2',
+        'per_src_extra_cxxflags': {},
+        'cmake_build_type': 'Dev',
+        'can_have_debug_info': False,
+        'default': True,
+        'description': 'a mode with no optimizations and no debug checks, optimized for fast build times, used for development',
     },
     'sanitize': {
         'cxxflags': '-DDEBUG -DSANITIZE -DDEBUG_LSA_SANITIZER -DSCYLLA_ENABLE_ERROR_INJECTION',
         'cxx_ld_flags': '',
         'stack-usage-threshold': 1024*50,
         'optimization-level': 's',
-    }
+        'per_src_extra_cxxflags': {},
+        'cmake_build_type': 'Sanitize',
+        'can_have_debug_info': True,
+        'default': False,
+        'description': 'a mode with optimizations and sanitizers enabled, used for finding memory errors',
+    },
+    'coverage': {
+        'cxxflags': '-fprofile-instr-generate -fcoverage-mapping -g -gz',
+        'cxx_ld_flags': '-fprofile-instr-generate -fcoverage-mapping',
+        'stack-usage-threshold': 1024*40,
+        'optimization-level': 'g',
+        'per_src_extra_cxxflags': {},
+        'cmake_build_type': 'Debug',
+        'can_have_debug_info': True,
+        'default': False,
+        'description': 'a mode exclusively used for generating test coverage reports',
+    },
 }
 
 ldap_tests = set([
@@ -455,6 +486,8 @@ scylla_tests = set([
     'test/boost/view_schema_ckey_test',
     'test/boost/vint_serialization_test',
     'test/boost/virtual_reader_test',
+    'test/boost/virtual_table_mutation_source_test',
+    'test/boost/virtual_table_test',
     'test/boost/bptree_test',
     'test/boost/btree_test',
     'test/boost/radix_tree_test',
@@ -463,6 +496,7 @@ scylla_tests = set([
     'test/boost/raft_address_map_test',
     'test/boost/raft_sys_table_storage_test',
     'test/boost/sstable_set_test',
+    'test/boost/reader_concurrency_semaphore_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -509,6 +543,7 @@ perf_tests = set([
 
 raft_tests = set([
     'test/raft/replication_test',
+    'test/raft/randomized_nemesis_test',
     'test/raft/fsm_test',
     'test/raft/etcd_test',
 ])
@@ -536,8 +571,10 @@ arg_parser.add_argument('--pie', dest='pie', action='store_true',
                         help='Build position-independent executable (PIE)')
 arg_parser.add_argument('--so', dest='so', action='store_true',
                         help='Build shared object (SO) instead of executable')
-arg_parser.add_argument('--mode', action='append', choices=list(modes.keys()), dest='selected_modes')
-arg_parser.add_argument('--with', dest='artifacts', action='append', choices=all_artifacts, default=[])
+arg_parser.add_argument('--mode', action='append', choices=list(modes.keys()), dest='selected_modes',
+                        help="Build modes to generate ninja files for. The available build modes are:\n{}".format("; ".join(["{} - {}".format(m, cfg['description']) for m, cfg in modes.items()])))
+arg_parser.add_argument('--with', dest='artifacts', action='append', default=[],
+                        help="Specify the artifacts to build, invoke {} with --list-artifacts to list all available artifacts, if unspecified all artifacts are built".format(sys.argv[0]))
 arg_parser.add_argument('--with-seastar', action='store', dest='seastar_path', default='seastar', help='Path to Seastar sources')
 add_tristate(arg_parser, name='dist', dest='enable_dist',
                         help='scylla-tools-java, scylla-jmx and packages')
@@ -589,20 +626,18 @@ arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', typ
 arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
 arg_parser.add_argument('--clang-inline-threshold', action='store', type=int, dest='clang_inline_threshold', default=-1,
                         help="LLVM-specific inline threshold compilation parameter")
-arg_parser.add_argument('--coverage', dest='coverage', action='store_true',
-                        help='Enable coverage report generation for tests. Only clang is supported at the moment. See HACKING.md for more information.')
+arg_parser.add_argument('--list-artifacts', dest='list_artifacts', action='store_true', default=False,
+                        help='List all available build artifacts, that can be passed to --with')
 args = arg_parser.parse_args()
+
+if args.list_artifacts:
+    for artifact in sorted(all_artifacts):
+        print(artifact)
+    exit(0)
 
 defines = ['XXH_PRIVATE_API',
            'SEASTAR_TESTING_MAIN',
 ]
-
-extra_cxxflags = {
-    'debug': {},
-    'dev': {},
-    'release': {},
-    'sanitize': {}
-}
 
 scylla_raft_core = [
     'raft/raft.cc',
@@ -802,6 +837,7 @@ scylla_core = (['database.cc',
                 'cql3/variable_specifications.cc',
                 'db/consistency_level.cc',
                 'db/system_keyspace.cc',
+                'db/virtual_table.cc',
                 'db/system_distributed_keyspace.cc',
                 'db/size_estimates_virtual_reader.cc',
                 'db/schema_tables.cc',
@@ -961,6 +997,7 @@ scylla_core = (['database.cc',
                 'utils/error_injection.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
                 'mutation_writer/shard_based_splitting_writer.cc',
+                'mutation_writer/partition_based_splitting_writer.cc',
                 'mutation_writer/feed_writers.cc',
                 'lua.cc',
                 'service/raft/schema_raft_state_machine.cc',
@@ -1204,8 +1241,8 @@ deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_t
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
 deps['test/boost/anchorless_list_test'] = ['test/boost/anchorless_list_test.cc']
-deps['test/perf/perf_fast_forward'] += ['release.cc']
-deps['test/perf/perf_simple_query'] += ['release.cc', 'test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
+deps['test/perf/perf_fast_forward'] += ['release.cc', 'test/perf/linux-perf-event.cc']
+deps['test/perf/perf_simple_query'] += ['release.cc', 'test/perf/perf.cc', 'test/perf/linux-perf-event.cc', 'test/lib/alternator_test_env.cc'] + alternator
 deps['test/perf/perf_row_cache_reads'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
 deps['test/perf/perf_row_cache_update'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
 deps['test/boost/reusable_buffer_test'] = [
@@ -1225,6 +1262,7 @@ deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/alternator_unit_test'] += ['alternator/base64.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc'] + scylla_raft_dependencies
+deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc'] + scylla_raft_dependencies
 deps['test/raft/fsm_test'] =  ['test/raft/fsm_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 deps['test/raft/etcd_test'] =  ['test/raft/etcd_test.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 
@@ -1414,9 +1452,21 @@ total_memory = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
 link_pool_depth = max(int(total_memory / 7e9), 1)
 
 selected_modes = args.selected_modes or modes.keys()
-default_modes = args.selected_modes or ['debug', 'release', 'dev']
+default_modes = args.selected_modes or [mode for mode, mode_cfg in modes.items() if mode_cfg["default"]]
 build_modes =  {m: modes[m] for m in selected_modes}
-build_artifacts = all_artifacts if not args.artifacts else args.artifacts
+
+if args.artifacts:
+    build_artifacts = []
+    for artifact in args.artifacts:
+        if artifact in all_artifacts:
+            build_artifacts.append(artifact)
+        else:
+            print("Ignoring unknown build artifact: {}".format(artifact))
+    if not build_artifacts:
+        print("No artifacts to build, exiting")
+        exit(1)
+else:
+    build_artifacts = all_artifacts
 
 status = subprocess.call("./SCYLLA-VERSION-GEN")
 if status != 0:
@@ -1430,12 +1480,11 @@ scylla_release = file.read().strip()
 file = open(f'{outdir}/SCYLLA-PRODUCT-FILE', 'r')
 scylla_product = file.read().strip()
 
-for m in ['debug', 'release', 'sanitize', 'dev']:
+for m, mode_config in modes.items():
     cxxflags = "-DSCYLLA_VERSION=\"\\\"" + scylla_version + "\\\"\" -DSCYLLA_RELEASE=\"\\\"" + scylla_release + "\\\"\" -DSCYLLA_BUILD_MODE=\"\\\"" + m + "\\\"\""
-    extra_cxxflags[m]["release.cc"] = cxxflags
-
-for m in ['debug', 'release', 'sanitize']:
-    modes[m]['cxxflags'] += ' ' + dbgflag
+    mode_config["per_src_extra_cxxflags"]["release.cc"] = cxxflags
+    if mode_config["can_have_debug_info"]:
+        mode_config['cxxflags'] += ' ' + dbgflag
 
 # The relocatable package includes its own dynamic linker. We don't
 # know the path it will be installed to, so for now use a very long
@@ -1473,11 +1522,6 @@ args.user_ldflags = forced_ldflags + ' ' + args.user_ldflags
 
 args.user_cflags += f" -ffile-prefix-map={curdir}=."
 
-if args.coverage:
-    #FIXME: works with clang only
-    args.user_cflags = args.user_cflags + ' ' + '-fprofile-instr-generate -fcoverage-mapping'
-    args.user_ldflags = args.user_ldflags + ' ' + '-fprofile-instr-generate -fcoverage-mapping'
-
 seastar_cflags = args.user_cflags
 
 if args.target != '':
@@ -1485,8 +1529,6 @@ if args.target != '':
 seastar_ldflags = args.user_ldflags
 
 libdeflate_cflags = seastar_cflags
-
-MODE_TO_CMAKE_BUILD_TYPE = {'release' : 'RelWithDebInfo', 'debug' : 'Debug', 'dev' : 'Dev', 'sanitize' : 'Sanitize' }
 
 # cmake likes to separate things with semicolons
 def semicolon_separated(*flags):
@@ -1498,11 +1540,11 @@ def semicolon_separated(*flags):
 def real_relpath(path, start):
     return os.path.relpath(os.path.realpath(path), os.path.realpath(start))
 
-def configure_seastar(build_dir, mode):
+def configure_seastar(build_dir, mode, mode_config):
     seastar_build_dir = os.path.join(build_dir, mode, 'seastar')
 
     seastar_cmake_args = [
-        '-DCMAKE_BUILD_TYPE={}'.format(MODE_TO_CMAKE_BUILD_TYPE[mode]),
+        '-DCMAKE_BUILD_TYPE={}'.format(mode_config['cmake_build_type']),
         '-DCMAKE_C_COMPILER={}'.format(args.cc),
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON',
@@ -1542,8 +1584,8 @@ def configure_seastar(build_dir, mode):
     os.makedirs(seastar_build_dir, exist_ok=True)
     subprocess.check_call(seastar_cmd, shell=False, cwd=cmake_dir)
 
-for mode in build_modes:
-    configure_seastar(outdir, mode)
+for mode, mode_config in build_modes.items():
+    configure_seastar(outdir, mode, mode_config)
 
 pc = {mode: f'{outdir}/{mode}/seastar/seastar.pc' for mode in build_modes}
 ninja = find_executable('ninja') or find_executable('ninja-build')
@@ -1565,11 +1607,11 @@ for mode in build_modes:
     modes[mode]['seastar_cflags'] = seastar_pc_cflags
     modes[mode]['seastar_libs'] = seastar_pc_libs
 
-def configure_abseil(build_dir, mode):
+def configure_abseil(build_dir, mode, mode_config):
     abseil_build_dir = os.path.join(build_dir, mode, 'abseil')
 
     abseil_cflags = seastar_cflags + ' ' + modes[mode]['cxx_ld_flags']
-    cmake_mode = MODE_TO_CMAKE_BUILD_TYPE[mode]
+    cmake_mode = mode_config['cmake_build_type']
     abseil_cmake_args = [
         '-DCMAKE_BUILD_TYPE={}'.format(cmake_mode),
         '-DCMAKE_INSTALL_PREFIX={}'.format(build_dir + '/inst'), # just to avoid a warning from absl
@@ -1684,8 +1726,8 @@ if args.ragel_exec:
 else:
     ragel_exec = "ragel"
 
-for mode in build_modes:
-    configure_abseil(outdir, mode)
+for mode, mode_config in build_modes.items():
+    configure_abseil(outdir, mode, mode_config)
 
 # configure.py may run automatically from an already-existing build.ninja.
 # If the user interrupts configure.py in the middle, we need build.ninja
@@ -1926,8 +1968,8 @@ with open(buildfile_tmp, 'w') as f:
         for obj in compiles:
             src = compiles[obj]
             f.write('build {}: cxx.{} {} || {} {}\n'.format(obj, mode, src, seastar_dep, gen_headers_dep))
-            if src in extra_cxxflags[mode]:
-                f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=extra_cxxflags[mode][src], **modeval))
+            if src in modeval['per_src_extra_cxxflags']:
+                f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=modeval["per_src_extra_cxxflags"][src], **modeval))
         for swagger in swaggers:
             hh = swagger.headers(gen_dir)[0]
             cc = swagger.sources(gen_dir)[0]
@@ -2007,7 +2049,7 @@ with open(buildfile_tmp, 'w') as f:
             f.write('  subdir = $builddir/{mode}/abseil\n'.format(**locals()))
             f.write('  target = {lib}\n'.format(**locals()))
 
-    checkheaders_mode = 'dev' if 'dev' in modes else modes[0]
+    checkheaders_mode = 'dev' if 'dev' in modes else modes.keys()[0]
     f.write('build checkheaders: phony || {}\n'.format(' '.join(['$builddir/{}/{}.o'.format(checkheaders_mode, hh) for hh in headers])))
 
     f.write(

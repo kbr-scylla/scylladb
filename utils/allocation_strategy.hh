@@ -34,8 +34,9 @@ class migrate_fn_type {
 private:
     static uint32_t register_migrator(migrate_fn_type* m);
     static void unregister_migrator(uint32_t index);
-public:
+protected:
     explicit migrate_fn_type(size_t align) : _align(align), _index(register_migrator(this)) {}
+public:
     virtual ~migrate_fn_type() { unregister_migrator(_index); }
     virtual void migrate(void* src, void* dsts, size_t size) const noexcept = 0;
     virtual size_t size(const void* obj) const = 0;
@@ -43,19 +44,30 @@ public:
     uint32_t index() const { return _index; }
 };
 
-// Non-constant-size classes (ending with `char data[0]`) must override this
-// to tell the allocator about the real size of the object
+// Non-constant-size classes (ending with `char data[0]`) must provide
+// the method telling the underlying storage size
+template <typename T>
+concept DynamicObject = requires (const T& obj) {
+    { obj.storage_size() } noexcept -> std::same_as<size_t>;
+};
+
 template <typename T>
 inline
 size_t
-size_for_allocation_strategy(const T& obj) {
-    return sizeof(T);
+size_for_allocation_strategy(const T& obj) noexcept {
+    if constexpr (DynamicObject<T>) {
+        return obj.storage_size();
+    } else {
+        return sizeof(T);
+    }
 }
 
 template <typename T>
 class standard_migrator final : public migrate_fn_type {
-public:
+    friend class allocation_strategy;
     standard_migrator() : migrate_fn_type(alignof(T)) {}
+
+public:
     virtual void migrate(void* src, void* dst, size_t size) const noexcept override {
         static_assert(std::is_nothrow_move_constructible<T>::value, "T must be nothrow move-constructible.");
         static_assert(std::is_nothrow_destructible<T>::value, "T must be nothrow destructible.");
@@ -68,14 +80,6 @@ public:
         return size_for_allocation_strategy(*static_cast<const T*>(obj));
     }
 };
-
-template <typename T>
-standard_migrator<T>& get_standard_migrator()
-{
-    seastar::memory::scoped_critical_alloc_section dfg;
-    static thread_local standard_migrator<T> instance;
-    return instance;
-}
 
 //
 // Abstracts allocation strategy for managed objects.
@@ -100,6 +104,14 @@ standard_migrator<T>& get_standard_migrator()
 // across deferring points.
 //
 class allocation_strategy {
+    template <typename T>
+    standard_migrator<T>& get_standard_migrator()
+    {
+        seastar::memory::scoped_critical_alloc_section dfg;
+        static thread_local standard_migrator<T> instance;
+        return instance;
+    }
+
 protected:
     size_t _preferred_max_contiguous_allocation = std::numeric_limits<size_t>::max();
     uint64_t _invalidate_counter = 1;
@@ -108,6 +120,7 @@ public:
 
     virtual ~allocation_strategy() {}
 
+    virtual void* alloc(migrate_fn, size_t size, size_t alignment) = 0;
     //
     // Allocates space for a new ManagedObject. The caller must construct the
     // object before compaction runs. "size" is the amount of space to reserve
@@ -117,7 +130,11 @@ public:
     //
     // Doesn't invalidate references to objects allocated with this strategy.
     //
-    virtual void* alloc(migrate_fn, size_t size, size_t alignment) = 0;
+    template <typename T>
+    requires DynamicObject<T>
+    void* alloc(size_t size) {
+        return alloc(&get_standard_migrator<T>(), size, alignof(T));
+    }
 
     // Releases storage for the object. Doesn't invoke object's destructor.
     // Doesn't invalidate references to objects allocated with this strategy.

@@ -66,6 +66,10 @@ struct blob_storage {
         }
         memcpy(data, o.data, frag_size);
     }
+
+    size_t storage_size() const noexcept {
+        return sizeof(*this) + frag_size;
+    }
 } __attribute__((packed));
 
 // A managed version of "bytes" (can be used with LSA).
@@ -135,16 +139,14 @@ public:
             auto& alctr = current_allocator();
             auto maxseg = max_seg(alctr);
             auto now = std::min(size_t(size), maxseg);
-            void* p = alctr.alloc(&get_standard_migrator<blob_storage>(),
-                sizeof(blob_storage) + now, alignof(blob_storage));
+            void* p = alctr.alloc<blob_storage>(sizeof(blob_storage) + now);
             auto first = new (p) blob_storage(&_u.ptr, size, now);
             auto last = first;
             size -= now;
             try {
                 while (size) {
                     auto now = std::min(size_t(size), maxseg);
-                    void* p = alctr.alloc(&get_standard_migrator<blob_storage>(),
-                        sizeof(blob_storage) + now, alignof(blob_storage));
+                    void* p = alctr.alloc<blob_storage>(sizeof(blob_storage) + now);
                     last = new (p) blob_storage(&last->next, 0, now);
                     size -= now;
                 }
@@ -290,10 +292,6 @@ public:
         return !(*this == o);
     }
 
-    bool is_fragmented() const {
-        return external() && _u.ptr->next;
-    }
-
     bytes_view::value_type& operator[](size_type index) {
         return value_at_index(index);
     }
@@ -364,13 +362,6 @@ public:
     friend class managed_bytes_basic_view;
 };
 
-// blob_storage is a variable-size type
-inline
-size_t
-size_for_allocation_strategy(const blob_storage& bs) {
-    return sizeof(bs) + bs.frag_size;
-}
-
 template <mutable_view is_mutable>
 class managed_bytes_basic_view {
 public:
@@ -439,9 +430,6 @@ public:
         auto v = *this;
         v.remove_prefix(index);
         return v.current_fragment().front();
-    }
-    bool is_fragmented() const {
-        return _size != _current_fragment.size();
     }
     bytes linearize() const {
         return linearized(*this);

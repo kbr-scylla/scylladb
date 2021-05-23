@@ -177,7 +177,7 @@ int main(int ac, char ** av) {
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
         seastar::sharded<netw::messaging_service> messaging;
-        return sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).then([listen, &messaging, &sl_controller] {
+        return sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).then([listen, &messaging, &sl_controller] {
             return messaging.start(std::ref(sl_controller), listen);
         }).then([config, api_port, stay_alive, listen, &messaging] () {
             auto testers = new distributed<tester>;

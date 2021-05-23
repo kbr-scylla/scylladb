@@ -20,6 +20,7 @@
 #include "service/storage_service.hh"
 #include "service/qos/service_level_controller.hh"
 #include "utils/fb_utilities.hh"
+#include "repair/row_level.hh"
 #include "locator/snitch_base.hh"
 #include "log.hh"
 #include <seastar/core/thread.hh>
@@ -68,26 +69,24 @@ int main(int ac, char ** av) {
             sharded<db::system_distributed_keyspace> sys_dist_ks;
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<abort_source> abort_sources;
-            sharded<service::migration_notifier> mnotif;
             sharded<locator::shared_token_metadata> token_metadata;
             sharded<netw::messaging_service> messaging;
             sharded<cdc::generation_service> cdc_generation_service;
             sharded<service::migration_manager> migration_manager;
+            sharded<repair_service> repair;
             sharded<auth::service> auth_service;
 
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
             token_metadata.start().get();
             auto stop_token_mgr = defer([&] { token_metadata.stop().get(); });
-            mnotif.start().get();
-            auto stop_mnotifier = defer([&] { mnotif.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
-            sl_controller.start(std::ref(auth_service), qos::service_level_options{1000}).get();
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
             messaging.start(std::ref(sl_controller), listen).get();
             gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(messaging), std::ref(*cfg)).get();
-            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), sys_dist_ks, view_update_generator, feature_service, sscfg, mnotif, migration_manager, token_metadata, messaging, std::ref(cdc_generation_service), sl_controller).get();
+            service::init_storage_service(std::ref(abort_sources), db, gms::get_gossiper(), sys_dist_ks, view_update_generator, feature_service, sscfg, migration_manager, token_metadata, messaging, std::ref(cdc_generation_service), std::ref(repair), sl_controller).get();
             auto& server = messaging.local();
             auto port = server.port();
             auto msg_listen = server.listen_address();

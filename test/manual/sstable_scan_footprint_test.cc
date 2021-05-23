@@ -115,9 +115,6 @@ public:
     }
     stats_collector(const stats_collector&) = delete;
     stats_collector(stats_collector&&) = delete;
-    ~stats_collector() {
-        _sem.stop().get();
-    }
     collect_guard collect() {
         return collect_guard{*this, _params ? _params->period : std::chrono::milliseconds(0)};
     }
@@ -311,11 +308,6 @@ int main(int argc, char** argv) {
     return app.run(argc, argv, [] {
       return async([] {
         cql_test_config test_cfg;
-
-        test_cfg.dbcfg.emplace();
-        test_cfg.dbcfg->available_memory = memory::stats().total_memory();
-        test_cfg.dbcfg->statement_scheduling_group = seastar::create_scheduling_group("statement", 1000).get0();
-        test_cfg.dbcfg->streaming_scheduling_group = seastar::create_scheduling_group("streaming", 200).get0();
 
         auto& db_cfg = *test_cfg.db_config;
 

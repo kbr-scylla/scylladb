@@ -628,10 +628,10 @@ SEASTAR_THREAD_TEST_CASE(unpaged_mutation_read_global_limit) {
 SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
     cql_test_config cfg;
 
-    cfg.dbcfg.emplace();
-    cfg.dbcfg->available_memory = memory::stats().total_memory();
-
-    scheduling_group unknown_scheduling_group;
+    scheduling_group unknown_scheduling_group = create_scheduling_group("unknown", 800).get();
+    auto cleanup_unknown_scheduling_group = defer([&unknown_scheduling_group] {
+        destroy_scheduling_group(unknown_scheduling_group).get();
+    });
 
     const auto user_semaphore = std::mem_fn(&database_test::get_user_read_concurrency_semaphore);
     const auto system_semaphore = std::mem_fn(&database_test::get_system_read_concurrency_semaphore);
@@ -641,29 +641,16 @@ SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
         {default_scheduling_group(), system_semaphore}
     };
 
-    auto clean_up_sched_groups = defer([&scheduling_group_and_expected_semaphore] {
-        for (const auto& [sched_group, _] : scheduling_group_and_expected_semaphore) {
-            if (!sched_group.is_main()) {
-                destroy_scheduling_group(sched_group).get();
-            }
-        }
-    });
+    auto sched_groups = get_scheduling_groups().get();
 
-    auto create_sched_group = [&scheduling_group_and_expected_semaphore] (const char* name, unsigned shares, scheduling_group& target,
-            std::function<reader_concurrency_semaphore&(database_test&)> semaphore_getter) mutable {
-        target = create_scheduling_group(name, shares).get();
-        scheduling_group_and_expected_semaphore.emplace_back(target, semaphore_getter);
-    };
-
-    create_sched_group("unknown", 800, unknown_scheduling_group, user_semaphore);
-
-    create_sched_group("compaction", 1000, cfg.dbcfg->compaction_scheduling_group, system_semaphore);
-    create_sched_group("mem_compaction", 1000, cfg.dbcfg->memory_compaction_scheduling_group, system_semaphore);
-    create_sched_group("streaming", 200, cfg.dbcfg->streaming_scheduling_group, streaming_semaphore);
-    create_sched_group("statement", 1000, cfg.dbcfg->statement_scheduling_group, user_semaphore);
-    create_sched_group("memtable", 1000, cfg.dbcfg->memtable_scheduling_group, system_semaphore);
-    create_sched_group("memtable_to_cache", 200, cfg.dbcfg->memtable_to_cache_scheduling_group, system_semaphore);
-    create_sched_group("gossip", 1000, cfg.dbcfg->gossip_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.compaction_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.memory_compaction_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.streaming_scheduling_group, streaming_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.statement_scheduling_group, user_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.memtable_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.memtable_to_cache_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(sched_groups.gossip_scheduling_group, system_semaphore);
+    scheduling_group_and_expected_semaphore.emplace_back(unknown_scheduling_group, user_semaphore);
 
     do_with_cql_env_thread([&scheduling_group_and_expected_semaphore] (cql_test_env& e) {
         auto& db = e.local_db();
@@ -673,6 +660,56 @@ SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
                 auto& sem = db.get_reader_concurrency_semaphore();
                 if (&sem != expected_sem_ptr) {
                     BOOST_FAIL(fmt::format("Unexpected semaphore for scheduling group {}, expected {}, got {}", sched_group.name(), expected_sem_ptr->name(), sem.name()));
+                }
+            }).get();
+        }
+    }, std::move(cfg)).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(max_result_size_for_unlimited_query_selection_test) {
+    cql_test_config cfg;
+
+    cfg.db_config->max_memory_for_unlimited_query_soft_limit(1 * 1024 * 1024, utils::config_file::config_source::CommandLine);
+    cfg.db_config->max_memory_for_unlimited_query_hard_limit(2 * 1024 * 1024, utils::config_file::config_source::CommandLine);
+
+    scheduling_group unknown_scheduling_group = create_scheduling_group("unknown", 800).get();
+    auto cleanup_unknown_scheduling_group = defer([&unknown_scheduling_group] {
+        destroy_scheduling_group(unknown_scheduling_group).get();
+    });
+
+    const auto user_max_result_size = query::max_result_size(cfg.db_config->max_memory_for_unlimited_query_soft_limit(),
+            cfg.db_config->max_memory_for_unlimited_query_hard_limit());
+    const auto system_max_result_size = query::max_result_size(query::result_memory_limiter::unlimited_result_size);
+    const auto maintenance_max_result_size = system_max_result_size;
+
+    std::vector<std::pair<scheduling_group, query::max_result_size>> scheduling_group_and_expected_max_result_size{
+        {default_scheduling_group(), system_max_result_size}
+    };
+
+    auto sched_groups = get_scheduling_groups().get();
+
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.compaction_scheduling_group, system_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.memory_compaction_scheduling_group, system_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.streaming_scheduling_group, maintenance_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.statement_scheduling_group, user_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.memtable_scheduling_group, system_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.memtable_to_cache_scheduling_group, system_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(sched_groups.gossip_scheduling_group, system_max_result_size);
+    scheduling_group_and_expected_max_result_size.emplace_back(unknown_scheduling_group, user_max_result_size);
+
+    do_with_cql_env_thread([&scheduling_group_and_expected_max_result_size] (cql_test_env& e) {
+        auto& db = e.local_db();
+        database_test tdb(db);
+        for (const auto& [sched_group, expected_max_size] : scheduling_group_and_expected_max_result_size) {
+            with_scheduling_group(sched_group, [&db, sched_group = sched_group, expected_max_size = expected_max_size] {
+                const auto max_size = db.get_unlimited_query_max_result_size();
+                if (max_size != expected_max_size) {
+                    BOOST_FAIL(fmt::format("Unexpected max_size for scheduling group {}, expected {{{}, {}}}, got {{{}, {}}}",
+                                sched_group.name(),
+                                expected_max_size.soft_limit,
+                                expected_max_size.hard_limit,
+                                max_size.soft_limit,
+                                max_size.hard_limit));
                 }
             }).get();
         }

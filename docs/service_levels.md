@@ -34,7 +34,73 @@ one can run the following query:
 The table is used to store and distribute the service levels configuration.
 The table column names meanings are:
 *service_level* - the name of the service level.
+*timeout* - timeout for operations performed by users under this service level
 *shares* - a number that represents this service level priority in relation to other service levels.
+
+```
+select * from system_distributed.service_levels ;
+
+ service_level | timeout 
+---------------+---------
+            sl |    50ms
+
+```
+
+### Service Level Timeout
+
+Service level timeout can be used to assign a default timeout value for all operations for a particular service level.
+
+Service level timeout takes precenence over default timeout values from scylla.yaml configuration
+file, but it can still be superseded by per-query timeouts (issuing a query with USING TIMEOUT directive).
+
+In order to set a timeout for a service level, create or alter it with proper parameters, e.g.:
+```
+create service level sl with timeout = 50ms;
+list all service levels;
+
+ service_level | timeout 
+---------------+---------
+            sl |    50ms
+
+```
+
+Restoring the default timeout value (from scylla.yaml file) can be done by setting the service level timeout value to null:
+```
+alter service level sl with timeout = null;
+list all service levels;
+
+ service_level | timeout 
+---------------+---------
+            sl |    null
+
+```
+
+#### Combining service level timeouts from multiple roles
+
+A single role may be granted multiple other roles, which also means that more than one service level may be in effect
+for a particular user. In case of timeouts, multiple timeout values are combined by using a minimum of all effective
+timeouts. Example:
+
+role1: `timeout = 1s`
+role2: `timeout = 50ms`
+role3: `timeout = 2s`
+role4: `timeout = 10ms`
+
+The granting hierarchy is as follows, with role1 inheriting from role2, which in turn
+inherits from role3 and role4:
+      role4  role3
+         \   /
+         role2
+          /
+       role1
+        
+With the following roles granted, here are the effective timeouts for the roles:
+
+role1: `timeout = 10ms`
+role2: `timeout = 10ms`
+role3: `timeout = 2s`
+role4: `timeout = 10ms`
+>>>>>>> b4d6bdb16e16ec1f5b0036b3b63ec2245613cb43
 
  So for example to create a service level that is twice more important than the default service
  level (which has shares of 1000) one can run:
@@ -44,4 +110,3 @@ The table column names meanings are:
  ```
  
  
-    

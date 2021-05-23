@@ -499,12 +499,7 @@ SEASTAR_THREAD_TEST_CASE(test_view_update_generator_deadlock) {
     db_cfg.enable_cache(false);
     db_cfg.enable_commitlog(false);
 
-    test_cfg.dbcfg.emplace();
-    test_cfg.dbcfg->available_memory = memory::stats().total_memory();
-    test_cfg.dbcfg->statement_scheduling_group = seastar::create_scheduling_group("statement", 1000).get0();
-    test_cfg.dbcfg->streaming_scheduling_group = seastar::create_scheduling_group("streaming", 200).get0();
-
-    do_with_cql_env([] (cql_test_env& e) -> future<> {
+    do_with_cql_env_thread([] (cql_test_env& e) -> future<> {
         e.execute_cql("create table t (p text, c text, v text, primary key (p, c))").get();
         e.execute_cql("create materialized view tv as select * from t "
                       "where p is not null and c is not null and v is not null "

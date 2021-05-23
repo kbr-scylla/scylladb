@@ -116,14 +116,13 @@ BOOST_AUTO_TEST_CASE(test_votes) {
 
 BOOST_AUTO_TEST_CASE(test_tracker) {
     auto id1 = id();
-    raft::tracker tracker(id1);
+    raft::tracker tracker;
     raft::configuration cfg({id1});
     tracker.set_configuration(cfg, index_t{1});
     BOOST_CHECK_NE(tracker.find(id1), nullptr);
     // The node with id set during construction is assumed to be
     // the leader, since otherwise we wouldn't create a tracker
     // in the first place.
-    BOOST_CHECK_EQUAL(tracker.find(id1), tracker.leader_progress());
     BOOST_CHECK_EQUAL(tracker.committed(index_t{0}), index_t{0});
     // Avoid keeping a reference, follower_progress address may
     // change with configuration change
@@ -248,11 +247,11 @@ BOOST_AUTO_TEST_CASE(test_log_last_conf_idx) {
     BOOST_CHECK_EQUAL(log.last_conf_idx(), log.get_snapshot().idx);
     // log::last_term() is maintained correctly by truncate_head/truncate_tail() (snapshotting)
     BOOST_CHECK_EQUAL(log.last_term(), log.get_snapshot().term);
-    BOOST_CHECK(log.term_for(log.get_snapshot().idx).has_value());
+    BOOST_CHECK(log.term_for(log.get_snapshot().idx));
     BOOST_CHECK_EQUAL(log.term_for(log.get_snapshot().idx).value(), log.get_snapshot().term);
-    BOOST_CHECK(! log.term_for(log.last_idx() - index_t{1}).has_value());
+    BOOST_CHECK(! log.term_for(log.last_idx() - index_t{1}));
     add_entry(log, log_entry::dummy{});
-    BOOST_CHECK(log.term_for(log.last_idx()).has_value());
+    BOOST_CHECK(log.term_for(log.last_idx()));
     add_entry(log, log_entry::dummy{});
     const size_t GAP = 10;
     // apply_snapshot with a log gap, this should clear all log
@@ -350,6 +349,41 @@ BOOST_AUTO_TEST_CASE(test_single_node_is_quiet) {
     fsm.tick();
 
     BOOST_CHECK(fsm.get_output().messages.empty());
+}
+
+BOOST_AUTO_TEST_CASE(test_snapshot_follower_is_quiet) {
+    server_id id1 = id(), id2 = id();
+
+    raft::configuration cfg({id1, id2});
+    raft::log log(raft::snapshot{.idx = index_t{999}, .config = cfg});
+
+    log.emplace_back(seastar::make_lw_shared<raft::log_entry>(raft::log_entry{term_t{10}, index_t{1000}}));
+    log.stable_to(log.last_idx());
+
+    fsm_debug fsm(id1, term_t{10}, server_id{}, std::move(log), trivial_failure_detector, fsm_cfg);
+
+    // become leader
+    election_timeout(fsm);
+
+    fsm.step(id2, raft::vote_reply{fsm.get_current_term(), true});
+
+    BOOST_CHECK(fsm.is_leader());
+
+    // clear output
+    (void) fsm.get_output();
+
+    // reply with reject pointing into the snapshot
+    fsm.step(id2, raft::append_reply{fsm.get_current_term(), raft::index_t{1}, raft::append_reply::rejected{raft::index_t{1000}, raft::index_t{1}}});
+
+    BOOST_CHECK(fsm.get_progress(id2).state == raft::follower_progress::state::SNAPSHOT);
+
+    // clear output
+    (void) fsm.get_output();
+
+    for (int i = 0; i < 100; i++) {
+      fsm.tick();
+      BOOST_CHECK(fsm.get_output().messages.empty());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(test_election_two_nodes) {
