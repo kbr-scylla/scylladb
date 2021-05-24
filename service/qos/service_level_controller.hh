@@ -142,7 +142,8 @@ public:
             return auth::get_roles(ser, *usr).then([this] (auth::role_set roles) {
                 return find_service_level(roles);
             }).then([this, func = std::move(func)] (std::optional<service_level_options> opts) mutable {
-                return with_service_level(opts->shares_name.value_or(default_service_level_name), std::move(func));
+                auto& service_level_name = (opts && opts->shares_name) ? *opts->shares_name : default_service_level_name;
+                return with_service_level(service_level_name, std::move(func));
             });
         } else {
             return with_service_level(default_service_level_name, std::move(func));
