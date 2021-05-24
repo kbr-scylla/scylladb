@@ -155,6 +155,14 @@ protected:
     static inline const auto& get_compound_type(const schema& s) {
         return TopLevel::get_compound_type(s);
     }
+private:
+    static const data_type& get_singular_type(const schema& s) {
+        const auto& ct = get_compound_type(s);
+        if (!ct->is_singular()) {
+            throw std::invalid_argument("compound is not singular");
+        }
+        return ct->types()[0];
+    }
 public:
     struct with_schema_wrapper {
         with_schema_wrapper(const schema& s, const TopLevel& key) : s(s), key(key) {}
@@ -201,23 +209,24 @@ public:
         return TopLevel::from_bytes(get_compound_type(s)->serialize_value_deep(v));
     }
 
-    static TopLevel from_single_value(const schema& s, bytes v) {
-        return TopLevel::from_bytes(get_compound_type(s)->serialize_single(std::move(v)));
+    static TopLevel from_single_value(const schema& s, const bytes& v) {
+        return TopLevel::from_bytes(get_compound_type(s)->serialize_single(v));
     }
 
-    static TopLevel from_single_value(const schema& s, managed_bytes v) {
-        return TopLevel::from_bytes(get_compound_type(s)->serialize_single(std::move(v)));
+    static TopLevel from_single_value(const schema& s, const managed_bytes& v) {
+        return TopLevel::from_bytes(get_compound_type(s)->serialize_single(v));
     }
 
     template <typename T>
     static
     TopLevel from_singular(const schema& s, const T& v) {
-        auto ct = get_compound_type(s);
-        if (!ct->is_singular()) {
-            throw std::invalid_argument("compound is not singular");
-        }
-        auto type = ct->types()[0];
+        const auto& type = get_singular_type(s);
         return from_single_value(s, type->decompose(v));
+    }
+
+    static TopLevel from_singular_bytes(const schema& s, const bytes& b) {
+        get_singular_type(s); // validation
+        return from_single_value(s, b);
     }
 
     TopLevelView view() const {
@@ -480,8 +489,8 @@ public:
     using prefix_view_type = prefix_view_on_full_compound<TopLevel, PrefixTopLevel>;
 
     bool is_prefixed_by(const schema& s, const PrefixTopLevel& prefix) const {
-        auto t = base::get_compound_type(s);
-        auto prefix_type = PrefixTopLevel::get_compound_type(s);
+        const auto& t = base::get_compound_type(s);
+        const auto& prefix_type = PrefixTopLevel::get_compound_type(s);
         return ::is_prefixed_by(t->types().begin(),
             t->begin(*this), t->end(*this),
             prefix_type->begin(prefix), prefix_type->end(prefix),
@@ -583,7 +592,7 @@ public:
     }
 
     bool is_prefixed_by(const schema& s, const TopLevel& prefix) const {
-        auto t = base::get_compound_type(s);
+        const auto& t = base::get_compound_type(s);
         return ::is_prefixed_by(t->types().begin(),
             t->begin(*this), t->end(*this),
             t->begin(prefix), t->end(prefix),

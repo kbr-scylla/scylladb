@@ -15,7 +15,6 @@
 #include <unordered_map>
 #include <boost/range/iterator_range.hpp>
 #include <boost/range/join.hpp>
-#include <boost/range/algorithm/transform.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/dynamic_bitset.hpp>
 

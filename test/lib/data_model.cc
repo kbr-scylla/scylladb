@@ -11,6 +11,7 @@
 #include "test/lib/data_model.hh"
 
 #include <boost/algorithm/string/join.hpp>
+#include <boost/range/algorithm/sort.hpp>
 
 #include "schema_builder.hh"
 #include "concrete_types.hh"

@@ -12,9 +12,9 @@
 #include "auth/authenticated_user.hh"
 #include <seastar/core/sstring.hh>
 #include <seastar/core/distributed.hh>
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/file.hh>
 #include "auth/service.hh"
-#include "service/storage_service.hh"
 #include <map>
 #include <stack>
 #include <unordered_set>
@@ -83,6 +83,9 @@ private:
     service_level _default_service_level;
     service_level_distributed_data_accessor_ptr _sl_data_accessor;
     sharded<auth::service>& _auth_service;
+    std::chrono::time_point<seastar::lowres_clock> _last_successful_config_update;
+    unsigned _logged_intervals;
+
 public:
     service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config);
 

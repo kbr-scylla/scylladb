@@ -11,7 +11,6 @@
 #pragma once
 
 #include <vector>
-#include <boost/range/algorithm/stable_partition.hpp>
 #include <seastar/core/shared_ptr.hh>
 
 #include "schema_fwd.hh"

@@ -9,6 +9,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <chrono>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/sstring.hh>
@@ -19,6 +20,7 @@
 #include "gms/gossip_digest_ack2.hh"
 #include "gms/gossip_digest.hh"
 #include "api/api.hh"
+#include "utils/fb_utilities.hh"
 #include "service/qos/service_level_controller.hh"
 
 using namespace std::chrono_literals;
@@ -140,7 +142,7 @@ public:
         fmt::print("=== {} ===\n", __func__);
         auto id = get_msg_addr();
         int64_t gen = 0x1;
-        return ms.send_gossip_echo(id, gen).then_wrapped([] (auto&& f) {
+        return ms.send_gossip_echo(id, gen, std::chrono::seconds(10)).then_wrapped([] (auto&& f) {
             try {
                 f.get();
                 return make_ready_future<>();

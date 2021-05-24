@@ -79,6 +79,9 @@
 #include "service/qos/service_level_controller.hh"
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
 
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/classification.hpp>
+
 using token = dht::token;
 using UUID = utils::UUID;
 using inet_address = gms::inet_address;

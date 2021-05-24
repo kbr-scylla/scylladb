@@ -36,7 +36,6 @@
 #include <stdexcept>
 #include <unordered_map>
 
-#include <boost/any.hpp>
 #include <seastar/core/enum.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/sstring.hh>

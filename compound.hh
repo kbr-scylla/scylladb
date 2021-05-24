@@ -36,7 +36,7 @@ public:
 
     compound_type(std::vector<data_type> types)
         : _types(std::move(types))
-        , _byte_order_equal(std::all_of(_types.begin(), _types.end(), [] (auto t) {
+        , _byte_order_equal(std::all_of(_types.begin(), _types.end(), [] (const auto& t) {
                 return t->is_byte_order_equal();
             }))
         , _byte_order_comparable(false)
@@ -95,11 +95,11 @@ private:
         return len;
     }
 public:
-    managed_bytes serialize_single(managed_bytes&& v) const {
-        return serialize_value({std::move(v)});
+    managed_bytes serialize_single(const managed_bytes& v) const {
+        return serialize_value(boost::make_iterator_range(&v, 1+&v));
     }
-    managed_bytes serialize_single(bytes&& v) const {
-        return serialize_value({std::move(v)});
+    managed_bytes serialize_single(const bytes& v) const {
+        return serialize_value(boost::make_iterator_range(&v, 1+&v));
     }
     template<typename RangeOfSerializedComponents>
     static managed_bytes serialize_value(RangeOfSerializedComponents&& values) {

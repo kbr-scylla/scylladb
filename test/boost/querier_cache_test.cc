@@ -20,6 +20,8 @@
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/closeable.hh>
 
+#include <boost/range/algorithm/sort.hpp>
+
 using namespace std::chrono_literals;
 
 class dummy_result_builder {
@@ -64,7 +66,6 @@ public:
 
 private:
     // Expected value of the above counters, updated by this.
-    unsigned _expected_factory_invoked{};
     query::querier_cache::stats _expected_stats;
 
     simple_schema _s;

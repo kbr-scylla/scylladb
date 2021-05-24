@@ -1298,7 +1298,6 @@ warnings = [
     '-Wno-redundant-move',
     '-Wno-gnu-designator',
     '-Wno-instantiation-after-specialization',
-    '-Wno-unused-private-field',
     '-Wno-unsupported-friend',
     '-Wno-unused-variable',
     '-Wno-return-std-move',

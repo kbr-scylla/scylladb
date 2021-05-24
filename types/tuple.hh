@@ -14,6 +14,10 @@
 #include <vector>
 #include <string>
 
+#include <boost/range/numeric.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/range/algorithm/for_each.hpp>
+
 #include "types.hh"
 
 struct tuple_deserializing_iterator {

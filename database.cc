@@ -25,6 +25,7 @@
 #include <seastar/util/defer.hh>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/erase.hpp>
+#include <boost/algorithm/string/classification.hpp>
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include "sstables/compaction.hh"
@@ -32,6 +33,7 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/algorithm/sort.hpp>
+#include <boost/range/algorithm/min_element.hpp>
 #include <boost/container/static_vector.hpp>
 #include "frozen_mutation.hh"
 #include <seastar/core/do_with.hh>
@@ -343,7 +345,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat))
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat))
     , _result_memory_limiter(dbcfg.available_memory / 10)
-    , _data_listeners(std::make_unique<db::data_listeners>(*this))
+    , _data_listeners(std::make_unique<db::data_listeners>())
     , _mnotifier(mn)
     , _feat(feat)
     , _shared_token_metadata(stm)

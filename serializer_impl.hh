@@ -12,7 +12,6 @@
 
 #include "serializer.hh"
 #include <seastar/util/bool_class.hh>
-#include <boost/range/algorithm/for_each.hpp>
 #include "utils/small_vector.hh"
 #include <absl/container/btree_set.h>
 #include <seastar/core/shared_ptr.hh>

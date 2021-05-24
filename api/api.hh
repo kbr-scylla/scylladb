@@ -18,6 +18,7 @@
 #include <boost/units/detail/utility.hpp>
 #include "api/api-doc/utils.json.hh"
 #include "utils/histogram.hh"
+#include "utils/estimated_histogram.hh"
 #include <seastar/http/exception.hh>
 #include "api_init.hh"
 #include "seastarx.hh"

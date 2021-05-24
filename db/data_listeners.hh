@@ -49,12 +49,9 @@ public:
 };
 
 class data_listeners {
-    database& _db;
     std::set<data_listener*> _listeners;
 
 public:
-    data_listeners(database& db) : _db(db) {}
-
     void install(data_listener* listener);
     void uninstall(data_listener* listener);
 

@@ -10,6 +10,8 @@
 
 #include <boost/icl/interval_map.hpp>
 #include <boost/range/adaptor/map.hpp>
+#include <boost/range/algorithm/remove_if.hpp>
+#include <boost/range/algorithm/sort.hpp>
 
 #include "compatible_ring_position.hh"
 #include "compaction_strategy_impl.hh"
@@ -17,6 +19,8 @@
 #include "time_window_compaction_strategy.hh"
 
 #include "sstable_set_impl.hh"
+
+#include "database.hh"
 
 namespace sstables {
 

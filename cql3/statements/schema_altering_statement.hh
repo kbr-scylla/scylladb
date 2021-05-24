@@ -38,8 +38,6 @@
 
 #include <seastar/core/shared_ptr.hh>
 
-#include <optional>
-
 namespace cql3 {
 
 class query_processor;

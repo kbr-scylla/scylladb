@@ -28,10 +28,6 @@
 #include "to_string.hh"
 #include "duration.hh"
 #include "marshal_exception.hh"
-#include <boost/range/adaptor/transformed.hpp>
-#include <boost/range/algorithm/for_each.hpp>
-#include <boost/range/numeric.hpp>
-#include <boost/range/combine.hpp>
 #include <seastar/net/ip.hh>
 #include <seastar/net/inet_address.hh>
 #include <seastar/util/backtrace.hh>
@@ -1107,42 +1103,10 @@ to_bytes(const utils::UUID& uuid) {
     return bytes(reinterpret_cast<int8_t*>(&tmp), 16);
 }
 
-// This follows java.util.Comparator
-template <typename T>
-struct comparator {
-    comparator() = default;
-    comparator(std::function<int32_t (T& v1, T& v2)> fn)
-        : _compare_fn(std::move(fn))
-    { }
-    int32_t compare() { return _compare_fn(); }
-private:
-    std::function<int32_t (T& v1, T& v2)> _compare_fn;
-};
-
 inline bool
 less_unsigned(bytes_view v1, bytes_view v2) {
     return compare_unsigned(v1, v2) < 0;
 }
-
-class serialized_hash {
-private:
-    data_type _type;
-public:
-    serialized_hash(data_type type) : _type(type) {}
-    size_t operator()(const bytes& v) const {
-        return _type->hash(v);
-    }
-};
-
-class serialized_equal {
-private:
-    data_type _type;
-public:
-    serialized_equal(data_type type) : _type(type) {}
-    bool operator()(const bytes& v1, const bytes& v2) const {
-        return _type->equal(v1, v2);
-    }
-};
 
 template<typename Type>
 static inline

@@ -35,6 +35,7 @@
 #include "cql3/maps.hh"
 #include "cql3/sets.hh"
 #include "cql3/user_types.hh"
+#include "cql3/variable_specifications.hh"
 #include "types/list.hh"
 
 namespace cql3 {

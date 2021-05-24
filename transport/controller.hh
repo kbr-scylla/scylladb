@@ -13,7 +13,6 @@
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/distributed.hh>
 #include <seastar/core/future.hh>
-#include "service/qos/service_level_controller.hh"
 
 using namespace seastar;
 
