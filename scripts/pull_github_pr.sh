@@ -52,7 +52,7 @@ echo -n "Fetching full name of author $PR_LOGIN... "
 USER_NAME=$(curl -s "https://api.github.com/users/$PR_LOGIN" | jq -r .name)
 echo "$USER_NAME"
 
-git fetch enterprise pull/$PR_NUM/head
+git fetch git@github.com:scylladb/scylla-enterprise.git pull/$PR_NUM/head
 
 nr_commits=$(git log --pretty=oneline HEAD..FETCH_HEAD | wc -l)
 
