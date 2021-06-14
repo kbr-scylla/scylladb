@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  */
 
 /*
@@ -19,6 +19,7 @@
 #include "types/user.hh"
 #include "types/listlike_partial_deserializing_iterator.hh"
 #include "utils/managed_bytes.hh"
+#include "exceptions/exceptions.hh"
 
 static inline bool is_control_char(char c) {
     return c >= 0 && c <= 0x1F;

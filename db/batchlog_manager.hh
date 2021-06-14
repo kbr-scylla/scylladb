@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -37,12 +37,20 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/metrics_registration.hh>
 
-#include "cql3/query_processor.hh"
 #include "gms/inet_address.hh"
 #include "db_clock.hh"
+#include "mutation.hh"
+#include "utils/UUID.hh"
 
 #include <chrono>
 #include <limits>
+#include <random>
+
+namespace cql3 {
+
+class query_processor;
+
+} // namespace cql3
 
 namespace db {
 

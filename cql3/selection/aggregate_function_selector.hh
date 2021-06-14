@@ -17,7 +17,7 @@
  */
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -28,6 +28,7 @@
 
 #include "abstract_function_selector.hh"
 #include "cql3/functions/aggregate_function.hh"
+#include "cql_serialization_format.hh"
 
 #pragma once
 

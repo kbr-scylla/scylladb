@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -55,6 +55,7 @@
 #include "database.hh"
 #include "gms/feature_service.hh"
 #include "db/view/view.hh"
+#include "service/migration_manager.hh"
 
 namespace cql3 {
 

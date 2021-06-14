@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -21,7 +21,6 @@
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/rp_set.hh"
 #include "utils/extremum_tracking.hh"
-#include "partition_version.hh"
 #include "mutation_cleaner.hh"
 #include "sstables/types.hh"
 #include "utils/double-decker.hh"
@@ -261,8 +260,8 @@ public:
     const db::replay_position& replay_position() const {
         return _replay_position;
     }
-    const db::rp_set& rp_set() const {
-        return _rp_set;
+    db::rp_set rp_set() {
+        return std::exchange(_rp_set, {});
     }
     friend class iterator_reader;
 

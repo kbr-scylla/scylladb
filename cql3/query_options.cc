@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,6 +32,7 @@
 #include "query_options.hh"
 #include "version.hh"
 #include "db/consistency_level_type.hh"
+#include "cql3/column_identifier.hh"
 
 namespace cql3 {
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -14,11 +14,9 @@
 #include <seastar/core/future.hh>
 
 #include "dht/i_partitioner.hh"
-#include "position_in_partition.hh"
 #include "mutation_fragment.hh"
 #include "tracing/trace_state.hh"
 #include "mutation.hh"
-#include "query_class_config.hh"
 #include "mutation_consumer_concepts.hh"
 
 #include <seastar/core/thread.hh>
@@ -31,6 +29,7 @@
 using seastar::future;
 
 class mutation_source;
+class position_in_partition;
 
 /*
  * Allows iteration on mutations using mutation_fragments.
@@ -802,3 +801,8 @@ make_generating_reader(schema_ptr s, reader_permit permit, std::function<future<
 /// FIXME: reversing should be done in the sstable layer, see #1413.
 flat_mutation_reader
 make_reversing_reader(flat_mutation_reader& original, query::max_result_size max_size);
+
+/// A cosumer function that is passed a flat_mutation_reader to be consumed from
+/// and returns a future<> resolved when the reader is fully consumed, and closed.
+/// Note: the function assumes ownership of the reader and must close it in all cases.
+using reader_consumer = noncopyable_function<future<> (flat_mutation_reader)>;

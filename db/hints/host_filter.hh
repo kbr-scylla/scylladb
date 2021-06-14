@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -10,16 +10,18 @@
 
 #pragma once
 
-#include <functional>
 #include <unordered_set>
-#include <exception>
-#include <iostream>
+#include <stdexcept>
+#include <iosfwd>
 #include <string_view>
 
 #include <seastar/core/sstring.hh>
-#include "gms/inet_address.hh"
 #include "locator/snitch_base.hh"
 #include "seastarx.hh"
+
+namespace gms {
+    class inet_address;
+} // namespace gms
 
 namespace db {
 namespace hints {

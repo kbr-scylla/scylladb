@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -28,7 +28,6 @@ using namespace std::chrono_literals;
 SEASTAR_THREAD_TEST_CASE(test_schema_changes) {
   sstables::test_env::do_with_async([] (sstables::test_env& env) {
     auto dir = tmpdir();
-    storage_service_for_tests ssft;
     int gen = 1;
 
     std::map<std::tuple<sstables::sstable::version_types, schema_ptr>, std::tuple<shared_sstable, int>> cache;

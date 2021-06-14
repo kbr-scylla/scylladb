@@ -18,7 +18,7 @@
 /*
  * Modified by ScyllaDB
  *
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -159,6 +159,10 @@ const std::vector<managed_bytes_opt>& user_types::value::get_elements() const {
     return _elements;
 }
 
+std::vector<managed_bytes_opt> user_types::value::copy_elements() const {
+    return _elements;
+}
+
 sstring user_types::value::to_string() const {
     return format("({})", join(", ", _elements));
 }
@@ -252,7 +256,7 @@ void user_types::setter::execute(mutation& m, const clustering_key_prefix& row_k
         mut.tomb = params.make_tombstone_just_before();
 
         if (value) {
-            auto ut_value = static_pointer_cast<multi_item_terminal>(value);
+            auto ut_value = static_pointer_cast<user_types::value>(value);
 
             const auto& elems = ut_value->get_elements();
             // There might be fewer elements given than fields in the type

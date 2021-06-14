@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -1041,7 +1041,6 @@ static flat_mutation_reader make_normalizing_sstable_reader(shared_sstable sst, 
 
 SEASTAR_TEST_CASE(compaction_manager_test) {
   return test_env::do_with_async([] (test_env& env) {
-    storage_service_for_tests ssft;
     BOOST_REQUIRE(smp::count == 1);
     auto s = make_shared_schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
@@ -2227,7 +2226,6 @@ SEASTAR_TEST_CASE(check_read_indexes) {
 SEASTAR_TEST_CASE(tombstone_purge_test) {
     BOOST_REQUIRE(smp::count == 1);
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         // In a column family with gc_grace_seconds set to 0, check that a tombstone
@@ -2963,7 +2961,6 @@ SEASTAR_TEST_CASE(get_fully_expired_sstables_test) {
 
 SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto builder = schema_builder("la", "cf")
             .with_column("pk", utf8_type, column_kind::partition_key)
             .with_column("ck1", utf8_type, column_kind::clustering_key)
@@ -3168,7 +3165,6 @@ SEASTAR_TEST_CASE(time_window_strategy_correctness_test) {
     using namespace std::chrono;
 
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto s = schema_builder("tests", "time_window_strategy")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type).build();
@@ -3268,7 +3264,6 @@ SEASTAR_TEST_CASE(time_window_strategy_size_tiered_behavior_correctness) {
     using namespace std::chrono;
 
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto s = schema_builder("tests", "time_window_strategy")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type).build();
@@ -3451,7 +3446,6 @@ static void test_min_max_clustering_key(test_env& env, schema_ptr s, std::vector
 
 SEASTAR_TEST_CASE(min_max_clustering_key_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (auto version : all_sstable_versions) {
             {
                 auto s = schema_builder("ks", "cf")
@@ -3559,7 +3553,6 @@ SEASTAR_TEST_CASE(min_max_clustering_key_test) {
 
 SEASTAR_TEST_CASE(min_max_clustering_key_test_2) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (const auto version : all_sstable_versions) {
             auto s = schema_builder("ks", "cf")
                       .with_column("pk", utf8_type, column_kind::partition_key)
@@ -3608,7 +3601,6 @@ SEASTAR_TEST_CASE(min_max_clustering_key_test_2) {
 
 SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (const auto version : all_sstable_versions) {
             auto s = schema_builder("ks", "cf")
                     .with_column("pk", utf8_type, column_kind::partition_key)
@@ -3826,7 +3818,6 @@ SEASTAR_TEST_CASE(sstable_tombstone_metadata_check) {
 
 SEASTAR_TEST_CASE(sstable_composite_tombstone_metadata_check) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (const auto version : all_sstable_versions) {
             auto s = schema_builder("ks", "cf")
                     .with_column("pk", utf8_type, column_kind::partition_key)
@@ -4033,7 +4024,6 @@ SEASTAR_TEST_CASE(sstable_composite_tombstone_metadata_check) {
 
 SEASTAR_TEST_CASE(sstable_composite_reverse_tombstone_metadata_check) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (const auto version : all_sstable_versions) {
             auto s = schema_builder("ks", "cf")
                     .with_column("pk", utf8_type, column_kind::partition_key)
@@ -4314,7 +4304,6 @@ shared_sstable make_sstable_easy(test_env& env, const fs::path& path, flat_mutat
 SEASTAR_TEST_CASE(test_repeated_tombstone_skipping) {
     return test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         simple_schema table;
 
         std::vector<mutation_fragment> fragments;
@@ -4373,7 +4362,6 @@ SEASTAR_TEST_CASE(test_repeated_tombstone_skipping) {
 SEASTAR_TEST_CASE(test_skipping_using_index) {
     return test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         simple_schema table;
 
         const unsigned rows_per_part = 10;
@@ -4668,7 +4656,6 @@ SEASTAR_TEST_CASE(sstable_set_erase) {
 
 SEASTAR_TEST_CASE(sstable_tombstone_histogram_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (auto version : all_sstable_versions) {
             auto builder = schema_builder("tests", "tombstone_histogram_test")
                     .with_column("id", utf8_type, column_kind::partition_key)
@@ -4727,7 +4714,6 @@ SEASTAR_TEST_CASE(sstable_bad_tombstone_histogram_test) {
 
 SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto tmp = tmpdir();
         auto s = make_shared_schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
@@ -4828,7 +4814,6 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
 
 SEASTAR_TEST_CASE(sstable_owner_shards) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "test")
@@ -4896,7 +4881,6 @@ SEASTAR_TEST_CASE(sstable_owner_shards) {
 
 SEASTAR_TEST_CASE(test_summary_entry_spanning_more_keys_than_min_interval) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto s = make_shared_schema({}, some_keyspace, some_column_family,
             {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
@@ -5023,7 +5007,6 @@ SEASTAR_TEST_CASE(test_wrong_counter_shard_order) {
 
 SEASTAR_TEST_CASE(compaction_correctness_with_partitioned_sstable_set) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "tombstone_purge")
@@ -5206,7 +5189,6 @@ SEASTAR_TEST_CASE(test_old_format_non_compound_range_tombstone_is_read) {
 
 SEASTAR_TEST_CASE(summary_rebuild_sanity) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto builder = schema_builder("tests", "test")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", utf8_type);
@@ -5876,7 +5858,6 @@ SEASTAR_THREAD_TEST_CASE(sstable_scrub_reader_test) {
 
 SEASTAR_TEST_CASE(sstable_partition_estimation_sanity_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto builder = schema_builder("tests", "test")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", utf8_type);
@@ -5934,7 +5915,6 @@ SEASTAR_TEST_CASE(sstable_partition_estimation_sanity_test) {
 SEASTAR_TEST_CASE(sstable_timestamp_metadata_correcness_with_negative) {
     BOOST_REQUIRE(smp::count == 1);
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (auto version : all_sstable_versions) {
             cell_locker_stats cl_stats;
 
@@ -5970,7 +5950,6 @@ SEASTAR_TEST_CASE(sstable_timestamp_metadata_correcness_with_negative) {
 SEASTAR_TEST_CASE(sstable_run_identifier_correctness) {
     BOOST_REQUIRE(smp::count == 1);
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto s = schema_builder("tests", "ts_correcness_test")
@@ -5991,7 +5970,6 @@ SEASTAR_TEST_CASE(sstable_run_identifier_correctness) {
 
 SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "sstable_run_based_compaction_test")
@@ -6126,7 +6104,6 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
 
 SEASTAR_TEST_CASE(compaction_strategy_aware_major_compaction_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto s = schema_builder("tests", "compaction_strategy_aware_major_compaction_test")
@@ -6197,7 +6174,6 @@ SEASTAR_TEST_CASE(test_reads_cassandra_static_compact) {
 
 SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "backlog_correctness_after_stop_tracking_compaction")
@@ -6353,8 +6329,6 @@ SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
 SEASTAR_TEST_CASE(partial_sstable_run_filtered_out_test) {
     BOOST_REQUIRE(smp::count == 1);
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
-
         auto s = schema_builder("tests", "partial_sstable_run_filtered_out_test")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type).build();
@@ -6413,7 +6387,6 @@ SEASTAR_TEST_CASE(partial_sstable_run_filtered_out_test) {
 SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
     BOOST_REQUIRE(smp::count == 1);
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "purged_tombstone_consumer_sstable_test")
@@ -6572,7 +6545,6 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
  */
 SEASTAR_TEST_CASE(incremental_compaction_data_resurrection_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         // In a column family with gc_grace_seconds set to 0, check that a tombstone
@@ -6698,7 +6670,6 @@ SEASTAR_TEST_CASE(twcs_major_compaction_test) {
     // to two different SSTables, whereas two mutations that were written 1ms apart
     // are compacted to the same SSTable.
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         // In a column family with gc_grace_seconds set to 0, check that a tombstone
@@ -6768,7 +6739,6 @@ SEASTAR_TEST_CASE(twcs_major_compaction_test) {
 
 SEASTAR_TEST_CASE(autocompaction_control_test) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
         cache_tracker tracker;
 
@@ -7083,7 +7053,6 @@ SEASTAR_TEST_CASE(test_zero_estimated_partitions) {
 
 SEASTAR_TEST_CASE(test_may_have_partition_tombstones) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         simple_schema ss;
         auto s = ss.schema();
         auto pks = ss.make_pkeys(2);
@@ -7127,9 +7096,11 @@ SEASTAR_TEST_CASE(stcs_reshape_test) {
         auto s = ss.schema();
         std::vector<shared_sstable> sstables;
         sstables.reserve(s->max_compaction_threshold());
+        auto key_and_token_pair = token_generation_for_current_shard(s->max_compaction_threshold() + 2);
         for (auto gen = 1; gen <= s->max_compaction_threshold(); gen++) {
             auto sst = env.make_sstable(s, "", gen);
             sstables::test(sst).set_data_file_size(1);
+            sstables::test(sst).set_values(key_and_token_pair[gen - 1].first, key_and_token_pair[gen + 1].first, stats_metadata{});
             sstables.push_back(std::move(sst));
         }
 
@@ -7186,8 +7157,6 @@ SEASTAR_TEST_CASE(lcs_reshape_test) {
 
 SEASTAR_TEST_CASE(test_twcs_interposer_on_memtable_flush) {
     return test_env::do_with_async([] (test_env& env) {
-      storage_service_for_tests ssft;
-
       auto test_interposer_on_flush = [&] (bool split_during_flush) {
         auto builder = schema_builder("tests", "test_twcs_interposer_on_flush")
                 .with_column("id", utf8_type, column_kind::partition_key)
@@ -7437,13 +7406,47 @@ SEASTAR_TEST_CASE(compound_sstable_set_incremental_selector_test) {
             check(sel, decorated_keys[7], {0});
         }
 
+        {
+            // reproduces use-after-free failure in incremental reader selector with compound set where the next position
+            // returned by a set can be used after freed as selector position in another set, producing incorrect results.
+
+            enum class strategy_param : bool {
+                ICS = false,
+                LCS = true,
+            };
+
+            auto incremental_selection_test = [&] (strategy_param param) {
+                auto set1 = make_lw_shared<sstable_set>(sstables::make_partitioned_sstable_set(s, make_lw_shared<sstable_list>(), false));
+                auto set2 = make_lw_shared<sstable_set>(sstables::make_partitioned_sstable_set(s, make_lw_shared<sstable_list>(), bool(param)));
+                set1->insert(sstable_for_overlapping_test(env, s, 0, key_and_token_pair[1].first, key_and_token_pair[1].first, 1));
+                set2->insert(sstable_for_overlapping_test(env, s, 1, key_and_token_pair[0].first, key_and_token_pair[2].first, 1));
+                set2->insert(sstable_for_overlapping_test(env, s, 2, key_and_token_pair[3].first, key_and_token_pair[3].first, 1));
+                set2->insert(sstable_for_overlapping_test(env, s, 3, key_and_token_pair[4].first, key_and_token_pair[4].first, 1));
+
+                sstable_set compound = sstables::make_compound_sstable_set(s, { set1, set2 });
+                sstable_set::incremental_selector sel = compound.make_incremental_selector();
+
+                dht::ring_position_view pos = dht::ring_position_view::min();
+                std::unordered_set<sstables::shared_sstable> sstables;
+                do {
+                    auto ret = sel.select(pos);
+                    pos = ret.next_position;
+                    sstables.insert(ret.sstables.begin(), ret.sstables.end());
+                } while (!pos.is_max());
+
+                BOOST_REQUIRE(sstables.size() == 4);
+            };
+
+            incremental_selection_test(strategy_param::ICS);
+            incremental_selection_test(strategy_param::LCS);
+        }
+
         return make_ready_future<>();
     });
 }
 
 SEASTAR_TEST_CASE(test_offstrategy_sstable_compaction) {
     return test_env::do_with_async([tmp = tmpdir()] (test_env& env) {
-        storage_service_for_tests ssft;
         simple_schema ss;
         auto s = ss.schema();
 
@@ -7539,6 +7542,68 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
             sstables.reserve(disjoint_sstable_count);
             for (auto i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(0, std::chrono::hours(1))});
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == s->max_compaction_threshold());
+        }
+    });
+}
+
+
+SEASTAR_TEST_CASE(stcs_reshape_overlapping_test) {
+    static constexpr unsigned disjoint_sstable_count = 256;
+
+    return test_env::do_with_async([] (test_env& env) {
+        auto builder = schema_builder("tests", "stcs_reshape_test")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("cl", ::timestamp_type, column_kind::clustering_key)
+                .with_column("value", int32_type);
+        builder.set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+        auto s = builder.build();
+        std::map<sstring, sstring> opts;
+        auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, std::move(opts));
+
+        auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+
+        auto make_row = [&](unsigned token_idx) {
+            auto key_str = tokens[token_idx].first;
+            auto key = partition_key::from_exploded(*s, {to_bytes(key_str)});
+
+            mutation m(s, key);
+            auto value = 1;
+            auto next_ts = 1;
+            auto c_key = clustering_key::from_exploded(*s, {::timestamp_type->decompose(next_ts)});
+            m.set_clustered_cell(c_key, bytes("value"), data_value(int32_t(value)), next_ts);
+            return m;
+        };
+
+        auto tmp = tmpdir();
+
+        auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)]() {
+            return env.make_sstable(s, tmp.path().string(), (*gen)++, sstables::sstable::version_types::md, big);
+        };
+
+        {
+            // create set of 256 disjoint ssts and expect that stcs reshape allows them all to be compacted at once
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (auto i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(i)});
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == disjoint_sstable_count);
+        }
+
+        {
+            // create set of 256 overlapping ssts and expect that stcs reshape allows only 32 to be compacted at once
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (auto i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(0)});
                 sstables.push_back(std::move(sst));
             }
 
@@ -7697,5 +7762,117 @@ SEASTAR_TEST_CASE(test_twcs_single_key_reader_filtering) {
         BOOST_REQUIRE_EQUAL(
                 cf_stats.surviving_sstables_after_clustering_filter - surviving_after_ck,
                 cf_stats.sstables_checked_by_clustering_filter - checked_by_ck);
+    });
+}
+
+SEASTAR_TEST_CASE(max_ongoing_compaction_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        BOOST_REQUIRE(smp::count == 1);
+
+        auto make_schema = [] (auto idx) {
+            auto builder = schema_builder("tests", std::to_string(idx))
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("cl", int32_type, column_kind::clustering_key)
+                .with_column("value", int32_type);
+            builder.set_compaction_strategy(sstables::compaction_strategy_type::time_window);
+            std::map <sstring, sstring> opts = {
+                {time_window_compaction_strategy_options::COMPACTION_WINDOW_UNIT_KEY,                  "HOURS"},
+                {time_window_compaction_strategy_options::COMPACTION_WINDOW_SIZE_KEY,                  "1"},
+                {time_window_compaction_strategy_options::EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS_KEY, "0"},
+            };
+            builder.set_compaction_strategy_options(std::move(opts));
+            builder.set_gc_grace_seconds(0);
+            return builder.build();
+        };
+
+        auto cm = make_lw_shared<compaction_manager>();
+        cm->enable();
+        auto stop_cm = defer([&cm] {
+            cm->stop().get();
+        });
+
+        auto tmp = tmpdir();
+        auto cl_stats = make_lw_shared<cell_locker_stats>();
+        auto tracker = make_lw_shared<cache_tracker>();
+        auto tokens = token_generation_for_shard(1, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+
+        auto next_timestamp = [] (auto step) {
+            using namespace std::chrono;
+            return (gc_clock::now().time_since_epoch() - duration_cast<microseconds>(step)).count();
+        };
+        auto make_expiring_cell = [&] (schema_ptr s, std::chrono::hours step) {
+            static thread_local int32_t value = 1;
+
+            auto key_str = tokens[0].first;
+            auto key = partition_key::from_exploded(*s, {to_bytes(key_str)});
+
+            mutation m(s, key);
+            auto c_key = clustering_key::from_exploded(*s, {int32_type->decompose(value++)});
+            m.set_clustered_cell(c_key, bytes("value"), data_value(int32_t(value)), next_timestamp(step), gc_clock::duration(step + 5s));
+            return m;
+        };
+
+        auto make_table_with_single_fully_expired_sstable = [&] (auto idx) {
+            auto s = make_schema(idx);
+            column_family::config cfg = column_family_test_config(env.manager());
+            cfg.datadir = tmp.path().string() + "/" + std::to_string(idx);
+            touch_directory(cfg.datadir).get();
+            cfg.enable_commitlog = false;
+            cfg.enable_incremental_backups = false;
+
+            auto sst_gen = [&env, s, dir = cfg.datadir, gen = make_lw_shared<unsigned>(1)] () mutable {
+                return env.make_sstable(s, dir, (*gen)++, sstables::sstable::version_types::md, big);
+            };
+
+            auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm, *cl_stats, *tracker);
+            cf->start();
+            cf->mark_ready_for_writes();
+
+            auto muts = { make_expiring_cell(s, std::chrono::hours(1)) };
+            auto sst = make_sstable_containing(sst_gen, muts);
+            column_family_test(cf).add_sstable(sst);
+            return cf;
+        };
+
+        std::vector<lw_shared_ptr<column_family>> tables;
+        auto stop_tables = defer([&tables] {
+            for (auto& t : tables) {
+                t->stop().get();
+            }
+        });
+        for (auto i = 0; i < 100; i++) {
+            tables.push_back(make_table_with_single_fully_expired_sstable(i));
+        }
+
+        // Make sure everything is expired
+        forward_jump_clocks(std::chrono::hours(100));
+
+        for (auto& t : tables) {
+            BOOST_REQUIRE(t->sstables_count() == 1);
+            t->trigger_compaction();
+        }
+
+        BOOST_REQUIRE(cm->get_stats().pending_tasks >= 1 || cm->get_stats().active_tasks >= 1);
+
+        size_t max_ongoing_compaction = 0;
+
+        // wait for submitted jobs to finish.
+        auto end = [cm, &tables] {
+            return cm->get_stats().pending_tasks == 0 && cm->get_stats().active_tasks == 0
+                && boost::algorithm::all_of(tables, [] (auto& t) { return t->sstables_count() == 0; });
+        };
+        while (!end()) {
+            if (!cm->get_stats().pending_tasks && !cm->get_stats().active_tasks) {
+                for (auto& t : tables) {
+                    if (t->sstables_count()) {
+                        t->trigger_compaction();
+                    }
+                }
+            }
+            max_ongoing_compaction = std::max(cm->get_stats().active_tasks, max_ongoing_compaction);
+            later().get();
+        }
+        BOOST_REQUIRE(cm->get_stats().errors == 0);
+        BOOST_REQUIRE(max_ongoing_compaction == 1);
     });
 }

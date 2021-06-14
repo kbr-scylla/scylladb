@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -31,6 +31,7 @@
 #include "types/list.hh"
 #include "types/set.hh"
 #include <seastar/util/closeable.hh>
+#include "utils/UUID_gen.hh"
 
 // partitions must be sorted by decorated key
 static void require_no_token_duplicates(const std::vector<mutation>& partitions) {

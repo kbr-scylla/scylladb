@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -318,7 +318,11 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_
 
     // for extensions that are not altered, keep the old ones
     auto& old_exts = builder.get_extensions();
-    schema_extensions.insert(old_exts.begin(), old_exts.end());
+    for (auto& [key, ext] : old_exts) {
+        if (!_properties.count(key)) {
+            schema_extensions.emplace(key, ext);
+        }
+    }
 
     builder.set_extensions(std::move(schema_extensions));
 }

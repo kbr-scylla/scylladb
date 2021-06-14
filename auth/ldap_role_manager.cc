@@ -171,27 +171,27 @@ future<> ldap_role_manager::stop() {
     return _std_mgr.stop().then([this] { return _connection_factory.stop(); });
 }
 
-future<> ldap_role_manager::create(std::string_view name, const role_config& config) const {
+future<> ldap_role_manager::create(std::string_view name, const role_config& config) {
     return _std_mgr.create(name, config);
 }
 
-future<> ldap_role_manager::drop(std::string_view name) const {
+future<> ldap_role_manager::drop(std::string_view name) {
     return _std_mgr.drop(name);
 }
 
-future<> ldap_role_manager::alter(std::string_view name, const role_config_update& config) const {
+future<> ldap_role_manager::alter(std::string_view name, const role_config_update& config) {
     return _std_mgr.alter(name, config);
 }
 
-future<> ldap_role_manager::grant(std::string_view, std::string_view) const {
+future<> ldap_role_manager::grant(std::string_view, std::string_view) {
     throw exceptions::invalid_request_exception("Cannot grant roles with LDAPRoleManager.");
 }
 
-future<> ldap_role_manager::revoke(std::string_view, std::string_view) const {
+future<> ldap_role_manager::revoke(std::string_view, std::string_view) {
     throw exceptions::invalid_request_exception("Cannot revoke roles with LDAPRoleManager.");
 }
 
-future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name, recursive_role_query) const {
+future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name, recursive_role_query) {
     const auto url = get_url(grantee_name.data());
     auto desc = parse_url(url);
     if (!desc) {
@@ -230,37 +230,37 @@ future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name,
     });
 }
 
-future<role_set> ldap_role_manager::query_all() const {
+future<role_set> ldap_role_manager::query_all() {
     return _std_mgr.query_all();
 }
 
-future<bool> ldap_role_manager::exists(std::string_view role_name) const {
+future<bool> ldap_role_manager::exists(std::string_view role_name) {
     return _std_mgr.exists(role_name);
 }
 
-future<bool> ldap_role_manager::is_superuser(std::string_view role_name) const {
+future<bool> ldap_role_manager::is_superuser(std::string_view role_name) {
     return _std_mgr.is_superuser(role_name);
 }
 
-future<bool> ldap_role_manager::can_login(std::string_view role_name) const {
+future<bool> ldap_role_manager::can_login(std::string_view role_name) {
     return _std_mgr.can_login(role_name);
 }
 
 future<std::optional<sstring>> ldap_role_manager::get_attribute(
-        std::string_view role_name, std::string_view attribute_name) const {
+        std::string_view role_name, std::string_view attribute_name) {
     return _std_mgr.get_attribute(role_name, attribute_name);
 }
 
-future<role_manager::attribute_vals> ldap_role_manager::query_attribute_for_all(std::string_view attribute_name) const {
+future<role_manager::attribute_vals> ldap_role_manager::query_attribute_for_all(std::string_view attribute_name) {
     return _std_mgr.query_attribute_for_all(attribute_name);
 }
 
 future<> ldap_role_manager::set_attribute(
-        std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value) const {
+        std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value) {
     return _std_mgr.set_attribute(role_name, attribute_value, attribute_value);
 }
 
-future<> ldap_role_manager::remove_attribute(std::string_view role_name, std::string_view attribute_name) const {
+future<> ldap_role_manager::remove_attribute(std::string_view role_name, std::string_view attribute_name) {
     return _std_mgr.remove_attribute(role_name, attribute_name);
 }
 

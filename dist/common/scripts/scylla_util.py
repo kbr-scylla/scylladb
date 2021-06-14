@@ -1,4 +1,4 @@
-#  Copyright (C) 2017 ScyllaDB
+#  Copyright (C) 2017-present ScyllaDB
 
 # This file is part of Scylla.
 #
@@ -145,20 +145,22 @@ class gcp_instance:
         return curl(self.META_DATA_BASE_URL + path + "?recursive=%s" % str(recursive).lower(),
                     headers={"Metadata-Flavor": "Google"})
 
+    def is_in_root_devs(self, x, root_devs):
+        for root_dev in root_devs:
+            if root_dev.startswith(os.path.join("/dev/", x)):
+                return True
+        return False
+
     def _non_root_nvmes(self):
         """get list of nvme disks from os, filter away if one of them is root"""
         nvme_re = re.compile(r"nvme\d+n\d+$")
 
         root_dev_candidates = [x for x in psutil.disk_partitions() if x.mountpoint == "/"]
-        if len(root_dev_candidates) != 1:
-            raise Exception("found more than one disk mounted at root ".format(root_dev_candidates))
 
-        root_dev = root_dev_candidates[0].device
-        # if root_dev.startswith("/dev/mapper"):
-        #     raise Exception("mapper used for root, not checking if nvme is used ".format(root_dev))
+        root_devs = [x.device for x in root_dev_candidates]
 
         nvmes_present = list(filter(nvme_re.match, os.listdir("/dev")))
-        return {self.ROOT: [root_dev], self.EPHEMERAL: [x for x in nvmes_present if not root_dev.startswith(os.path.join("/dev/", x))]}
+        return {self.ROOT: root_devs, self.EPHEMERAL: [x for x in nvmes_present if not self.is_in_root_devs(x, root_devs)]}
 
     @property
     def os_disks(self):
@@ -286,13 +288,17 @@ class gcp_instance:
         """return the size of first non root NVME disk in GB"""
         if self.__firstNvmeSize is None:
             ephemeral_disks = self.getEphemeralOsDisks()
-            firstDisk = ephemeral_disks[0]
-            firstDiskSize = self.get_file_size_by_seek(os.path.join("/dev/", firstDisk))
-            firstDiskSizeGB = firstDiskSize/1024/1024/1024
-            if firstDiskSizeGB >= self.GCP_NVME_DISK_SIZE_2020:
-                self.__firstNvmeSize = firstDiskSizeGB
+            if len(ephemeral_disks) > 0:
+                firstDisk = ephemeral_disks[0]
+                firstDiskSize = self.get_file_size_by_seek(os.path.join("/dev/", firstDisk))
+                firstDiskSizeGB = firstDiskSize/1024/1024/1024
+                if firstDiskSizeGB >= self.GCP_NVME_DISK_SIZE_2020:
+                    self.__firstNvmeSize = firstDiskSizeGB
+                else:
+                    self.__firstNvmeSize = 0
+                    logging.warning("First nvme is smaller than lowest expected size. ".format(firstDisk))
             else:
-                raise Exception("First nvme is smaller than lowest expected size. ".format(firstDisk))
+                self.__firstNvmeSize = 0
         return self.__firstNvmeSize
 
     def is_recommended_instance(self):
@@ -348,8 +354,8 @@ class azure_instance:
     EPHEMERAL = "ephemeral"
     ROOT = "root"
     GETTING_STARTED_URL = "http://www.scylladb.com/doc/getting-started-azure/"
-    META_DATA_BASE_URL = "http://169.254.169.254/1.0/meta-data/instance/"
     ENDPOINT_SNITCH = "GossipingPropertyFileSnitch"
+    META_DATA_BASE_URL = "http://169.254.169.254/metadata/instance"
 
     def __init__(self):
         self.__type = None
@@ -375,7 +381,7 @@ class azure_instance:
 
     def __instance_metadata(self, path):
         """query Azure metadata server"""
-        return curl(self.META_DATA_BASE_URL + path + self.API_VERSION + "&format=text")
+        return curl(self.META_DATA_BASE_URL + path + self.API_VERSION + "&format=text", headers = { "Metadata": "True" })
 
     def is_in_root_devs(self, x, root_devs):
         for root_dev in root_devs:
@@ -457,7 +463,7 @@ class azure_instance:
     def instancetype(self):
         """return the type of this instance, e.g. Standard_L8s_v2"""
         if self.__type is None:
-            self.__type = self.__instance_metadata("vmSize")
+            self.__type = self.__instance_metadata("/compute/vmSize")
         return self.__type
 
     @property
@@ -474,11 +480,6 @@ class azure_instance:
             self.__memoryGB = psutil.virtual_memory().total/1024/1024/1024
         return self.__memoryGB
 
-    def instance_version(self):
-        """Returns the size of the instance we are running in. i.e.: v2"""
-        instancetypesplit = self.instancetype.split("_")
-        return instancetypesplit[2] if len(instancetypesplit) > 2 else ""
-
     def instance_purpose(self):
         """Returns the class of the instance we are running in. i.e.: Standard"""
         return self.instancetype.split("_")[0]
@@ -487,11 +488,11 @@ class azure_instance:
         """Returns the purpose of the instance we are running in. i.e.: L8s"""
         return self.instancetype.split("_")[1]
 
-    def is_unsupported_instance(self):
+    def is_unsupported_instance_class(self):
         """Returns if this instance type belongs to unsupported ones for nvmes"""
         return False
 
-    def is_supported_instance(self):
+    def is_supported_instance_class(self):
         """Returns if this instance type belongs to supported ones for nvmes"""
         if self.instance_class() in list(self.instanceToDiskCount.keys()):
             return True
@@ -504,9 +505,20 @@ class azure_instance:
         return False
 
     def is_recommended_instance(self):
-        if self.is_recommended_instance_size() and not self.is_unsupported_instance() and self.is_supported_instance():
+        if self.is_unsupported_instance_class() and self.is_supported_instance_class():
             return True
         return False
+
+    def private_ipv4(self):
+        return self.__instance_metadata("/network/interface/0/ipv4/ipAddress/0/privateIpAddress")
+
+    @staticmethod
+    def check():
+        pass
+
+    @staticmethod
+    def io_setup():
+        return run('/opt/scylladb/scripts/scylla_io_setup', shell=True, check=True)
 
 class aws_instance:
     """Describe several aspects of the current AWS instance"""
@@ -710,19 +722,21 @@ def match_patterns_in_files(list_of_patterns_files):
 def is_ec2():
     return aws_instance.is_aws_instance()
 
-
 def is_gce():
     return gcp_instance.is_gce_instance()
 
+def is_azure():
+    return azure_instance.is_azure_instance()
 
 def get_cloud_instance():
     if is_ec2():
         return aws_instance()
     elif is_gce():
         return gcp_instance()
+    elif is_azure():
+        return azure_instance()
     else:
-        raise Exception("Unknown cloud provider! Only AWS/GCP supported.")
-
+        raise Exception("Unknown cloud provider! Only AWS/GCP/Azure supported.")
 
 def hex2list(hex_str):
     hex_str2 = hex_str.replace("0x", "").replace(",", "")

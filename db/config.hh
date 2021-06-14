@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  */
 
@@ -75,6 +75,16 @@ struct experimental_features_t {
     static std::unordered_map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();
 };
+
+/// A restriction that can be in three modes: true (the operation is disabled),
+/// false (the operation is allowed), or warn (the operation is allowed but
+/// produces a warning in the log).
+struct tri_mode_restriction_t {
+    enum class mode { FALSE, TRUE, WARN };
+    static std::unordered_map<sstring, mode> map(); // for enum_option<>
+};
+using tri_mode_restriction = enum_option<tri_mode_restriction_t>;
+
 
 class config : public utils::config_file {
 public:
@@ -331,6 +341,11 @@ public:
     named_value<sstring> redis_write_consistency_level;
     named_value<uint16_t> redis_database_count;
     named_value<string_map> redis_keyspace_replication_strategy_options;
+
+    // Options to restrict (forbid, warn or somehow limit) certain operations
+    // or options which non-expert users are more likely to regret than to
+    // enjoy:
+    named_value<tri_mode_restriction> restrict_replication_simplestrategy;
 
     named_value<sstring> audit;
     named_value<sstring> audit_categories;

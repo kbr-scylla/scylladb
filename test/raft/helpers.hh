@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Arm Limited and affiliates. All rights reserved.
+ * Copyright (C) 2021-present ScyllaDB
  */
 
 /*
@@ -18,6 +18,7 @@
 
 #include <boost/test/unit_test.hpp>
 #include "test/lib/log.hh"
+#include "test/lib/random_utils.hh"
 #include "serializer_impl.hh"
 #include <limits>
 
@@ -64,6 +65,7 @@ public:
     void mark_dead(raft::server_id id) { _dead.emplace(id); }
     void mark_alive(raft::server_id id) { _dead.erase(id); }
     void mark_all_dead() { _is_alive = false; }
+    void mark_all_alive() { _is_alive = true; }
 };
 
 template <typename T> void add_entry(raft::log& log, T cmd) {
@@ -199,7 +201,7 @@ raft::server_id id() {
     return raft::server_id{utils::UUID(0, ++id)};
 }
 
-raft::server_address_set address_set(std::initializer_list<raft::server_id> ids) {
+raft::server_address_set address_set(std::vector<raft::server_id> ids) {
     raft::server_address_set set;
     for (auto id : ids) {
         set.emplace(raft::server_address{.id = id});
@@ -207,7 +209,31 @@ raft::server_address_set address_set(std::initializer_list<raft::server_id> ids)
     return set;
 }
 
-raft::fsm create_follower(raft::server_id id, raft::log log, raft::failure_detector& fd = trivial_failure_detector) {
-    return raft::fsm(id, raft::term_t{}, raft::server_id{}, std::move(log), fd, fsm_cfg);
+fsm_debug create_follower(raft::server_id id, raft::log log, raft::failure_detector& fd = trivial_failure_detector) {
+    return fsm_debug(id, raft::term_t{}, raft::server_id{}, std::move(log), fd, fsm_cfg);
 }
 
+
+// Raft uses UUID 0 as special case.
+// Convert local 0-based integer id to raft +1 UUID
+utils::UUID to_raft_uuid(size_t local_id) {
+    return utils::UUID{0, local_id + 1};
+}
+
+raft::server_id to_raft_id(size_t local_id) {
+    return raft::server_id{to_raft_uuid(local_id)};
+}
+
+// NOTE: can_vote = true
+raft::server_address to_server_address(size_t local_id) {
+    return raft::server_address{raft::server_id{to_raft_uuid(local_id)}};
+}
+
+size_t to_local_id(utils::UUID uuid) {
+    return uuid.get_least_significant_bits() - 1;
+}
+
+// Return true upon a random event with given probability
+bool rolladice(float probability = 1.0/2.0) {
+    return tests::random::get_real(0.0, 1.0) < probability;
+}

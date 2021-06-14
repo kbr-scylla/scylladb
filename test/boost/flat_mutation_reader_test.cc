@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -24,8 +24,8 @@
 #include "row_cache.hh"
 #include "test/lib/tmpdir.hh"
 #include "repair/repair.hh"
+#include "mutation_partition_view.hh"
 
-#include "test/lib/test_services.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "test/lib/log.hh"
@@ -181,8 +181,6 @@ SEASTAR_TEST_CASE(test_flat_mutation_reader_consume_two_partitions) {
 
 SEASTAR_TEST_CASE(test_fragmenting_and_freezing) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         for_each_mutation([&] (const mutation& m) {
             std::vector<frozen_mutation> fms;
 

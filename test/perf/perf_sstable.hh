@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -99,7 +99,10 @@ public:
            , _mt(make_lw_shared<memtable>(s))
     {}
 
-    future<> stop() { return make_ready_future<>(); }
+    future<> stop() {
+        _sst.clear();
+        return _env.stop();
+    }
 
     future<> fill_memtable() {
         auto idx = boost::irange(0, int(_cfg.partitions / _cfg.sstables));

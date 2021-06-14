@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,9 +31,7 @@
 #pragma once
 
 #include "cql3/statements/schema_altering_statement.hh"
-#include "cql3/statements/ks_prop_defs.hh"
 #include "transport/event.hh"
-#include "log.hh"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -43,11 +41,11 @@ class query_processor;
 
 namespace statements {
 
+class ks_prop_defs;
+
 /** A <code>CREATE KEYSPACE</code> statement parsed from a CQL query. */
 class create_keyspace_statement : public schema_altering_statement {
 private:
-    static logging::logger _logger;
-
     sstring _name;
     shared_ptr<ks_prop_defs> _attrs;
     bool _if_not_exists;
@@ -84,6 +82,11 @@ public:
     virtual future<::shared_ptr<messages::result_message>>
     execute(query_processor& qp, service::query_state& state, const query_options& options) const override;
 };
+
+std::optional<sstring> check_restricted_replication_strategy(
+    service::storage_proxy& proxy,
+    const sstring& keyspace,
+    const ks_prop_defs& attrs);
 
 }
 

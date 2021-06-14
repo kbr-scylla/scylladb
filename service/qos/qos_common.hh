@@ -1,4 +1,8 @@
 /*
+ * Copyright (C) 2020-present ScyllaDB
+ */
+
+/*
  * This file is part of Scylla.
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
@@ -32,8 +36,13 @@ struct service_level_options {
         bool operator!=(const delete_marker&) const { return false; };
     };
 
+    enum class workload_type {
+        unspecified, batch, interactive, delete_marker
+    };
+
     using timeout_type = std::variant<unset_marker, delete_marker, lowres_clock::duration>;
     timeout_type timeout = unset_marker{};
+    workload_type workload = workload_type::unspecified;
 
     using shares_type = std::variant<unset_marker, delete_marker, int32_t>;
     shares_type shares = unset_marker{};
@@ -47,7 +56,12 @@ struct service_level_options {
 
     bool operator==(const service_level_options& other) const = default;
     bool operator!=(const service_level_options& other) const = default;
+
+    static std::string_view to_string(const workload_type& wt);
+    static std::optional<workload_type> parse_workload_type(std::string_view sv);
 };
+
+std::ostream& operator<<(std::ostream& os, const service_level_options::workload_type&);
 
 using service_levels_info = std::map<sstring, service_level_options>;
 

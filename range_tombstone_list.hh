@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  */
 
 /*
@@ -13,10 +13,11 @@
 #include <seastar/util/defer.hh>
 #include "range_tombstone.hh"
 #include "query-request.hh"
-#include "position_in_partition.hh"
 #include "utils/preempt.hh"
 #include <iosfwd>
 #include <variant>
+
+class position_in_partition_view;
 
 class range_tombstone_list final {
     using range_tombstones_type = range_tombstone::container_type;

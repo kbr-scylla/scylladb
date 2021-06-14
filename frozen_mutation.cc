@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -31,6 +31,7 @@
 #include "idl/mutation.dist.impl.hh"
 #include "flat_mutation_reader.hh"
 #include "converting_mutation_partition_applier.hh"
+#include "mutation_partition_view.hh"
 
 //
 // Representation layout:

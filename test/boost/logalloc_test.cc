@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -15,11 +15,14 @@
 #include <chrono>
 #include <random>
 
+#include <seastar/core/circular_buffer.hh>
 #include <seastar/core/print.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/timer.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread_cputime_clock.hh>
+#include <seastar/core/when_all.hh>
+#include <seastar/core/with_timeout.hh>
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/defer.hh>

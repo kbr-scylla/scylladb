@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -17,24 +17,32 @@
 #include <concepts>
 
 #include "bytes.hh"
-#include "cql3/query_options.hh"
-#include "cql3/selection/selection.hh"
 #include "cql3/statements/bound.hh"
 #include "cql3/term.hh"
 #include "database_fwd.hh"
 #include "gc_clock.hh"
-#include "mutation_partition.hh"
-#include "query-result-reader.hh"
 #include "range.hh"
 #include "seastarx.hh"
 #include "utils/overloaded_functor.hh"
+
+class row;
 
 namespace secondary_index {
 class index;
 class secondary_index_manager;
 } // namespace secondary_index
 
+namespace query {
+    class result_row_view;
+} // namespace query
+
 namespace cql3 {
+
+class query_options;
+
+namespace selection {
+    class selection;
+} // namespace selection
 
 namespace expr {
 

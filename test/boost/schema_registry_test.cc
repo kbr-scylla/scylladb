@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,6 @@
 
 #include <seastar/core/thread.hh>
 
-#include "test/lib/test_services.hh"
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "schema_registry.hh"
@@ -57,7 +56,6 @@ SEASTAR_THREAD_TEST_CASE(test_load_with_non_nantive_type) {
 
 SEASTAR_TEST_CASE(test_async_loading) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
         dummy_init dummy;
         auto s1 = random_schema();
         auto s2 = random_schema();
@@ -84,7 +82,6 @@ SEASTAR_TEST_CASE(test_async_loading) {
 
 SEASTAR_TEST_CASE(test_schema_is_synced_when_syncer_doesnt_defer) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
         dummy_init dummy;
         auto s = random_schema();
         s = local_schema_registry().get_or_load(s->version(), [s] (table_schema_version) { return frozen_schema(s); });
@@ -96,7 +93,6 @@ SEASTAR_TEST_CASE(test_schema_is_synced_when_syncer_doesnt_defer) {
 
 SEASTAR_TEST_CASE(test_schema_is_synced_when_syncer_defers) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
         dummy_init dummy;
         auto s = random_schema();
         s = local_schema_registry().get_or_load(s->version(), [s] (table_schema_version) { return frozen_schema(s); });
@@ -108,7 +104,6 @@ SEASTAR_TEST_CASE(test_schema_is_synced_when_syncer_defers) {
 
 SEASTAR_TEST_CASE(test_failed_sync_can_be_retried) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
         dummy_init dummy;
         auto s = random_schema();
         s = local_schema_registry().get_or_load(s->version(), [s] (table_schema_version) { return frozen_schema(s); });

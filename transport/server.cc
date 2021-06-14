@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -17,6 +17,7 @@
 #include <boost/range/adaptor/sliced.hpp>
 
 #include "cql3/statements/batch_statement.hh"
+#include "cql3/statements/modification_statement.hh"
 #include "types/collection.hh"
 #include "types/list.hh"
 #include "types/set.hh"
@@ -28,7 +29,6 @@
 #include "service/storage_proxy.hh"
 #include "service/qos/service_level_controller.hh"
 #include "db/consistency_level_type.hh"
-#include "database.hh"
 #include "db/write_type.hh"
 #include <seastar/core/future-util.hh>
 #include <seastar/core/seastar.hh>
@@ -143,12 +143,12 @@ event::event_type parse_event_type(const sstring& value)
 }
 
 cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
-        service::migration_notifier& mn, database& db, service::memory_limiter& ml, cql_server_config config, qos::service_level_controller& sl_controller)
+        service::migration_notifier& mn, service::memory_limiter& ml, cql_server_config config, const db::config& db_cfg, qos::service_level_controller& sl_controller)
     : server("CQLServer", clogger)
     , _query_processor(qp)
     , _config(config)
     , _max_request_size(config.max_request_size)
-    , _max_concurrent_requests(db.get_config().max_concurrent_requests_per_shard)
+    , _max_concurrent_requests(db_cfg.max_concurrent_requests_per_shard)
     , _memory_available(ml.get_semaphore())
     , _notifier(std::make_unique<event_notifier>(mn))
     , _auth_service(auth_service)
@@ -512,6 +512,10 @@ cql_server::connection::connection(cql_server& server, socket_address server_add
     , _server_addr(server_addr)
     , _client_state(service::client_state::external_tag{}, server._auth_service, &server._sl_controller, server.timeout_config(), addr)
 {
+    _shedding_timer.set_callback([this] {
+        clogger.debug("Shedding all incoming requests due to overload");
+        _shed_incoming_requests = true;
+    });
 }
 
 cql_server::connection::~connection() {
@@ -568,6 +572,13 @@ future<> cql_server::connection::process_request() {
         }
 
         auto& f = *maybe_frame;
+
+        const bool allow_shedding = _client_state.get_workload_type() == service::client_state::workload_type::interactive;
+        if (allow_shedding && _shed_incoming_requests) {
+            ++_server._stats.requests_shed;
+            return _read_buf.skip(f.length);
+        }
+
         tracing_request_type tracing_requested = tracing_request_type::not_requested;
         if (f.flags & cql_frame_flags::tracing) {
             // If tracing is requested for a specific CQL command - flush
@@ -581,11 +592,11 @@ future<> cql_server::connection::process_request() {
         auto stream = f.stream;
         auto mem_estimate = f.length * 2 + 8000; // Allow for extra copies and bookkeeping
         if (mem_estimate > _server._max_request_size) {
-            return _read_buf.skip(f.length).then([length = f.length, stream = f.stream, mem_estimate, this] () {
-                write_response(make_error(stream, exceptions::exception_code::INVALID,
-                        format("request size too large (frame size {:d}; estimate {:d}; allowed {:d}", length, mem_estimate, _server._max_request_size),
-                        tracing::trace_state_ptr()));
-                return make_ready_future<>();
+            write_response(make_error(stream, exceptions::exception_code::INVALID,
+                    format("request size too large (frame size {:d}; estimate {:d}; allowed {:d}", f.length, mem_estimate, _server._max_request_size),
+                    tracing::trace_state_ptr()));
+            return std::exchange(_ready_to_respond, make_ready_future<>()).then([this] {
+                return _read_buf.close();
             });
         }
 
@@ -599,19 +610,47 @@ future<> cql_server::connection::process_request() {
             });
         }
 
-        auto fut = get_units(_server._memory_available, mem_estimate);
+        const auto shedding_timeout = std::chrono::milliseconds(50);
+        auto fut = allow_shedding
+                ? get_units(_server._memory_available, mem_estimate, shedding_timeout).then_wrapped([this, length = f.length] (auto f) {
+                    try {
+                        return make_ready_future<semaphore_units<>>(f.get0());
+                    } catch (semaphore_timed_out sto) {
+                        // Cancel shedding in case no more requests are going to do that on completion
+                        if (_pending_requests_gate.get_count() == 0) {
+                            _shed_incoming_requests = false;
+                        }
+                        return _read_buf.skip(length).then([sto = std::move(sto)] () mutable {
+                            return make_exception_future<semaphore_units<>>(std::move(sto));
+                        });
+                    }
+                })
+                : get_units(_server._memory_available, mem_estimate);
         if (_server._memory_available.waiters()) {
+            if (allow_shedding && !_shedding_timer.armed()) {
+                _shedding_timer.arm(shedding_timeout);
+            }
             ++_server._stats.requests_blocked_memory;
         }
 
-        return fut.then([this, length = f.length, flags = f.flags, op, stream, tracing_requested] (semaphore_units<> mem_permit) {
+        return fut.then_wrapped([this, length = f.length, flags = f.flags, op, stream, tracing_requested] (auto mem_permit_fut) {
+          if (mem_permit_fut.failed()) {
+              // Ignore semaphore errors - they are expected if load shedding took place
+              mem_permit_fut.ignore_ready_future();
+              return make_ready_future<>();
+          }
+          semaphore_units<> mem_permit = mem_permit_fut.get0();
           return this->read_and_decompress_frame(length, flags).then([this, op, stream, tracing_requested, mem_permit = make_service_permit(std::move(mem_permit))] (fragmented_temporary_buffer buf) mutable {
 
             ++_server._stats.requests_served;
             ++_server._stats.requests_serving;
 
             _pending_requests_gate.enter();
-            auto leave = defer([this] { _pending_requests_gate.leave(); });
+            auto leave = defer([this] {
+                _shedding_timer.cancel();
+                _shed_incoming_requests = false;
+                _pending_requests_gate.leave();
+            });
             auto istream = buf.get_istream();
             (void)_process_request_stage(this, istream, op, stream, seastar::ref(_client_state), tracing_requested, mem_permit)
                     .then_wrapped([this, buf = std::move(buf), mem_permit, leave = std::move(leave)] (future<foreign_ptr<std::unique_ptr<cql_server::response>>> response_f) mutable {
@@ -627,12 +666,6 @@ future<> cql_server::connection::process_request() {
           });
         });
     });
-}
-
-static inline bytes_view to_bytes_view(temporary_buffer<char>& b)
-{
-    using byte = bytes_view::value_type;
-    return bytes_view(reinterpret_cast<const byte*>(b.get()), b.size());
 }
 
 namespace compression_buffers {

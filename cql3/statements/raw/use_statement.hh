@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,6 +31,8 @@
 #pragma once
 
 #include "cql3/statements/raw/parsed_statement.hh"
+
+#include <seastar/core/sstring.hh>
 
 namespace cql3 {
 

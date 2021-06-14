@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,12 +31,10 @@
 #pragma once
 
 #include "cql3/statements/schema_altering_statement.hh"
-#include "cql3/statements/cf_prop_defs.hh"
 #include "cql3/statements/cf_properties.hh"
 #include "cql3/statements/raw/cf_statement.hh"
 #include "cql3/cql3_type.hh"
 
-#include "service/migration_manager.hh"
 #include "schema_fwd.hh"
 
 #include <seastar/core/shared_ptr.hh>
@@ -51,6 +49,7 @@
 namespace cql3 {
 
 class query_processor;
+class cf_prop_defs;
 
 namespace statements {
 

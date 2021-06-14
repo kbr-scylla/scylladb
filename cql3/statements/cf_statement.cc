@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright 2014-2015 ScyllaDB
+ * Copyright 2014-present-2015 ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,6 +30,7 @@
 
 #include "raw/cf_statement.hh"
 #include "service/client_state.hh"
+#include "cql3/column_specification.hh"
 
 namespace cql3 {
 

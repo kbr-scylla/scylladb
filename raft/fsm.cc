@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -46,7 +46,7 @@ template<typename T>
 const log_entry& fsm::add_entry(T command) {
     // It's only possible to add entries on a leader.
     check_is_leader();
-    if(leader_state().stepdown) {
+    if (leader_state().stepdown) {
         // A leader that is stepping down should not add new entries
         // to its log (see 3.10), but it still does not know who the new
         // leader will be.
@@ -54,6 +54,10 @@ const log_entry& fsm::add_entry(T command) {
     }
 
     if constexpr (std::is_same_v<T, configuration>) {
+        // Do not permit changes which would render the cluster
+        // unusable, such as transitioning to an empty configuration or
+        // one with no voters.
+        raft::configuration::check(command.current);
         if (_log.last_conf_idx() > _commit_idx ||
             _log.get_configuration().is_joint()) {
             // 4.1. Cluster membership changes/Safety.
@@ -387,20 +391,23 @@ void fsm::maybe_commit() {
             // configuration, and 6 if we assume we left it. Let
             // it happen without an extra FSM step.
             maybe_commit();
-        } else if (leader_state().tracker.find(_my_id) == nullptr) {
-            logger.trace("maybe_commit[{}]: stepping down as leader", _my_id);
-            // 4.2.2 Removing the current leader
-            //
-            // The leader temporarily manages a configuration
-            // in which it is not a member.
-            //
-            // A leader that is removed from the configuration
-            // steps down once the C_new entry is committed.
-            //
-            // If the leader stepped down before this point,
-            // it might still time out and become leader
-            // again, delaying progress.
-            transfer_leadership();
+        } else {
+            auto lp = leader_state().tracker.find(_my_id);
+            if (lp == nullptr || !lp->can_vote) {
+                logger.trace("maybe_commit[{}]: stepping down as leader", _my_id);
+                // 4.2.2 Removing the current leader
+                //
+                // The leader temporarily manages a configuration
+                // in which it is not a member.
+                //
+                // A leader that is removed from the configuration
+                // steps down once the C_new entry is committed.
+                //
+                // If the leader stepped down before this point,
+                // it might still time out and become leader
+                // again, delaying progress.
+                transfer_leadership();
+            }
         }
     }
 }
@@ -681,6 +688,11 @@ void fsm::request_vote_reply(server_id from, vote_reply&& reply) {
     logger.trace("{} received a {} vote from {}", _my_id, reply.vote_granted ? "yes" : "no", from);
 
     auto& state = std::get<candidate>(_state);
+    // Should not register a reply to prevote as a real vote
+    if (state.is_prevote != reply.is_prevote) {
+        logger.trace("{} ignoring prevote from {} as state is vote", _my_id, from);
+        return;
+    }
     state.votes.register_vote(from, reply.vote_granted);
 
     switch (state.votes.tally_votes()) {

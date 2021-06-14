@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -12,10 +12,27 @@
 
 #include "database_fwd.hh"
 #include "schema_fwd.hh"
-#include "mutation_query.hh"
 #include "cache_temperature.hh"
+#include "db/timeout_clock.hh"
+#include "dht/i_partitioner.hh"
 
 #include <seastar/core/distributed.hh>
+
+#include "seastarx.hh"
+
+class reconcilable_result;
+
+namespace query {
+
+class read_command;
+class result;
+class result_options;
+
+} // namespace query
+
+namespace tracing {
+    class trace_state_ptr;
+} // namespace tracing
 
 /// Run the mutation query on all shards.
 ///

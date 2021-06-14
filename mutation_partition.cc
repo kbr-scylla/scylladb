@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -29,6 +29,8 @@
 #include "types/map.hh"
 #include "compaction_garbage_collector.hh"
 #include "utils/exceptions.hh"
+#include "clustering_key_filter.hh"
+#include "mutation_partition_view.hh"
 
 logging::logger mplog("mutation_partition");
 

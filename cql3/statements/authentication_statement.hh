@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright 2016 ScyllaDB
+ * Copyright 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,7 +31,6 @@
 #pragma once
 
 #include "cql3/cql_statement.hh"
-#include "prepared_statement.hh"
 #include "raw/parsed_statement.hh"
 #include "transport/messages_fwd.hh"
 

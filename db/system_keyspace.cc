@@ -18,7 +18,7 @@
 
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -73,6 +73,7 @@
 #include "db/virtual_table.hh"
 #include "service/storage_service.hh"
 #include "gms/gossiper.hh"
+#include "service/paxos/paxos_state.hh"
 
 #include "idl/frozen_mutation.dist.hh"
 #include "serializer_impl.hh"
@@ -883,9 +884,17 @@ schema_ptr scylla_views_builds_in_progress() {
         {},
         // regular columns
         {
-                /* Every node announces the timestamp of the newest known CDC generation to other nodes.
-                 * This timestamp is persisted here. */
+                /* Every node announces the identifier of the newest known CDC generation to other nodes.
+                 * The identifier consists of two things: a timestamp (which is the generation's timestamp,
+                 * denoting the time point from which it starts operating) and an UUID (randomly generated
+                 * when the generation is created).
+                 * This identifier is persisted here and restored on node restart.
+                 *
+                 * Some identifiers - identifying generations created in older clusters - have only the timestamp.
+                 * For these the uuid column is empty.
+                 */
                 {"streams_timestamp", timestamp_type},
+                {"uuid", uuid_type},
 
         },
         // static columns
@@ -1304,27 +1313,18 @@ future<> setup(distributed<database>& db,
                distributed<gms::feature_service>& feat,
                sharded<netw::messaging_service>& ms) {
     const db::config& cfg = db.local().get_config();
-    return setup_version(feat, ms, cfg).then([&db] {
-        return update_schema_version(db.local().get_version());
-    }).then([] {
-        return init_local_cache();
-    }).then([] {
-        return build_dc_rack_info();
-    }).then([] {
-        return build_bootstrap_info();
-    }).then([&cfg] {
-        return check_health(cfg.cluster_name());
-    }).then([&qp] {
-        return db::schema_tables::save_system_keyspace_schema(qp.local());
-    }).then([&qp] {
-        // #2514 - make sure "system" is written to system_schema.keyspaces.
-        return db::schema_tables::save_system_schema(qp.local(), NAME);
-    }).then([&db] {
-        return cache_truncation_record(db);
-    }).then([&ms] {
-        return ms.invoke_on_all([] (auto& ms){
+    co_await setup_version(feat, ms, cfg);
+    co_await update_schema_version(db.local().get_version());
+    co_await init_local_cache();
+    co_await build_dc_rack_info();
+    co_await build_bootstrap_info();
+    co_await check_health(cfg.cluster_name());
+    co_await db::schema_tables::save_system_keyspace_schema(qp.local());
+    // #2514 - make sure "system" is written to system_schema.keyspaces.
+    co_await db::schema_tables::save_system_schema(qp.local(), NAME);
+    co_await cache_truncation_record(db);
+    co_await ms.invoke_on_all([] (auto& ms){
             return ms.init_local_preferred_ip_cache();
-        });
     });
 }
 
@@ -1663,30 +1663,54 @@ future<std::unordered_set<dht::token>> get_local_tokens() {
             slogger.error("{}", err);
             throw std::runtime_error(err);
         }
-        return tokens;
+        return std::move(tokens);
     });
 }
 
 future<> update_cdc_generation_id(cdc::generation_id gen_id) {
-    return qctx->execute_cql(format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)",
-                v3::CDC_LOCAL), sstring(v3::CDC_LOCAL), gen_id.ts)
-            .discard_result().then([] { return force_blocking_flush(v3::CDC_LOCAL); });
+    co_await std::visit(make_visitor(
+    [] (cdc::generation_id_v1 id) -> future<> {
+        co_await qctx->execute_cql(
+                format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)", v3::CDC_LOCAL),
+                sstring(v3::CDC_LOCAL), id.ts);
+    },
+    [] (cdc::generation_id_v2 id) -> future<> {
+        co_await qctx->execute_cql(
+                format("INSERT INTO system.{} (key, streams_timestamp, uuid) VALUES (?, ?, ?)", v3::CDC_LOCAL),
+                sstring(v3::CDC_LOCAL), id.ts, id.id);
+    }
+    ), gen_id);
+
+    co_await force_blocking_flush(v3::CDC_LOCAL);
 }
 
 future<std::optional<cdc::generation_id>> get_cdc_generation_id() {
-    return qctx->execute_cql(format("SELECT streams_timestamp FROM system.{} WHERE key = ?", v3::CDC_LOCAL), sstring(v3::CDC_LOCAL))
-            .then([] (::shared_ptr<cql3::untyped_result_set> msg)-> std::optional<cdc::generation_id> {
-        if (msg->empty() || !msg->one().has("streams_timestamp")) {
-            return std::nullopt;
-        }
+    auto msg = co_await qctx->execute_cql(
+            format("SELECT streams_timestamp, uuid FROM system.{} WHERE key = ?", v3::CDC_LOCAL),
+            sstring(v3::CDC_LOCAL));
 
-        return cdc::generation_id{msg->one().get_as<db_clock::time_point>("streams_timestamp")};
-    });
+    if (msg->empty()) {
+        co_return std::nullopt;
+    }
+
+    auto& row = msg->one();
+    if (!row.has("streams_timestamp")) {
+        // should not happen but whatever
+        co_return std::nullopt;
+    }
+
+    auto ts = row.get_as<db_clock::time_point>("streams_timestamp");
+    if (!row.has("uuid")) {
+        co_return cdc::generation_id_v1{ts};
+    }
+
+    auto id = row.get_as<utils::UUID>("uuid");
+    co_return cdc::generation_id_v2{ts, id};
 }
 
 static const sstring CDC_REWRITTEN_KEY = "rewritten";
 
-future<> cdc_set_rewritten(std::optional<cdc::generation_id> gen_id) {
+future<> cdc_set_rewritten(std::optional<cdc::generation_id_v1> gen_id) {
     if (gen_id) {
         return qctx->execute_cql(
                 format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)", v3::CDC_LOCAL),

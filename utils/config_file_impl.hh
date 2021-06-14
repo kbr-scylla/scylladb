@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  */
 
@@ -66,9 +66,6 @@ template<typename K, typename V, typename... Args>
 std::istream& operator>>(std::istream&, std::unordered_map<K, V, Args...>&);
 
 template<>
-std::istream& operator>>(std::istream&, std::unordered_map<seastar::sstring, seastar::sstring>&);
-
-extern template
 std::istream& operator>>(std::istream&, std::unordered_map<seastar::sstring, seastar::sstring>&);
 
 template<typename V, typename... Args>

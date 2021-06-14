@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 ScyllaDB
+ * Copyright 2015-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,6 @@
 #pragma once
 
 #include <seastar/core/future.hh>
-#include <seastar/core/future-util.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/shared_ptr.hh>
 #include "seastarx.hh"
@@ -63,16 +62,15 @@ public:
 
     // Starts a new phase and waits for all operations started in any of the earlier phases.
     // It is fine to start multiple awaits in parallel.
-    // Strong exception guarantees.
+    // Cannot fail.
     future<> advance_and_await() noexcept {
-      try {
-        auto new_gate = make_lw_shared<gate>();
+        auto new_gate = [] {
+            seastar::memory::scoped_critical_alloc_section _;
+            return make_lw_shared<gate>();
+        }();
         ++_phase;
         auto old_gate = std::exchange(_gate, std::move(new_gate));
         return old_gate->close().then([old_gate, op = start()] {});
-      } catch (...) {
-        return current_exception_as_future();
-      }
     }
 
     // Returns current phase number. The smallest value returned is 0.

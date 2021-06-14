@@ -1,4 +1,8 @@
 /*
+ * Copyright (C) 2021-present ScyllaDB
+ */
+
+/*
  * This file is part of Scylla.
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
@@ -9,6 +13,8 @@
 #include "service/qos/service_level_controller.hh"
 #include "transport/messages/result_message.hh"
 #include "utils/overloaded_functor.hh"
+#include "service/client_state.hh"
+#include "service/query_state.hh"
 
 namespace cql3 {
 
@@ -46,6 +52,7 @@ list_service_level_statement::execute(query_processor& qp,
 
     static thread_local const std::vector<lw_shared_ptr<column_specification>> metadata({make_column("service_level", utf8_type),
         make_column("timeout", duration_type),
+        make_column("workload_type", utf8_type),
         make_column("shares", int32_type),
     });
 
@@ -86,10 +93,14 @@ list_service_level_statement::execute(query_processor& qp,
                 };
                 auto rs = std::make_unique<result_set>(metadata);
                 for (auto &&[sl_name, slo] : sl_info) {
+                    bytes_opt workload = slo.workload == qos::service_level_options::workload_type::unspecified
+                            ? bytes_opt()
+                            : utf8_type->decompose(qos::service_level_options::to_string(slo.workload));
                     rs->add_row(std::vector<bytes_opt>{
-                            utf8_type->decompose(sl_name), d(slo.timeout),
-                            dd(slo.shares),
-                        });
+                            utf8_type->decompose(sl_name),
+                            d(slo.timeout),
+                            workload,
+                            dd(slo.shares)});
                 }
 
                 auto rows = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(std::move(rs))));

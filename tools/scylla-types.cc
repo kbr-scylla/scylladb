@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -13,6 +13,7 @@
 
 #include "compound.hh"
 #include "db/marshal/type_parser.hh"
+#include "log.hh"
 
 using namespace seastar;
 

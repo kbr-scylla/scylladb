@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -22,9 +22,6 @@
 #include <seastar/net/byteorder.hh>
 #include "db_clock.hh"
 #include "bytes.hh"
-#include "log.hh"
-#include "cql_serialization_format.hh"
-#include "tombstone.hh"
 #include "to_string.hh"
 #include "duration.hh"
 #include "marshal_exception.hh"
@@ -36,10 +33,11 @@
 #include "utils/exceptions.hh"
 #include "utils/managed_bytes.hh"
 #include "utils/bit_cast.hh"
+#include "utils/chunked_vector.hh"
 
 class tuple_type_impl;
 class big_decimal;
-
+class cql_serialization_format;
 
 namespace utils {
 
@@ -1176,7 +1174,7 @@ void write_collection_value(managed_bytes_mutable_view&, cql_serialization_forma
 // Splits a serialized collection into a vector of elements, but does not recursively deserialize the elements.
 // Does not perform validation.
 template <FragmentedView View>
-std::vector<managed_bytes> partially_deserialize_listlike(View in, cql_serialization_format sf);
+utils::chunked_vector<managed_bytes> partially_deserialize_listlike(View in, cql_serialization_format sf);
 template <FragmentedView View>
 std::vector<std::pair<managed_bytes, managed_bytes>> partially_deserialize_map(View in, cql_serialization_format sf);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,7 @@
 #ifndef DATABASE_HH_
 #define DATABASE_HH_
 
-#include "locator/abstract_replication_strategy.hh"
+#include "locator/token_metadata.hh"
 #include "index/secondary_index_manager.hh"
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/sstring.hh>
@@ -118,6 +118,12 @@ future<> make(database& db);
 }
 }
 
+namespace locator {
+
+class abstract_replication_strategy;
+
+} // namespace locator
+
 class mutation_reordered_with_truncate_exception : public std::exception {};
 
 using shared_memtable = lw_shared_ptr<memtable>;
@@ -148,7 +154,6 @@ public:
 private:
     std::vector<shared_memtable> _memtables;
     seal_immediate_fn_type _seal_immediate_fn;
-    seal_delayed_fn_type _seal_delayed_fn;
     std::function<schema_ptr()> _current_schema;
     dirty_memory_manager* _dirty_memory_manager;
     std::optional<shared_promise<>> _flush_coalescing;
@@ -157,14 +162,12 @@ private:
 public:
     memtable_list(
             seal_immediate_fn_type seal_immediate_fn,
-            seal_delayed_fn_type seal_delayed_fn,
             std::function<schema_ptr()> cs,
             dirty_memory_manager* dirty_memory_manager,
             table_stats& table_stats,
             seastar::scheduling_group compaction_scheduling_group = seastar::current_scheduling_group())
         : _memtables({})
         , _seal_immediate_fn(seal_immediate_fn)
-        , _seal_delayed_fn(seal_delayed_fn)
         , _current_schema(cs)
         , _dirty_memory_manager(dirty_memory_manager)
         , _compaction_scheduling_group(compaction_scheduling_group)
@@ -172,19 +175,10 @@ public:
         add_memtable();
     }
 
-    memtable_list(
-            seal_immediate_fn_type seal_immediate_fn,
-            std::function<schema_ptr()> cs,
-            dirty_memory_manager* dirty_memory_manager,
-            table_stats& table_stats,
-            seastar::scheduling_group compaction_scheduling_group = seastar::current_scheduling_group())
-        : memtable_list(std::move(seal_immediate_fn), {}, std::move(cs), dirty_memory_manager, table_stats, compaction_scheduling_group) {
-    }
-
     memtable_list(std::function<schema_ptr()> cs, dirty_memory_manager* dirty_memory_manager,
             table_stats& table_stats,
             seastar::scheduling_group compaction_scheduling_group = seastar::current_scheduling_group())
-        : memtable_list({}, {}, std::move(cs), dirty_memory_manager, table_stats, compaction_scheduling_group) {
+        : memtable_list({}, std::move(cs), dirty_memory_manager, table_stats, compaction_scheduling_group) {
     }
 
     bool may_flush() const {
@@ -211,23 +205,25 @@ public:
     void erase(const shared_memtable& element) {
         _memtables.erase(boost::range::find(_memtables, element));
     }
-    void clear() {
+
+    // Clears the active memtable and adds a new, empty one.
+    // Exception safe.
+    void clear_and_add() {
+        auto mt = new_memtable();
         _memtables.clear();
+        // emplace_back might throw only if _memtables was empty
+        // on entry. Otherwise, we rely on clear() not to release
+        // the vector capacity (See https://en.cppreference.com/w/cpp/container/vector/clear)
+        // and lw_shared_ptr being nothrow move constructible.
+        _memtables.emplace_back(std::move(mt));
     }
 
     size_t size() const {
         return _memtables.size();
     }
 
-    future<> seal_active_memtable_immediate(flush_permit&& permit) {
+    future<> seal_active_memtable(flush_permit&& permit) {
         return _seal_immediate_fn(std::move(permit));
-    }
-
-    future<> seal_active_memtable_delayed() {
-        if (_seal_delayed_fn) {
-            return _seal_delayed_fn();
-        }
-        return request_flush();
     }
 
     auto begin() noexcept {
@@ -261,7 +257,8 @@ public:
     // dirty_memory_manager allows us to. We will not seal at this time since the flush itself
     // wouldn't happen anyway. Keeping the memtable in memory will potentially increase the time it
     // spends in memory allowing for more coalescing opportunities.
-    future<> request_flush();
+    // The returned future<> resolves when any pending flushes are complete and the memtable is sealed.
+    future<> flush();
 private:
     lw_shared_ptr<memtable> new_memtable();
 };
@@ -1033,6 +1030,14 @@ public:
     friend class column_family_test;
 
     friend class distributed_loader;
+
+private:
+    timer<> _off_strategy_trigger;
+    void do_update_off_strategy_trigger();
+
+public:
+    void update_off_strategy_trigger();
+    void enable_off_strategy_trigger();
 };
 
 class user_types_metadata;
@@ -1185,6 +1190,7 @@ class no_such_column_family : public std::runtime_error {
 public:
     no_such_column_family(const utils::UUID& uuid);
     no_such_column_family(std::string_view ks_name, std::string_view cf_name);
+    no_such_column_family(std::string_view ks_name, const utils::UUID& uuid);
 };
 
 

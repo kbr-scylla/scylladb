@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -677,7 +677,7 @@ future<> parse(const schema& s, sstable_version_types v, random_access_reader& i
                 return do_until([&eh, length] { return eh.buckets.size() == length; }, [&eh, &j, &buf] () mutable {
                     auto offset = net::ntoh(read_unaligned<uint64_t>(buf.get() + (j++) * sizeof(uint64_t)));
                     auto bucket = net::ntoh(read_unaligned<uint64_t>(buf.get() + (j++) * sizeof(uint64_t)));
-                    if (eh.buckets.size() > 0) {
+                    if (!eh.buckets.empty()) {
                         eh.bucket_offsets.push_back(offset);
                     }
                     eh.buckets.push_back(bucket);
@@ -2215,13 +2215,18 @@ void sstable::set_first_and_last_keys() {
     }
     auto decorate_key = [this] (const char *m, const bytes& value) {
         if (value.empty()) {
-            throw std::runtime_error(format("{} key of summary of {} is empty", m, get_filename()));
+            throw malformed_sstable_exception(format("{} key of summary of {} is empty", m, get_filename()));
         }
         auto pk = key::from_bytes(value).to_partition_key(*_schema);
         return dht::decorate_key(*_schema, std::move(pk));
     };
-    _first = decorate_key("first", _components->summary.first_key.value);
-    _last = decorate_key("last", _components->summary.last_key.value);
+    auto first = decorate_key("first", _components->summary.first_key.value);
+    auto last = decorate_key("last", _components->summary.last_key.value);
+    if (first.tri_compare(*_schema, last) > 0) {
+        throw malformed_sstable_exception(format("{}: first and last keys of summary are misordered: first={} > last={}", get_filename(), first, last));
+    }
+    _first = std::move(first);
+    _last = std::move(last);
 }
 
 const partition_key& sstable::get_first_partition_key() const {

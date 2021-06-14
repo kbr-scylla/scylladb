@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -12,8 +12,8 @@
 #include "service/raft/raft_services.hh"
 #include "gms/gossiper.hh"
 
-raft_gossip_failure_detector::raft_gossip_failure_detector(gms::gossiper& gs, raft_services& raft_srvs)
-    : _gossip(gs), _raft_services(raft_srvs)
+raft_gossip_failure_detector::raft_gossip_failure_detector(gms::gossiper& gs, raft_services& raft_svcs)
+    : _gossip(gs), _raft_services(raft_svcs)
 {}
 
 bool raft_gossip_failure_detector::is_alive(raft::server_id server) {

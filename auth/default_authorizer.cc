@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -51,6 +51,7 @@ extern "C" {
 #include "exceptions/exceptions.hh"
 #include "log.hh"
 #include "database.hh"
+#include "utils/class_registrator.hh"
 
 namespace auth {
 

@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -24,7 +24,7 @@
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  *
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 #pragma once

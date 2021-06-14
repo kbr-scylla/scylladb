@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  */
 
 /*
@@ -66,7 +66,7 @@ public:
         mutable std::optional<dht::partition_range> _current_range;
         mutable std::optional<nonwrapping_range<dht::ring_position_view>> _current_range_view;
         mutable std::vector<shared_sstable> _current_sstables;
-        mutable dht::ring_position_view _current_next_position = dht::ring_position_view::min();
+        mutable dht::ring_position_ext _current_next_position = dht::ring_position_view::min();
     public:
         ~incremental_selector();
         incremental_selector(std::unique_ptr<incremental_selector_impl> impl, const schema& s);
@@ -143,6 +143,8 @@ public:
             streamed_mutation::forwarding,
             mutation_reader::forwarding,
             read_monitor_generator& rmg = default_read_monitor_generator()) const;
+
+    friend class compound_sstable_set;
 };
 
 /// Read a range from the passed-in sstables.

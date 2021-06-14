@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -17,14 +17,14 @@
 #include "schema_fwd.hh"
 #include "sstables/shared_sstable.hh"
 #include "exceptions/exceptions.hh"
-#include "sstables/compaction_backlog_manager.hh"
 #include "compaction_strategy_type.hh"
+#include "flat_mutation_reader.hh"
 
 class table;
 using column_family = table;
 
-class flat_mutation_reader;
 struct mutation_source_metadata;
+class compaction_backlog_tracker;
 
 namespace sstables {
 
@@ -33,8 +33,6 @@ class sstable;
 class sstable_set;
 struct compaction_descriptor;
 struct resharding_descriptor;
-
-using reader_consumer = noncopyable_function<future<> (flat_mutation_reader)>;
 
 class compaction_strategy {
     ::shared_ptr<compaction_strategy_impl> _compaction_strategy_impl;

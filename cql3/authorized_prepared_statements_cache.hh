@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -11,6 +11,7 @@
 #pragma once
 
 #include "cql3/prepared_statements_cache.hh"
+#include "auth/authenticated_user.hh"
 
 namespace cql3 {
 

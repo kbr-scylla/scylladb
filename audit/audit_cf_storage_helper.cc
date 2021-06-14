@@ -16,21 +16,6 @@ namespace audit {
 const sstring audit_cf_storage_helper::KEYSPACE_NAME("audit");
 const sstring audit_cf_storage_helper::TABLE_NAME("audit_log");
 
-static ::service::query_state& internal_distributed_query_state() noexcept {
-    using namespace std::chrono_literals;
-
-#ifdef DEBUG
-    // Give the much slower debug tests more headroom for completing auth queries.
-    static const auto t = 30s;
-#else
-    static const auto t = 5s;
-#endif
-    static const timeout_config tc{t, t, t, t, t, t, t};
-    static thread_local ::service::client_state cs(::service::client_state::internal_tag{}, tc);
-    static thread_local ::service::query_state qs(cs, empty_service_permit());
-    return qs;
-}
-
 audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
     : _qp(qp)
     , _table(KEYSPACE_NAME, TABLE_NAME,

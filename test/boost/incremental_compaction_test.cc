@@ -43,7 +43,6 @@ static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
 
 SEASTAR_TEST_CASE(incremental_compaction_test) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
-        storage_service_for_tests ssft;
         cell_locker_stats cl_stats;
 
         auto builder = schema_builder("tests", "incremental_compaction_test")
@@ -223,7 +222,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             static thread_local unsigned gen = 0;
             auto sst = _env.make_sstable(_cf->schema(), "", gen++, la, big);
             sstables::test(sst).set_data_file_size(sstable_data_size);
-            sstables::test(sst).set_values("a", "z", stats_metadata{});
+            sstables::test(sst).set_values("z", "a", stats_metadata{});
             return sst;
         }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -15,7 +15,6 @@
 #include <boost/intrusive/parent_from_member.hpp>
 
 #include <seastar/core/memory.hh>
-#include <seastar/core/thread.hh>
 #include <seastar/util/noncopyable_function.hh>
 
 #include "mutation_reader.hh"
@@ -23,7 +22,6 @@
 #include "utils/phased_barrier.hh"
 #include "utils/histogram.hh"
 #include "partition_version.hh"
-#include "utils/estimated_histogram.hh"
 #include "tracing/trace_state.hh"
 #include <seastar/core/metrics_registration.hh>
 #include "mutation_cleaner.hh"

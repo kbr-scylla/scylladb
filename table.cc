@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -403,6 +403,26 @@ void table::add_maintenance_sstable(sstables::shared_sstable sst) {
     refresh_compound_sstable_set();
 }
 
+void table::do_update_off_strategy_trigger() {
+    _off_strategy_trigger.rearm(timer<>::clock::now() +  std::chrono::minutes(5));
+}
+
+// If there are more sstables to be added to the off-strategy sstable set, call
+// update_off_strategy_trigger to update the timer and delay to trigger
+// off-strategy compaction. The off-strategy compaction will be triggered when
+// the timer is expired.
+void table::update_off_strategy_trigger() {
+    if (_off_strategy_trigger.armed()) {
+        do_update_off_strategy_trigger();
+    }
+}
+
+// Call enable_off_strategy_trigger to enable the automatic off-strategy
+// compaction trigger.
+void table::enable_off_strategy_trigger() {
+    do_update_off_strategy_trigger();
+}
+
 future<>
 table::add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy) {
     return get_row_cache().invalidate(row_cache::external_updater([this, sst, offstrategy] () noexcept {
@@ -557,10 +577,14 @@ table::seal_active_memtable(flush_permit&& permit) {
                 });
             });
         });
-    }).then([this, memtable_size, old, op = std::move(op), previous_flush = std::move(previous_flush)] () mutable {
+    }).then_wrapped([this, memtable_size, old, op = std::move(op), previous_flush = std::move(previous_flush)] (future<> f) mutable {
         _stats.pending_flushes--;
         _config.cf_stats->pending_memtables_flushes_count--;
         _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
+
+        if (f.failed()) {
+            return std::move(f);
+        }
 
         if (_commitlog) {
             _commitlog->discard_completed_segments(_schema->id(), old->rp_set());
@@ -659,7 +683,7 @@ table::stop() {
     }
     return _async_gate.close().then([this] {
         return await_pending_ops().finally([this] {
-            return _memtables->request_flush().finally([this] {
+            return _memtables->flush().finally([this] {
                 return _compaction_manager.remove(this).then([this] {
                     return _sstable_deletion_gate.close().then([this] {
                         return get_row_cache().invalidate(row_cache::external_updater([this] {
@@ -959,6 +983,9 @@ future<> table::run_compaction(sstables::compaction_descriptor descriptor) {
 }
 
 void table::trigger_offstrategy_compaction() {
+    // If the user calls trigger_offstrategy_compaction() to trigger
+    // off-strategy explicitly, cancel the timeout based automatic trigger.
+    _off_strategy_trigger.cancel();
     _compaction_manager.submit_offstrategy(this);
 }
 
@@ -1174,6 +1201,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _index_manager(*this)
     , _counter_cell_locks(_schema->is_counter() ? std::make_unique<cell_locker>(_schema, cl_stats) : nullptr)
     , _row_locker(_schema)
+    , _off_strategy_trigger([this] { trigger_offstrategy_compaction(); })
 {
     if (!_config.enable_disk_writes) {
         tlogger.warn("Writes disabled, column family no durable.");
@@ -1453,7 +1481,7 @@ future<> table::flush(std::optional<db::replay_position> pos) {
         return make_ready_future<>();
     }
     auto op = _pending_flushes_phaser.start();
-    return _memtables->request_flush().then([this, op = std::move(op), fp = _highest_rp] {
+    return _memtables->flush().then([this, op = std::move(op), fp = _highest_rp] {
         _flush_rp = std::max(_flush_rp, fp);
     });
 }
@@ -1463,11 +1491,12 @@ bool table::can_flush() const {
 }
 
 future<> table::clear() {
+    _memtables->clear_and_add();
     if (_commitlog) {
-        _commitlog->discard_completed_segments(_schema->id());
+        for (auto& t : *_memtables) {
+            _commitlog->discard_completed_segments(_schema->id(), t->rp_set());
+        }
     }
-    _memtables->clear();
-    _memtables->add_memtable();
     return _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
 }
 
@@ -1809,6 +1838,10 @@ db::replay_position table::set_low_replay_position_mark() {
 
 template<typename... Args>
 void table::do_apply(db::rp_handle&& h, Args&&... args) {
+    if (_async_gate.is_closed()) {
+        on_internal_error(tlogger, "Table async_gate is closed");
+    }
+
     utils::latency_counter lc;
     _stats.writes.set_latency(lc);
     db::replay_position rp = h;

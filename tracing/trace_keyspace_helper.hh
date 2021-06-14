@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -34,6 +34,7 @@
 #include <seastar/core/metrics_registration.hh>
 #include "tracing/tracing.hh"
 #include "table_helper.hh"
+#include "cql3/values.hh"
 
 namespace tracing {
 

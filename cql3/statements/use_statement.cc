@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,6 +32,7 @@
 #include "cql3/statements/raw/use_statement.hh"
 #include "cql3/query_processor.hh"
 #include "transport/messages/result_message.hh"
+#include "service/query_state.hh"
 
 namespace cql3 {
 

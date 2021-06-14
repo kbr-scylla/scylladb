@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,6 +31,9 @@
 #include "parsed_statement.hh"
 
 #include "cql3/statements/prepared_statement.hh"
+#include "cql3/column_specification.hh"
+
+#include "cql3/cql_statement.hh"
 
 namespace cql3 {
 

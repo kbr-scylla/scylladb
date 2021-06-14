@@ -18,7 +18,7 @@
 /*
  * Modified by ScyllaDB
  *
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -70,7 +70,8 @@ public:
         static value from_serialized(const raw_value_view&, const user_type_impl&);
 
         virtual cql3::raw_value get(const query_options&) override;
-        virtual const std::vector<managed_bytes_opt>& get_elements() const override;
+        const std::vector<managed_bytes_opt>& get_elements() const;
+        virtual std::vector<managed_bytes_opt> copy_elements() const override;
         virtual sstring to_string() const override;
     };
 

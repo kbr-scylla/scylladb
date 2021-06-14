@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 ScyllaDB
+ * Copyright 2016-present ScyllaDB
  */
 
 /*
@@ -105,6 +105,7 @@ enum class node_ops_cmd : uint32_t {
      bootstrap_abort,
      bootstrap_done,
      query_pending_ops,
+     repair_updater,
 };
 
 struct node_ops_cmd_request {
@@ -120,6 +121,8 @@ struct node_ops_cmd_request {
     std::unordered_map<gms::inet_address, gms::inet_address> replace_nodes;
     // Optional field, map bootstrapping nodes to bootstrap tokens, set by bootstrap cmd
     std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap_nodes;
+    // Optional field, list uuids of tables being repaired, set by repair cmd
+    std::list<utils::UUID> repair_tables;
 };
 
 struct node_ops_cmd_response {

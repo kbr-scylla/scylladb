@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -30,6 +30,8 @@
 #include <seastar/core/execution_stage.hh>
 #include "utils/updateable_value.hh"
 #include "generic_server.hh"
+#include "service/query_state.hh"
+#include "cql3/query_options.hh"
 
 namespace scollectd {
 
@@ -41,7 +43,6 @@ namespace service {
 class memory_limiter;
 }
 
-class database;
 enum class client_type;
 struct client_data;
 
@@ -153,8 +154,9 @@ private:
     qos::service_level_controller& _sl_controller;
 public:
     cql_server(distributed<cql3::query_processor>& qp, auth::service&,
-            service::migration_notifier& mn, database& db, service::memory_limiter& ml,
+            service::migration_notifier& mn, service::memory_limiter& ml,
             cql_server_config config,
+            const db::config& db_cfg,
             qos::service_level_controller& sl_controller);
 public:
     using response = cql_transport::response;
@@ -173,6 +175,8 @@ private:
         cql_serialization_format _cql_serialization_format = cql_serialization_format::latest();
         service::client_state _client_state;
         std::unordered_map<uint16_t, cql_query_state> _query_states;
+        timer<lowres_clock> _shedding_timer;
+        bool _shed_incoming_requests = false;
         unsigned _request_cpu = 0;
         bool _tenant_switch = false;
 

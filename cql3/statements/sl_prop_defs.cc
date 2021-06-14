@@ -1,4 +1,8 @@
 /*
+ * Copyright (C) 2021-present ScyllaDB
+ */
+
+/*
  * This file is part of Scylla.
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
@@ -16,7 +20,7 @@ namespace statements {
 
 void sl_prop_defs::validate() {
     static std::set<sstring> timeout_props {
-        "timeout",  sstring(KW_SHARES),
+        "timeout", "workload_type",  sstring(KW_SHARES),
     };
     auto get_duration = [&] (const std::optional<sstring>& repr) -> qos::service_level_options::timeout_type {
         if (!repr) {
@@ -41,6 +45,20 @@ void sl_prop_defs::validate() {
 
     property_definitions::validate(timeout_props);
     _slo.timeout = get_duration(get_simple("timeout"));
+
+    auto workload_string_opt = get_simple("workload_type");
+    if (workload_string_opt) {
+        auto workload = qos::service_level_options::parse_workload_type(*workload_string_opt);
+        if (!workload) {
+            throw exceptions::invalid_request_exception(format("Invalid workload type: {}", *workload_string_opt));
+        }
+        _slo.workload = *workload;
+        // Explicitly setting a workload type to 'unspecified' should result in resetting
+        // the previous value to 'unspecified, not just keeping it as is
+        if (_slo.workload == qos::service_level_options::workload_type::unspecified) {
+            _slo.workload = qos::service_level_options::workload_type::delete_marker;
+        }
+    }
 
     if (has_property(KW_SHARES)) {
         auto shares = get_int(KW_SHARES, SHARES_DEFAULT_VAL);

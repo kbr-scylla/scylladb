@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,13 +31,16 @@
 #pragma once
 
 #include "cql3/statements/property_definitions.hh"
-#include "locator/token_metadata.hh"
 
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
 #include <optional>
 
 class keyspace_metadata;
+
+namespace locator {
+    class token_metadata;
+} // namespace locator
 
 namespace cql3 {
 

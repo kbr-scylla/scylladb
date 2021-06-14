@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -18,6 +18,8 @@
 #include "collection_mutation.hh"
 #include "utils/chunked_vector.hh"
 #include "schema_fwd.hh"
+#include "log.hh"
+#include "cql_serialization_format.hh"
 
 namespace cql3 {
 

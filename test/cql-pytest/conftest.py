@@ -1,4 +1,4 @@
-# Copyright 2020 ScyllaDB
+# Copyright 2020-present ScyllaDB
 #
 # This file is part of Scylla.
 #
@@ -16,6 +16,7 @@ import pytest
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster, ConsistencyLevel, ExecutionProfile, EXEC_PROFILE_DEFAULT
 from cassandra.policies import RoundRobinPolicy
+import ssl
 
 from util import unique_name, new_test_table
 
@@ -27,6 +28,8 @@ def pytest_addoption(parser):
         help='CQL server host to connect to')
     parser.addoption('--port', action='store', default='9042',
         help='CQL server port to connect to')
+    parser.addoption('--ssl', action='store_true',
+        help='Connect to CQL via an encrypted TLSv1.2 connection')
 
 # "cql" fixture: set up client object for communicating with the CQL API.
 # The host/port combination of the server are determined by the --host and
@@ -44,6 +47,12 @@ def cql(request):
         # request (e.g., a DROP KEYSPACE needing to drop multiple tables)
         # 10 seconds may not be enough, so let's increase it. See issue #7838.
         request_timeout = 120)
+    if request.config.getoption('ssl'):
+        # Scylla does not support any earlier TLS protocol. If you try,
+        # you will get mysterious EOF errors (see issue #6971) :-(
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+    else:
+        ssl_context = None
     cluster = Cluster(execution_profiles={EXEC_PROFILE_DEFAULT: profile},
         contact_points=[request.config.getoption('host')],
         port=request.config.getoption('port'),
@@ -53,6 +62,7 @@ def cql(request):
         protocol_version=4,
         # Use the default superuser credentials, which work for both Scylla and Cassandra
         auth_provider=PlainTextAuthProvider(username='cassandra', password='cassandra'),
+        ssl_context=ssl_context,
     )
     return cluster.connect()
 

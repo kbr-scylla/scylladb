@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -300,7 +300,6 @@ public:
 
     static future<> do_with_tmp_directory(std::function<future<> (test_env&, sstring tmpdir_path)>&& fut) {
         return seastar::async([fut = std::move(fut)] {
-            storage_service_for_tests ssft;
             auto tmp = tmpdir();
             test_env env;
             auto close_env = defer([&] { env.stop().get(); });
@@ -310,7 +309,6 @@ public:
 
     static future<> do_with_cloned_tmp_directory(sstring src, std::function<future<> (test_env&, sstring srcdir_path, sstring destdir_path)>&& fut) {
         return seastar::async([fut = std::move(fut), src = std::move(src)] {
-            storage_service_for_tests ssft;
             auto src_dir = tmpdir();
             auto dest_dir = tmpdir();
             for (const auto& entry : std::filesystem::directory_iterator(src.c_str())) {

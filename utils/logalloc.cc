@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -24,8 +24,10 @@
 #include <seastar/core/metrics.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/util/alloc_failure_injector.hh>
 #include <seastar/util/backtrace.hh>
+#include <seastar/util/later.hh>
 
 #include "utils/logalloc.hh"
 #include "log.hh"

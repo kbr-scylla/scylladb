@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -35,6 +35,7 @@
 #include "database_fwd.hh"
 #include "term.hh"
 #include "update_parameters.hh"
+#include "cql3/column_identifier.hh"
 
 #include <optional>
 

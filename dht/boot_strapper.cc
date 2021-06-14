@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -33,6 +33,7 @@
 #include "db/config.hh"
 #include "database.hh"
 #include "streaming/stream_reason.hh"
+#include "locator/abstract_replication_strategy.hh"
 
 static logging::logger blogger("boot_strapper");
 

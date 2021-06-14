@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,6 +32,7 @@
 #include "selector.hh"
 #include "types.hh"
 #include "types/user.hh"
+#include "cql_serialization_format.hh"
 
 namespace cql3 {
 

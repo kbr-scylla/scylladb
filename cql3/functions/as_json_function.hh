@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,11 +32,13 @@
 
 #include "cql3/functions/function.hh"
 #include "cql3/functions/scalar_function.hh"
+#include "cql3/functions/function_name.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/type_json.hh"
 
 #include "bytes_ostream.hh"
 #include "types.hh"
+#include "cql_serialization_format.hh"
 
 #include <boost/algorithm/cxx11/any_of.hpp>
 

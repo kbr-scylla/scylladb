@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -12,6 +12,7 @@
 
 #include "mutation_fragment.hh"
 #include "clustering_ranges_walker.hh"
+#include "clustering_key_filter.hh"
 
 namespace sstables {
 

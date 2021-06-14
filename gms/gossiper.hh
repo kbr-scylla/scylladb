@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -412,6 +412,8 @@ public:
      */
     int compare_endpoint_startup(inet_address addr1, inet_address addr2);
 private:
+    void update_timestamp_for_nodes(const std::map<inet_address, endpoint_state>& map);
+
     void mark_alive(inet_address addr, endpoint_state& local_state);
 
     void real_mark_alive(inet_address addr, endpoint_state& local_state);

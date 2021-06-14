@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2021 ScyllaDB
+ * Copyright (C) 2021-present ScyllaDB
  *
  */
 
@@ -34,6 +34,7 @@ class config;
 
 namespace gms {
 class gossiper;
+class feature_service;
 }
 
 namespace seastar {
@@ -60,6 +61,7 @@ class generation_service : public peering_sharded_service<generation_service>
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     abort_source& _abort_src;
     const locator::shared_token_metadata& _token_metadata;
+    gms::feature_service& _feature_service;
 
     /* Maintains the set of known CDC generations used to pick streams for log writes (i.e., the partition keys of these log writes).
      * Updated in response to certain gossip events (see the handle_cdc_generation function).
@@ -81,7 +83,8 @@ class generation_service : public peering_sharded_service<generation_service>
     std::optional<cdc::generation_id> _gen_id;
 public:
     generation_service(const db::config&, gms::gossiper&,
-            sharded<db::system_distributed_keyspace>&, abort_source&, const locator::shared_token_metadata&);
+            sharded<db::system_distributed_keyspace>&, abort_source&, const locator::shared_token_metadata&,
+            gms::feature_service&);
 
     future<> stop();
     ~generation_service();

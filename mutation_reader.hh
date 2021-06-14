@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -12,7 +12,6 @@
 
 #include <vector>
 
-#include "clustering_key_filter.hh"
 #include <seastar/core/future.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/do_with.hh>
@@ -557,12 +556,12 @@ private:
     std::exception_ptr _ex;
 
 private:
-    explicit queue_reader_handle(queue_reader& reader);
+    explicit queue_reader_handle(queue_reader& reader) noexcept;
 
     void abandon();
 
 public:
-    queue_reader_handle(queue_reader_handle&& o);
+    queue_reader_handle(queue_reader_handle&& o) noexcept;
     ~queue_reader_handle();
     queue_reader_handle& operator=(queue_reader_handle&& o);
 

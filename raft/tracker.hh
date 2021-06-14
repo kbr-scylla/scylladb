@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,6 @@
 
 #include <seastar/core/condition-variable.hh>
 #include "raft.hh"
-#include "logical_clock.hh"
 
 namespace raft {
 
@@ -30,7 +29,7 @@ public:
     index_t match_idx = index_t(0);
     // Index that we know to be committed by the follower
     index_t commit_idx = index_t(0);
-    // True if the follower is voting one
+    // True if the follower is a voting one
     bool can_vote = true;
 
     enum class state {

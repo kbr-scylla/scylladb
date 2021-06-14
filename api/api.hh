@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 ScyllaDB
+ * Copyright 2015-present ScyllaDB
  */
 
 /*
@@ -60,7 +60,7 @@ T map_sum(T&& dest, const S& src) {
     for (auto i : src) {
         dest[i.first] += i.second;
     }
-    return dest;
+    return std::move(dest);
 }
 
 template <typename MAP>

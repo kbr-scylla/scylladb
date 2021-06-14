@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -23,11 +23,13 @@
 #include "cql3/lists.hh"
 #include "cql3/statements/request_validations.hh"
 #include "cql3/tuples.hh"
+#include "cql3/selection/selection.hh"
 #include "index/secondary_index_manager.hh"
 #include "types/list.hh"
 #include "types/map.hh"
 #include "types/set.hh"
 #include "utils/like_matcher.hh"
+#include "query-result-reader.hh"
 
 namespace cql3 {
 namespace expr {
@@ -807,7 +809,7 @@ bool has_supporting_index(
         const secondary_index::secondary_index_manager& index_manager,
         allow_local_index allow_local) {
     const auto indexes = index_manager.list_indexes();
-    const auto support = std::bind(is_supported_by, expr, std::placeholders::_1);
+    const auto support = std::bind(is_supported_by, std::ref(expr), std::placeholders::_1);
     return allow_local ? boost::algorithm::any_of(indexes, support)
             : boost::algorithm::any_of(
                     indexes | filtered([] (const secondary_index::index& i) { return !i.metadata().local(); }),

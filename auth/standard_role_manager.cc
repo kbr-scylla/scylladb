@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -203,7 +203,7 @@ future<> standard_role_manager::create_default_role_if_missing() const {
 
 static const sstring legacy_table_name{"users"};
 
-bool standard_role_manager::legacy_metadata_exists() const {
+bool standard_role_manager::legacy_metadata_exists() {
     return _qp.db().has_schema(meta::AUTH_KS, legacy_table_name);
 }
 
@@ -281,7 +281,7 @@ future<> standard_role_manager::create_or_replace(std::string_view role_name, co
 }
 
 future<>
-standard_role_manager::create(std::string_view role_name, const role_config& c) const {
+standard_role_manager::create(std::string_view role_name, const role_config& c) {
     return this->exists(role_name).then([this, role_name, &c](bool role_exists) {
         if (role_exists) {
             throw role_already_exists(role_name);
@@ -292,7 +292,7 @@ standard_role_manager::create(std::string_view role_name, const role_config& c) 
 }
 
 future<>
-standard_role_manager::alter(std::string_view role_name, const role_config_update& u) const {
+standard_role_manager::alter(std::string_view role_name, const role_config_update& u) {
     static const auto build_column_assignments = [](const role_config_update& u) -> sstring {
         std::vector<sstring> assignments;
 
@@ -323,7 +323,7 @@ standard_role_manager::alter(std::string_view role_name, const role_config_updat
     });
 }
 
-future<> standard_role_manager::drop(std::string_view role_name) const {
+future<> standard_role_manager::drop(std::string_view role_name) {
     return this->exists(role_name).then([this, role_name](bool role_exists) {
         if (!role_exists) {
             throw nonexistant_role(role_name);
@@ -440,7 +440,7 @@ standard_role_manager::modify_membership(
 }
 
 future<>
-standard_role_manager::grant(std::string_view grantee_name, std::string_view role_name) const {
+standard_role_manager::grant(std::string_view grantee_name, std::string_view role_name) {
     const auto check_redundant = [this, role_name, grantee_name] {
         return this->query_granted(
                 grantee_name,
@@ -471,7 +471,7 @@ standard_role_manager::grant(std::string_view grantee_name, std::string_view rol
 }
 
 future<>
-standard_role_manager::revoke(std::string_view revokee_name, std::string_view role_name) const {
+standard_role_manager::revoke(std::string_view revokee_name, std::string_view role_name) {
     return this->exists(role_name).then([this, revokee_name, role_name](bool role_exists) {
         if (!role_exists) {
             throw nonexistant_role(sstring(role_name));
@@ -511,7 +511,7 @@ static future<> collect_roles(
     });
 }
 
-future<role_set> standard_role_manager::query_granted(std::string_view grantee_name, recursive_role_query m) const {
+future<role_set> standard_role_manager::query_granted(std::string_view grantee_name, recursive_role_query m) {
     const bool recurse = (m == recursive_role_query::yes);
 
     return do_with(
@@ -521,7 +521,7 @@ future<role_set> standard_role_manager::query_granted(std::string_view grantee_n
     });
 }
 
-future<role_set> standard_role_manager::query_all() const {
+future<role_set> standard_role_manager::query_all() {
     static const sstring query = format("SELECT {} FROM {}",
             meta::roles_table::role_col_name,
             meta::roles_table::qualified_name);
@@ -547,25 +547,25 @@ future<role_set> standard_role_manager::query_all() const {
     });
 }
 
-future<bool> standard_role_manager::exists(std::string_view role_name) const  {
+future<bool> standard_role_manager::exists(std::string_view role_name) {
     return find_record(_qp, role_name).then([](std::optional<record> mr) {
         return static_cast<bool>(mr);
     });
 }
 
-future<bool> standard_role_manager::is_superuser(std::string_view role_name) const {
+future<bool> standard_role_manager::is_superuser(std::string_view role_name) {
     return require_record(_qp, role_name).then([](record r) {
         return r.is_superuser;
     });
 }
 
-future<bool> standard_role_manager::can_login(std::string_view role_name) const {
+future<bool> standard_role_manager::can_login(std::string_view role_name) {
     return require_record(_qp, role_name).then([](record r) {
         return r.can_login;
     });
 }
 
-future<std::optional<sstring>> standard_role_manager::get_attribute(std::string_view role_name, std::string_view attribute_name) const {
+future<std::optional<sstring>> standard_role_manager::get_attribute(std::string_view role_name, std::string_view attribute_name) {
     static const sstring query = format("SELECT name, value FROM {} WHERE role = ? AND name = ?", meta::role_attributes_table::qualified_name());
     return _qp.execute_internal(query, {sstring(role_name), sstring(attribute_name)}).then([] (shared_ptr<cql3::untyped_result_set> result_set) {
         if (!result_set->empty()) {
@@ -576,7 +576,7 @@ future<std::optional<sstring>> standard_role_manager::get_attribute(std::string_
     });
 }
 
-future<role_manager::attribute_vals> standard_role_manager::query_attribute_for_all (std::string_view attribute_name) const {
+future<role_manager::attribute_vals> standard_role_manager::query_attribute_for_all (std::string_view attribute_name) {
     return query_all().then([this, attribute_name] (role_set roles) {
         return do_with(attribute_vals{}, [this, attribute_name, roles = std::move(roles)] (attribute_vals &role_to_att_val) {
             return parallel_for_each(roles.begin(), roles.end(), [this, &role_to_att_val, attribute_name] (sstring role) {
@@ -592,7 +592,7 @@ future<role_manager::attribute_vals> standard_role_manager::query_attribute_for_
     });
 }
 
-future<> standard_role_manager::set_attribute(std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value) const {
+future<> standard_role_manager::set_attribute(std::string_view role_name, std::string_view attribute_name, std::string_view attribute_value) {
     static const sstring query = format("INSERT INTO {} (role, name, value)  VALUES (?, ?, ?)", meta::role_attributes_table::qualified_name());
     return do_with(sstring(role_name), sstring(attribute_name), sstring(attribute_value), [this] (sstring& role_name, sstring &attribute_name,
             sstring &attribute_value) {
@@ -606,7 +606,7 @@ future<> standard_role_manager::set_attribute(std::string_view role_name, std::s
 
 }
 
-future<> standard_role_manager::remove_attribute(std::string_view role_name, std::string_view attribute_name) const {
+future<> standard_role_manager::remove_attribute(std::string_view role_name, std::string_view attribute_name) {
     static const sstring query = format("DELETE FROM {} WHERE role = ? AND name = ?", meta::role_attributes_table::qualified_name());
     return do_with(sstring(role_name), sstring(attribute_name), [this] (sstring& role_name, sstring &attribute_name) {
         return exists(role_name).then([&role_name, &attribute_name, this] (bool role_exists) {

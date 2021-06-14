@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -63,7 +63,7 @@ static std::vector<raft::log_entry_ptr> create_test_log() {
         make_lw_shared(raft::log_entry{
             .term = raft::term_t(2),
             .idx = raft::index_t(2),
-            .data = raft::configuration({raft::server_id{.id = utils::make_random_uuid()}})}),
+            .data = raft::configuration({raft::server_id::create_random_id()})}),
         // dummy
         make_lw_shared(raft::log_entry{
             .term = raft::term_t(3),
@@ -78,7 +78,7 @@ SEASTAR_TEST_CASE(test_store_load_term_and_vote) {
         raft_sys_table_storage storage(qp, gid);
 
         raft::term_t vote_term(1);
-        raft::server_id vote_id{.id = utils::make_random_uuid()};
+        auto vote_id = raft::server_id::create_random_id();
 
         co_await storage.store_term_and_vote(vote_term, vote_id);
         auto persisted = co_await storage.load_term_and_vote();
@@ -95,8 +95,8 @@ SEASTAR_TEST_CASE(test_store_load_snapshot) {
 
         raft::term_t snp_term(1);
         raft::index_t snp_idx(1);
-        raft::configuration snp_cfg({raft::server_id{.id = utils::make_random_uuid()}});
-        raft::snapshot_id snp_id{.id = utils::make_random_uuid()};
+        raft::configuration snp_cfg({raft::server_id::create_random_id()});
+        auto snp_id = raft::snapshot_id::create_random_id();
 
         raft::snapshot snp{
             .idx = snp_idx,
@@ -158,8 +158,8 @@ SEASTAR_TEST_CASE(test_store_snapshot_truncate_log_tail) {
 
         raft::term_t snp_term(3);
         raft::index_t snp_idx(3);
-        raft::configuration snp_cfg({raft::server_id{.id = utils::make_random_uuid()}});
-        raft::snapshot_id snp_id{.id = utils::make_random_uuid()};
+        raft::configuration snp_cfg({raft::server_id::create_random_id()});
+        auto snp_id = raft::snapshot_id::create_random_id();
 
         raft::snapshot snp{
             .idx = snp_idx,

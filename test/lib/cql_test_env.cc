@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -20,6 +20,7 @@
 #include "cql3/query_processor.hh"
 #include "cql3/query_options.hh"
 #include "cql3/statements/batch_statement.hh"
+#include "cql3/statements/modification_statement.hh"
 #include "cql3/cql_config.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/abort_source.hh>
@@ -31,6 +32,7 @@
 #include "service/migration_manager.hh"
 #include "sstables/compaction_manager.hh"
 #include "message/messaging_service.hh"
+#include "service/raft/raft_services.hh"
 #include "service/storage_service.hh"
 #include "service/storage_proxy.hh"
 #include "auth/service.hh"
@@ -274,6 +276,13 @@ public:
         return make_ready_future<>();
     }
 
+    virtual future<> require_table_exists(std::string_view qualified_name) override {
+        auto dot_pos = qualified_name.find_first_of('.');
+        assert(dot_pos != std::string_view::npos && dot_pos != 0 && dot_pos != qualified_name.size() - 1);
+        assert(_db.local().has_schema(qualified_name.substr(0, dot_pos), qualified_name.substr(dot_pos + 1)));
+        return make_ready_future<>();
+    }
+
     virtual future<> require_table_does_not_exist(const sstring& ks_name, const sstring& table_name) override {
         auto& db = _db.local();
         assert(!db.has_schema(ks_name, table_name));
@@ -513,11 +522,25 @@ public:
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<cdc::generation_service> cdc_generation_service;
             sharded<repair_service> repair;
+            sharded<cql3::query_processor> qp;
+            sharded<raft_services> raft_svcs;
+            raft_svcs.start(std::ref(ms), std::ref(gms::get_gossiper()), std::ref(qp)).get();
+            auto stop_raft = defer([&raft_svcs] { raft_svcs.stop().get(); });
 
             auto& ss = service::get_storage_service();
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
-            ss.start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(mm), std::ref(token_metadata), std::ref(ms), std::ref(cdc_generation_service), std::ref(repair), std::ref(sl_controller), true).get();
+            ss.start(std::ref(abort_sources), std::ref(db),
+                std::ref(gms::get_gossiper()),
+                std::ref(sys_dist_ks),
+                std::ref(view_update_generator),
+                std::ref(feature_service), sscfg, std::ref(mm),
+                std::ref(token_metadata), std::ref(ms),
+                std::ref(cdc_generation_service),
+                std::ref(repair),
+                std::ref(raft_svcs),
+                std::ref(sl_controller),
+                true).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             sharded<semaphore> sst_dir_semaphore;
@@ -576,7 +599,6 @@ public:
             mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms)).get();
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
-            sharded<cql3::query_processor> qp;
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
             qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
@@ -629,7 +651,14 @@ public:
 
             sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
 
-            cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata)).get();
+            // We need to have a system keyspace started and
+            // initialized to initialize Raft service.
+            raft_svcs.invoke_on_all(&raft_services::init).get();
+            auto stop_raft_rpc = defer([&raft_svcs] {
+                raft_svcs.invoke_on_all(&raft_services::uninit).get();
+            });
+
+            cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
             auto stop_cdc_generation_service = defer([&cdc_generation_service] {
                 cdc_generation_service.stop().get();
             });

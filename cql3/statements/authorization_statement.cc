@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright 2016 ScyllaDB
+ * Copyright 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,6 +30,8 @@
 
 #include "authorization_statement.hh"
 #include "transport/messages/result_message.hh"
+#include "service/client_state.hh"
+#include "auth/resource.hh"
 
 uint32_t cql3::statements::authorization_statement::get_bound_terms() const {
     return 0;

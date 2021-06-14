@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -15,6 +15,7 @@
 #include "frozen_mutation.hh"
 #include "partition_snapshot_reader.hh"
 #include "partition_builder.hh"
+#include "mutation_partition_view.hh"
 
 namespace {
 

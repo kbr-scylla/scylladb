@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -41,6 +41,10 @@ using namespace std::chrono_literals;
 using namespace seastar;
 namespace fs = std::filesystem;
 using int_range = nonwrapping_range<int>;
+
+namespace sstables {
+    extern bool use_binary_search_in_promoted_index;
+} // namespace sstables
 
 reactor::io_stats s;
 

@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -38,6 +38,7 @@
 #include <boost/range/adaptors.hpp>
 
 #include "utils/rjson.hh"
+#include "log.hh"
 
 const sstring db::index::secondary_index::custom_index_option_name = "class_name";
 const sstring db::index::secondary_index::index_keys_option_name = "index_keys";

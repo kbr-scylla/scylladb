@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -457,6 +457,7 @@ enum class node_ops_cmd : uint32_t {
      bootstrap_abort,
      bootstrap_done,
      query_pending_ops,
+     repair_updater,
 };
 
 // The cmd and ops_uuid are mandatory for each request.
@@ -474,18 +475,22 @@ struct node_ops_cmd_request {
     std::unordered_map<gms::inet_address, gms::inet_address> replace_nodes;
     // Optional field, map bootstrapping nodes to bootstrap tokens, set by bootstrap cmd
     std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap_nodes;
+    // Optional field, list uuids of tables being repaired, set by repair cmd
+    std::list<utils::UUID> repair_tables;
     node_ops_cmd_request(node_ops_cmd command,
             utils::UUID uuid,
             std::list<gms::inet_address> ignore = {},
             std::list<gms::inet_address> leaving = {},
             std::unordered_map<gms::inet_address, gms::inet_address> replace = {},
-            std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap = {})
+            std::unordered_map<gms::inet_address, std::list<dht::token>> bootstrap = {},
+            std::list<utils::UUID> tables = {})
         : cmd(command)
         , ops_uuid(std::move(uuid))
         , ignore_nodes(std::move(ignore))
         , leaving_nodes(std::move(leaving))
         , replace_nodes(std::move(replace))
-        , bootstrap_nodes(std::move(bootstrap)) {
+        , bootstrap_nodes(std::move(bootstrap))
+        , repair_tables(std::move(tables)) {
     }
 };
 

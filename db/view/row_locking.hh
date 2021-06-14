@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -32,8 +32,6 @@
 #include "dht/i_partitioner.hh"
 #include "query-request.hh"
 #include "utils/estimated_histogram.hh"
-#include "utils/histogram.hh"
-#include "utils/latency.hh"
 
 class row_locker {
 public:

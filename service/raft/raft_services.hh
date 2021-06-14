@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -39,14 +39,19 @@ class raft_gossip_failure_detector;
 // `peering_sharded_service` inheritance is used to forward requests
 // to the owning shard for a given raft group_id.
 class raft_services : public seastar::peering_sharded_service<raft_services> {
+public:
+    using ticker_type = seastar::timer<lowres_clock>;
+    // TODO: should be configurable.
+    static constexpr ticker_type::duration tick_interval = std::chrono::milliseconds(100);
+private:
     using create_server_result = std::pair<std::unique_ptr<raft::server>, raft_rpc*>;
 
     netw::messaging_service& _ms;
-    cql3::query_processor& _qp;
+    gms::gossiper& _gossiper;
+    sharded<cql3::query_processor>& _qp;
     // Shard-local failure detector instance shared among all raft groups
     shared_ptr<raft_gossip_failure_detector> _fd;
 
-    using ticker_type = seastar::timer<lowres_clock>;
     struct servers_value_type {
         std::unique_ptr<raft::server> server;
         raft_rpc* rpc;
@@ -66,9 +71,19 @@ class raft_services : public seastar::peering_sharded_service<raft_services> {
 
 public:
 
-    raft_services(netw::messaging_service& ms, gms::gossiper& gs, cql3::query_processor& qp);
-
+    raft_services(netw::messaging_service& ms, gms::gossiper& gs, sharded<cql3::query_processor>& qp);
+    // To integrate Raft service into the boot procedure, the
+    // initialization is split into 2 steps:
+    // - in sharded::start(), we construct an instance of
+    // raft_services on each shard. The RPC is not available
+    // yet and no groups are created. The created object is
+    // useless but it won't crash on use.
+    // - in init(), which must be invoked explicitly on each
+    // shard after the query processor and database have started,
+    // we boot all existing groups from the local system tables
+    // and start RPC
     seastar::future<> init();
+    // Must be invoked explicitly on each shard to stop this service.
     seastar::future<> uninit();
 
     raft_rpc& get_rpc(raft::server_id id);

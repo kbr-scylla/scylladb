@@ -239,7 +239,7 @@ auto make_ldap_manager(cql_test_env& env, sstring query_template = default_query
             std::move(stop_role_manager));
 }
 
-void create_ldap_roles(const auth::role_manager& rmgr) {
+void create_ldap_roles(auth::role_manager& rmgr) {
     rmgr.create("jsmith", auth::role_config()).get();
     rmgr.create("role1", auth::role_config()).get();
     rmgr.create("role2", auth::role_config()).get();

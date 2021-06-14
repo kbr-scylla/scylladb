@@ -1,6 +1,6 @@
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -21,6 +21,7 @@
 #include "gms/feature_service.hh"
 #include <seastar/core/seastar.hh>
 #include "service/storage_service.hh"
+#include "service/raft/raft_services.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/abort_source.hh>
 #include "cdc/generation_service.hh"
@@ -52,6 +53,8 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         sharded<cdc::generation_service> cdc_generation_service;
         sharded<repair_service> repair;
         sharded<service::migration_manager> migration_manager;
+        sharded<cql3::query_processor> qp;
+        sharded<raft_services> raft_svcs;
         sharded<auth::service> auth_service;
 
         token_metadata.start().get();
@@ -82,7 +85,20 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         service::storage_service_config sscfg;
         sscfg.available_memory =  memory::stats().total_memory();
 
-        service::get_storage_service().start(std::ref(abort_sources), std::ref(db), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(feature_service), sscfg, std::ref(migration_manager), std::ref(token_metadata), std::ref(_messaging), std::ref(cdc_generation_service), std::ref(repair), std::ref(sl_controller), true).get();
+        raft_svcs.start(std::ref(_messaging), std::ref(gms::get_gossiper()), std::ref(qp)).get();
+        auto stop_raft = defer([&raft_svcs] { raft_svcs.stop().get(); });
+
+        service::get_storage_service().start(std::ref(abort_sources),
+            std::ref(db), std::ref(gms::get_gossiper()),
+            std::ref(sys_dist_ks),
+            std::ref(view_update_generator),
+            std::ref(feature_service), sscfg,
+            std::ref(migration_manager), std::ref(token_metadata),
+            std::ref(_messaging),
+            std::ref(cdc_generation_service), std::ref(repair),
+            std::ref(raft_svcs),
+            std::ref(sl_controller),
+            true).get();
         auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
 
         sharded<semaphore> sst_dir_semaphore;
@@ -101,7 +117,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
             stop_database(db).get();
         });
 
-        cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata)).get();
+        cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
         auto stop_cdc_generation_service = defer([&cdc_generation_service] {
             cdc_generation_service.stop().get();
         });

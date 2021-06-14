@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,16 +30,14 @@
 
 #pragma once
 
-#include <optional>
-#include "variable_specifications.hh"
 #include "cql3/assignment_testable.hh"
 #include "cql3/query_options.hh"
 #include "cql3/values.hh"
-#include "types.hh"
 
 namespace cql3 {
 
 class terminal;
+class variable_specifications;
 
 /**
  * A CQL3 term, i.e. a column value with or without bind variables.
@@ -179,7 +177,7 @@ public:
 
 class multi_item_terminal : public terminal {
 public:
-    virtual const std::vector<managed_bytes_opt>& get_elements() const = 0;
+    virtual std::vector<managed_bytes_opt> copy_elements() const = 0;
 };
 
 class collection_terminal {

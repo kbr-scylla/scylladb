@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,7 +30,6 @@
 
 #pragma once
 
-#include "cql3/statements/modification_statement.hh"
 #include "cql3/statements/raw/modification_statement.hh"
 #include "cql3/column_identifier.hh"
 #include "cql3/term.hh"
@@ -38,11 +37,12 @@
 #include "database_fwd.hh"
 
 #include <vector>
-#include "unimplemented.hh"
 
 namespace cql3 {
 
 namespace statements {
+
+class modification_statement;
 
 namespace raw {
 

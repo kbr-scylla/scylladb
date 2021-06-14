@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,7 +32,7 @@
 
 #include "cql3/selection/selectable.hh"
 
-#include "schema_fwd.hh"
+#include "schema.hh"
 
 #include <algorithm>
 #include <functional>

@@ -2966,12 +2966,18 @@ class scylla_io_queues(gdb.Command):
         for entry in slist:
             gdb.write("{}\t{}\n".format(indent, scylla_io_queues.ticket(entry['_ticket'])))
 
+    def _get_classes_infos(self, ioq):
+        try:
+            return std_array(gdb.parse_and_eval('seastar::io_priority_class::_infos'))
+        except gdb.error:
+            # Compatibility: io_queue::_registered_... stuff moved onto io_priority_class in version 4.6
+            return [ { 'name': x[0], 'shares': x[1] } for x in zip(std_array(ioq['_registered_names']), std_array(ioq['_registered_shares'])) ]
+
     def invoke(self, arg, for_tty):
         for dev, ioq in get_local_io_queues():
             gdb.write("Dev {}:\n".format(dev))
 
-            names = std_array(ioq['_registered_names'])
-            shares = std_array(ioq['_registered_shares'])
+            infos = self._get_classes_infos(ioq)
             pclasses = std_vector(ioq['_priority_classes'])
 
             names_from_ptrs = {}
@@ -2980,16 +2986,11 @@ class scylla_io_queues(gdb.Command):
             gdb.write("\t" + '-'*64 + "\n")
             for i, pclass in enumerate(pclasses):
                 pclass_ptr = std_unique_ptr(pclass).get()
-                names_from_ptrs[pclass_ptr] = names[i]
-                gdb.write("\t{:24}|{:16}|({:30}){:16}\n".format(str(names[i]), str(shares[i]), str(pclass_ptr.type), str(pclass_ptr)))
+                names_from_ptrs[pclass_ptr] = infos[i]['name']
+                gdb.write("\t{:24}|{:16}|({:30}){:16}\n".format(str(infos[i]['name']), str(infos[i]['shares']), str(pclass_ptr.type), str(pclass_ptr)))
             gdb.write("\n")
 
             group = std_shared_ptr(ioq['_group']).get().dereference()
-            try:
-                gdb.write("\tMax bytes count:     {}\n".format(group['_max_bytes_count']))
-            except gdb.error:
-                # Compatibility: _maximum_request_size was renamed to _max_bytes_count in scylla version 4.6
-                gdb.write("\tMax request size:    {}\n".format(group['_maximum_request_size']))
             gdb.write("\tMax capacity:        {}\n".format(self.ticket(group['_fg']['_maximum_capacity'])))
             gdb.write("\tCapacity tail:       {}\n".format(self.ticket(std_atomic(group['_fg']['_capacity_tail']).get())))
             gdb.write("\tCapacity head:       {}\n".format(self.ticket(std_atomic(group['_fg']['_capacity_head']).get())))
@@ -3781,7 +3782,10 @@ class scylla_smp_queues(gdb.Command):
         self.queues = set()
 
     def _init(self):
-        qs = std_unique_ptr(gdb.parse_and_eval('seastar::smp::_qs')).get()
+        qs = gdb.parse_and_eval('seastar::smp::_qs')
+        if qs.type.code != gdb.TYPE_CODE_PTR:
+            # older Seastar use std::unique_ptr for this variable
+            qs = std_unique_ptr(qs).get()
         for i in range(cpus()):
             for j in range(cpus()):
                 self.queues.add(int(qs[i][j].address))

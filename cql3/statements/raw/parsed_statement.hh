@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,8 +31,7 @@
 #pragma once
 
 #include "cql3/variable_specifications.hh"
-#include "cql3/column_identifier.hh"
-#include "cql3/stats.hh"
+#include "cql3/column_specification.hh"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -40,7 +39,12 @@
 #include <vector>
 #include "audit/audit.hh"
 
+class database;
+
 namespace cql3 {
+
+class column_identifier;
+class cql_stats;
 
 namespace statements {
 

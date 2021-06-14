@@ -17,7 +17,7 @@
  */
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -30,6 +30,7 @@
 #include "aggregate_function_selector.hh"
 #include "scalar_function_selector.hh"
 #include "to_string.hh"
+#include "cql3/selection/selector_factories.hh"
 
 namespace cql3 {
 

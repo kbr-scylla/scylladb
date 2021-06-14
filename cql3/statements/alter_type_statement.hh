@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -33,6 +33,7 @@
 #include "cql3/statements/schema_altering_statement.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/ut_name.hh"
+#include "database_fwd.hh"
 
 namespace service {
 class migration_manager;

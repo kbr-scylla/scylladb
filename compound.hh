@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -18,6 +18,7 @@
 #include <boost/range/adaptor/transformed.hpp>
 #include "utils/serialization.hh"
 #include <seastar/util/backtrace.hh>
+#include "cql_serialization_format.hh"
 
 enum class allow_prefixes { no, yes };
 

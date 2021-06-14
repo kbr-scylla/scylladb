@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -13,6 +13,7 @@
 #include "tracing/tracing.hh"
 #include "tracing/trace_state.hh"
 #include "tracing/tracing_backend_registry.hh"
+#include "utils/class_registrator.hh"
 
 #include "test/lib/cql_test_env.hh"
 

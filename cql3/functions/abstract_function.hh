@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -36,6 +36,8 @@
 #include <vector>
 #include <iosfwd>
 #include <boost/functional/hash.hpp>
+
+#include "cql3/functions/function_name.hh"
 
 namespace std {
     std::ostream& operator<<(std::ostream& os, const std::vector<data_type>& arg_types);

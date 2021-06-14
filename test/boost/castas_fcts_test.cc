@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -610,7 +610,7 @@ SEASTAR_TEST_CASE(test_identity_casts) {
                 {duration_type, "5h23m10s"},
         };
 
-        for (const auto [type, value] : type_value_pairs) {
+        for (const auto& [type, value] : type_value_pairs) {
             const auto type_name = type->cql3_type_name();
             cquery_nofail(e, format("create table t_{} (pk int primary key, v {})", type_name, type_name));
             cquery_nofail(e, format("insert into t_{} (pk, v) values (0, {})", type_name, value));

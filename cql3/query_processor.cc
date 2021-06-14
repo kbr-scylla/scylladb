@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -35,6 +35,7 @@
 #include "cql3/CqlParser.hpp"
 #include "cql3/error_collector.hh"
 #include "cql3/statements/batch_statement.hh"
+#include "cql3/statements/modification_statement.hh"
 #include "cql3/util.hh"
 #include "cql3/untyped_result_set.hh"
 #include "db/config.hh"

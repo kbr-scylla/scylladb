@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -29,7 +29,6 @@
 #include "test/lib/tmpdir.hh"
 #include "memtable-sstable.hh"
 #include "test/lib/index_reader_assertions.hh"
-#include "test/lib/test_services.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/sstable_utils.hh"
@@ -404,7 +403,6 @@ mutation_source make_sstable_mutation_source(sstables::test_env& env, schema_ptr
 SEASTAR_TEST_CASE(test_sstable_can_write_and_read_range_tombstone) {
     return seastar::async([] {
       test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         auto s = make_shared_schema({}, "ks", "cf",
             {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
@@ -846,7 +844,6 @@ SEASTAR_TEST_CASE(test_non_compound_table_row_is_not_marked_as_static) {
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -884,7 +881,6 @@ SEASTAR_TEST_CASE(test_has_partition_key) {
     return seastar::async([] {
       test_env::do_with_async([] (test_env& env) {
         for (const auto version : all_sstable_versions) {
-            storage_service_for_tests ssft;
             auto dir = tmpdir();
             schema_builder builder("ks", "cf");
             builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -932,7 +928,6 @@ static std::unique_ptr<index_reader> get_index_reader(shared_sstable sst) {
 SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic) {
     return seastar::async([] {
       test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -983,7 +978,6 @@ SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic_compound_dense) {
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -1047,7 +1041,6 @@ SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic_non_compound_dense) {
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -1107,7 +1100,6 @@ SEASTAR_TEST_CASE(test_promoted_index_repeats_open_tombstones) {
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         int id = 0;
         for (auto& compact : { schema_builder::compact_storage::no, schema_builder::compact_storage::yes }) {
@@ -1161,7 +1153,6 @@ SEASTAR_TEST_CASE(test_range_tombstones_are_correctly_seralized_for_non_compound
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -1205,7 +1196,6 @@ SEASTAR_TEST_CASE(test_promoted_index_is_absent_for_schemas_without_clustering_k
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         schema_builder builder("ks", "cf");
         builder.with_column("p", utf8_type, column_kind::partition_key);
@@ -1241,7 +1231,6 @@ SEASTAR_TEST_CASE(test_writing_combined_stream_with_tombstones_at_the_same_posit
     return seastar::async([] {
      test_env::do_with_async([] (test_env& env) {
       for (const auto version : all_sstable_versions) {
-        storage_service_for_tests ssft;
         auto dir = tmpdir();
         simple_schema ss;
         auto s = ss.schema();
@@ -1292,7 +1281,6 @@ SEASTAR_TEST_CASE(test_no_index_reads_when_rows_fall_into_range_boundaries) {
     return seastar::async([] {
       test_env::do_with_async([] (test_env& env) {
         for (const auto version : all_sstable_versions) {
-            storage_service_for_tests ssft;
             simple_schema ss(simple_schema::with_static::yes);
             auto s = ss.schema();
 
@@ -1337,7 +1325,6 @@ SEASTAR_TEST_CASE(test_key_count_estimation) {
     return seastar::async([] {
       test_env::do_with_async([] (test_env& env) {
         for (const auto version : all_sstable_versions) {
-            storage_service_for_tests ssft;
             simple_schema ss;
             auto s = ss.schema();
 
@@ -1404,8 +1391,6 @@ SEASTAR_THREAD_TEST_CASE(test_large_index_pages_do_not_cause_large_allocations) 
   test_env::do_with_async([] (test_env& env) {
     // We create a sequence of partitions such that first we have a partition with a very long key, then
     // series of partitions with small keys. This should result in large index page.
-
-    storage_service_for_tests ssft;
     auto dir = tmpdir();
 
     simple_schema ss;
@@ -1487,7 +1472,6 @@ SEASTAR_THREAD_TEST_CASE(test_large_index_pages_do_not_cause_large_allocations) 
 SEASTAR_THREAD_TEST_CASE(test_reading_serialization_header) {
   test_env::do_with_async([] (test_env& env) {
     auto dir = tmpdir();
-    storage_service_for_tests ssft;
 
     auto random_int32_value = [] {
         return int32_type->decompose(tests::random::get_int<int32_t>());
@@ -1594,7 +1578,6 @@ SEASTAR_THREAD_TEST_CASE(test_merging_encoding_stats) {
 SEASTAR_THREAD_TEST_CASE(test_counter_header_size) {
   test_env::do_with_async([] (test_env& env) {
     auto dir = tmpdir();
-    storage_service_for_tests ssft;
 
     auto s = schema_builder("ks", "counter_test")
         .with_column("pk", int32_type, column_kind::partition_key)
@@ -1637,7 +1620,6 @@ SEASTAR_THREAD_TEST_CASE(test_counter_header_size) {
 
 SEASTAR_TEST_CASE(test_static_compact_tables_are_read) {
     return test_env::do_with_async([] (test_env& env) {
-        storage_service_for_tests ssft;
         for (const auto version : all_sstable_versions) {
             auto s = schema_builder("ks", "test")
                 .with_column("pk", int32_type, column_kind::partition_key)

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  */
 
 /*
@@ -10,12 +10,14 @@
 
 #pragma once
 
-#include <seastar/core/shared_ptr.hh>
-#include <seastar/core/file.hh>
 #include "seastarx.hh"
 
 #include "db/timeout_clock.hh"
 #include "schema_fwd.hh"
+
+namespace seastar {
+    class file;
+} // namespace seastar
 
 struct reader_resources {
     int count = 0;

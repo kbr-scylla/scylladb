@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -10,6 +10,7 @@
 
 #include "row_locking.hh"
 #include "log.hh"
+#include "utils/latency.hh"
 
 #include <seastar/core/when_all.hh>
 

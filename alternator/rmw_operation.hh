@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 ScyllaDB
+ * Copyright 2020-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,7 @@
 #pragma once
 
 #include "seastarx.hh"
-#include "service/storage_proxy.hh"
+#include "service/paxos/cas_request.hh"
 #include "utils/rjson.hh"
 #include "executor.hh"
 

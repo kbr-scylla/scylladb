@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -33,13 +33,14 @@
 #include <memory>
 
 #include "cql3/statements/schema_altering_statement.hh"
-#include "cql3/statements/ks_prop_defs.hh"
 
 namespace cql3 {
 
 class query_processor;
 
 namespace statements {
+
+class ks_prop_defs;
 
 class alter_keyspace_statement : public schema_altering_statement {
     sstring _name;
@@ -54,6 +55,7 @@ public:
     void validate(service::storage_proxy& proxy, const service::client_state& state) const override;
     future<shared_ptr<cql_transport::event::schema_change>> announce_migration(query_processor& qp) const override;
     virtual std::unique_ptr<prepared_statement> prepare(database& db, cql_stats& stats) override;
+    virtual future<::shared_ptr<messages::result_message>> execute(query_processor& qp, service::query_state& state, const query_options& options) const override;
 };
 
 }

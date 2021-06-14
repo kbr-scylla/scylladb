@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2015 ScyllaDB
+# Copyright (C) 2015-present ScyllaDB
 #
 
 #
@@ -932,6 +932,7 @@ scylla_core = (['database.cc',
                 'streaming/stream_result_future.cc',
                 'streaming/stream_session_state.cc',
                 'streaming/stream_reason.cc',
+                'streaming/consumer.cc',
                 'clocks-impl.cc',
                 'partition_slice_builder.cc',
                 'init.cc',
@@ -1148,7 +1149,6 @@ pure_boost_tests = set([
     'test/boost/cartesian_product_test',
     'test/boost/checksum_utils_test',
     'test/boost/chunked_vector_test',
-    'test/boost/compound_test',
     'test/boost/compress_test',
     'test/boost/cql_auth_syntax_test',
     'test/boost/crc_test',
@@ -1296,16 +1296,11 @@ warnings = [
     '-Wno-redeclared-class-member',
     '-Wno-pessimizing-move',
     '-Wno-redundant-move',
-    '-Wno-gnu-designator',
-    '-Wno-instantiation-after-specialization',
     '-Wno-unsupported-friend',
     '-Wno-unused-variable',
-    '-Wno-return-std-move',
     '-Wno-delete-non-abstract-non-virtual-dtor',
     '-Wno-unknown-attributes',
     '-Wno-braced-scalar-init',
-    '-Wno-range-loop-construct',
-    '-Wno-unused-function',
     '-Wno-implicit-int-float-conversion',
     '-Wno-delete-abstract-non-virtual-dtor',
     '-Wno-uninitialized-const-reference',

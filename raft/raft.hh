@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -20,6 +20,7 @@
 #include "bytes_ostream.hh"
 #include "utils/UUID.hh"
 #include "internal.hh"
+#include "logical_clock.hh"
 
 namespace raft {
 // Keeps user defined command. A user is responsible to serialize
@@ -42,8 +43,6 @@ using term_t = internal::tagged_uint64<struct term_tag>;
 // This type represensts the index into the raft log
 using index_t = internal::tagged_uint64<struct index_tag>;
 
-using clock_type = lowres_clock;
-
 // Opaque connection properties. May contain ip:port pair for instance.
 // This value is disseminated between cluster member
 // through regular log replication as part of a configuration
@@ -60,6 +59,9 @@ struct server_address {
     server_info info;
     bool operator==(const server_address& rhs) const {
         return id == rhs.id;
+    }
+    bool operator<(const server_address& rhs) const {
+        return id < rhs.id;
     }
 };
 
@@ -116,14 +118,24 @@ struct configuration {
         return !previous.empty();
     }
 
-    // Check the proposed configuration and compute a diff
-    // between it and the current one.
-    configuration_diff diff(const server_address_set& c_new) const {
+    // Count the number of voters in a configuration
+    static size_t voter_count(const server_address_set& c_new) {
+        return std::count_if(c_new.begin(), c_new.end(), [] (const server_address& s) { return s.can_vote; });
+    }
+
+    // Check if transitioning to a proposed configuration is safe.
+    static void check(const server_address_set& c_new) {
         // We must have at least one voting member in the config.
-        if (std::count_if(c_new.begin(), c_new.end(), [] (const server_address& s) { return s.can_vote; }) == 0) {
+        if (c_new.empty()) {
             throw std::invalid_argument("Attempt to transition to an empty Raft configuration");
         }
+        if (voter_count(c_new) == 0) {
+            throw std::invalid_argument("The configuration must have at least one voter");
+        }
+    }
 
+    // Compute a diff between a proposed configuration and the current one.
+    configuration_diff diff(const server_address_set& c_new) const {
         configuration_diff diff;
         // joining
         for (const auto& s : c_new) {
@@ -301,6 +313,13 @@ using rpc_message = std::variant<append_request, append_reply, vote_request, vot
 // std::deque move constructor is not nothrow hence cannot be used
 using log_entries = boost::container::deque<log_entry_ptr>;
 
+// 3.4 Leader election
+// If a follower receives no communication over a period of
+// time called the election timeout, then it assumes there is
+// no viable leader and begins an election to choose a new
+// leader.
+static constexpr logical_clock::duration ELECTION_TIMEOUT = logical_clock::duration{10};
+
 // rpc, persistence and state_machine classes will have to be implemented by the
 // raft user to provide network, persistency and busyness logic support
 // repectively.
@@ -376,25 +395,17 @@ public:
     // message is sent. It does not mean it was received.
     virtual future<> send_append_entries(server_id id, const append_request& append_request) = 0;
 
-    // Send a reply to an append_request. The returned future
-    // resolves when message is sent. It does not mean it was
-    // received.
-    virtual future<> send_append_entries_reply(server_id id, const append_reply& reply) = 0;
+    // Send a reply to an append_request.
+    virtual void send_append_entries_reply(server_id id, const append_reply& reply) = 0;
 
-    // Send a vote request. The returned future
-    // resolves when message is sent. It does not mean it was
-    // received.
-    virtual future<> send_vote_request(server_id id, const vote_request& vote_request) = 0;
+    // Send a vote request.
+    virtual void send_vote_request(server_id id, const vote_request& vote_request) = 0;
 
-    // Sends a reply to a vote request. The returned future
-    // resolves when message is sent. It does not mean it was
-    // received.
-    virtual future<> send_vote_reply(server_id id, const vote_reply& vote_reply) = 0;
+    // Sends a reply to a vote request.
+    virtual void send_vote_reply(server_id id, const vote_reply& vote_reply) = 0;
 
-    // Send a request to start leader election immediately
-    // resolves when message is sent. It does not mean it was
-    // received.
-    virtual future<> send_timeout_now(server_id, const timeout_now& timeout_now) = 0;
+    // Send a request to start leader election.
+    virtual void send_timeout_now(server_id, const timeout_now& timeout_now) = 0;
 
     // When a new server is learn this function is called with the
     // info about the server.

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -10,9 +10,7 @@
 
 #pragma once
 
-#include "utils/data_input.hh"
 #include "database_fwd.hh"
-#include "mutation_partition_view.hh"
 #include "bytes_ostream.hh"
 #include "mutation_fragment.hh"
 

@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -299,6 +299,7 @@ future<> gossiper::handle_ack_msg(msg_addr id, gossip_digest_ack ack_msg) {
 
     auto f = make_ready_future<>();
     if (ep_state_map.size() > 0) {
+        update_timestamp_for_nodes(ep_state_map);
         f = this->apply_state_locally(std::move(ep_state_map));
     }
 
@@ -390,6 +391,7 @@ future<> gossiper::handle_ack2_msg(msg_addr from, gossip_digest_ack2 msg) {
     msg_proc_guard mp(*this);
 
     auto& remote_ep_state_map = msg.get_endpoint_state_map();
+    update_timestamp_for_nodes(remote_ep_state_map);
     return apply_state_locally(std::move(remote_ep_state_map)).finally([mp = std::move(mp)] {});
 }
 
@@ -831,6 +833,28 @@ future<> gossiper::failure_detector_loop() {
                     return g.failure_detector_loop_for_node(node, generation_number, live_endpoints_version);
                 });
             });
+            for (;;) {
+                auto version =  _live_endpoints_version;
+                utils::chunked_vector<inet_address> nodes_down;
+                std::sort(nodes.begin(), nodes.end());
+                std::sort(_live_endpoints.begin(), _live_endpoints.end());
+                std::set_difference(nodes.begin(), nodes.end(), _live_endpoints.begin(), _live_endpoints.end(), std::back_inserter(nodes_down));
+                if (!nodes_down.empty()) {
+                    logger.debug("failure_detector_loop: previous_live_nodes={}, current_live_nodes={}, nodes_down={}",
+                            nodes, _live_endpoints, nodes_down);
+                    co_await seastar::async([this, &nodes_down] {
+                        for (const auto& node : nodes_down) {
+                            convict(node);
+                        }
+                    });
+                }
+                // Make sure _live_endpoints do not change when nodes_down are being convicted above. This guarantees no down nodes will miss the convict.
+                logger.debug("failure_detector_loop: previous_live_nodes={}, current_live_nodes={}, nodes_down={}, version_before={}, version_after={}",
+                        nodes, _live_endpoints, nodes_down, version, _live_endpoints_version);
+                if (version == _live_endpoints_version) {
+                    break;
+                }
+            }
         } catch (...) {
             logger.warn("failure_detector_loop: Got error in the loop, live_nodes={}: {}",
                     _live_endpoints, std::current_exception());
@@ -1449,6 +1473,32 @@ int gossiper::compare_endpoint_startup(inet_address addr1, inet_address addr2) {
         throw std::runtime_error(err);
     }
     return ep1->get_heart_beat_state().get_generation() - ep2->get_heart_beat_state().get_generation();
+}
+
+void gossiper::update_timestamp_for_nodes(const std::map<inet_address, endpoint_state>& map) {
+    for (const auto& x : map) {
+        const gms::inet_address& endpoint = x.first;
+        const endpoint_state& remote_endpoint_state = x.second;
+        auto* local_endpoint_state = get_endpoint_state_for_endpoint_ptr(endpoint);
+        if (local_endpoint_state) {
+            bool update = false;
+            int local_generation = local_endpoint_state->get_heart_beat_state().get_generation();
+            int remote_generation = remote_endpoint_state.get_heart_beat_state().get_generation();
+            if (remote_generation > local_generation) {
+                update = true;
+            } else if (remote_generation == local_generation) {
+                int local_version = get_max_endpoint_state_version(*local_endpoint_state);
+                int remote_version = remote_endpoint_state.get_heart_beat_state().get_heart_beat_version();
+                if (remote_version > local_version) {
+                    update = true;
+                }
+            }
+            if (update) {
+                logger.trace("Updated timestamp for node {}", endpoint);
+                local_endpoint_state->update_timestamp();
+            }
+        }
+    }
 }
 
 // Runs inside seastar::async context

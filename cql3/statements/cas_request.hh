@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -27,8 +27,14 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 #pragma once
-#include "service/storage_proxy.hh"
+#include "service/paxos/cas_request.hh"
 #include "cql3/statements/modification_statement.hh"
+
+namespace service {
+
+class storage_proxy;
+
+} // namespace service
 
 namespace cql3::statements {
 

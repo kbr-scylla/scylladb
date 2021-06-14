@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -40,6 +40,8 @@
 #include "index/target_parser.hh"
 #include "gms/feature_service.hh"
 #include "cql3/query_processor.hh"
+#include "cql3/index_name.hh"
+#include "cql3/statements/index_prop_defs.hh"
 
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/algorithm/string/join.hpp>
@@ -122,8 +124,8 @@ create_index_statement::validate(service::storage_proxy& proxy, const service::c
             const auto& ty = *cd->type;
 
             check_false(ty.is_collection(), "Secondary indexes are not supported on collections containing durations");
-            check_false(ty.is_tuple(), "Secondary indexes are not supported on tuples containing durations");
             check_false(ty.is_user_type(), "Secondary indexes are not supported on UDTs containing durations");
+            check_false(ty.is_tuple(), "Secondary indexes are not supported on tuples containing durations");
 
             // We're a duration.
             throw exceptions::invalid_request_exception("Secondary indexes are not supported on duration columns");
@@ -206,7 +208,7 @@ void create_index_statement::validate_for_frozen_collection(const index_target& 
 {
     if (target.type != index_target::target_type::full) {
         throw exceptions::invalid_request_exception(
-                format("Cannot create index on {} of frozen<map> column {}",
+                format("Cannot create index on {} of frozen collection column {}",
                         index_target::index_option(target.type),
                         target.as_string()));
     }
@@ -278,13 +280,6 @@ create_index_statement::announce_migration(query_processor& qp) const {
         }
         accepted_name = db.get_available_index_name(keyspace(), column_family(), index_name_root);
     }
-    auto index_table_name = secondary_index::index_table_name(accepted_name);
-    if (db.has_schema(keyspace(), index_table_name)) {
-        return make_exception_future<::shared_ptr<cql_transport::event::schema_change>>(
-            exceptions::invalid_request_exception(format("Index {} cannot be created, because table {} already exists",
-                    accepted_name, index_table_name))
-        );
-    }
     index_metadata_kind kind;
     index_options_map index_options;
     if (_properties->is_custom) {
@@ -302,6 +297,13 @@ create_index_statement::announce_migration(query_processor& qp) const {
             throw exceptions::invalid_request_exception(
                     format("Index {} is a duplicate of existing index {}", index.name(), existing_index.value().name()));
         }
+    }
+    auto index_table_name = secondary_index::index_table_name(accepted_name);
+    if (db.has_schema(keyspace(), index_table_name)) {
+        return make_exception_future<::shared_ptr<cql_transport::event::schema_change>>(
+            exceptions::invalid_request_exception(format("Index {} cannot be created, because table {} already exists",
+                accepted_name, index_table_name))
+        );
     }
     ++_cql_stats->secondary_index_creates;
     schema_builder builder{schema};

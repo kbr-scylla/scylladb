@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -54,7 +54,7 @@ future<> service::client_state::check_user_can_login() {
         return make_ready_future();
     }
 
-    const auto& role_manager = _auth_service->underlying_role_manager();
+    auto& role_manager = _auth_service->underlying_role_manager();
 
     return role_manager.exists(*_user->name).then([this](bool exists) mutable {
         if (!exists) {
@@ -200,7 +200,8 @@ future<> service::client_state::has_access(const sstring& ks, auth::command_desc
                 if ((ks == db::system_distributed_keyspace::NAME || ks == db::system_distributed_keyspace::NAME_EVERYWHERE)
                         && (resource_view.table() == db::system_distributed_keyspace::CDC_DESC_V2
                         || resource_view.table() == db::system_distributed_keyspace::CDC_TOPOLOGY_DESCRIPTION
-                        || resource_view.table() == db::system_distributed_keyspace::CDC_TIMESTAMPS)) {
+                        || resource_view.table() == db::system_distributed_keyspace::CDC_TIMESTAMPS
+                        || resource_view.table() == db::system_distributed_keyspace::CDC_GENERATIONS_V2)) {
                     throw exceptions::unauthorized_exception(
                             format("Cannot {} {}", auth::permissions::to_string(cmd.permission), cmd.resource));
                 }
@@ -263,7 +264,7 @@ future<> service::client_state::ensure_exists(const auth::resource& r) const {
 
 future<> service::client_state::maybe_update_per_service_level_params() {
     if (_sl_controller && _user && _user->name) {
-        const auto& role_manager = _auth_service->underlying_role_manager();
+        auto& role_manager = _auth_service->underlying_role_manager();
         auto role_set = co_await role_manager.query_granted(_user->name.value(), auth::recursive_role_query::yes);
         auto slo_opt = co_await _sl_controller->find_service_level(role_set);
         if (!slo_opt) {
@@ -289,5 +290,7 @@ future<> service::client_state::maybe_update_per_service_level_params() {
         _timeout_config.truncate_timeout = slo_timeout_or(_default_timeout_config.truncate_timeout);
         _timeout_config.cas_timeout = slo_timeout_or(_default_timeout_config.cas_timeout);
         _timeout_config.other_timeout = slo_timeout_or(_default_timeout_config.other_timeout);
+
+        _workload_type = slo_opt->workload;
     }
 }

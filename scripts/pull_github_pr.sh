@@ -33,7 +33,9 @@ curl() {
 NL=$'\n'
 
 PR_NUM=$1
-PR_PREFIX=https://api.github.com/repos/scylladb/scylla-enterprise/pulls
+# convert git@github.com:scylladb/scylla.git to just scylladb/scylla:
+PROJECT=scylla-enterprise
+PR_PREFIX=https://api.github.com/repos/$PROJECT/pulls
 
 echo "Fetching info on PR #$PR_NUM... "
 PR_DATA=$(curl -s $PR_PREFIX/$PR_NUM)

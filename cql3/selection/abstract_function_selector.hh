@@ -17,7 +17,7 @@
  */
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -29,12 +29,14 @@
 #pragma once
 
 #include "selector.hh"
-#include "selector_factories.hh"
 #include "cql3/functions/function.hh"
+#include "cql3/functions/function_name.hh"
 #include <boost/algorithm/cxx11/any_of.hpp>
 
 namespace cql3 {
 namespace selection {
+
+class selector_factories;
 
 class abstract_function_selector : public selector {
 protected:

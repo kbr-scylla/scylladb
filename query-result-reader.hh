@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -13,9 +13,7 @@
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/numeric.hpp>
 
-#include "query-request.hh"
 #include "query-result.hh"
-#include "utils/data_input.hh"
 #include "digest_algorithm.hh"
 
 #include "idl/uuid.dist.hh"

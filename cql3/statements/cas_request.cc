@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -34,6 +34,7 @@
 #include "cql3/result_set.hh"
 #include "transport/messages/result_message.hh"
 #include "types/map.hh"
+#include "service/storage_proxy.hh"
 
 namespace cql3::statements {
 

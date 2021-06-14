@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 ScyllaDB
+ * Copyright (C) 2016-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -39,6 +39,7 @@
 #include "auth/authenticated_user.hh"
 #include "db/consistency_level_type.hh"
 #include "types.hh"
+#include "timestamp.hh"
 
 namespace cql3{
 class query_options;

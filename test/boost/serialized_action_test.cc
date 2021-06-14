@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -147,7 +147,7 @@ SEASTAR_THREAD_TEST_CASE(test_phased_barrier_reassignment) {
         BOOST_ERROR("phased_barrier::advance_and_await timed out");
         _exit(1);
     });
-    completion_timer.arm(1ms);
+    completion_timer.arm(1s);
     bar1.advance_and_await().get();
     bar2.advance_and_await().get();
     completion_timer.cancel();

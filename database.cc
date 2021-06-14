@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -55,6 +55,8 @@
 #include "user_types_metadata.hh"
 #include <seastar/core/shared_ptr_incomplete.hh>
 #include <seastar/util/memory_diagnostics.hh>
+
+#include "locator/abstract_replication_strategy.hh"
 
 using namespace std::chrono_literals;
 using namespace db;
@@ -1176,6 +1178,11 @@ no_such_column_family::no_such_column_family(std::string_view ks_name, std::stri
 {
 }
 
+no_such_column_family::no_such_column_family(std::string_view ks_name, const utils::UUID& uuid)
+    : runtime_error{format("Can't find a column family with UUID {} in keyspace {}", uuid, ks_name)}
+{
+}
+
 column_family& database::find_column_family(const schema_ptr& schema) {
     return find_column_family(schema->id());
 }
@@ -1618,8 +1625,8 @@ future<> dirty_memory_manager::shutdown() {
     });
 }
 
-future<> memtable_list::request_flush() {
-    if (empty() || !may_flush()) {
+future<> memtable_list::flush() {
+    if (!may_flush()) {
         return make_ready_future<>();
     } else if (!_flush_coalescing) {
         _flush_coalescing = shared_promise<>();
@@ -1651,7 +1658,7 @@ future<flush_permit> flush_permit::reacquire_sstable_write_permit() && {
 }
 
 future<> dirty_memory_manager::flush_one(memtable_list& mtlist, flush_permit&& permit) {
-    return mtlist.seal_active_memtable_immediate(std::move(permit)).handle_exception([this, schema = mtlist.back()->schema()] (std::exception_ptr ep) {
+    return mtlist.seal_active_memtable(std::move(permit)).handle_exception([this, schema = mtlist.back()->schema()] (std::exception_ptr ep) {
         dblog.error("Failed to flush memtable, {}:{} - {}", schema->ks_name(), schema->cf_name(), ep);
         return make_exception_future<>(ep);
     });
@@ -1719,15 +1726,19 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
 
     data_listeners().on_write(m_schema, m);
 
+  return cf.run_async([this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf, timeout]() mutable {
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf]() mutable {
         cf.apply(m, m_schema, std::move(h));
     }, timeout);
+  });
 }
 
 future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
+  return cf.run_async([this, &m, h = std::move(h), &cf, timeout]() mutable {
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, &cf, h = std::move(h)]() mutable {
         cf.apply(m, std::move(h));
     }, timeout);
+  });
 }
 
 future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {

@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,23 +30,29 @@
 
 #pragma once
 
-#include "cql3/statements/raw/cf_statement.hh"
 #include "cql3/statements/raw/select_statement.hh"
 #include "cql3/cql_statement.hh"
-#include "cql3/selection/selection.hh"
-#include "cql3/selection/raw_selector.hh"
-#include "cql3/restrictions/statement_restrictions.hh"
-#include "cql3/result_set.hh"
-#include "exceptions/unrecognized_entity_exception.hh"
-#include "service/client_state.hh"
+#include "cql3/stats.hh"
 #include <seastar/core/shared_ptr.hh>
-#include <seastar/core/distributed.hh>
-#include "validation.hh"
 #include "transport/messages/result_message.hh"
+#include "index/secondary_index_manager.hh"
+
+namespace service {
+    class client_state;
+} // namespace service
 
 namespace cql3 {
 
 class query_processor;
+
+namespace selection {
+    class selection;
+} // namespace selection
+
+namespace restrictions {
+    class restrictions;
+    class statement_restrictions;
+} // namespace restrictions
 
 namespace statements {
 
@@ -177,6 +183,8 @@ class indexed_table_select_statement : public select_statement {
     noncopyable_function<dht::partition_range_vector(const query_options&)> _get_partition_ranges_for_posting_list;
     noncopyable_function<query::partition_slice(const query_options&)> _get_partition_slice_for_posting_list;
 public:
+    static constexpr size_t max_base_table_query_concurrency = 4096;
+
     static ::shared_ptr<cql3::statements::select_statement> prepare(database& db,
                                                                     schema_ptr schema,
                                                                     uint32_t bound_terms,

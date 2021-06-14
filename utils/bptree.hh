@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -1594,7 +1594,7 @@ class node final {
 
     void insert_into_parent(node& nn, Key sep, Less less, prealloc& nodes) noexcept {
         nn._parent = _parent;
-        _parent->insert_key(std::move(sep), node_or_data{n: &nn}, less, nodes);
+        _parent->insert_key(std::move(sep), node_or_data{.n = &nn}, less, nodes);
     }
 
     void insert_into_root(node& nn, Key sep, prealloc& nodes) noexcept {
@@ -1645,7 +1645,7 @@ class node final {
             cur = cur->_parent;
         }
 
-        insert(i, std::move(k), node_or_data{d: d}, less, nodes);
+        insert(i, std::move(k), node_or_data{.d = d}, less, nodes);
         assert(nodes.empty());
     }
 

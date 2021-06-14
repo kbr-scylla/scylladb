@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 ScyllaDB
+ * Copyright 2019-present ScyllaDB
  */
 
 /*
@@ -48,6 +48,7 @@
 #include <seastar/core/coroutine.hh>
 #include <boost/range/adaptors.hpp>
 #include <boost/range/algorithm/find_end.hpp>
+#include "service/storage_proxy.hh"
 
 logging::logger elogger("alternator-executor");
 

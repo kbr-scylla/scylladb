@@ -18,7 +18,7 @@
 
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -37,19 +37,22 @@
 #include "utils/UUID.hh"
 #include "gms/inet_address.hh"
 #include "query-result-set.hh"
-#include "locator/token_metadata.hh"
 #include "db_clock.hh"
 #include "db/commitlog/replay_position.hh"
 #include "mutation_query.hh"
 #include <map>
 #include <seastar/core/distributed.hh>
-#include "service/paxos/paxos_state.hh"
 #include "cdc/generation_id.hh"
 
 namespace service {
 
 class storage_proxy;
 class storage_service;
+
+namespace paxos {
+    class paxos_state;
+    class proposal;
+} // namespace service::paxos
 
 }
 
@@ -65,6 +68,10 @@ namespace gms {
     class feature;
     class feature_service;
 }
+
+namespace locator {
+    class endpoint_dc_rack;
+} // namespace locator
 
 bool is_system_keyspace(std::string_view ks_name);
 
@@ -631,7 +638,7 @@ future<> update_cdc_generation_id(cdc::generation_id);
 future<std::optional<cdc::generation_id>> get_cdc_generation_id();
 
 future<bool> cdc_is_rewritten();
-future<> cdc_set_rewritten(std::optional<cdc::generation_id>);
+future<> cdc_set_rewritten(std::optional<cdc::generation_id_v1>);
 
 } // namespace system_keyspace
 } // namespace db

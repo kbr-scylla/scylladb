@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -13,12 +13,7 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
 #include <limits>
-#include <iterator>
-#include <algorithm>
-#include <seastar/core/thread.hh>
 #include <seastar/core/preempt.hh>
 #include "utils/chunked_vector.hh"
 

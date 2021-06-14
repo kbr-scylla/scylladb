@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -248,7 +248,7 @@ public:
                 }
             }
             auto descriptor = get_descriptor_for_level(i, last_compacted_keys, compaction_counter);
-            if (descriptor.sstables.size() > 0) {
+            if (!descriptor.sstables.empty()) {
                 return descriptor;
             }
         }
@@ -273,7 +273,7 @@ public:
                 continue;
             }
             auto descriptor = get_descriptor_for_level(i-1, last_compacted_keys, compaction_counter);
-            if (descriptor.sstables.size() > 0) {
+            if (!descriptor.sstables.empty()) {
                 return descriptor;
             }
         }
@@ -327,10 +327,10 @@ private:
                     break;
                 }
             }
-            return candidates;
+            return std::move(candidates);
         }
 
-        return candidates;
+        return std::move(candidates);
     }
 public:
     size_t get_level_size(uint32_t level) {

@@ -4,7 +4,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-/* Copyright 2020 ScyllaDB */
+/* Copyright 2020-present ScyllaDB */
 
 #include "util.hh"
 

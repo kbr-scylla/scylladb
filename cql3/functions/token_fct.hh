@@ -19,7 +19,7 @@
 /*
  * Modified by ScyllaDB
  *
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -34,6 +34,7 @@
 #include "native_scalar_function.hh"
 #include "dht/i_partitioner.hh"
 #include "utils/UUID.hh"
+#include "unimplemented.hh"
 
 namespace cql3 {
 namespace functions {

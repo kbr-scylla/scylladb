@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  *
  */
 
@@ -190,7 +190,6 @@ std::istream& std::operator>>(std::istream& is, std::vector<seastar::sstring>& r
 
    return is;
 }
-template std::istream& std::operator>>(std::istream&, std::unordered_map<seastar::sstring, seastar::sstring>&);
 
 thread_local unsigned utils::config_file::s_shard_id = 0;
 

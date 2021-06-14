@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -11,12 +11,17 @@
 #pragma once
 
 #include "mutation_partition_visitor.hh"
+#include "atomic_cell.hh"
+#include "schema.hh" // temporary: bring in definition of `column_kind`
 
 class schema;
 class row;
 class mutation_partition;
 class column_mapping;
 class deletable_row;
+class column_definition;
+class abstract_type;
+class atomic_cell_or_collection;
 
 // Mutation partition visitor which applies visited data into
 // existing mutation_partition. The visited data may be of a different schema.

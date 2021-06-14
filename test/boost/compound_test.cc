@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -8,9 +8,10 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#define BOOST_TEST_MODULE core
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
+#include "test/lib/random_utils.hh"
 
-#include <boost/test/unit_test.hpp>
 #include "compound.hh"
 #include "compound_compat.hh"
 #include "test/boost/range_assert.hh"
@@ -38,7 +39,7 @@ static void test_sequence(Compound& t, std::vector<sstring> strings) {
     assert_that_components(t, packed).equals(to_bytes_vec(strings));
 };
 
-BOOST_AUTO_TEST_CASE(test_iteration_over_non_prefixable_tuple) {
+SEASTAR_THREAD_TEST_CASE(test_iteration_over_non_prefixable_tuple) {
     compound_type<allow_prefixes::no> t({bytes_type, bytes_type, bytes_type});
 
     test_sequence(t, {"el1", "el2", "el3"});
@@ -50,7 +51,7 @@ BOOST_AUTO_TEST_CASE(test_iteration_over_non_prefixable_tuple) {
     test_sequence(t, {"",    "",    ""});
 }
 
-BOOST_AUTO_TEST_CASE(test_iteration_over_prefixable_tuple) {
+SEASTAR_THREAD_TEST_CASE(test_iteration_over_prefixable_tuple) {
     compound_type<allow_prefixes::yes> t({bytes_type, bytes_type, bytes_type});
 
     test_sequence(t, {"el1", "el2", "el3"});
@@ -69,14 +70,14 @@ BOOST_AUTO_TEST_CASE(test_iteration_over_prefixable_tuple) {
     test_sequence(t, {});
 }
 
-BOOST_AUTO_TEST_CASE(test_iteration_over_non_prefixable_singular_tuple) {
+SEASTAR_THREAD_TEST_CASE(test_iteration_over_non_prefixable_singular_tuple) {
     compound_type<allow_prefixes::no> t({bytes_type});
 
     test_sequence(t, {"el1"});
     test_sequence(t, {""});
 }
 
-BOOST_AUTO_TEST_CASE(test_iteration_over_prefixable_singular_tuple) {
+SEASTAR_THREAD_TEST_CASE(test_iteration_over_prefixable_singular_tuple) {
     compound_type<allow_prefixes::yes> t({bytes_type});
 
     test_sequence(t, {"elem1"});
@@ -117,7 +118,7 @@ void do_test_conversion_methods_for_singular_compound() {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_conversion_methods_for_singular_compound) {
+SEASTAR_THREAD_TEST_CASE(test_conversion_methods_for_singular_compound) {
     do_test_conversion_methods_for_singular_compound<allow_prefixes::yes>();
     do_test_conversion_methods_for_singular_compound<allow_prefixes::no>();
 }
@@ -150,12 +151,12 @@ void do_test_conversion_methods_for_non_singular_compound() {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_conversion_methods_for_non_singular_compound) {
+SEASTAR_THREAD_TEST_CASE(test_conversion_methods_for_non_singular_compound) {
     do_test_conversion_methods_for_non_singular_compound<allow_prefixes::yes>();
     do_test_conversion_methods_for_non_singular_compound<allow_prefixes::no>();
 }
 
-BOOST_AUTO_TEST_CASE(test_component_iterator_post_incrementation) {
+SEASTAR_THREAD_TEST_CASE(test_component_iterator_post_incrementation) {
     compound_type<allow_prefixes::no> t({bytes_type, bytes_type, bytes_type});
 
     auto packed = t.serialize_value(to_bytes_vec({"el1", "el2", "el3"}));
@@ -167,7 +168,7 @@ BOOST_AUTO_TEST_CASE(test_component_iterator_post_incrementation) {
     BOOST_REQUIRE(i == end);
 }
 
-BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form) {
+SEASTAR_THREAD_TEST_CASE(test_conversion_to_legacy_form) {
     compound_type<allow_prefixes::no> singular({bytes_type});
 
     BOOST_REQUIRE_EQUAL(to_legacy(singular, singular.serialize_single(to_bytes("asd"))), bytes("asd"));
@@ -182,7 +183,7 @@ BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form) {
         bytes({'\x00', '\x03', 'e', 'l', '1', '\x00', '\x00', '\x00', '\x00'}));
 }
 
-BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_singular) {
+SEASTAR_THREAD_TEST_CASE(test_conversion_to_legacy_form_same_token_singular) {
     auto s = schema_builder("ks", "cf")
                 .with_column("c", int32_type, column_kind::partition_key)
                 .with_column("v", int32_type)
@@ -192,9 +193,8 @@ BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_singular) {
                   .with_column("v", int32_type)
                   .build();
 
-    std::srand(std::time(nullptr));
     dht::murmur3_partitioner partitioner;
-    auto key = partition_key::from_deeply_exploded(*s, {std::rand()});
+    auto key = partition_key::from_deeply_exploded(*s, {tests::random::get_int<int32_t>()});
     auto dk = partitioner.decorate_key(*s, key);
 
     auto b = to_legacy(*key.get_compound_type(*s), key.representation());
@@ -204,7 +204,7 @@ BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_singular) {
     BOOST_REQUIRE_EQUAL(dk._token, dk1._token);
 }
 
-BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_two_components) {
+SEASTAR_THREAD_TEST_CASE(test_conversion_to_legacy_form_same_token_two_components) {
     auto s = schema_builder("ks", "cf")
                 .with_column("c1", int32_type, column_kind::partition_key)
                 .with_column("c2", int32_type, column_kind::partition_key)
@@ -215,9 +215,8 @@ BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_two_components) {
                   .with_column("v", int32_type)
                   .build();
 
-    std::srand(std::time(nullptr));
     dht::murmur3_partitioner partitioner;
-    auto key = partition_key::from_deeply_exploded(*s, {std::rand(), std::rand()});
+    auto key = partition_key::from_deeply_exploded(*s, {tests::random::get_int<int32_t>(), tests::random::get_int<int32_t>()});
     auto dk = partitioner.decorate_key(*s, key);
 
     auto b = to_legacy(*key.get_compound_type(*s), key.representation());
@@ -227,7 +226,7 @@ BOOST_AUTO_TEST_CASE(test_conversion_to_legacy_form_same_token_two_components) {
     BOOST_REQUIRE_EQUAL(dk._token, dk1._token);
 }
 
-BOOST_AUTO_TEST_CASE(test_legacy_ordering_of_singular) {
+SEASTAR_THREAD_TEST_CASE(test_legacy_ordering_of_singular) {
     compound_type<allow_prefixes::no> t({bytes_type});
 
     auto make = [&t] (sstring value) -> managed_bytes {
@@ -243,7 +242,7 @@ BOOST_AUTO_TEST_CASE(test_legacy_ordering_of_singular) {
     BOOST_REQUIRE(cmp(make("A"), make("A")) == 0);
 }
 
-BOOST_AUTO_TEST_CASE(test_legacy_ordering_of_composites) {
+SEASTAR_THREAD_TEST_CASE(test_legacy_ordering_of_composites) {
     compound_type<allow_prefixes::no> t({bytes_type, bytes_type});
 
     auto make = [&t] (sstring v1, sstring v2) -> managed_bytes {
@@ -265,7 +264,7 @@ BOOST_AUTO_TEST_CASE(test_legacy_ordering_of_composites) {
     BOOST_REQUIRE(cmp(make("A", ""), make("A", "A")) < 0);
 }
 
-BOOST_AUTO_TEST_CASE(test_enconding_of_legacy_composites) {
+SEASTAR_THREAD_TEST_CASE(test_enconding_of_legacy_composites) {
     using components = std::vector<composite::component>;
 
     BOOST_REQUIRE_EQUAL(composite(bytes({'\x00', '\x03', 'e', 'l', '1', '\x00'})).components(),
@@ -287,7 +286,7 @@ BOOST_AUTO_TEST_CASE(test_enconding_of_legacy_composites) {
                                     std::make_pair(bytes(""), composite::eoc::end)}));
 }
 
-BOOST_AUTO_TEST_CASE(test_enconding_of_singular_composite) {
+SEASTAR_THREAD_TEST_CASE(test_enconding_of_singular_composite) {
     using components = std::vector<composite::component>;
 
     BOOST_REQUIRE_EQUAL(composite(bytes({'e', 'l', '1'}), false).components(),
@@ -297,7 +296,7 @@ BOOST_AUTO_TEST_CASE(test_enconding_of_singular_composite) {
                         components({std::make_pair(bytes("el1"), composite::eoc::none)}));
 }
 
-BOOST_AUTO_TEST_CASE(test_enconding_of_static_composite) {
+SEASTAR_THREAD_TEST_CASE(test_enconding_of_static_composite) {
     using components = std::vector<composite::component>;
 
     auto s = schema_builder("ks", "cf")
@@ -314,18 +313,18 @@ BOOST_AUTO_TEST_CASE(test_enconding_of_static_composite) {
     BOOST_REQUIRE_EQUAL(cs, components({std::make_pair(bytes(""), composite::eoc::none)}));
 }
 
-BOOST_AUTO_TEST_CASE(test_composite_serialize_value) {
+SEASTAR_THREAD_TEST_CASE(test_composite_serialize_value) {
     BOOST_REQUIRE_EQUAL(composite::serialize_value(std::vector<bytes>({bytes({'e', 'l', '1'})})).release_bytes(),
                         bytes({'\x00', '\x03', 'e', 'l', '1', '\x00'}));
 }
 
-BOOST_AUTO_TEST_CASE(test_composite_from_exploded) {
+SEASTAR_THREAD_TEST_CASE(test_composite_from_exploded) {
     using components = std::vector<composite::component>;
     BOOST_REQUIRE_EQUAL(composite::from_exploded({bytes_view(bytes({'e', 'l', '1'}))}, true, composite::eoc::start).components(),
                         components({std::make_pair(bytes("el1"), composite::eoc::start)}));
 }
 
-BOOST_AUTO_TEST_CASE(test_composite_view_explode) {
+SEASTAR_THREAD_TEST_CASE(test_composite_view_explode) {
     auto to_owning_vector = [] (std::vector<bytes_view> bvs) {
         return boost::copy_range<std::vector<bytes>>(bvs | boost::adaptors::transformed([] (auto bv) {
             return bytes(bv.begin(), bv.end());
@@ -342,7 +341,7 @@ BOOST_AUTO_TEST_CASE(test_composite_view_explode) {
     }
 }
 
-BOOST_AUTO_TEST_CASE(test_composite_validity) {
+SEASTAR_THREAD_TEST_CASE(test_composite_validity) {
     auto is_valid = [] (bytes b) {
         return composite_view(b).is_valid();
     };
@@ -360,7 +359,7 @@ BOOST_AUTO_TEST_CASE(test_composite_validity) {
     BOOST_REQUIRE_EQUAL(is_valid({'\x00', '\x02', 'a'}), false);
 }
 
-BOOST_AUTO_TEST_CASE(test_full_compound_validity) {
+SEASTAR_THREAD_TEST_CASE(test_full_compound_validity) {
     const auto c = compound_type<allow_prefixes::no>({byte_type, utf8_type});
 
     auto validate = [&] (bytes b) {
@@ -375,7 +374,7 @@ BOOST_AUTO_TEST_CASE(test_full_compound_validity) {
     BOOST_REQUIRE_THROW(validate({'\x00', '\x02', 'a', 'b', '\x00', '\x01', 0}), marshal_exception); // wrong order of components
 }
 
-BOOST_AUTO_TEST_CASE(test_prefix_compound_validity) {
+SEASTAR_THREAD_TEST_CASE(test_prefix_compound_validity) {
     const auto c = compound_type<allow_prefixes::yes>({byte_type, utf8_type});
 
     auto validate = [&] (bytes b) {

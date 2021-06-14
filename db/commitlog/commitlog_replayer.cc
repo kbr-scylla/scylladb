@@ -19,7 +19,7 @@
 
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -50,6 +50,7 @@
 #include "db/extensions.hh"
 #include "utils/fragmented_temporary_buffer.hh"
 #include "validation.hh"
+#include "mutation_partition_view.hh"
 
 static logging::logger rlogger("commitlog_replayer");
 

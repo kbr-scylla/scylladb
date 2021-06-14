@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -26,7 +26,6 @@
 #include "test/lib/tmpdir.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/simple_schema.hh"
-#include "test/lib/test_services.hh"
 #include "test/lib/mutation_source_test.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/make_random_string.hh"
@@ -432,7 +431,6 @@ SEASTAR_THREAD_TEST_CASE(test_fast_forwarding_combining_reader_with_galloping) {
 
 SEASTAR_TEST_CASE(test_sm_fast_forwarding_combining_reader) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
         simple_schema s;
 
         const auto pkeys = s.make_pkeys(4);
@@ -567,8 +565,6 @@ struct sst_factory {
 
 SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
   sstables::test_env::do_with_async([] (sstables::test_env& env) {
-    storage_service_for_tests ssft;
-
     simple_schema s;
 
     auto pkeys = s.make_pkeys(6);
@@ -735,8 +731,6 @@ public:
 
 SEASTAR_TEST_CASE(reader_selector_gap_between_readers_test) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         simple_schema s;
         auto pkeys = s.make_pkeys(3);
 
@@ -770,8 +764,6 @@ SEASTAR_TEST_CASE(reader_selector_gap_between_readers_test) {
 
 SEASTAR_TEST_CASE(reader_selector_overlapping_readers_test) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         simple_schema s;
         auto pkeys = s.make_pkeys(4);
 
@@ -824,8 +816,6 @@ SEASTAR_TEST_CASE(reader_selector_overlapping_readers_test) {
 
 SEASTAR_TEST_CASE(reader_selector_fast_forwarding_test) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         simple_schema s;
         auto pkeys = s.make_pkeys(5);
 
@@ -1035,7 +1025,6 @@ public:
 
 SEASTAR_TEST_CASE(restricted_reader_reading) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
-        storage_service_for_tests ssft;
         reader_concurrency_semaphore semaphore(2, new_reader_base_cost, get_name());
         auto stop_sem = deferred_stop(semaphore);
 
@@ -1110,7 +1099,6 @@ SEASTAR_TEST_CASE(restricted_reader_reading) {
 
 SEASTAR_TEST_CASE(restricted_reader_create_reader) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
-        storage_service_for_tests ssft;
         reader_concurrency_semaphore semaphore(100, new_reader_base_cost, get_name());
         auto stop_sem = deferred_stop(semaphore);
 
@@ -1179,7 +1167,6 @@ static mutation compacted(const mutation& m) {
 
 SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicing) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
-        storage_service_for_tests ssft;
         random_mutation_generator gen(random_mutation_generator::generate_counters::no);
         auto s = gen.schema();
 
@@ -1258,7 +1245,6 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combined_reader_is_consistent_with_slicin
 
 SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
-        storage_service_for_tests ssft;
         simple_schema ss;
         auto s = ss.schema();
 
@@ -3818,8 +3804,6 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_in_memory) {
 
 SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_sstable_set) {
   sstables::test_env::do_with_async([] (sstables::test_env& env) {
-    storage_service_for_tests ssft;
-
     auto pkeys = make_local_keys(2, clustering_order_merger_test_generator::make_schema());
     clustering_order_merger_test_generator g(pkeys[0]);
 

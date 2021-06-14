@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -32,11 +32,13 @@
 
 #include <vector>
 #include "cql3/selection/selector.hh"
-#include "cql3/selection/selectable.hh"
+#include "schema.hh"
 
 namespace cql3 {
 
 namespace selection {
+
+class selectable;
 
 /**
  * A set of <code>selector</code> factories.

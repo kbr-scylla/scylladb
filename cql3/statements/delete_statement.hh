@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -31,12 +31,11 @@
 #pragma once
 
 #include "cql3/statements/modification_statement.hh"
-#include "cql3/statements/raw/modification_statement.hh"
-#include "cql3/attributes.hh"
-#include "cql3/operation.hh"
 #include "database_fwd.hh"
 
 namespace cql3 {
+
+class attributes;
 
 namespace statements {
 

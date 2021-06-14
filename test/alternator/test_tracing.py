@@ -1,4 +1,4 @@
-# Copyright 2020 ScyllaDB
+# Copyright 2020-present ScyllaDB
 #
 # This file is part of Scylla.
 #
@@ -125,7 +125,7 @@ def find_tracing_session(dynamodb, str):
         # The trace tables have RF=2, even on a one-node test setup, and
         # thus fail reads with ConsistentRead=True (Quorum)...
         last_scan = full_scan(trace_sessions_table, ConsistentRead=False)
-    while time.time() - start < 30:
+    while time.time() - start < 100:
         for entry in last_scan:
             if str in entry['parameters']:
                 print(f'find_tracing_session time {time.time()-start}')
@@ -160,9 +160,10 @@ def get_tracing_events(dynamodb, session_id):
 # a timeout. In the successful case, we'll finish very quickly (usually,
 # even immediately).
 def expect_tracing_events(dynamodb, str, expected_events):
-    delay = 0.1
-    while delay < 60:
-        events = get_tracing_events(dynamodb, find_tracing_session(dynamodb, str))
+    session = find_tracing_session(dynamodb, str)
+    start = time.time()
+    while time.time() - start < 100:
+        events = get_tracing_events(dynamodb, session)
         for event in expected_events:
             if not event in events:
                 break
@@ -172,8 +173,7 @@ def expect_tracing_events(dynamodb, str, expected_events):
             # the event list isn't ridiculously short.
             if len(events) > 3:
                 return
-        time.sleep(delay)
-        delay = delay * 2
+        time.sleep(0.1)
     # Failed until the timeout. Repeat the last tests with an assertion,
     # to get a useful error report from pytest.
     assert len(events) > 3
@@ -252,8 +252,8 @@ def test_slow_query_log(with_slow_query_logging, test_table_s, dynamodb):
     # Verify that the operations got logged. Each operation taking more than 0 microseconds is logged,
     # which effectively logs all requests as slow.
     slow_query_table = dynamodb.Table('.scylla.alternator.system_traces.node_slow_log')
-    delay = 0.2
-    while delay < 30:
+    start_time = time.time()
+    while time.time() < start_time + 60:
         results = full_scan(slow_query_table, ConsistentRead=False)
         put_item_found = any("PutItem" in result['parameters'] and p in result['parameters']
                 and result['username'] == "alternator" for result in results)
@@ -262,6 +262,5 @@ def test_slow_query_log(with_slow_query_logging, test_table_s, dynamodb):
         if put_item_found and delete_item_found:
             return
         else:
-            time.sleep(delay)
-            delay += 1
+            time.sleep(0.5)
     pytest.fail("Slow query entries not found")

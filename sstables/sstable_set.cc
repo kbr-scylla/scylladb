@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -294,16 +294,13 @@ class partitioned_sstable_set::incremental_selector : public incremental_selecto
     const uint64_t& _leveled_sstables_change_cnt;
     uint64_t _last_known_leveled_sstables_change_cnt;
     map_iterator _it;
-    // Only to back the dht::ring_position_view returned from select().
-    dht::ring_position _next_position;
 private:
-    dht::ring_position_view next_position(map_iterator it) {
+    dht::ring_position_ext next_position(map_iterator it) {
         if (it == _leveled_sstables.end()) {
-            _next_position = dht::ring_position::max();
             return dht::ring_position_view::max();
         } else {
-            _next_position = partitioned_sstable_set::to_ring_position(it->first.lower());
-            return dht::ring_position_view(_next_position, dht::ring_position_view::after_key(!boost::icl::is_left_closed(it->first.bounds())));
+            auto&& next_position = partitioned_sstable_set::to_ring_position(it->first.lower());
+            return dht::ring_position_ext(next_position, dht::ring_position_ext::after_key(!boost::icl::is_left_closed(it->first.bounds())));
         }
     }
     static bool is_before_interval(const compatible_ring_position_or_view& crp, const interval_type& interval) {
@@ -327,10 +324,9 @@ public:
         , _leveled_sstables(leveled_sstables)
         , _leveled_sstables_change_cnt(leveled_sstables_change_cnt)
         , _last_known_leveled_sstables_change_cnt(leveled_sstables_change_cnt)
-        , _it(leveled_sstables.begin())
-        , _next_position(dht::ring_position::min()) {
+        , _it(leveled_sstables.begin()) {
     }
-    virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_view> select(const dht::ring_position_view& pos) override {
+    virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_ext> select(const dht::ring_position_view& pos) override {
         auto crp = compatible_ring_position_or_view(*_schema, pos);
         auto ssts = _unleveled_sstables;
         using namespace dht;
@@ -400,7 +396,7 @@ std::unique_ptr<incremental_selector_impl> time_series_sstable_set::make_increme
 
         selector(const time_series_sstable_set& set) : _set(set) {}
 
-        virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_view>
+        virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_ext>
         select(const dht::ring_position_view&) override {
             return std::make_tuple(dht::partition_range::make_open_ended_both_sides(), _set.select(), dht::ring_position_view::max());
         }
@@ -684,7 +680,7 @@ static std::vector<shared_sstable>
 filter_sstable_for_reader_by_pk(std::vector<shared_sstable>&& sstables, const schema& schema, const dht::ring_position& pos) {
     auto filter = [_filter = make_pk_filter(pos, schema)] (const shared_sstable& sst) { return !_filter(*sst); };
     sstables.erase(boost::remove_if(sstables, filter), sstables.end());
-    return sstables;
+    return std::move(sstables);
 }
 
 // Filter out sstables for reader using sstable metadata that keeps track
@@ -696,7 +692,7 @@ filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, column_f
     // compaction strategy thinks it will not benefit from such an optimization,
     // or the partition_slice includes static columns.
     if (!schema->clustering_key_size() || !cf.get_compaction_strategy().use_clustering_key_filter() || slice.static_columns.size()) {
-        return sstables;
+        return std::move(sstables);
     }
 
     ::cf_stats* stats = cf.cf_stats();
@@ -709,7 +705,7 @@ filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, column_f
     if (ck_filtering_all_ranges.size() == 1 && ck_filtering_all_ranges[0].is_full()) {
         stats->clustering_filter_fast_path_count++;
         stats->surviving_sstables_after_clustering_filter += sstables.size();
-        return sstables;
+        return std::move(sstables);
     }
 
     auto skipped = std::partition(sstables.begin(), sstables.end(), [&ranges = ck_filtering_all_ranges] (const shared_sstable& sst) {
@@ -718,7 +714,7 @@ filter_sstable_for_reader_by_ck(std::vector<shared_sstable>&& sstables, column_f
     sstables.erase(skipped, sstables.end());
     stats->surviving_sstables_after_clustering_filter += sstables.size();
 
-    return sstables;
+    return std::move(sstables);
 }
 
 std::vector<sstable_run>
@@ -890,7 +886,7 @@ std::vector<sstable_run> compound_sstable_set::select_sstable_runs(const std::ve
 
 lw_shared_ptr<sstable_list> compound_sstable_set::all() const {
     auto sets = _sets;
-    auto it = std::partition(sets.begin(), sets.end(), [] (const auto& set) { return set->all()->size() > 0; });
+    auto it = std::partition(sets.begin(), sets.end(), [] (const auto& set) { return !set->all()->empty(); });
     auto non_empty_set_count = std::distance(sets.begin(), it);
 
     if (!non_empty_set_count) {
@@ -943,7 +939,7 @@ public:
             , _selectors(make_selectors(sets)) {
     }
 
-    virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_view> select(const dht::ring_position_view& pos) override {
+    virtual std::tuple<dht::partition_range, std::vector<shared_sstable>, dht::ring_position_ext> select(const dht::ring_position_view& pos) override {
         // Return all sstables selected on the requested position from all selectors.
         std::vector<shared_sstable> sstables;
         // Return the lowest next position from all selectors, such that this function will be called again to select the
@@ -963,11 +959,25 @@ public:
             }
         }
 
-        return std::make_tuple(std::move(current_range), std::move(sstables), lowest_next_position);
+        return std::make_tuple(std::move(current_range), std::move(sstables), dht::ring_position_ext(lowest_next_position));
     }
 };
 
 std::unique_ptr<incremental_selector_impl> compound_sstable_set::make_incremental_selector() const {
+    if (_sets.empty()) {
+        // compound_sstable_set must manage one sstable set at least.
+        abort();
+    }
+    auto sets = _sets;
+    auto it = std::partition(sets.begin(), sets.end(), [] (const lw_shared_ptr<sstable_set>& set) { return !set->all()->empty(); });
+    auto non_empty_set_count = std::distance(sets.begin(), it);
+
+    // optimize for common case where only primary set contains sstables, so its selector can be built without an interposer.
+    // optimization also applies when no set contains sstable, so any set can be picked as selection will be a no-op anyway.
+    if (non_empty_set_count <= 1) {
+        const auto& set = sets.front();
+        return set->_impl->make_incremental_selector();
+    }
     return std::make_unique<incremental_selector>(*_schema, _sets);
 }
 
@@ -988,7 +998,7 @@ compound_sstable_set::create_single_key_sstable_reader(
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr) const {
     auto sets = _sets;
-    auto it = std::partition(sets.begin(), sets.end(), [] (const auto& set) { return set->all()->size() > 0; });
+    auto it = std::partition(sets.begin(), sets.end(), [] (const auto& set) { return !set->all()->empty(); });
     auto non_empty_set_count = std::distance(sets.begin(), it);
 
     if (!non_empty_set_count) {

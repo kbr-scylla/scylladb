@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -17,6 +17,7 @@
 #include "service/storage_service.hh"
 #include <seastar/core/metrics.hh>
 #include "exceptions.hh"
+#include "locator/abstract_replication_strategy.hh"
 #include <cmath>
 
 static logging::logger cmlog("compaction_manager");
@@ -432,7 +433,7 @@ void compaction_manager::postpone_compaction_for_column_family(column_family* cf
 }
 
 future<> compaction_manager::stop_ongoing_compactions(sstring reason) {
-    cmlog.info("Stopping {} ongoing compactions", _compactions.size());
+    cmlog.info("Stopping {} ongoing compactions due to {}", _compactions.size(), reason);
 
     // Stop all ongoing compaction.
     for (auto& info : _compactions) {
@@ -568,7 +569,7 @@ void compaction_manager::submit(column_family* cf) {
                 return make_ready_future<stop_iteration>(stop_iteration::yes);
             }
             auto compacting = make_lw_shared<compacting_sstable_registration>(this, descriptor.sstables);
-            descriptor.weight_registration = compaction_weight_registration(this, weight);
+            auto weight_r = compaction_weight_registration(this, weight);
             descriptor.release_exhausted = [compacting] (const std::vector<sstables::shared_sstable>& exhausted_sstables) {
                 compacting->release_compacting(exhausted_sstables);
             };
@@ -578,7 +579,7 @@ void compaction_manager::submit(column_family* cf) {
             _stats.pending_tasks--;
             _stats.active_tasks++;
             task->compaction_running = true;
-            return cf.run_compaction(std::move(descriptor)).then_wrapped([this, task, compacting = std::move(compacting)] (future<> f) mutable {
+            return cf.run_compaction(std::move(descriptor)).then_wrapped([this, task, compacting = std::move(compacting), weight_r = std::move(weight_r)] (future<> f) mutable {
                 _stats.active_tasks--;
                 task->compaction_running = false;
 
@@ -873,11 +874,6 @@ void compaction_manager::stop_compaction(sstring type) {
             info->stop("user request");
         }
     }
-}
-
-void compaction_manager::on_compaction_complete(compaction_weight_registration& weight_registration) {
-    weight_registration.deregister();
-    reevaluate_postponed_compactions();
 }
 
 void compaction_manager::propagate_replacement(column_family* cf,

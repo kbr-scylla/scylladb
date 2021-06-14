@@ -39,7 +39,7 @@
 #include "distributed_loader.hh"
 #include "schema_builder.hh"
 #include "db/system_keyspace.hh"
-
+#include "locator/everywhere_replication_strategy.hh"
 
 namespace encryption {
 

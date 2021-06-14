@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -232,6 +232,10 @@ abstract_replication_strategy::get_address_ranges(const token_metadata& tm, can_
                 ret.emplace(ep, rng);
             }
         }
+
+        if (can_yield) {
+            seastar::thread::maybe_yield();
+        }
     }
     return ret;
 }
@@ -257,6 +261,10 @@ abstract_replication_strategy::get_address_ranges(const token_metadata& tm, inet
         if (!found) {
             logger.debug("token={} natural_endpoints={}: endpoint={} not found", t, eps, endpoint);
         }
+
+        if (can_yield) {
+            seastar::thread::maybe_yield();
+        }
     }
     return ret;
 }
@@ -269,6 +277,10 @@ abstract_replication_strategy::get_range_addresses(const token_metadata& tm, can
         auto eps = calculate_natural_endpoints(t, tm, can_yield);
         for (auto& r : ranges) {
             ret.emplace(r, eps);
+        }
+
+        if (can_yield) {
+            seastar::thread::maybe_yield();
         }
     }
     return ret;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -21,6 +21,8 @@
 #include <seastar/util/defer.hh>
 #include "utils/exceptions.hh"
 #include <seastar/core/on_internal_error.hh>
+
+#include "clustering_key_filter.hh"
 
 logging::logger fmr_logger("flat_mutation_reader");
 

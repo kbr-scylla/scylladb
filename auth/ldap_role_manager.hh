@@ -65,33 +65,33 @@ class ldap_role_manager : public role_manager {
 
     future<> stop() override;
 
-    future<> create(std::string_view, const role_config&) const override;
+    future<> create(std::string_view, const role_config&) override;
 
-    future<> drop(std::string_view) const override;
+    future<> drop(std::string_view) override;
 
-    future<> alter(std::string_view, const role_config_update&) const override;
+    future<> alter(std::string_view, const role_config_update&) override;
 
-    future<> grant(std::string_view, std::string_view) const override;
+    future<> grant(std::string_view, std::string_view) override;
 
-    future<> revoke(std::string_view, std::string_view) const override;
+    future<> revoke(std::string_view, std::string_view) override;
 
-    future<role_set> query_granted(std::string_view, recursive_role_query) const override;
+    future<role_set> query_granted(std::string_view, recursive_role_query) override;
 
-    future<role_set> query_all() const override;
+    future<role_set> query_all() override;
 
-    future<bool> exists(std::string_view) const override;
+    future<bool> exists(std::string_view) override;
 
-    future<bool> is_superuser(std::string_view) const override;
+    future<bool> is_superuser(std::string_view) override;
 
-    future<bool> can_login(std::string_view) const override;
+    future<bool> can_login(std::string_view) override;
 
-    future<std::optional<sstring>> get_attribute(std::string_view, std::string_view) const override;
+    future<std::optional<sstring>> get_attribute(std::string_view, std::string_view) override;
 
-    future<role_manager::attribute_vals> query_attribute_for_all(std::string_view) const override;
+    future<role_manager::attribute_vals> query_attribute_for_all(std::string_view) override;
 
-    future<> set_attribute(std::string_view, std::string_view, std::string_view) const override;
+    future<> set_attribute(std::string_view, std::string_view, std::string_view) override;
 
-    future<> remove_attribute(std::string_view, std::string_view) const override;
+    future<> remove_attribute(std::string_view, std::string_view) override;
 
   private:
     /// Connects to the LDAP server indicated by _query_template and executes LDAP bind using _bind_name and

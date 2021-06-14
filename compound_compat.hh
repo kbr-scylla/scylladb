@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -15,6 +15,7 @@
 #include "compound.hh"
 #include "schema.hh"
 #include "sstables/version.hh"
+#include "log.hh"
 
 //FIXME: de-inline methods and define this as static in a .cc file.
 extern logging::logger compound_logger;

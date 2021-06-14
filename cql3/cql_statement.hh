@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,15 +30,14 @@
 
 #pragma once
 
-#include "service/client_state.hh"
-#include "service/query_state.hh"
-#include "cql3/query_options.hh"
 #include "timeout_config.hh"
 #include "audit/audit.hh"
 
 namespace service {
 
 class storage_proxy;
+class query_state;
+class client_state;
 
 }
 
@@ -57,14 +56,16 @@ namespace cql3 {
 class query_processor;
 
 class metadata;
-shared_ptr<const metadata> make_empty_metadata();
+seastar::shared_ptr<const metadata> make_empty_metadata();
+
+class query_options;
 
 class cql_statement {
     timeout_config_selector _timeout_config_selector;
     audit::audit_info_ptr _audit_info;
 public:
     // CQL statement text
-    sstring raw_cql_statement;
+    seastar::sstring raw_cql_statement;
 
     explicit cql_statement(timeout_config_selector timeout_selector) : _timeout_config_selector(timeout_selector) {}
     cql_statement(cql_statement&& o) = default;
@@ -81,7 +82,7 @@ public:
      *
      * @param state the current client state
      */
-    virtual future<> check_access(service::storage_proxy& proxy, const service::client_state& state) const = 0;
+    virtual seastar::future<> check_access(service::storage_proxy& proxy, const service::client_state& state) const = 0;
 
     /**
      * Perform additional validation required by the statment.
@@ -97,14 +98,14 @@ public:
      * @param state the current query state
      * @param options options for this query (consistency, variables, pageSize, ...)
      */
-    virtual future<::shared_ptr<cql_transport::messages::result_message>>
+    virtual seastar::future<seastar::shared_ptr<cql_transport::messages::result_message>>
         execute(query_processor& qp, service::query_state& state, const query_options& options) const = 0;
 
-    virtual bool depends_on_keyspace(const sstring& ks_name) const = 0;
+    virtual bool depends_on_keyspace(const seastar::sstring& ks_name) const = 0;
 
-    virtual bool depends_on_column_family(const sstring& cf_name) const = 0;
+    virtual bool depends_on_column_family(const seastar::sstring& cf_name) const = 0;
 
-    virtual shared_ptr<const metadata> get_result_metadata() const = 0;
+    virtual seastar::shared_ptr<const metadata> get_result_metadata() const = 0;
 
     virtual bool is_conditional() const {
         return false;
@@ -119,7 +120,7 @@ public:
 class cql_statement_no_metadata : public cql_statement {
 public:
     using cql_statement::cql_statement;
-    virtual shared_ptr<const metadata> get_result_metadata() const override {
+    virtual seastar::shared_ptr<const metadata> get_result_metadata() const override {
         return make_empty_metadata();
     }
 };
@@ -130,10 +131,10 @@ public:
 class cql_statement_opt_metadata : public cql_statement {
 protected:
     // Result set metadata, may be empty for simple updates and batches
-    shared_ptr<metadata> _metadata;
+    seastar::shared_ptr<metadata> _metadata;
 public:
     using cql_statement::cql_statement;
-    virtual shared_ptr<const metadata> get_result_metadata() const override {
+    virtual seastar::shared_ptr<const metadata> get_result_metadata() const override {
         if (_metadata) {
             return _metadata;
         }

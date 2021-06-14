@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  */
 
@@ -62,6 +62,7 @@ class node_ops_cmd_request;
 class node_ops_cmd_response;
 class node_ops_info;
 class repair_service;
+class raft_services;
 
 namespace cql_transport { class controller; }
 
@@ -78,6 +79,7 @@ class view_update_generator;
 
 namespace dht {
 class boot_strapper;
+class range_streamer;
 }
 
 namespace qos {
@@ -119,6 +121,7 @@ class node_ops_meta_data {
     utils::UUID _ops_uuid;
     gms::inet_address _coordinator;
     std::function<future<> ()> _abort;
+    shared_ptr<abort_source> _abort_source;
     std::function<void ()> _signal;
     shared_ptr<node_ops_info> _ops;
     seastar::timer<lowres_clock> _watchdog;
@@ -132,6 +135,7 @@ public:
             std::function<future<> ()> abort_func,
             std::function<void ()> signal_func);
     shared_ptr<node_ops_info> get_ops_info();
+    shared_ptr<abort_source> get_abort_source();
     future<> abort();
     void update_watchdog();
     void cancel_watchdog();
@@ -163,6 +167,8 @@ private:
     gms::feature_service& _feature_service;
     distributed<database>& _db;
     gms::gossiper& _gossiper;
+    // Container for all Raft instances running on this shard.
+    raft_services& _raft_svcs;
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
     sharded<repair_service>& _repair;
@@ -204,7 +210,20 @@ private:
     void node_ops_singal_abort(std::optional<utils::UUID> ops_uuid);
     future<> node_ops_abort_thread();
 public:
-    storage_service(abort_source& as, distributed<database>& db, gms::gossiper& gossiper, sharded<db::system_distributed_keyspace>&, sharded<db::view::view_update_generator>&, gms::feature_service& feature_service, storage_service_config config, sharded<service::migration_manager>& mm, locator::shared_token_metadata& stm, sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<repair_service>& repair, sharded<qos::service_level_controller>&, /* only for tests */ bool for_testing = false);
+    storage_service(abort_source& as, distributed<database>& db,
+        gms::gossiper& gossiper,
+        sharded<db::system_distributed_keyspace>&,
+        sharded<db::view::view_update_generator>&,
+        gms::feature_service& feature_service,
+        storage_service_config config,
+        sharded<service::migration_manager>& mm,
+        locator::shared_token_metadata& stm,
+        sharded<netw::messaging_service>& ms,
+        sharded<cdc::generation_service>&,
+        sharded<repair_service>& repair,
+        raft_services& raft_svcs,
+        sharded<qos::service_level_controller>&,
+        /* only for tests */ bool for_testing = false);
 
     // Needed by distributed<>
     future<> stop();
@@ -249,13 +268,6 @@ public:
     }
 
     future<> gossip_sharder();
-
-    distributed<database>& db() {
-        return _db;
-    }
-
-    gms::feature_service& features() { return _feature_service; }
-    const gms::feature_service& features() const { return _feature_service; }
 
     cdc::generation_service& get_cdc_generation_service() {
         if (!_cdc_gen_service.local_is_initialized()) {
@@ -373,6 +385,9 @@ private:
 
     void run_replace_ops();
     void run_bootstrap_ops();
+
+    std::unordered_set<token> get_replace_tokens();
+    std::optional<utils::UUID> get_replace_node();
 
 public:
     future<bool> is_initialized();
@@ -687,6 +702,8 @@ private:
      * @param endpoint the node that left
      */
     future<> restore_replica_count(inet_address endpoint, inet_address notify_endpoint);
+    future<> removenode_with_stream(gms::inet_address leaving_node, shared_ptr<abort_source> as_ptr);
+    future<> removenode_add_ranges(lw_shared_ptr<dht::range_streamer> streamer, gms::inet_address leaving_node);
 
     // needs to be modified to accept either a keyspace or ARS.
     std::unordered_multimap<dht::token_range, inet_address> get_changed_ranges_for_leaving(sstring keyspace_name, inet_address endpoint);
@@ -893,12 +910,20 @@ private:
     void start_workload_prioritization(workload_prioritization_create_tables create_tables);
 };
 
-future<> init_storage_service(sharded<abort_source>& abort_sources, distributed<database>& db, sharded<gms::gossiper>& gossiper,
-        sharded<db::system_distributed_keyspace>& sys_dist_ks,
-        sharded<db::view::view_update_generator>& view_update_generator, sharded<gms::feature_service>& feature_service,
-        storage_service_config config,
-        sharded<service::migration_manager>& mm, sharded<locator::shared_token_metadata>& stm,
-        sharded<netw::messaging_service>& ms, sharded<cdc::generation_service>&, sharded<repair_service>& repair, sharded<qos::service_level_controller>& sl_controller);
+future<> init_storage_service(sharded<abort_source>& abort_sources,
+    distributed<database>& db,
+    sharded<gms::gossiper>& gossiper,
+    sharded<db::system_distributed_keyspace>& sys_dist_ks,
+    sharded<db::view::view_update_generator>& view_update_generator,
+    sharded<gms::feature_service>& feature_service,
+    storage_service_config config,
+    sharded<service::migration_manager>& mm,
+    sharded<locator::shared_token_metadata>& stm,
+    sharded<netw::messaging_service>& ms,
+    sharded<cdc::generation_service>&,
+    sharded<repair_service>& repair,
+    sharded<raft_services>& raft_svcs,
+    sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 
 }

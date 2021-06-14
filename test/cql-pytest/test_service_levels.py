@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright 2020 ScyllaDB
+# Copyright 2020-present ScyllaDB
 #
 # This file is part of Scylla.
 #
@@ -68,3 +68,31 @@ def test_attached_service_level(scylla_only, cql):
         assert res_one.role == cql.cluster.auth_provider.username and res_one.service_level == sl
         res_one = cql.execute(f"LIST ALL ATTACHED SERVICE LEVELS").one()
         assert res_one.role == cql.cluster.auth_provider.username and res_one.service_level == sl
+
+# Test that declaring service level workload types is possible
+def test_set_workload_type(scylla_only, cql):
+    with new_service_level(cql) as sl:
+        res = cql.execute(f"LIST SERVICE LEVEL {sl}")
+        assert not res.one().workload_type
+        for wt in ['interactive', 'batch']:
+            cql.execute(f"ALTER SERVICE LEVEL {sl} WITH workload_type = '{wt}'")
+            res = cql.execute(f"LIST SERVICE LEVEL {sl}")
+            assert res.one().workload_type == wt
+
+# Test that workload type input is validated
+def test_set_invalid_workload_types(scylla_only, cql):
+    with new_service_level(cql) as sl:
+        for incorrect in ['', 'i', 'b', 'dog', 'x'*256]:
+            print(f"Checking {incorrect}")
+            with pytest.raises(Exception):
+                cql.execute(f"ALTER SERVICE LEVEL {sl} WITH workload_type = '{incorrect}'")
+
+# Test that resetting an already set workload type by assigning NULL to it works fine
+def test_reset_workload_type(scylla_only, cql):
+    with new_service_level(cql) as sl:
+        cql.execute(f"ALTER SERVICE LEVEL {sl} WITH workload_type = 'interactive'")
+        res = cql.execute(f"LIST SERVICE LEVEL {sl}")
+        assert res.one().workload_type == 'interactive'
+        cql.execute(f"ALTER SERVICE LEVEL {sl} WITH workload_type = null")
+        res = cql.execute(f"LIST SERVICE LEVEL {sl}")
+        assert not res.one().workload_type

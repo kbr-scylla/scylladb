@@ -16,7 +16,7 @@
  * limitations under the License.
  *
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -38,6 +38,7 @@
 #include "db/config.hh"
 #include <seastar/core/semaphore.hh>
 #include <boost/range/adaptors.hpp>
+#include "locator/abstract_replication_strategy.hh"
 
 namespace dht {
 

@@ -19,7 +19,7 @@
 /*
  * Modified by ScyllaDB
  *
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -34,6 +34,7 @@
 #include "exceptions/exceptions.hh"
 #include <seastar/core/print.hh>
 #include "cql3/cql3_type.hh"
+#include "cql_serialization_format.hh"
 
 namespace cql3 {
 

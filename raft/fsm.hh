@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 ScyllaDB
+ * Copyright (C) 2020-present ScyllaDB
  */
 
 /*
@@ -51,13 +51,6 @@ struct fsm_config {
     // If set to true will enable prevoting stage during election
     bool enable_prevoting;
 };
-
-// 3.4 Leader election
-// If a follower receives no communication over a period of
-// time called the election timeout, then it assumes there is
-// no viable leader and begins an election to choose a new
-// leader.
-static constexpr logical_clock::duration ELECTION_TIMEOUT = logical_clock::duration{10};
 
 class fsm;
 
@@ -561,7 +554,7 @@ void fsm::step(server_id from, Message&& msg) {
                 follower_state().current_leader = from;
             }
             if (current_leader() != from) {
-                on_internal_error_noexcept(logger, "Got append request or install snpaphot from unexpected leader");
+                on_internal_error_noexcept(logger, "Got append request or install snapshot from an unexpected leader");
             }
         }
     }

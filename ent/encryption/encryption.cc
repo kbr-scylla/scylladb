@@ -54,11 +54,13 @@
 #include "db/commitlog/commitlog_extensions.hh"
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
+#include "utils/UUID_gen.hh"
 
 static seastar::logger logg{"encryption"};
 
 sharded<cql3::query_processor>* hack_query_processor_for_encryption;
 sharded<service::migration_manager>* hack_migration_manager_for_encryption;
+sharded<database>* hack_database_for_encryption;
 
 namespace encryption {
 
@@ -336,7 +338,7 @@ public:
         return service::get_storage_service();
     }
     distributed<database>& get_database() const override {
-        return get_storage_service().local().db();
+        return *hack_database_for_encryption;
     }
 
     distributed<service::migration_manager>& get_migration_manager() const override {

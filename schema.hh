@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -24,12 +24,12 @@
 #include "types.hh"
 #include "compound.hh"
 #include "gc_clock.hh"
-#include "unimplemented.hh"
 #include "utils/UUID.hh"
 #include "compress.hh"
 #include "compaction_strategy_type.hh"
 #include "caching_options.hh"
 #include "column_computation.hh"
+#include "timestamp.hh"
 
 namespace dht {
 
@@ -694,16 +694,6 @@ private:
     void rebuild();
     schema(const raw_schema&, std::optional<raw_view_info>);
 public:
-    // deprecated, use schema_builder.
-    schema(std::optional<utils::UUID> id,
-        std::string_view ks_name,
-        std::string_view cf_name,
-        std::vector<column> partition_key,
-        std::vector<column> clustering_key,
-        std::vector<column> regular_columns,
-        std::vector<column> static_columns,
-        data_type regular_column_name_type,
-        std::string_view comment = {});
     schema(const schema&);
     ~schema();
     table_schema_version version() const {
@@ -977,9 +967,9 @@ public:
     }
 };
 
-lw_shared_ptr<schema> make_shared_schema(std::optional<utils::UUID> id, std::string_view ks_name, std::string_view cf_name,
+lw_shared_ptr<const schema> make_shared_schema(std::optional<utils::UUID> id, std::string_view ks_name, std::string_view cf_name,
     std::vector<schema::column> partition_key, std::vector<schema::column> clustering_key, std::vector<schema::column> regular_columns,
-    std::vector<schema::column> static_columns, data_type regular_column_name_type, std::string_view comment = {});
+    std::vector<schema::column> static_columns, data_type regular_column_name_type, sstring comment = "");
 
 bool operator==(const schema&, const schema&);
 

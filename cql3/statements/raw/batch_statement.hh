@@ -17,7 +17,7 @@
  */
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  */
 
 /*
@@ -25,21 +25,19 @@
  *
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
-
-#include "cql3/cql_statement.hh"
-#include "modification_statement.hh"
-#include "transport/messages/result_message.hh"
-#include "timestamp.hh"
-#include "log.hh"
-#include "to_string.hh"
-
 #pragma once
+
+#include "cql3/statements/raw/cf_statement.hh"
+#include "cql3/statements/raw/modification_statement.hh"
+#include "service/client_state.hh"
 
 namespace cql3 {
 
 namespace statements {
 
 namespace raw {
+
+class modification_statement;
 
 class batch_statement : public raw::cf_statement {
 public:

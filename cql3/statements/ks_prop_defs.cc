@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2015 ScyllaDB
+ * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
  */
@@ -30,6 +30,7 @@
 
 #include "cql3/statements/ks_prop_defs.hh"
 #include "database.hh"
+#include "locator/token_metadata.hh"
 
 namespace cql3 {
 

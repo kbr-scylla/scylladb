@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -19,12 +19,13 @@
 #include "schema_fwd.hh"
 #include "flat_mutation_reader.hh"
 #include "mutation_reader.hh"
-#include "frozen_mutation.hh"
 #include "utils/top_k.hh"
 #include "schema_registry.hh"
 
 #include <vector>
 #include <set>
+
+class frozen_mutation;
 
 namespace db {
 

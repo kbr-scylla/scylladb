@@ -17,7 +17,7 @@
  */
 
 /*
- * Copyright (C) 2016 Cloudius Systems, Ltd.
+ * Copyright (C) 2016-present ScyllaDB
  */
 
 #pragma once
@@ -33,15 +33,6 @@
 #include "sstables/compaction_manager.hh"
 #include "db/large_data_handler.hh"
 #include "sstables/sstables_manager.hh"
-
-// Includes: database, auth, storage_service
-class storage_service_for_tests {
-    class impl;
-    std::unique_ptr<impl> _impl;
-public:
-    storage_service_for_tests();
-    ~storage_service_for_tests();
-};
 
 extern db::nop_large_data_handler nop_lp_handler;
 extern db::config test_db_config;

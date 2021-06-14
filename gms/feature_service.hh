@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 ScyllaDB
+ * Copyright (C) 2018-present ScyllaDB
  */
 
 /*
@@ -81,6 +81,7 @@ private:
     gms::feature _correct_idx_token_in_secondary_index_feature;
     gms::feature _alternator_streams_feature;
     gms::feature _range_scan_data_variant;
+    gms::feature _cdc_generations_v2;
     gms::feature _in_memory_tables;
     gms::feature _workload_prioritization;
 
@@ -152,6 +153,10 @@ public:
     // instead of through the intermediate reconcilable_result format.
     bool cluster_supports_range_scan_data_variant() const {
         return bool(_range_scan_data_variant);
+    }
+
+    bool cluster_supports_cdc_generations_v2() const {
+        return bool(_cdc_generations_v2);
     }
 
     const gms::feature& cluster_supports_in_memory_tables() const {

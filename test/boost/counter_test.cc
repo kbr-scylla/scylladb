@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -18,12 +18,12 @@
 #include <boost/range/algorithm/random_shuffle.hpp>
 
 #include <seastar/testing/test_case.hh>
-#include "test/lib/test_services.hh"
 #include "test/lib/random_utils.hh"
 #include "schema_builder.hh"
 #include "keys.hh"
 #include "mutation.hh"
 #include "frozen_mutation.hh"
+#include "mutation_partition_view.hh"
 
 void verify_shard_order(counter_cell_view ccv) {
     if (ccv.shards().begin() == ccv.shards().end()) {
@@ -185,8 +185,6 @@ atomic_cell_view get_static_counter_cell(mutation& m) {
 
 SEASTAR_TEST_CASE(test_counter_mutations) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         auto s = get_schema();
 
         auto id = generate_ids(4);
@@ -348,8 +346,6 @@ SEASTAR_TEST_CASE(test_counter_mutations) {
 
 SEASTAR_TEST_CASE(test_counter_update_mutations) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         auto s = get_schema();
 
         auto pk = partition_key::from_single_value(*s, int32_type->decompose(0));
@@ -398,8 +394,6 @@ SEASTAR_TEST_CASE(test_counter_update_mutations) {
 
 SEASTAR_TEST_CASE(test_transfer_updates_to_shards) {
     return seastar::async([] {
-        storage_service_for_tests ssft;
-
         auto s = get_schema();
 
         auto pk = partition_key::from_single_value(*s, int32_type->decompose(0));

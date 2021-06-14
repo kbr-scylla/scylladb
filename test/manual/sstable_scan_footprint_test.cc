@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  */
 
 /*
@@ -24,6 +24,7 @@
 #include <seastar/core/units.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/timer.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/util/log.hh>
 
 app_template app;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 ScyllaDB
+ * Copyright (C) 2021-present ScyllaDB
  */
 
 /*
@@ -23,6 +23,8 @@
 #include "alternator/rmw_operation.hh"
 #include "database.hh"
 #include <seastar/core/coroutine.hh>
+
+#include "service/storage_proxy.hh"
 
 future<> alternator_test_env::start(std::string_view isolation_level) {
     smp_service_group_config c;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -12,6 +12,7 @@
 
 #include "partition_version.hh"
 #include "flat_mutation_reader.hh"
+#include "clustering_key_filter.hh"
 #include <boost/range/algorithm/heap_algorithm.hpp>
 
 struct partition_snapshot_reader_dummy_accounter {

@@ -1,6 +1,6 @@
 /*
  * Modified by ScyllaDB
- * Copyright (C) 2017 ScyllaDB
+ * Copyright (C) 2017-present ScyllaDB
  */
 
 /*
@@ -30,6 +30,8 @@
 #include "service_permit.hh"
 #include "utils/directories.hh"
 #include "utils/UUID_gen.hh"
+#include "locator/abstract_replication_strategy.hh"
+#include "mutation_partition_view.hh"
 
 using namespace std::literals::chrono_literals;
 

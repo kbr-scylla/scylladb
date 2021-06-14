@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 ScyllaDB
+ * Copyright (C) 2019-present ScyllaDB
  */
 
 /*
@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "query-request.hh"
+#include "dht/i_partitioner.hh"
 #include <optional>
 #include <variant>
 

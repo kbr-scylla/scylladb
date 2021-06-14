@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 ScyllaDB
+ * Copyright (C) 2014-present ScyllaDB
  */
 
 /*
@@ -22,6 +22,7 @@
 #include <boost/intrusive/list.hpp>
 #include "database_fwd.hh"
 #include "utils/updateable_value.hh"
+#include "service_permit.hh"
 
 class thrift_server;
 class thrift_stats;

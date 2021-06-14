@@ -13,6 +13,7 @@
 #include "db/config.hh"
 #include "cql3/cql_statement.hh"
 #include "cql3/statements/batch_statement.hh"
+#include "cql3/statements/modification_statement.hh"
 #include "storage_helper.hh"
 #include "audit.hh"
 #include "../db/config.hh"
