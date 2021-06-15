@@ -19,9 +19,7 @@
 #include "encryption.hh"
 
 encryption::encryption_config::encryption_config()
-                : config_file( { system_key_directory, config_encryption_active,
-                                config_encryption_key_name,
-                                system_info_encryption, kmip_hosts })
+                : config_file()
 // BEGIN entry definitions
 
         , system_key_directory(this, "system_key_directory", value_status::Used, "resources/system_keys",
