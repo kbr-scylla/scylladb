@@ -604,8 +604,14 @@ public:
     }
     // Takes a vector of possibly overlapping intervals and returns a vector containing
     // a set of non-overlapping intervals covering the same values.
-    template<typename Comparator>
-    static std::vector<nonwrapping_interval> deoverlap(std::vector<nonwrapping_interval> intervals, Comparator&& cmp) {
+    template<typename Comparator, typename IntervalVec>
+    requires requires (IntervalVec vec) {
+        { vec.begin() } -> std::random_access_iterator;
+        { vec.end() } -> std::random_access_iterator;
+        { vec.reserve(1) };
+        { vec.front() } -> std::same_as<nonwrapping_interval&>;
+    }
+    static IntervalVec deoverlap(IntervalVec intervals, Comparator&& cmp) {
         auto size = intervals.size();
         if (size <= 1) {
             return intervals;
@@ -615,7 +621,7 @@ public:
             return wrapping_interval<T>::less_than(r1._interval.start_bound(), r2._interval.start_bound(), cmp);
         });
 
-        std::vector<nonwrapping_interval> deoverlapped_intervals;
+        IntervalVec deoverlapped_intervals;
         deoverlapped_intervals.reserve(size);
 
         auto&& current = intervals[0];

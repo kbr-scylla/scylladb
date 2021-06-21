@@ -90,10 +90,8 @@ class feature_service;
 namespace sstables {
 
 class sstable;
-class entry_descriptor;
 class compaction_descriptor;
 class compaction_completion_desc;
-class foreign_sstable_open_info;
 class sstables_manager;
 
 }
@@ -780,7 +778,7 @@ public:
 
     db::replay_position set_low_replay_position_mark();
 
-    future<> snapshot(database& db, sstring name);
+    future<> snapshot(database& db, sstring name, bool skip_flush = false);
     future<std::unordered_map<sstring, snapshot_details>> get_snapshot_details();
 
     /*!
@@ -991,7 +989,7 @@ public:
     }
 
 private:
-    future<row_locker::lock_holder> do_push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout, mutation_source&& source,
+    future<row_locker::lock_holder> do_push_view_replica_updates(schema_ptr s, mutation m, db::timeout_clock::time_point timeout, mutation_source source,
             tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
     std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update, gc_clock::time_point now) const;
     future<> generate_and_propagate_view_updates(const schema_ptr& base,

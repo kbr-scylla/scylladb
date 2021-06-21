@@ -54,6 +54,7 @@ public:
     future<> add_entry(command command, wait_type type);
     future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) override;
     future<> set_configuration(server_address_set c_new) override;
+    raft::configuration get_configuration() const override;
     future<> start() override;
     future<> abort() override;
     term_t get_current_term() const override;
@@ -229,7 +230,6 @@ server_impl::server_impl(server_id uuid, std::unique_ptr<rpc> rpc,
 }
 
 future<> server_impl::start() {
-    register_metrics();
     auto [term, vote] = co_await _persistence->load_term_and_vote();
     auto snapshot  = co_await _persistence->load_snapshot();
     auto snp_id = snapshot.id;
@@ -267,6 +267,8 @@ future<> server_impl::start() {
     // start fiber to apply committed entries
     _applier_status = applier_fiber();
 
+    // Metrics access _fsm, so create them only after the pointer is populated
+    register_metrics();
     co_return;
 }
 
@@ -704,7 +706,20 @@ future<> server_impl::set_configuration(server_address_set c_new) {
         co_return;
     }
     _stats.add_config++;
-    co_return co_await add_entry_internal(raft::configuration{std::move(c_new)}, wait_type::committed);
+    co_await add_entry_internal(raft::configuration{std::move(c_new)}, wait_type::committed);
+     // Above we co_wait that the joint configuration is committed.
+     // Immediately, without yield, once the FSM discovers
+     // this, it appends non-joint entry. Hence,
+     // at this point in execution, non-joint entry is in the log.
+     // By waiting for a follow up dummy to get committed, we
+     // automatically wait for the non-joint entry to get
+     // committed.
+    co_await add_entry_internal(log_entry::dummy(), wait_type::committed);
+}
+
+raft::configuration
+server_impl::get_configuration() const {
+    return _fsm->get_configuration();
 }
 
 void server_impl::register_metrics() {

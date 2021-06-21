@@ -284,6 +284,7 @@ class raft_cluster {
     size_t _apply_entries;
     size_t _next_val;
     bool _packet_drops;
+    bool _prevote;
     apply_fn _apply;
     std::unordered_set<size_t> _in_configuration;   // Servers in current configuration
     std::vector<seastar::timer<lowres_clock>> _tickers;
@@ -633,6 +634,7 @@ raft_cluster::raft_cluster(test_case test,
             _apply_entries(apply_entries),
             _next_val(first_val),
             _packet_drops(packet_drops),
+            _prevote(prevote),
             _apply(apply),
             _leader(first_leader) {
 
@@ -836,7 +838,15 @@ future<> raft_cluster::elect_new_leader(size_t new_leader) {
     BOOST_CHECK_MESSAGE(new_leader < _servers.size(),
             format("Wrong next leader value {}", new_leader));
 
-    if (new_leader != _leader) {
+    if (new_leader == _leader) {
+        co_return;
+    }
+
+    // Prevote prevents dueling candidate from bumping up term
+    // but in corner cases it needs a loop to retry.
+    // With prevote we need our candidate to retry bumping term
+    // and waiting log on every loop.
+    if (_prevote) {
         bool both_connected = (*_connected)(to_raft_id(_leader), to_raft_id(new_leader));
         if (both_connected) {
             co_await wait_log(new_leader);
@@ -869,14 +879,43 @@ future<> raft_cluster::elect_new_leader(size_t new_leader) {
                 _connected->disconnect(to_raft_id(_leader));
             }
         } while (!_servers[new_leader].server->is_leader());
-        tlogger.debug("confirmed leader on {}", to_raft_id(new_leader));
-        _leader = new_leader;
 
         // Restore connections to the original setting
         *_connected = prev_disconnected;
         restart_tickers();
         co_await wait_log_all();
+
+    } else {  // not prevote
+
+        do {
+            if ((*_connected)(to_raft_id(_leader), to_raft_id(new_leader))) {
+                co_await wait_log(new_leader);
+            }
+
+            pause_tickers();
+            // Leader could be already partially disconnected, save current connectivity state
+            struct connected prev_disconnected = *_connected;
+            // Disconnect current leader from everyone
+            _connected->disconnect(to_raft_id(_leader));
+            // Make move all nodes past election threshold, also making old leader follower
+            elapse_elections();
+            // Consume leader output messages since a stray append might make new leader step down
+            co_await later();                 // yield
+            _servers[new_leader].server->wait_until_candidate();
+            // Re-connect old leader
+            _connected->connect(to_raft_id(_leader));
+            // Disconnect old leader from all nodes except new leader
+            _connected->disconnect(to_raft_id(_leader), to_raft_id(new_leader));
+            restart_tickers();
+            co_await _servers[new_leader].server->wait_election_done();
+
+            // Restore connections to the original setting
+            *_connected = prev_disconnected;
+        } while (!_servers[new_leader].server->is_leader());
     }
+
+    tlogger.debug("confirmed leader on {}", to_raft_id(new_leader));
+    _leader = new_leader;
 }
 
 // Run a free election of nodes in configuration
@@ -1348,6 +1387,22 @@ RAFT_TEST_CASE(drops_03, (test_case{
 RAFT_TEST_CASE(drops_04, (test_case{
          .nodes = 4,
          .updates = {entries{4},partition{0,2,3},entries{4},partition{1,leader{2},3}}}));
+
+// Repro for dueling candidate for non-prevote scenarios where
+// node (0) is dropped and becomes candidate bumping its term over and over.
+// Meanwhile another node (2) becomes leader and adds entry.
+// When dropped (0) rejoins, followers (1,3) ignore it (leader up and no timeout)
+// but they should not ignore vote requests by current leader (2)
+// or else the elections never succeed
+// Note: for it to hang there has to be 4+ total nodes so
+//       2 dueling candidates don't have enough quorum to resolve election
+RAFT_TEST_CASE(drops_04_dueling_repro, (test_case{
+         .nodes = 4,
+         .updates = {entries{1},partition{0,2,3},entries{1},  // 0 leader
+                     partition{1,leader{2},3},entries{1},     // 0 dropped, 2 leader
+                     tick{40},                                // 0 becomes candidate, bumps term
+                     partition{0,1,2,3},entries{1},           // 0 re-joinin and 0 disrupts
+                     }}));
 
 // TODO: change to RAFT_TEST_CASE once it's stable for handling packet drops
 SEASTAR_THREAD_TEST_CASE(test_take_snapshot_and_stream) {

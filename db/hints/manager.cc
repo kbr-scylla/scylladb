@@ -12,10 +12,10 @@
 #include <algorithm>
 #include <seastar/core/future.hh>
 #include <seastar/core/seastar.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/core/gate.hh>
 #include <seastar/core/coroutine.hh>
 #include <boost/range/adaptors.hpp>
-#include "service/storage_service.hh"
 #include "utils/div_ceil.hh"
 #include "db/extensions.hh"
 #include "service/storage_proxy.hh"
@@ -92,10 +92,9 @@ void manager::register_metrics(const sstring& group_name) {
     });
 }
 
-future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr<gms::gossiper> gossiper_ptr, shared_ptr<service::storage_service> ss_ptr) {
+future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr<gms::gossiper> gossiper_ptr) {
     _proxy_anchor = std::move(proxy_ptr);
     _gossiper_anchor = std::move(gossiper_ptr);
-    _strorage_service_anchor = std::move(ss_ptr);
     return lister::scan_dir(_hints_dir, { directory_entry_type::directory }, [this] (fs::path datadir, directory_entry de) {
         ep_key_type ep = ep_key_type(de.name);
         if (!check_dc_for(ep)) {
@@ -105,7 +104,6 @@ future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr
     }).then([this] {
         return compute_hints_dir_device_id();
     }).then([this] {
-        _strorage_service_anchor->register_subscriber(this);
         set_started();
     });
 }
@@ -113,7 +111,7 @@ future<> manager::start(shared_ptr<service::storage_proxy> proxy_ptr, shared_ptr
 future<> manager::stop() {
     manager_logger.info("Asked to stop");
 
-  auto f = _strorage_service_anchor ? _strorage_service_anchor->unregister_subscriber(this) : make_ready_future<>();
+  auto f = make_ready_future<>();
 
   return f.finally([this] {
     set_stopping();
@@ -571,7 +569,7 @@ bool manager::check_dc_for(ep_key_type ep) const noexcept {
 }
 
 void manager::drain_for(gms::inet_address endpoint) {
-    if (stopping() || draining_all()) {
+    if (!started() || stopping() || draining_all()) {
         return;
     }
 

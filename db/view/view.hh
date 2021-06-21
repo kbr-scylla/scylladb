@@ -123,14 +123,14 @@ bool matches_view_filter(const schema& base, const view_info& view, const partit
 
 bool clustering_prefix_matches(const schema& base, const partition_key& key, const clustering_key_prefix& ck, gc_clock::time_point now);
 
-future<std::vector<frozen_mutation_and_schema>> generate_view_updates(
+future<utils::chunked_vector<frozen_mutation_and_schema>> generate_view_updates(
         const schema_ptr& base,
         std::vector<view_and_base>&& views_to_update,
         flat_mutation_reader&& updates,
         flat_mutation_reader_opt&& existings,
         gc_clock::time_point now);
 
-query::clustering_row_ranges calculate_affected_clustering_ranges(
+future<query::clustering_row_ranges> calculate_affected_clustering_ranges(
         const schema& base,
         const dht::decorated_key& key,
         const mutation_partition& mp,
@@ -140,8 +140,8 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(
 struct wait_for_all_updates_tag {};
 using wait_for_all_updates = bool_class<wait_for_all_updates_tag>;
 future<> mutate_MV(
-        const dht::token& base_token,
-        std::vector<frozen_mutation_and_schema> view_updates,
+        dht::token base_token,
+        utils::chunked_vector<frozen_mutation_and_schema> view_updates,
         db::view::stats& stats,
         cf_stats& cf_stats,
         tracing::trace_state_ptr tr_state,

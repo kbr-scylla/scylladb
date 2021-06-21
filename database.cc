@@ -418,7 +418,7 @@ void backlog_controller::update_controller(float shares) {
     if (!_inflight_update.available()) {
         return; // next timer will fix it
     }
-    _inflight_update = engine().update_shares_for_class(_io_priority, uint32_t(shares));
+    _inflight_update = _io_priority.update_shares(uint32_t(shares));
 }
 
 void
@@ -765,7 +765,7 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
         auto ksm = create_keyspace_from_schema_partition(v);
         return create_keyspace(ksm, true /* bootstrap. do not mark populated yet */, system_keyspace::no);
     }).then([&proxy, this] {
-        return do_parse_schema_tables(proxy, db::schema_tables::TYPES, [this, &proxy] (schema_result_value_type &v) {
+        return do_parse_schema_tables(proxy, db::schema_tables::TYPES, [this] (schema_result_value_type &v) {
             auto& ks = this->find_keyspace(v.first);
             auto&& user_types = create_types_from_schema_partition(*ks.metadata(), v.second);
             for (auto&& type : user_types) {
@@ -774,7 +774,7 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
             return make_ready_future<>();
         });
     }).then([&proxy, this] {
-        return do_parse_schema_tables(proxy, db::schema_tables::FUNCTIONS, [this, &proxy] (schema_result_value_type& v) {
+        return do_parse_schema_tables(proxy, db::schema_tables::FUNCTIONS, [this] (schema_result_value_type& v) {
             auto&& user_functions = create_functions_from_schema_partition(*this, v.second);
             for (auto&& func : user_functions) {
                 cql3::functions::functions::add_function(func);
@@ -2046,12 +2046,12 @@ database::stop() {
     }).then([this] {
         return _system_sstables_manager->close();
     }).finally([this] {
-        return when_all_succeed(
-                _read_concurrency_sem.stop(),
-                _streaming_concurrency_sem.stop(),
-                _compaction_concurrency_sem.stop(),
-                _system_read_concurrency_sem.stop()).discard_result().finally([this] {
-            return _querier_cache.stop();
+        return _querier_cache.stop().finally([this] {
+            return when_all_succeed(
+                    _read_concurrency_sem.stop(),
+                    _streaming_concurrency_sem.stop(),
+                    _compaction_concurrency_sem.stop(),
+                    _system_read_concurrency_sem.stop()).discard_result();
         });
     });
 }
@@ -2297,15 +2297,13 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
 
             return cf.make_streaming_reader(std::move(schema), *_contexts[shard].range, slice, fwd_mr);
         }
-        virtual future<> destroy_reader(shard_id shard, future<stopped_reader> reader_fut) noexcept override {
-            return reader_fut.then([this, zis = shared_from_this(), shard] (stopped_reader&& reader) mutable {
-                return smp::submit_to(shard, [ctx = std::move(_contexts[shard]), handle = std::move(reader.handle)] () mutable {
-                    auto reader_opt = ctx.semaphore->unregister_inactive_read(std::move(*handle));
-                    return reader_opt ? reader_opt->close() : make_ready_future<>();
-                });
-            }).handle_exception([shard] (std::exception_ptr e) {
-                dblog.warn("Failed to destroy shard reader of streaming multishard reader on shard {}: {}", shard, e);
-            });
+        virtual future<> destroy_reader(stopped_reader reader) noexcept override {
+            auto ctx = std::move(_contexts[this_shard_id()]);
+            auto reader_opt = ctx.semaphore->unregister_inactive_read(std::move(reader.handle));
+            if  (!reader_opt) {
+                return make_ready_future<>();
+            }
+            return reader_opt->close().finally([ctx = std::move(ctx)] {});
         }
         virtual reader_concurrency_semaphore& semaphore() override {
             const auto shard = this_shard_id();

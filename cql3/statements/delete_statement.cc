@@ -81,7 +81,7 @@ using namespace expr;
 
 /// If oper.lhs is a single column, returns it; otherwise, returns null.
 const column_definition* single_column(const binary_operator& oper) {
-    if (auto c = std::get_if<column_value>(&oper.lhs)) {
+    if (auto c = std::get_if<column_value>(oper.lhs.get())) {
         return c->col;
     }
     return nullptr;
@@ -119,7 +119,7 @@ bool bounds_ck_symmetrically(const expression& expr) {
 
         /// Updates state for a binary-operator expression.
         void operator()(const binary_operator& oper) {
-            if (std::holds_alternative<token>(oper.lhs)) {
+            if (std::holds_alternative<token>(*oper.lhs)) {
                 return;
             }
             // The rules of multi-column comparison imply that any multi-column expression sets a bound for the
@@ -146,6 +146,18 @@ bool bounds_ck_symmetrically(const expression& expr) {
                     break;
                 }
             }
+        }
+
+        void operator()(const column_value&) {
+            throw std::logic_error("Column encountered outside binary_operator");
+        }
+
+        void operator()(const column_value_tuple&) {
+            throw std::logic_error("Column tuple encountered outside binary_operator");
+        }
+
+        void operator()(const token&) {
+            throw std::logic_error("Token function encountered outside binary_operator");
         }
     } tracker;
 
@@ -204,7 +216,11 @@ delete_statement::delete_statement(cf_name name,
     : raw::modification_statement(std::move(name), std::move(attrs), std::move(conditions), false, if_exists)
     , _deletions(std::move(deletions))
     , _where_clause(std::move(where_clause))
-{ }
+{
+    if (_attrs->time_to_live) {
+        throw exceptions::invalid_request_exception("TTL attribute is not allowed for deletes");
+    }
+}
 
 }
 

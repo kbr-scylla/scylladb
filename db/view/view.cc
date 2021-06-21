@@ -43,6 +43,7 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 
 #include <seastar/core/future-util.hh>
+#include <seastar/core/coroutine.hh>
 
 #include "database.hh"
 #include "clustering_bounds_comparator.hh"
@@ -331,7 +332,7 @@ public:
             , _updates(8, partition_key::hashing(*_view), partition_key::equality(*_view)) {
     }
 
-    void move_to(std::vector<frozen_mutation_and_schema>& mutations) && {
+    void move_to(utils::chunked_vector<frozen_mutation_and_schema>& mutations) && {
         std::transform(_updates.begin(), _updates.end(), std::back_inserter(mutations), [&, this] (auto&& m) {
             auto mut = mutation(_view, dht::decorate_key(*_view, std::move(m.first)), std::move(m.second));
             return frozen_mutation_and_schema{freeze(mut), std::move(_view)};
@@ -846,7 +847,7 @@ public:
             , _now(now) {
     }
 
-    future<std::vector<frozen_mutation_and_schema>> build();
+    future<utils::chunked_vector<frozen_mutation_and_schema>> build();
 
     future<> close() noexcept {
         return when_all_succeed(_updates.close(), _existings->close()).discard_result();
@@ -887,7 +888,7 @@ private:
     }
 };
 
-future<std::vector<frozen_mutation_and_schema>> view_update_builder::build() {
+future<utils::chunked_vector<frozen_mutation_and_schema>> view_update_builder::build() {
     return advance_all().then([this] (auto&& ignored) {
         assert(_update && _update->is_partition_start());
         _key = std::move(std::move(_update)->as_partition_start().key().key());
@@ -902,7 +903,7 @@ future<std::vector<frozen_mutation_and_schema>> view_update_builder::build() {
             });
         });
     }).then([this] {
-        std::vector<frozen_mutation_and_schema> mutations;
+        utils::chunked_vector<frozen_mutation_and_schema> mutations;
         for (auto&& update : _view_updates) {
             std::move(update).move_to(mutations);
         }
@@ -1021,7 +1022,7 @@ future<stop_iteration> view_update_builder::on_results() {
     return stop();
 }
 
-future<std::vector<frozen_mutation_and_schema>> generate_view_updates(
+future<utils::chunked_vector<frozen_mutation_and_schema>> generate_view_updates(
         const schema_ptr& base,
         std::vector<view_and_base>&& views_to_update,
         flat_mutation_reader&& updates,
@@ -1042,13 +1043,13 @@ future<std::vector<frozen_mutation_and_schema>> generate_view_updates(
     });
 }
 
-query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& base,
+future<query::clustering_row_ranges> calculate_affected_clustering_ranges(const schema& base,
         const dht::decorated_key& key,
         const mutation_partition& mp,
         const std::vector<view_and_base>& views,
         gc_clock::time_point now) {
-    std::vector<nonwrapping_range<clustering_key_prefix_view>> row_ranges;
-    std::vector<nonwrapping_range<clustering_key_prefix_view>> view_row_ranges;
+    utils::chunked_vector<nonwrapping_range<clustering_key_prefix_view>> row_ranges;
+    utils::chunked_vector<nonwrapping_range<clustering_key_prefix_view>> view_row_ranges;
     clustering_key_prefix_view::tri_compare cmp(base);
     if (mp.partition_tombstone() || !mp.row_tombstones().empty()) {
         for (auto&& v : views) {
@@ -1059,6 +1060,7 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& 
             }
             for (auto&& r : v.view->view_info()->partition_slice().default_row_ranges()) {
                 view_row_ranges.push_back(r.transform(std::mem_fn(&clustering_key_prefix::view)));
+                co_await make_ready_future<>(); // yield if needed
             }
         }
     }
@@ -1075,6 +1077,7 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& 
                 if (overlap) {
                     row_ranges.push_back(std::move(overlap).value());
                 }
+                co_await make_ready_future<>(); // yield if needed
             }
         }
     }
@@ -1083,6 +1086,7 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& 
         if (update_requires_read_before_write(base, views, key, row, now)) {
             row_ranges.emplace_back(row.key());
         }
+        co_await make_ready_future<>(); // yield if needed
     }
 
     // Note that the views could have restrictions on regular columns,
@@ -1093,7 +1097,7 @@ query::clustering_row_ranges calculate_affected_clustering_ranges(const schema& 
     // this mutation.
 
     //FIXME: Unfortunate copy.
-    return boost::copy_range<query::clustering_row_ranges>(
+    co_return boost::copy_range<query::clustering_row_ranges>(
             nonwrapping_range<clustering_key_prefix_view>::deoverlap(std::move(row_ranges), cmp)
             | boost::adaptors::transformed([] (auto&& v) {
                 return std::move(v).transform([] (auto&& ckv) { return clustering_key_prefix(ckv); });
@@ -1164,7 +1168,7 @@ get_view_natural_endpoint(const sstring& keyspace_name,
 }
 
 static future<> apply_to_remote_endpoints(gms::inet_address target, inet_address_vector_topology_change&& pending_endpoints,
-        frozen_mutation_and_schema& mut, const dht::token& base_token, const dht::token& view_token,
+        frozen_mutation_and_schema&& mut, const dht::token& base_token, const dht::token& view_token,
         service::allow_hints allow_hints, tracing::trace_state_ptr tr_state) {
 
     tracing::trace(tr_state, "Sending view update for {}.{} to {}, with pending endpoints = {}; base token = {}; view token = {}",
@@ -1183,8 +1187,8 @@ static future<> apply_to_remote_endpoints(gms::inet_address target, inet_address
 // appropriate paired replicas. This is done asynchronously - we do not wait
 // for the writes to complete.
 future<> mutate_MV(
-        const dht::token& base_token,
-        std::vector<frozen_mutation_and_schema> view_updates,
+        dht::token base_token,
+        utils::chunked_vector<frozen_mutation_and_schema> view_updates,
         db::view::stats& stats,
         cf_stats& cf_stats,
         tracing::trace_state_ptr tr_state,
@@ -1192,35 +1196,14 @@ future<> mutate_MV(
         service::allow_hints allow_hints,
         wait_for_all_updates wait_for_all)
 {
-    auto fs = std::make_unique<std::vector<future<>>>();
-    fs->reserve(view_updates.size());
-    for (frozen_mutation_and_schema& mut : view_updates) {
+    static constexpr size_t max_concurrent_updates = 128;
+    co_await max_concurrent_for_each(view_updates, max_concurrent_updates,
+            [base_token, &stats, &cf_stats, tr_state, &pending_view_updates, allow_hints, wait_for_all] (frozen_mutation_and_schema mut) mutable -> future<> {
         auto view_token = dht::get_token(*mut.s, mut.fm.key());
         auto& keyspace_name = mut.s->ks_name();
         auto target_endpoint = get_view_natural_endpoint(keyspace_name, base_token, view_token);
         auto remote_endpoints = service::get_local_storage_service().get_token_metadata().pending_endpoints_for(view_token, keyspace_name);
-        auto maybe_account_failure = [s = mut.s, tr_state, &stats, &cf_stats, base_token, view_token, units = pending_view_updates.split(mut.fm.representation().size())] (
-                future<>&& f,
-                gms::inet_address target,
-                bool is_local,
-                size_t remotes) {
-            if (f.failed()) {
-                stats.view_updates_failed_local += is_local;
-                stats.view_updates_failed_remote += remotes;
-                cf_stats.total_view_updates_failed_local += is_local;
-                cf_stats.total_view_updates_failed_remote += remotes;
-                auto ep = f.get_exception();
-                tracing::trace(tr_state, "Failed to apply {}view update for {} and {} remote endpoints",
-                        seastar::value_of([is_local]{return is_local ? "local " : "";}), target, remotes);
-                vlogger.error("Error applying view update to {} (view: {}.{}, base token: {}, view token: {}): {}",
-                        target, s->ks_name(), s->cf_name(), base_token, view_token, ep);
-                return make_exception_future<>(std::move(ep));
-            } else {
-                tracing::trace(tr_state, "Successfully applied {}view update for {} and {} remote endpoints",
-                        seastar::value_of([is_local]{return is_local ? "local " : "";}), target, remotes);
-                return make_ready_future<>();
-            }
-        };
+        auto sem_units = pending_view_updates.split(mut.fm.representation().size());
 
         // First, find the local endpoint and ensure that if it exists,
         // it will be the target endpoint. That way, all endpoints in the
@@ -1249,6 +1232,7 @@ future<> mutate_MV(
             }
         }
 
+        future<> local_view_update = make_ready_future<>();
         if (target_endpoint && *target_endpoint == my_address) {
             ++stats.view_updates_pushed_local;
             ++cf_stats.total_view_updates_pushed_local;
@@ -1256,14 +1240,22 @@ future<> mutate_MV(
             auto mut_ptr = remote_endpoints.empty() ? std::make_unique<frozen_mutation>(std::move(mut.fm)) : std::make_unique<frozen_mutation>(mut.fm);
             tracing::trace(tr_state, "Locally applying view update for {}.{}; base token = {}; view token = {}",
                     mut.s->ks_name(), mut.s->cf_name(), base_token, view_token);
-            future<> local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, std::move(tr_state), db::commitlog::force_sync::no).then_wrapped(
-                    [&stats,
-                     maybe_account_failure = std::move(maybe_account_failure),
-                     mut_ptr = std::move(mut_ptr)] (future<>&& f) {
+            local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, std::move(tr_state), db::commitlog::force_sync::no).then_wrapped(
+                    [s = mut.s, &stats, &cf_stats, tr_state, base_token, view_token, my_address, mut_ptr = std::move(mut_ptr),
+                            units = sem_units.split(sem_units.count())] (future<>&& f) {
                 --stats.writes;
-                return maybe_account_failure(std::move(f), utils::fb_utilities::get_broadcast_address(), true, 0);
+                if (f.failed()) {
+                    ++stats.view_updates_failed_local;
+                    ++cf_stats.total_view_updates_failed_local;
+                    auto ep = f.get_exception();
+                    tracing::trace(tr_state, "Failed to apply local view update for {}", my_address);
+                    vlogger.error("Error applying view update to {} (view: {}.{}, base token: {}, view token: {}): {}",
+                            my_address, s->ks_name(), s->cf_name(), base_token, view_token, ep);
+                    return make_exception_future<>(std::move(ep));
+                }
+                tracing::trace(tr_state, "Successfully applied local view update for {}", my_address);
+                return make_ready_future<>();
             });
-            fs->push_back(std::move(local_view_update));
             // We just applied a local update to the target endpoint, so it should now be removed
             // from the possible targets
             target_endpoint.reset();
@@ -1276,6 +1268,7 @@ future<> mutate_MV(
             remote_endpoints.pop_back();
         }
 
+        future<> remote_view_update = make_ready_future<>();
         // If target_endpoint is engaged by this point, then either the update
         // is not local, or the local update was already applied but we still
         // have pending endpoints to send to.
@@ -1283,23 +1276,34 @@ future<> mutate_MV(
             size_t updates_pushed_remote = remote_endpoints.size() + 1;
             stats.view_updates_pushed_remote += updates_pushed_remote;
             cf_stats.total_view_updates_pushed_remote += updates_pushed_remote;
-            future<> view_update = apply_to_remote_endpoints(*target_endpoint, std::move(remote_endpoints), mut, base_token, view_token, allow_hints, tr_state).then_wrapped(
-                    [target_endpoint,
-                     updates_pushed_remote,
-                     maybe_account_failure = std::move(maybe_account_failure)] (future<>&& f) mutable {
-                return maybe_account_failure(std::move(f), std::move(*target_endpoint), false, updates_pushed_remote);
+            schema_ptr s = mut.s;
+            future<> view_update = apply_to_remote_endpoints(*target_endpoint, std::move(remote_endpoints), std::move(mut), base_token, view_token, allow_hints, tr_state).then_wrapped(
+                    [s = std::move(s), &stats, &cf_stats, tr_state, base_token, view_token, target_endpoint, updates_pushed_remote,
+                            units = sem_units.split(sem_units.count())] (future<>&& f) mutable {
+                if (f.failed()) {
+                    stats.view_updates_failed_remote += updates_pushed_remote;
+                    cf_stats.total_view_updates_failed_remote += updates_pushed_remote;
+                    auto ep = f.get_exception();
+                    tracing::trace(tr_state, "Failed to apply view update for {} and {} remote endpoints",
+                            *target_endpoint, updates_pushed_remote);
+                    vlogger.error("Error applying view update to {} (view: {}.{}, base token: {}, view token: {}): {}",
+                            *target_endpoint, s->ks_name(), s->cf_name(), base_token, view_token, ep);
+                    return make_exception_future<>(std::move(ep));
+                }
+                tracing::trace(tr_state, "Successfully applied view update for {} and {} remote endpoints",
+                        *target_endpoint, updates_pushed_remote);
+                return make_ready_future<>();
             });
             if (wait_for_all) {
-                fs->push_back(std::move(view_update));
+                remote_view_update = std::move(view_update);
             } else {
                 // The update is sent to background in order to preserve availability,
                 // its parallelism is limited by view_update_concurrency_semaphore
                 (void)view_update;
             }
         }
-    }
-    auto f = seastar::when_all_succeed(fs->begin(), fs->end());
-    return f.finally([fs = std::move(fs)] { });
+        return when_all_succeed(std::move(local_view_update), std::move(remote_view_update)).discard_result();
+    });
 }
 
 view_builder::view_builder(database& db, db::system_distributed_keyspace& sys_dist_ks, service::migration_notifier& mn)

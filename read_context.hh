@@ -99,10 +99,10 @@ public:
                 ++_cache._tracker._stats.underlying_recreations;
             }
         }
-      return close_reader().then([this, &snapshot, phase] {
-        _reader = _cache.create_underlying_reader(_read_context, snapshot, _range);
-        _reader_creation_phase = phase;
-      });
+        return close_reader().then([this, snapshot, phase] () mutable {
+            _reader = _cache.create_underlying_reader(_read_context, snapshot, _range);
+            _reader_creation_phase = phase;
+        });
     }
     future<> close() noexcept {
         return close_reader();

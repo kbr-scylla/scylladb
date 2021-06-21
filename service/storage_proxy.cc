@@ -28,6 +28,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/sleep.hh>
 #include "partition_range_compat.hh"
 #include "db/consistency_level.hh"
 #include "db/commitlog/commitlog.hh"
@@ -41,7 +42,6 @@
 #include "message/messaging_service.hh"
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
-#include "storage_service.hh"
 #include <seastar/core/future-util.hh>
 #include "db/read_repair_decision.hh"
 #include "db/config.hh"
@@ -95,6 +95,7 @@
 #include "service/paxos/cas_request.hh"
 #include "mutation_partition_view.hh"
 #include "service/paxos/paxos_state.hh"
+#include "gms/feature_service.hh"
 
 namespace bi = boost::intrusive;
 
@@ -361,7 +362,7 @@ protected:
     size_t _total_block_for = 0;
     db::write_type _type;
     std::unique_ptr<mutation_holder> _mutation_holder;
-    std::unordered_set<gms::inet_address> _targets; // who we sent this mutation to
+    inet_address_vector_replica_set _targets; // who we sent this mutation to
     // added dead_endpoints as a memeber here as well. This to be able to carry the info across
     // calls in helper methods in a convinient way. Since we hope this will be empty most of the time
     // it should not be a huge burden. (flw)
@@ -389,7 +390,7 @@ protected:
 
 public:
     abstract_write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl, db::write_type type,
-            std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets, tracing::trace_state_ptr trace_state,
+            std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets, tracing::trace_state_ptr trace_state,
             storage_proxy::write_stats& stats, service_permit permit, size_t pending_endpoints = 0, inet_address_vector_topology_change dead_endpoints = {})
             : _id(p->get_next_response_id()), _proxy(std::move(p)), _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
               _dead_endpoints(std::move(dead_endpoints)), _stats(stats), _expire_timer([this] { timeout_cb(); }), _permit(std::move(permit)) {
@@ -470,10 +471,12 @@ public:
     }
     // return true on last ack
     bool response(gms::inet_address from) {
-        auto it = _targets.find(from);
+        auto it = boost::find(_targets, from);
         if (it != _targets.end()) {
             signal(from);
-            _targets.erase(it);
+            using std::swap;
+            swap(*it, _targets.back());
+            _targets.pop_back();
         } else {
             slogger.warn("Receive outdated write ack from {}", from);
         }
@@ -482,7 +485,7 @@ public:
     // return true if handler is no longer needed because
     // CL cannot be reached
     bool failure_response(gms::inet_address from, size_t count, error err) {
-        if (!_targets.contains(from)) {
+        if (boost::find(_targets, from) == _targets.end()) {
             // There is a little change we can get outdated reply
             // if the coordinator was restarted after sending a request and
             // getting reply back. The chance is low though since initial
@@ -581,7 +584,7 @@ public:
     future<> wait() {
         return _ready.get_future();
     }
-    const std::unordered_set<gms::inet_address>& get_targets() const {
+    const inet_address_vector_replica_set& get_targets() const {
         return _targets;
     }
     const inet_address_vector_topology_change& get_dead_endpoints() const {
@@ -626,7 +629,7 @@ class datacenter_write_response_handler : public abstract_write_response_handler
 
 public:
     datacenter_write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl, db::write_type type,
-            std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets,
+            std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit) :
                 abstract_write_response_handler(std::move(p), ks, cl, type, std::move(mh),
@@ -641,7 +644,7 @@ class write_response_handler : public abstract_write_response_handler {
     }
 public:
     write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl, db::write_type type,
-            std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets,
+            std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit) :
                 abstract_write_response_handler(std::move(p), ks, cl, type, std::move(mh),
@@ -653,7 +656,7 @@ public:
 class view_update_write_response_handler : public write_response_handler, public bi::list_base_hook<bi::link_mode<bi::auto_unlink>> {
 public:
     view_update_write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl,
-            std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets,
+            std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit):
                 write_response_handler(p, ks, cl, db::write_type::VIEW, std::move(mh),
@@ -733,7 +736,7 @@ class datacenter_sync_write_response_handler : public abstract_write_response_ha
     }
 public:
     datacenter_sync_write_response_handler(shared_ptr<storage_proxy> p, keyspace& ks, db::consistency_level cl, db::write_type type,
-            std::unique_ptr<mutation_holder> mh, std::unordered_set<gms::inet_address> targets, const inet_address_vector_topology_change& pending_endpoints,
+            std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets, const inet_address_vector_topology_change& pending_endpoints,
             inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state, storage_proxy::write_stats& stats, service_permit permit) :
         abstract_write_response_handler(std::move(p), ks, cl, type, std::move(mh), targets, std::move(tr_state), stats, std::move(permit), 0, dead_endpoints) {
         auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
@@ -873,11 +876,11 @@ paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& conte
                 // those nodes, and retry.
                 auto now_in_sec = utils::UUID_gen::unix_timestamp_in_sec(ballot);
 
-                std::unordered_set<gms::inet_address> missing_mrc = summary.replicas_missing_most_recent_commit(_schema, now_in_sec);
+                inet_address_vector_replica_set missing_mrc = summary.replicas_missing_most_recent_commit(_schema, now_in_sec);
                 if (missing_mrc.size() > 0) {
                     paxos::paxos_state::logger.debug("CAS[{}] Repairing replicas that missed the most recent commit", _id);
                     tracing::trace(tr_state, "Repairing replicas that missed the most recent commit");
-                    std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, std::unordered_set<gms::inet_address>>, 1>
+                    std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>, 1>
                       m{std::make_tuple(make_lw_shared<paxos::proposal>(std::move(*summary.most_recent_commit)), _schema, _key.token(), std::move(missing_mrc))};
                     // create_write_response_handler is overloaded for paxos::proposal and will
                     // create cas_mutation holder, which consequently will ensure paxos::learn is
@@ -1411,7 +1414,7 @@ future<> storage_proxy::response_wait(storage_proxy::response_id_type id, clock_
 }
 
 storage_proxy::response_id_type storage_proxy::create_write_response_handler(keyspace& ks, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m,
-                             std::unordered_set<gms::inet_address> targets, const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
+                             inet_address_vector_replica_set targets, const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
                              storage_proxy::write_stats& stats, service_permit permit)
 {
     shared_ptr<abstract_write_response_handler> h;
@@ -1942,11 +1945,11 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     }
 
     // filter live endpoints from dead ones
-    std::unordered_set<gms::inet_address> live_endpoints;
+    inet_address_vector_replica_set live_endpoints;
     inet_address_vector_topology_change dead_endpoints;
     live_endpoints.reserve(all.size());
     dead_endpoints.reserve(all.size());
-    std::partition_copy(all.begin(), all.end(), std::inserter(live_endpoints, live_endpoints.begin()),
+    std::partition_copy(all.begin(), all.end(), std::back_inserter(live_endpoints),
             std::back_inserter(dead_endpoints), std::bind1st(std::mem_fn(&gms::gossiper::is_alive), &gms::get_local_gossiper()));
 
     slogger.trace("creating write handler with live: {} dead: {}", live_endpoints, dead_endpoints);
@@ -1979,7 +1982,8 @@ storage_proxy::create_write_response_handler(const hint_wrapper& h, db::consiste
 
 storage_proxy::response_id_type
 storage_proxy::create_write_response_handler(const std::unordered_map<gms::inet_address, std::optional<mutation>>& m, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
-    std::unordered_set<gms::inet_address> endpoints(m.size());
+    inet_address_vector_replica_set endpoints;
+    endpoints.reserve(m.size());
     boost::copy(m | boost::adaptors::map_keys, std::inserter(endpoints, endpoints.begin()));
     auto mh = std::make_unique<per_destination_mutation>(m);
 
@@ -2002,7 +2006,7 @@ storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxo
 }
 
 storage_proxy::response_id_type
-storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, std::unordered_set<gms::inet_address>>& meta,
+storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>& meta,
         db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
     auto& [commit, s, token, endpoints] = meta;
 
@@ -2393,7 +2397,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
         service_permit _permit;
 
         const utils::UUID _batch_uuid;
-        const std::unordered_set<gms::inet_address> _batchlog_endpoints;
+        const inet_address_vector_replica_set _batchlog_endpoints;
 
     public:
         context(storage_proxy & p, std::vector<mutation>&& mutations, lw_shared_ptr<cdc::operation_result_tracker>&& cdc_tracker, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit)
@@ -2408,7 +2412,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                 , _permit(std::move(permit))
                 , _batch_uuid(utils::UUID_gen::get_time_UUID())
                 , _batchlog_endpoints(
-                        [this]() -> std::unordered_set<gms::inet_address> {
+                        [this]() -> inet_address_vector_replica_set {
                             auto local_addr = utils::fb_utilities::get_broadcast_address();
                             auto& topology = _tmptr->get_topology();
                             auto& local_endpoints = topology.get_datacenter_racks().at(get_local_dc());
@@ -2521,7 +2525,7 @@ future<> storage_proxy::send_to_endpoint(
                 std::unique_ptr<mutation_holder>& m,
                 db::consistency_level cl,
                 db::write_type type, service_permit permit) mutable {
-        std::unordered_set<gms::inet_address> targets;
+        inet_address_vector_replica_set targets;
         targets.reserve(pending_endpoints.size() + 1);
         inet_address_vector_topology_change dead_endpoints;
         boost::algorithm::partition_copy(
@@ -3439,7 +3443,7 @@ public:
         return _used_targets;
     }
 
-private:
+protected:
     future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> make_mutation_data_request(lw_shared_ptr<query::read_command> cmd, gms::inet_address ep, clock_type::time_point timeout) {
         ++_proxy->get_stats().mutation_data_read_attempts.get_ep_stat(ep);
         if (fbu::is_me(ep)) {
@@ -3488,11 +3492,11 @@ private:
             });
         }
     }
-
-protected:
-    future<> make_mutation_data_requests(lw_shared_ptr<query::read_command> cmd, data_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout) {
-        return parallel_for_each(begin, end, [this, &cmd, resolver = std::move(resolver), timeout, start = latency_clock::now()] (gms::inet_address ep) {
-            return make_mutation_data_request(cmd, ep, timeout).then_wrapped([this, resolver, ep, start] (future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> f) {
+    void make_mutation_data_requests(lw_shared_ptr<query::read_command> cmd, data_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout) {
+        auto start = latency_clock::now();
+        for (const gms::inet_address& ep : boost::make_iterator_range(begin, end)) {
+            // Waited on indirectly, shared_from_this keeps `this` alive
+            (void)make_mutation_data_request(cmd, ep, timeout).then_wrapped([this, resolver, ep, start, exec = shared_from_this()] (future<rpc::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_temperature>> f) {
                 try {
                     auto v = f.get0();
                     _cf->set_hit_rate(ep, std::get<1>(v));
@@ -3504,11 +3508,13 @@ protected:
                     resolver->error(ep, std::current_exception());
                 }
             });
-        });
+        }
     }
-    future<> make_data_requests(digest_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout, bool want_digest) {
-        return parallel_for_each(begin, end, [this, resolver = std::move(resolver), timeout, want_digest, start = latency_clock::now()] (gms::inet_address ep) {
-            return make_data_request(ep, timeout, want_digest).then_wrapped([this, resolver, ep, start] (future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> f) {
+    void make_data_requests(digest_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout, bool want_digest) {
+        auto start = latency_clock::now();
+        for (const gms::inet_address& ep : boost::make_iterator_range(begin, end)) {
+            // Waited on indirectly, shared_from_this keeps `this` alive
+            (void)make_data_request(ep, timeout, want_digest).then_wrapped([this, resolver, ep, start, exec = shared_from_this()] (future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> f) {
                 try {
                     auto v = f.get0();
                     _cf->set_hit_rate(ep, std::get<1>(v));
@@ -3521,11 +3527,13 @@ protected:
                     resolver->error(ep, std::current_exception());
                 }
             });
-        });
+        }
     }
-    future<> make_digest_requests(digest_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout) {
-        return parallel_for_each(begin, end, [this, resolver = std::move(resolver), timeout, start = latency_clock::now()] (gms::inet_address ep) {
-            return make_digest_request(ep, timeout).then_wrapped([this, resolver, ep, start] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> f) {
+    void make_digest_requests(digest_resolver_ptr resolver, targets_iterator begin, targets_iterator end, clock_type::time_point timeout) {
+        auto start = latency_clock::now();
+        for (const gms::inet_address& ep : boost::make_iterator_range(begin, end)) {
+            // Waited on indirectly, shared_from_this keeps `this` alive
+            (void)make_digest_request(ep, timeout).then_wrapped([this, resolver, ep, start, exec = shared_from_this()] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> f) {
                 try {
                     auto v = f.get0();
                     _cf->set_hit_rate(ep, std::get<2>(v));
@@ -3538,14 +3546,13 @@ protected:
                     resolver->error(ep, std::current_exception());
                 }
             });
-        });
+        }
     }
-    virtual future<> make_requests(digest_resolver_ptr resolver, clock_type::time_point timeout) {
+    virtual void make_requests(digest_resolver_ptr resolver, clock_type::time_point timeout) {
         resolver->add_wait_targets(_targets.size());
         auto want_digest = _targets.size() > 1;
-        auto f_data = futurize_invoke([&] { return make_data_requests(resolver, _targets.begin(), _targets.begin() + 1, timeout, want_digest); });
-        auto f_digest = futurize_invoke([&] { return make_digest_requests(resolver, _targets.begin() + 1, _targets.end(), timeout); });
-        return when_all_succeed(std::move(f_data), std::move(f_digest)).discard_result().handle_exception([] (auto&&) { });
+        make_data_requests(resolver, _targets.begin(), _targets.begin() + 1, timeout, want_digest);
+        make_digest_requests(resolver, _targets.begin() + 1, _targets.end(), timeout);
     }
     virtual void got_cl() {}
     uint64_t original_row_limit() const {
@@ -3564,7 +3571,7 @@ protected:
         auto exec = shared_from_this();
 
         // Waited on indirectly.
-        (void)make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end(), timeout).finally([exec]{});
+        make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end(), timeout);
 
         // Waited on indirectly.
         (void)data_resolver->done().then_wrapped([this, exec, data_resolver, cmd = std::move(cmd), cl, timeout] (future<> f) {
@@ -3662,10 +3669,7 @@ public:
                 db::is_datacenter_local(_cl) ? db::count_local_endpoints(_targets): _targets.size(), timeout);
         auto exec = shared_from_this();
 
-        // Waited on indirectly.
-        (void)make_requests(digest_resolver, timeout).finally([exec]() {
-            // hold on to executor until all queries are complete
-        });
+        make_requests(digest_resolver, timeout);
 
         // Waited on indirectly.
         (void)digest_resolver->has_cl().then_wrapped([exec, digest_resolver, timeout] (future<digest_read_result> f) mutable {
@@ -3756,12 +3760,12 @@ public:
 class always_speculating_read_executor : public abstract_read_executor {
 public:
     using abstract_read_executor::abstract_read_executor;
-    virtual future<> make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) {
+    virtual void make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) {
         resolver->add_wait_targets(_targets.size());
         // FIXME: consider disabling for CL=*ONE
         bool want_digest = true;
-        return when_all(make_data_requests(resolver, _targets.begin(), _targets.begin() + 2, timeout, want_digest),
-                        make_digest_requests(resolver, _targets.begin() + 2, _targets.end(), timeout)).discard_result();
+        make_data_requests(resolver, _targets.begin(), _targets.begin() + 2, timeout, want_digest);
+        make_digest_requests(resolver, _targets.begin() + 2, _targets.end(), timeout);
     }
 };
 
@@ -3770,7 +3774,7 @@ class speculating_read_executor : public abstract_read_executor {
     timer<storage_proxy::clock_type> _speculate_timer;
 public:
     using abstract_read_executor::abstract_read_executor;
-    virtual future<> make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) {
+    virtual void make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) {
         _speculate_timer.set_callback([this, resolver, timeout] {
             if (!resolver->is_completed()) { // at the time the callback runs request may be completed already
                 resolver->add_wait_targets(1); // we send one more request so wait for it too
@@ -3778,14 +3782,13 @@ public:
                 auto send_request = [&] (bool has_data) {
                     if (has_data) {
                         _proxy->get_stats().speculative_digest_reads++;
-                        return make_digest_requests(resolver, _targets.end() - 1, _targets.end(), timeout);
+                        make_digest_requests(resolver, _targets.end() - 1, _targets.end(), timeout);
                     } else {
                         _proxy->get_stats().speculative_data_reads++;
-                        return make_data_requests(resolver, _targets.end() - 1, _targets.end(), timeout, true);
+                        make_data_requests(resolver, _targets.end() - 1, _targets.end(), timeout, true);
                     }
                 };
-                // Waited on indirectly.
-                (void)send_request(resolver->has_data()).finally([exec = shared_from_this()]{});
+                send_request(resolver->has_data());
             }
         });
         auto& sr = _schema->speculative_retry();
@@ -3803,13 +3806,13 @@ public:
             // We're hitting additional targets for read repair.  Since our "extra" replica is the least-
             // preferred by the snitch, we do an extra data read to start with against a replica more
             // likely to reply; better to let RR fail than the entire query.
-            return when_all(make_data_requests(resolver, _targets.begin(), _targets.begin() + 2, timeout, want_digest),
-                            make_digest_requests(resolver, _targets.begin() + 2, _targets.end(), timeout)).discard_result();
+            make_data_requests(resolver, _targets.begin(), _targets.begin() + 2, timeout, want_digest);
+            make_digest_requests(resolver, _targets.begin() + 2, _targets.end(), timeout);
         } else {
             // not doing read repair; all replies are important, so it doesn't matter which nodes we
             // perform data reads against vs digest.
-            return when_all(make_data_requests(resolver, _targets.begin(), _targets.begin() + 1, timeout, want_digest),
-                            make_digest_requests(resolver, _targets.begin() + 1, _targets.end() - 1, timeout)).discard_result();
+            make_data_requests(resolver, _targets.begin(), _targets.begin() + 1, timeout, want_digest);
+            make_digest_requests(resolver, _targets.begin() + 1, _targets.end() - 1, timeout);
         }
     }
     virtual void got_cl() override {
@@ -5263,15 +5266,15 @@ storage_proxy::query_nonsingular_data_locally(schema_ptr s, lw_shared_ptr<query:
     co_return ret;
 }
 
-future<> storage_proxy::start_hints_manager(shared_ptr<gms::gossiper> gossiper_ptr, shared_ptr<service::storage_service> ss_ptr) {
+future<> storage_proxy::start_hints_manager(shared_ptr<gms::gossiper> gossiper_ptr) {
     future<> f = make_ready_future<>();
     if (!_hints_manager.is_disabled_for_all()) {
         f = _hints_resource_manager.register_manager(_hints_manager);
     }
     return f.then([this] {
         return _hints_resource_manager.register_manager(_hints_for_views_manager);
-    }).then([this, gossiper_ptr, ss_ptr] {
-        return _hints_resource_manager.start(shared_from_this(), gossiper_ptr, ss_ptr);
+    }).then([this, gossiper_ptr] {
+        return _hints_resource_manager.start(shared_from_this(), gossiper_ptr);
     });
 }
 
@@ -5409,7 +5412,10 @@ future<> storage_proxy::wait_for_hints_to_be_replayed(utils::UUID operation_id, 
 
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
 
-void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {};
+void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {
+    _hints_manager.drain_for(endpoint);
+    _hints_for_views_manager.drain_for(endpoint);
+}
 
 void storage_proxy::on_up(const gms::inet_address& endpoint) {};
 
@@ -5431,7 +5437,8 @@ void storage_proxy::retire_view_response_handlers(noncopyable_function<bool(cons
 
 void storage_proxy::on_down(const gms::inet_address& endpoint) {
     return retire_view_response_handlers([endpoint] (const abstract_write_response_handler& handler) {
-        return handler.get_targets().contains(endpoint);
+        const auto& targets = handler.get_targets();
+        return boost::find(targets, endpoint) != targets.end();
     });
 };
 
