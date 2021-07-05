@@ -199,9 +199,13 @@ public:
         return _memtables.back();
     }
 
-    // The caller has to make sure the element exist before calling this.
+    // # 8904 - this method is akin to std::set::erase(key_type), not
+    // erase(iterator). Should be tolerant against non-existing.
     void erase(const shared_memtable& element) {
-        _memtables.erase(boost::range::find(_memtables, element));
+        auto i = boost::range::find(_memtables, element);
+        if (i != _memtables.end()) {
+            _memtables.erase(i);
+        }
     }
 
     // Clears the active memtable and adds a new, empty one.
@@ -399,11 +403,6 @@ private:
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
     std::vector<sstables::shared_sstable> _sstables_compacted_but_not_deleted;
-    // sstables that have been opened but not loaded yet, that's because refresh
-    // needs to load all opened sstables atomically, and now, we open a sstable
-    // in all shards at the same time, which makes it hard to store all sstables
-    // we need to load later on for all shards.
-    std::vector<sstables::shared_sstable> _sstables_opened_but_not_loaded;
     // sstables that should not be compacted (e.g. because they need to be used
     // to generate view updates later)
     std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_staging;

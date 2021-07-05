@@ -63,7 +63,9 @@ class node_ops_cmd_response;
 class node_ops_info;
 enum class node_ops_cmd : uint32_t;
 class repair_service;
-class raft_services;
+namespace service {
+class raft_group_registry;
+}
 
 namespace cql_transport { class controller; }
 
@@ -169,7 +171,7 @@ private:
     distributed<database>& _db;
     gms::gossiper& _gossiper;
     // Container for all Raft instances running on this shard.
-    raft_services& _raft_svcs;
+    raft_group_registry& _raft_gr;
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
     sharded<repair_service>& _repair;
@@ -221,7 +223,7 @@ public:
         sharded<netw::messaging_service>& ms,
         sharded<cdc::generation_service>&,
         sharded<repair_service>& repair,
-        raft_services& raft_svcs,
+        raft_group_registry& raft_gr,
         sharded<qos::service_level_controller>&,
         /* only for tests */ bool for_testing = false);
 
@@ -841,6 +843,7 @@ public:
 
 private:
     promise<> _drain_finished;
+    std::optional<shared_promise<>> _transport_stopped;
     future<> do_drain(bool on_shutdown);
     /**
      * Seed data to the endpoints that will be responsible for it at the future
@@ -923,7 +926,7 @@ future<> init_storage_service(sharded<abort_source>& abort_sources,
     sharded<netw::messaging_service>& ms,
     sharded<cdc::generation_service>&,
     sharded<repair_service>& repair,
-    sharded<raft_services>& raft_svcs,
+    sharded<raft_group_registry>& raft_gr,
     sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 

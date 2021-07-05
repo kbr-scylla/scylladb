@@ -98,6 +98,9 @@ public:
 
     virtual future<> grant_permissions_to_creator(const service::client_state&) const override;
 
+    virtual future<::shared_ptr<messages::result_message>>
+    execute(query_processor& qp, service::query_state& state, const query_options& options) const override;
+
     schema_ptr get_cf_meta_data(const database&) const;
 
     class raw_statement;
@@ -145,6 +148,11 @@ public:
 protected:
     virtual audit::statement_category category() const override;
 };
+
+std::optional<sstring> check_restricted_table_properties(
+    service::storage_proxy& proxy,
+    const sstring& keyspace, const sstring& table,
+    const cf_prop_defs& cfprops);
 
 }
 

@@ -100,6 +100,11 @@ public:
     raft::log& get_log() {
         return raft::fsm::get_log();
     }
+
+    bool leadership_transfer_active() const {
+        assert(is_leader());
+        return bool(leader_state().stepdown);
+    }
 };
 
 // NOTE: it doesn't compare data contents, just the data type

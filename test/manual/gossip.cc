@@ -18,7 +18,7 @@
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
 #include "service/storage_service.hh"
-#include "service/raft/raft_services.hh"
+#include "service/raft/raft_group_registry.hh"
 #include "service/qos/service_level_controller.hh"
 #include "utils/fb_utilities.hh"
 #include "repair/row_level.hh"
@@ -73,7 +73,7 @@ int main(int ac, char ** av) {
             sharded<locator::shared_token_metadata> token_metadata;
             sharded<netw::messaging_service> messaging;
             sharded<cql3::query_processor> qp;
-            sharded<raft_services> raft_svcs;
+            sharded<service::raft_group_registry> raft_gr;
             sharded<cdc::generation_service> cdc_generation_service;
             sharded<service::migration_manager> migration_manager;
             sharded<repair_service> repair;
@@ -90,8 +90,8 @@ int main(int ac, char ** av) {
             messaging.start(std::ref(sl_controller), listen).get();
             gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(messaging), std::ref(*cfg)).get();
 
-            raft_svcs.start(std::ref(messaging), std::ref(gms::get_gossiper()), std::ref(qp)).get();
-            auto stop_raft = defer([&raft_svcs] { raft_svcs.stop().get(); });
+            raft_gr.start(std::ref(messaging), std::ref(gms::get_gossiper()), std::ref(qp)).get();
+            auto stop_raft = defer([&raft_gr] { raft_gr.stop().get(); });
 
             service::init_storage_service(std::ref(abort_sources),
                 db, gms::get_gossiper(), sys_dist_ks,
@@ -99,7 +99,7 @@ int main(int ac, char ** av) {
                 migration_manager, token_metadata, messaging,
                 std::ref(cdc_generation_service),
                 std::ref(repair),
-                std::ref(raft_svcs),
+                std::ref(raft_gr),
                 sl_controller
                 ).get();
 

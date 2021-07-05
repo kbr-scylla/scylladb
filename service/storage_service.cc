@@ -105,14 +105,14 @@ storage_service::storage_service(abort_source& abort_source,
     sharded<netw::messaging_service>& ms,
     sharded<cdc::generation_service>& cdc_gen_service,
     sharded<repair_service>& repair,
-    raft_services& raft_svcs,
+    raft_group_registry& raft_gr,
     sharded<qos::service_level_controller>& sl_controller,
     bool for_testing)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
         , _db(db)
         , _gossiper(gossiper)
-        , _raft_svcs(raft_svcs)
+        , _raft_gr(raft_gr)
         , _messaging(ms)
         , _migration_manager(mm)
         , _repair(repair)
@@ -126,16 +126,17 @@ storage_service::storage_service(abort_source& abort_source,
         , _snitch_reconfigure([this] { return snitch_reconfigured(); })
         , _schema_version_publisher([this] { return publish_schema_version(); }) {
     register_metrics();
-    sstable_read_error.connect([this] { do_isolate_on_error(disk_error::regular); });
-    sstable_write_error.connect([this] { do_isolate_on_error(disk_error::regular); });
-    general_disk_error.connect([this] { do_isolate_on_error(disk_error::regular); });
-    commit_error.connect([this] { do_isolate_on_error(disk_error::commit); });
+
+    _listeners.emplace_back(make_lw_shared(bs2::scoped_connection(sstable_read_error.connect([this] { do_isolate_on_error(disk_error::regular); }))));
+    _listeners.emplace_back(make_lw_shared(bs2::scoped_connection(sstable_write_error.connect([this] { do_isolate_on_error(disk_error::regular); }))));
+    _listeners.emplace_back(make_lw_shared(bs2::scoped_connection(general_disk_error.connect([this] { do_isolate_on_error(disk_error::regular); }))));
+    _listeners.emplace_back(make_lw_shared(bs2::scoped_connection(commit_error.connect([this] { do_isolate_on_error(disk_error::commit); }))));
 
     auto& snitch = locator::i_endpoint_snitch::snitch_instance();
     if (snitch.local_is_initialized()) {
         _listeners.emplace_back(make_lw_shared(snitch.local()->when_reconfigured(_snitch_reconfigure)));
     }
-    (void) _raft_svcs;
+    (void) _raft_gr;
 }
 
 void storage_service::enable_all_features() {
@@ -692,6 +693,18 @@ void storage_service::bootstrap() {
     if (!_db.local().is_replacing()) {
         // Wait until we know tokens of existing node before announcing join status.
         _gossiper.wait_for_range_setup().get();
+
+        if (get_token_metadata_ptr()->count_normal_token_owners() == 0) {
+            // We're joining an existing cluster, so there are normal nodes in the cluster.
+            // We've waited for tokens to arrive.
+            // But we didn't see any normal token owners. Something's wrong, we cannot proceed.
+            throw std::runtime_error{
+                    "Failed to learn about other nodes' tokens during bootstrap. Make sure that:\n"
+                    " - the node can contact other nodes in the cluster,\n"
+                    " - the `ring_delay` parameter is large enough (the 30s default should be enough for small-to-middle-sized clusters),\n"
+                    " - a node with this IP didn't recently leave the cluster. If it did, wait for some time first (the IP is quarantined),\n"
+                    "and retry the bootstrap."};
+        }
 
         // Even if we reached this point before but crashed, we will make a new CDC generation.
         // It doesn't hurt: other nodes will (potentially) just do more generation switches.
@@ -1353,23 +1366,35 @@ future<> storage_service::unregister_subscriber(endpoint_lifecycle_subscriber* s
 }
 
 future<> storage_service::stop_transport() {
-    return seastar::async([this] {
-        slogger.info("Stop transport: starts");
+    if (!_transport_stopped.has_value()) {
+        _transport_stopped.emplace();
 
-        shutdown_client_servers();
-        slogger.info("Stop transport: shutdown rpc and cql server done");
+        (void) seastar::async([this] {
+            slogger.info("Stop transport: starts");
 
-        gms::stop_gossiping().get();
-        slogger.info("Stop transport: stop_gossiping done");
+            shutdown_client_servers();
+            slogger.info("Stop transport: shutdown rpc and cql server done");
 
-        do_stop_ms().get();
-        slogger.info("Stop transport: shutdown messaging_service done");
+            gms::stop_gossiping().get();
+            slogger.info("Stop transport: stop_gossiping done");
 
-        do_stop_stream_manager().get();
-        slogger.info("Stop transport: shutdown stream_manager done");
+            do_stop_ms().get();
+            slogger.info("Stop transport: shutdown messaging_service done");
 
-        slogger.info("Stop transport: done");
-    });
+            do_stop_stream_manager().get();
+            slogger.info("Stop transport: shutdown stream_manager done");
+        }).then_wrapped([this] (future<> f) {
+            if (f.failed()) {
+                _transport_stopped->set_exception(f.get_exception());
+            } else {
+                _transport_stopped->set_value();
+            }
+
+            slogger.info("Stop transport: done");
+        });
+    }
+
+    return _transport_stopped->get_shared_future();
 }
 
 future<> storage_service::drain_on_shutdown() {
@@ -1887,7 +1912,7 @@ future<> storage_service::node_ops_cmd_heartbeat_updater(const node_ops_cmd& cmd
             auto req = node_ops_cmd_request{cmd, uuid, {}, {}, {}};
             parallel_for_each(nodes, [this, ops, uuid, &req] (const gms::inet_address& node) {
                 return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([ops, uuid, node] (node_ops_cmd_response resp) {
-                    slogger.info("{}[{}]: Got heartbeat response from node={}", ops, uuid, node);
+                    slogger.debug("{}[{}]: Got heartbeat response from node={}", ops, uuid, node);
                     return make_ready_future<>();
                 });
             }).handle_exception([ops, uuid] (std::exception_ptr ep) {
@@ -2014,18 +2039,14 @@ future<> storage_service::decommission() {
                 throw;
             }
 
-            ss.shutdown_client_servers();
-            slogger.info("DECOMMISSIONING: shutdown rpc and cql server done");
+            ss.stop_transport().get();
+            slogger.info("DECOMMISSIONING: stopped transport");
 
             db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
                 return bm.stop();
             }).get();
             slogger.info("DECOMMISSIONING: stop batchlog_manager done");
 
-            gms::stop_gossiping().get();
-            slogger.info("DECOMMISSIONING: stop_gossiping done");
-            ss.do_stop_ms().get();
-            slogger.info("DECOMMISSIONING: stop messaging_service done");
             // StageManager.shutdownNow();
             db::system_keyspace::set_bootstrap_state(db::system_keyspace::bootstrap_state::DECOMMISSIONED).get();
             slogger.info("DECOMMISSIONING: set_bootstrap_state done");
@@ -3803,7 +3824,7 @@ future<> init_storage_service(sharded<abort_source>& abort_source, distributed<d
         sharded<netw::messaging_service>& ms,
         sharded<cdc::generation_service>& cdc_gen_service,
         sharded<repair_service>& repair,
-        sharded<raft_services>& raft_svcs,
+        sharded<service::raft_group_registry>& raft_gr,
         sharded<qos::service_level_controller>& sl_controller) {
     return
         service::get_storage_service().start(std::ref(abort_source),
@@ -3814,7 +3835,7 @@ future<> init_storage_service(sharded<abort_source>& abort_source, distributed<d
             std::ref(stm), std::ref(ms),
             std::ref(cdc_gen_service),
             std::ref(repair),
-            std::ref(raft_svcs),
+            std::ref(raft_gr),
             std::ref(sl_controller));
 }
 

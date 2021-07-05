@@ -43,6 +43,7 @@
 #include <seastar/util/closeable.hh>
 
 #include "sstables.hh"
+#include "sstable_writer.hh"
 #include "sstables/progress_monitor.hh"
 #include "sstables/sstables_manager.hh"
 #include "compaction.hh"

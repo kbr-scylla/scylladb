@@ -21,6 +21,7 @@
 #include <seastar/core/manual_clock.hh>
 
 using namespace raft;
+using namespace service;
 using namespace std::chrono_literals;
 using namespace seastar::testing;
 

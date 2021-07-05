@@ -12,6 +12,8 @@
 #include "raft/raft.hh"
 #include "utils/UUID_gen.hh"
 
+namespace service {
+
 // Raft state machine implementation for managing schema changes.
 // NOTE: schema raft server is always instantiated on shard 0.
 class schema_raft_state_machine : public raft::state_machine {
@@ -22,3 +24,5 @@ public:
     future<> load_snapshot(raft::snapshot_id id) override;
     future<> abort() override;
 };
+
+} // end of namespace service

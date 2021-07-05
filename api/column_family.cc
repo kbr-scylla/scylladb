@@ -13,6 +13,7 @@
 #include <vector>
 #include <seastar/http/exception.hh>
 #include "sstables/sstables.hh"
+#include "sstables/metadata_collector.hh"
 #include "utils/estimated_histogram.hh"
 #include <algorithm>
 #include "db/system_keyspace_view_types.hh"

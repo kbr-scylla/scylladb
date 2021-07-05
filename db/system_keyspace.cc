@@ -537,6 +537,10 @@ schema_ptr size_estimates() {
         ));
         builder.set_gc_grace_seconds(0);
         builder.with_version(generate_schema_version(builder.uuid()));
+        // FIXME re-enable caching for this and the other two
+        // system.large_* tables once
+        // https://github.com/scylladb/scylla/issues/3288 is fixed
+        builder.set_caching_options(caching_options::get_disabled_caching_options());
         return builder.build(schema_builder::compact_storage::no);
     }();
     return large_partitions;
@@ -557,6 +561,7 @@ static schema_ptr large_rows() {
                 .set_comment("rows larger than specified threshold")
                 .with_version(generate_schema_version(id))
                 .set_gc_grace_seconds(0)
+                .set_caching_options(caching_options::get_disabled_caching_options())
                 .build();
     }();
     return large_rows;
@@ -578,6 +583,7 @@ static schema_ptr large_cells() {
                 .set_comment("cells larger than specified threshold")
                 .with_version(generate_schema_version(id))
                 .set_gc_grace_seconds(0)
+                .set_caching_options(caching_options::get_disabled_caching_options())
                 .build();
     }();
     return large_cells;

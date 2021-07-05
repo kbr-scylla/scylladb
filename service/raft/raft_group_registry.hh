@@ -30,6 +30,8 @@ class gossiper;
 
 } // namespace gms
 
+namespace service {
+
 class raft_rpc;
 class raft_gossip_failure_detector;
 
@@ -45,7 +47,7 @@ struct raft_group_not_found: public raft::error {
 //
 // `peering_sharded_service` inheritance is used to forward requests
 // to the owning shard for a given raft group_id.
-class raft_services : public seastar::peering_sharded_service<raft_services> {
+class raft_group_registry : public seastar::peering_sharded_service<raft_group_registry> {
 public:
     using ticker_type = seastar::timer<lowres_clock>;
     // TODO: should be configurable.
@@ -78,11 +80,11 @@ private:
     server_for_group& get_server_for_group(raft::group_id id);
 public:
 
-    raft_services(netw::messaging_service& ms, gms::gossiper& gs, sharded<cql3::query_processor>& qp);
+    raft_group_registry(netw::messaging_service& ms, gms::gossiper& gs, sharded<cql3::query_processor>& qp);
     // To integrate Raft service into the boot procedure, the
     // initialization is split into 2 steps:
     // - in sharded::start(), we construct an instance of
-    // raft_services on each shard. The RPC is not available
+    // raft_group_registry on each shard. The RPC is not available
     // yet and no groups are created. The created object is
     // useless but it won't crash on use.
     // - in init(), which must be invoked explicitly on each
@@ -113,3 +115,5 @@ public:
     // Remove inet_address mapping for a raft server
     void remove_address_mapping(raft::server_id);
 };
+
+} // end of namespace service

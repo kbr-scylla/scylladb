@@ -54,7 +54,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto tmp = make_lw_shared<tmpdir>();
         auto sst_gen = [&env, s, tmp, gen = make_lw_shared<unsigned>(1)] () mutable {
-            auto sst = env.make_sstable(s, tmp->path().string(), (*gen)++, la, big);
+            auto sst = env.make_sstable(s, tmp->path().string(), (*gen)++, sstable_version_types::md, big);
             return sst;
         };
 
@@ -220,7 +220,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
 
         shared_sstable make_sstable_with_size(size_t sstable_data_size) {
             static thread_local unsigned gen = 0;
-            auto sst = _env.make_sstable(_cf->schema(), "", gen++, la, big);
+            auto sst = _env.make_sstable(_cf->schema(), "", gen++, sstable_version_types::md, big);
             sstables::test(sst).set_data_file_size(sstable_data_size);
             sstables::test(sst).set_values("z", "a", stats_metadata{});
             return sst;

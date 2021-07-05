@@ -3372,9 +3372,9 @@ class scylla_netw(gdb.Command):
         gdb.Command.__init__(self, 'scylla netw', gdb.COMMAND_USER, gdb.COMPLETE_NONE, True)
 
     def invoke(self, arg, for_tty):
-        mss = sharded(gdb.parse_and_eval('netw::_the_messaging_service'))
+        mss = sharded(gdb.parse_and_eval('debug::the_messaging_service'))
         if not mss.instances:
-            gdb.write('netw::_the_messaging_service does not exist (yet?)\n')
+            gdb.write('debug::the_messaging_service does not exist (yet?)\n')
             return
 
         ms = mss.local()
@@ -3830,9 +3830,9 @@ class scylla_smp_queues(gdb.Command):
                     if ptr in self.queues:
                         q = gdb.Value(ptr).reinterpret_cast(self._queue_type).dereference()
                         break
-                known_vptrs[vptr] = offset
                 if q is None:
                     continue
+                known_vptrs[vptr] = offset
             else:
                 ptr = int(gdb.Value(obj + offset).reinterpret_cast(self._ptr_type).dereference())
                 q = gdb.Value(ptr).reinterpret_cast(self._queue_type).dereference()

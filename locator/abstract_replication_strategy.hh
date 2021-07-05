@@ -72,8 +72,6 @@ protected:
         logger.debug(fmt, std::forward<Args>(args)...);
     }
 
-    void validate_replication_factor(sstring rf) const;
-
 public:
     abstract_replication_strategy(
         const sstring& keyspace_name,
@@ -95,6 +93,7 @@ public:
                                               const sstring& strategy_name,
                                               const shared_token_metadata& stm,
                                               const std::map<sstring, sstring>& config_options);
+    static void validate_replication_factor(sstring rf);
     inet_address_vector_replica_set get_natural_endpoints(const token& search_token, can_yield = can_yield::no);
     inet_address_vector_replica_set get_natural_endpoints_without_node_being_replaced(const token& search_token, can_yield = can_yield::no);
     virtual void validate_options() const = 0;

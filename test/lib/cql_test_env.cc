@@ -32,7 +32,7 @@
 #include "service/migration_manager.hh"
 #include "sstables/compaction_manager.hh"
 #include "message/messaging_service.hh"
-#include "service/raft/raft_services.hh"
+#include "service/raft/raft_group_registry.hh"
 #include "service/storage_service.hh"
 #include "service/storage_proxy.hh"
 #include "auth/service.hh"
@@ -523,9 +523,9 @@ public:
             sharded<cdc::generation_service> cdc_generation_service;
             sharded<repair_service> repair;
             sharded<cql3::query_processor> qp;
-            sharded<raft_services> raft_svcs;
-            raft_svcs.start(std::ref(ms), std::ref(gms::get_gossiper()), std::ref(qp)).get();
-            auto stop_raft = defer([&raft_svcs] { raft_svcs.stop().get(); });
+            sharded<service::raft_group_registry> raft_gr;
+            raft_gr.start(std::ref(ms), std::ref(gms::get_gossiper()), std::ref(qp)).get();
+            auto stop_raft = defer([&raft_gr] { raft_gr.stop().get(); });
 
             auto& ss = service::get_storage_service();
             service::storage_service_config sscfg;
@@ -538,7 +538,7 @@ public:
                 std::ref(token_metadata), std::ref(ms),
                 std::ref(cdc_generation_service),
                 std::ref(repair),
-                std::ref(raft_svcs),
+                std::ref(raft_gr),
                 std::ref(sl_controller),
                 true).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
@@ -653,9 +653,9 @@ public:
 
             // We need to have a system keyspace started and
             // initialized to initialize Raft service.
-            raft_svcs.invoke_on_all(&raft_services::init).get();
-            auto stop_raft_rpc = defer([&raft_svcs] {
-                raft_svcs.invoke_on_all(&raft_services::uninit).get();
+            raft_gr.invoke_on_all(&service::raft_group_registry::init).get();
+            auto stop_raft_rpc = defer([&raft_gr] {
+                raft_gr.invoke_on_all(&service::raft_group_registry::uninit).get();
             });
 
             cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
