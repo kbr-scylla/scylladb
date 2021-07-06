@@ -23,6 +23,7 @@ static logging::logger sl_logger("service_level_controller");
 sstring service_level_controller::default_service_level_name = "default";
 const char* scheduling_group_name_pattern = "sl:{}";
 const char* deleted_scheduling_group_name_pattern = "sl_deleted:{}";
+const char* temp_scheduling_group_name_pattern = "sl_temp:{}";
 
 service_level_controller::service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config, scheduling_group default_scheduling_group, bool destroy_default_sg_on_drain)
         : _sl_data_accessor(nullptr)
@@ -504,6 +505,21 @@ future<service_levels_info> service_level_controller::get_distributed_service_le
     return _sl_data_accessor ? _sl_data_accessor->get_service_level(service_level_name) : make_ready_future<service_levels_info>();
 }
 
+future<bool> service_level_controller::validate_before_service_level_add() {
+    assert(this_shard_id() == global_controller);
+    if (_global_controller_db->deleted_scheduling_groups.size() > 0) {
+        return make_ready_future<bool>(true);
+    } else {
+        return create_scheduling_group(format(temp_scheduling_group_name_pattern, _global_controller_db->unique_group_counter++), 1).then_wrapped([this] (future<scheduling_group> new_sg_f) {
+            try {
+                _global_controller_db->deleted_scheduling_groups.emplace_back(new_sg_f.get0());
+                return make_ready_future<bool>(true);
+            } catch (...) {
+                return make_ready_future<bool>(false);
+            }
+        });
+    }
+}
 future<> service_level_controller::set_distributed_service_level(sstring name, service_level_options slo, set_service_level_op_type op_type) {
     return _sl_data_accessor->get_service_levels().then([this, name, slo, op_type] (qos::service_levels_info sl_info) {
         auto it = sl_info.find(name);
@@ -519,7 +535,20 @@ future<> service_level_controller::set_distributed_service_level(sstring name, s
                 return make_ready_future();
             }
         }
-        return _sl_data_accessor->set_service_level(name, slo);
+        future<bool> validate_for_adding = make_ready_future<bool>(true);
+        if (op_type != set_service_level_op_type::alter) {
+            validate_for_adding = container().invoke_on(global_controller, &service_level_controller::validate_before_service_level_add);
+        }
+
+        // If we can't create a scheduling group for the new service level the validation
+        // result will contain an exception.
+        return validate_for_adding.then([this, name, slo] (bool validation_result) {
+            if (validation_result) {
+                return _sl_data_accessor->set_service_level(name, slo);
+            } else {
+                return make_exception_future<>(std::runtime_error("Can't create service level - no more scheduling groups exist"));
+            }
+        });
     });
 }
 
