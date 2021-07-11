@@ -105,7 +105,8 @@ SEASTAR_THREAD_TEST_CASE(subscriber_simple) {
     sharded<auth::service> auth_service;
     service_level_options sl_options;
     sl_options.shares.emplace<int32_t>(1000);
-    sl_controller.start(std::ref(auth_service), sl_options, default_scheduling_group()).get();
+    scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
+    sl_controller.start(std::ref(auth_service), sl_options, default_scheduling_group).get();
     qos_configuration_change_suscriber_simple ccss;
     sl_controller.local().register_subscriber(&ccss);
     sl_controller.local().add_service_level("sl1", sl_options).get();

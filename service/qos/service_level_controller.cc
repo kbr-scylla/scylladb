@@ -21,8 +21,8 @@ namespace qos {
 static logging::logger sl_logger("service_level_controller");
 
 sstring service_level_controller::default_service_level_name = "default";
-
-
+const char* scheduling_group_name_pattern = "sl:{}";
+const char* deleted_scheduling_group_name_pattern = "sl_deleted:{}";
 
 service_level_controller::service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config, scheduling_group default_scheduling_group, bool destroy_default_sg_on_drain)
         : _sl_data_accessor(nullptr)
@@ -30,6 +30,8 @@ service_level_controller::service_level_controller(sharded<auth::service>& auth_
         , _last_successful_config_update(seastar::lowres_clock::now())
         , _logged_intervals(0)
 {
+    // We can't rename the system default scheduling group so we have to reject it.
+    assert(default_scheduling_group != get_default_scheduling_group());
     if (this_shard_id() == global_controller) {
         _global_controller_db = std::make_unique<global_controller_data>();
         _global_controller_db->default_service_level_config = default_service_level_config;
@@ -342,6 +344,7 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
 }
 
 future<> service_level_controller::notify_service_level_removed(sstring name) {
+    future<> ret = make_ready_future<>();
     auto sl_it = _service_levels_db.find(name);
     if (sl_it != _service_levels_db.end()) {
         unsigned sl_idx = internal::scheduling_group_index(sl_it->second.sg);
@@ -350,6 +353,12 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         if (this_shard_id() == global_controller) {
             _global_controller_db->deleted_scheduling_groups.emplace_back(sl_it->second.sg);
             _global_controller_db->deleted_priority_classes.emplace_back(sl_it->second.pc);
+            ret = do_with(sstring(format(deleted_scheduling_group_name_pattern, sl_it->first)), scheduling_group(sl_it->second.sg), io_priority_class(sl_it->second.pc),
+                    [] (sstring& new_name, scheduling_group& sg, io_priority_class& pc) {
+                return rename_scheduling_group(sg, new_name).then([&pc, &new_name] {
+                    return pc.rename(new_name);
+                });
+            });
         }
         service_level_info sl_info = {
             .name = name,
@@ -367,7 +376,7 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
             });
         });
     }
-    return make_ready_future<>();
+    return ret;
 }
 
 io_priority_class* service_level_controller::get_current_priority_class() {
@@ -537,7 +546,7 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
     } else {
         return do_with(service_level{slo /*slo*/, default_scheduling_group() /*sg*/, default_priority_class() /*pc*/,
                 false /*marked_for_deletion*/, is_static /*is_static*/}, std::move(name), [this] (service_level& sl, sstring& name) {
-            return make_ready_future().then([this, &sl] () mutable {
+            return make_ready_future().then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
                     scheduling_group sg;
                     sg =  _global_controller_db->deleted_scheduling_groups.front();
@@ -546,13 +555,15 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
                         scheduling_group non_const_sg = sg;
                         return non_const_sg.set_shares((float)std::get<int32_t>(sl.slo.shares));
+                    }).then([sg, &sl, &name] {
+                        return rename_scheduling_group(sg, format(scheduling_group_name_pattern, name));
                     });
                 } else {
-                   return create_scheduling_group(format("service_level_sg_{}", _global_controller_db->schedg_group_cnt++), std::get<int32_t>(sl.slo.shares)).then([&sl] (scheduling_group sg) {
+                   return create_scheduling_group(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares)).then([&sl] (scheduling_group sg) {
                        sl.sg = sg;
                    });
                 }
-            }).then([this, &sl] () mutable {
+            }).then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_priority_classes.empty()) {
                     int32_t shares = std::get<int32_t>(sl.slo.shares);
                     io_priority_class pc = _global_controller_db->deleted_priority_classes.front();
@@ -560,13 +571,17 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     sl.pc = pc;
                     return container().invoke_on_all([pc, shares] (service_level_controller& service) {
                         return engine().update_shares_for_class(pc, shares);
+                    }).then([pc, &sl, &name] () mutable{
+                        return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
+                            return pc.rename(format(scheduling_group_name_pattern, name));
+                        });
                     });
                 } else {
                     sl. pc = engine().
-                            register_one_priority_class(format("service_level_pc_{}", _global_controller_db->io_priority_cnt++), std::get<int32_t>(sl.slo.shares));
+                            register_one_priority_class(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares));
                     return make_ready_future();
                 }
-            }).then([this, &sl, name] () {
+            }).then([this, &sl, &name] () {
                 return container().invoke_on_all(&service_level_controller::notify_service_level_added, name, sl);
             });
         });

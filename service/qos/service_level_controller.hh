@@ -68,8 +68,6 @@ private:
         service_levels_info  static_configurations{};
         std::deque<scheduling_group> deleted_scheduling_groups{};
         std::deque<io_priority_class> deleted_priority_classes{};
-        int schedg_group_cnt = 0;
-        int io_priority_cnt = 0;
         service_level_options default_service_level_config;
         // The below future is used to serialize work so no reordering can occur.
         // This is needed so for example: delete(x), add(x) will not reverse yielding
