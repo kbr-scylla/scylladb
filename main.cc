@@ -60,7 +60,7 @@
 
 #include "db/view/view_update_generator.hh"
 #include "service/cache_hitrate_calculator.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "sstables/sstables.hh"
 #include "utils/memory.hh"
 #include "gms/feature_service.hh"
@@ -611,6 +611,7 @@ int main(int ac, char** av) {
                 st_cfg.abort_on_lsa_bad_alloc = cfg->abort_on_lsa_bad_alloc();
                 st_cfg.lsa_reclamation_step = cfg->lsa_reclamation_step();
                 st_cfg.background_reclaim_sched_group = background_reclaim_scheduling_group;
+                st_cfg.sanitizer_report_backtrace = cfg->sanitizer_report_backtrace();
                 logalloc::shard_tracker().configure(st_cfg);
             }).get();
 
@@ -836,7 +837,7 @@ int main(int ac, char** av) {
             default_service_level_configuration.shares = 1000;
             sl_controller.start(std::ref(auth_service), default_service_level_configuration).get();
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
-            auto stop_sl_controller = defer_verbose_shutdown("service_level_controller", [&] {
+            auto stop_sl_controller = defer_verbose_shutdown("service level controller", [] {
                 sl_controller.stop().get();
             });
 
@@ -991,7 +992,7 @@ int main(int ac, char** av) {
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             debug::the_query_processor = &qp;
-            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
+            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
@@ -1419,6 +1420,10 @@ int main(int ac, char** av) {
 
             auto stop_repair = defer_verbose_shutdown("repair", [&db] {
                 repair_shutdown(db).get();
+            });
+
+            auto drain_sl_controller = defer_verbose_shutdown("service level controller update loop", [] {
+                sl_controller.invoke_on_all(&qos::service_level_controller::drain).get();
             });
 
             auto stop_view_update_generator = defer_verbose_shutdown("view update generator", [] {

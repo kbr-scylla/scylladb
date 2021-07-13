@@ -29,6 +29,7 @@ namespace row_cache_stress_test {
 
 struct table {
     simple_schema s;
+    reader_concurrency_semaphore semaphore;
     std::vector<dht::decorated_key> p_keys;
     std::vector<api::timestamp_type> p_writetime; // committed writes
     std::vector<clustering_key> c_keys;
@@ -44,13 +45,21 @@ struct table {
     row_cache cache;
 
     table(unsigned partitions, unsigned rows)
-        : mt(make_lw_shared<memtable>(s.schema()))
+        : semaphore(reader_concurrency_semaphore::no_limits{}, __FILE__)
+        , mt(make_lw_shared<memtable>(s.schema()))
         , underlying(s.schema())
         , cache(s.schema(), snapshot_source([this] { return underlying(); }), tracker)
     {
         p_keys = s.make_pkeys(partitions);
         p_writetime.resize(p_keys.size());
         c_keys = s.make_ckeys(rows);
+    }
+
+    reader_permit make_permit() {
+        return semaphore.make_permit(s.schema().get(), "test");
+    }
+    future<> stop() noexcept {
+        return semaphore.stop();
     }
 
     void set_schema(schema_ptr new_s) {
@@ -89,7 +98,7 @@ struct table {
         testlog.trace("flushing");
         prev_mt = std::exchange(mt, make_lw_shared<memtable>(s.schema()));
         auto flushed = make_lw_shared<memtable>(s.schema());
-        flushed->apply(*prev_mt, tests::make_permit()).get();
+        flushed->apply(*prev_mt, make_permit()).get();
         prev_mt->mark_flushed(flushed->as_data_source());
         testlog.trace("updating cache");
         cache.update(row_cache::external_updater([&] {
@@ -145,15 +154,16 @@ struct table {
         testlog.trace("making reader, pk={} ck={}", pr, slice);
         auto r = std::make_unique<reader>(std::move(pr), std::move(slice));
         std::vector<flat_mutation_reader> rd;
+        auto permit = make_permit();
         if (prev_mt) {
-            rd.push_back(prev_mt->make_flat_reader(s.schema(), tests::make_permit(), r->pr, r->slice, default_priority_class(), nullptr,
+            rd.push_back(prev_mt->make_flat_reader(s.schema(), permit, r->pr, r->slice, default_priority_class(), nullptr,
                 streamed_mutation::forwarding::no, mutation_reader::forwarding::no));
         }
-        rd.push_back(mt->make_flat_reader(s.schema(), tests::make_permit(), r->pr, r->slice, default_priority_class(), nullptr,
+        rd.push_back(mt->make_flat_reader(s.schema(), permit, r->pr, r->slice, default_priority_class(), nullptr,
             streamed_mutation::forwarding::no, mutation_reader::forwarding::no));
-        rd.push_back(cache.make_reader(s.schema(), tests::make_permit(), r->pr, r->slice, default_priority_class(), nullptr,
+        rd.push_back(cache.make_reader(s.schema(), permit, r->pr, r->slice, default_priority_class(), nullptr,
             streamed_mutation::forwarding::no, mutation_reader::forwarding::no));
-        r->rd = make_combined_reader(s.schema(), tests::make_permit(), std::move(rd), streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
+        r->rd = make_combined_reader(s.schema(), permit, std::move(rd), streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
         return r;
     }
 
@@ -275,6 +285,7 @@ int main(int argc, char** argv) {
             auto seconds = app.configuration()["seconds"].as<unsigned>();
 
             row_cache_stress_test::table t(partitions, rows);
+            auto stop_t = deferred_stop(t);
 
             engine().at_exit([] {
                 cancelled = true;

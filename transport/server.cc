@@ -655,7 +655,7 @@ future<> cql_server::connection::process_request() {
             (void)_process_request_stage(this, istream, op, stream, seastar::ref(_client_state), tracing_requested, mem_permit)
                     .then_wrapped([this, buf = std::move(buf), mem_permit, leave = std::move(leave)] (future<foreign_ptr<std::unique_ptr<cql_server::response>>> response_f) mutable {
                 try {
-                    write_response(std::move(response_f.get0()), std::move(mem_permit), _compression);
+                    write_response(response_f.get0(), std::move(mem_permit), _compression);
                     _ready_to_respond = _ready_to_respond.finally([leave = std::move(leave)] {});
                 } catch (...) {
                     clogger.error("request processing failed: {}", std::current_exception());
@@ -811,7 +811,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
             bool failed = f.failed();
             return audit::inspect_login(sasl_challenge->get_username(), client_state.get_client_address().addr(), failed).then(
                     [this, stream, challenge = std::move(challenge), &client_state, sasl_challenge, ff = std::move(f), trace_state = std::move(trace_state)] () mutable {
-                client_state.set_login(std::move(ff.get0()));
+                client_state.set_login(ff.get0());
                 switch_tenant([this] (noncopyable_function<future<> ()> process_loop) {
                     return _server._sl_controller.with_user_service_level(_client_state.user(), std::move(process_loop));
                 });

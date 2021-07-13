@@ -122,7 +122,7 @@ query_options::query_options(std::unique_ptr<query_options> qo, lw_shared_ptr<se
         std::move(qo->_values),
         std::move(qo->_value_views),
         qo->_skip_metadata,
-        std::move(query_options::specific_options{qo->_options.page_size, paging_state, qo->_options.serial_consistency, qo->_options.timestamp}),
+        query_options::specific_options{qo->_options.page_size, paging_state, qo->_options.serial_consistency, qo->_options.timestamp},
         qo->_cql_serialization_format) {
 
 }
@@ -134,7 +134,7 @@ query_options::query_options(std::unique_ptr<query_options> qo, lw_shared_ptr<se
         std::move(qo->_values),
         std::move(qo->_value_views),
         qo->_skip_metadata,
-        std::move(query_options::specific_options{page_size, paging_state, qo->_options.serial_consistency, qo->_options.timestamp}),
+        query_options::specific_options{page_size, paging_state, qo->_options.serial_consistency, qo->_options.timestamp},
         qo->_cql_serialization_format) {
 
 }

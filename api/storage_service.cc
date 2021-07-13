@@ -31,7 +31,7 @@
 #include "column_family.hh"
 #include "log.hh"
 #include "release.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "sstables/sstables.hh"
 #include "database.hh"
 #include "db/extensions.hh"
@@ -529,6 +529,19 @@ void set_storage_service(http_context& ctx, routes& r) {
             });
         });
     });
+
+    ss::validate.set(r, wrap_ks_cf(ctx, [] (http_context& ctx, std::unique_ptr<request> req, sstring keyspace, std::vector<sstring> column_families ) {
+        return ctx.db.invoke_on_all([=] (database& db) {
+            return do_for_each(column_families, [=, &db](sstring cfname) {
+                auto& cm = db.get_compaction_manager();
+                auto& cf = db.find_column_family(keyspace, cfname);
+                return cm.perform_sstable_validation(&cf);
+            });
+        }).then([]{
+            return make_ready_future<json::json_return_type>(0);
+        });
+
+    }));
 
     ss::upgrade_sstables.set(r, wrap_ks_cf(ctx, [] (http_context& ctx, std::unique_ptr<request> req, sstring keyspace, std::vector<sstring> column_families) {
         bool exclude_current_version = req_param<bool>(*req, "exclude_current_version", false);
@@ -1098,9 +1111,10 @@ void set_storage_service(http_context& ctx, routes& r) {
                                     e.value = p.second;
                                     nm.attributes.push(std::move(e));
                                 }
-                                if (!cp->options().contains(compression_parameters::SSTABLE_COMPRESSION)) {
+                                if (!cp->options().contains(compression_parameters::CLASS)
+                                        && !cp->options().contains(compression_parameters::SSTABLE_COMPRESSION_DEPRECATED)) {
                                     ss::mapper e;
-                                    e.key = compression_parameters::SSTABLE_COMPRESSION;
+                                    e.key = compression_parameters::CLASS;
                                     e.value = cp->name();
                                     nm.attributes.push(std::move(e));
                                 }

@@ -11,7 +11,7 @@
 #include <boost/range/adaptor/map.hpp>
 #include "sstables/sstable_directory.hh"
 #include "sstables/sstables.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "log.hh"
 #include "sstable_directory.hh"
 #include "lister.hh"
@@ -345,7 +345,7 @@ future<uint64_t> sstable_directory::reshape(compaction_manager& cm, table& table
 
             desc.creator = creator;
 
-            return cm.run_custom_job(&table, "reshape", [this, &table, sstlist = std::move(sstlist), desc = std::move(desc)] () mutable {
+            return cm.run_custom_job(&table, compaction_type::Reshape, [this, &table, sstlist = std::move(sstlist), desc = std::move(desc)] () mutable {
                 return sstables::compact_sstables(std::move(desc), table).then([this, sstlist = std::move(sstlist)] (sstables::compaction_info result) mutable {
                     return remove_input_sstables_from_reshaping(std::move(sstlist)).then([this, new_sstables = std::move(result.new_sstables)] () mutable {
                         return collect_output_sstables_from_reshaping(std::move(new_sstables));
@@ -391,7 +391,7 @@ sstable_directory::reshard(sstable_info_vector shared_info, compaction_manager& 
             // parallel_for_each so the statistics about pending jobs are updated to reflect all
             // jobs. But only one will run in parallel at a time
             return parallel_for_each(buckets, [this, iop, &cm, &table, creator = std::move(creator)] (std::vector<sstables::shared_sstable>& sstlist) mutable {
-                return cm.run_custom_job(&table, "resharding", [this, iop, &cm, &table, creator, &sstlist] () {
+                return cm.run_custom_job(&table, compaction_type::Reshard, [this, iop, &cm, &table, creator, &sstlist] () {
                     sstables::compaction_descriptor desc(sstlist, {}, iop);
                     desc.options = sstables::compaction_options::make_reshard();
                     desc.creator = std::move(creator);

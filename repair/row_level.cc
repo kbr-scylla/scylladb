@@ -38,6 +38,7 @@
 #include "utils/stall_free.hh"
 #include "service/migration_manager.hh"
 #include "streaming/consumer.hh"
+#include <seastar/core/coroutine.hh>
 
 extern logging::logger rlogger;
 
@@ -389,6 +390,16 @@ public:
     is_dirty_on_master dirty_on_master() const {
         return _dirty_on_master;
     }
+    future<> clear_gently() noexcept {
+        if (_fm) {
+            co_await _fm->clear_gently();
+            _fm.reset();
+        }
+        _dk_with_hash = {};
+        _boundary.reset();
+        _hash.reset();
+        _mf = {};
+    }
 };
 
 class repair_reader {
@@ -720,6 +731,7 @@ private:
     row_level_repair* _row_level_repair_ptr;
     std::vector<repair_node_state> _all_node_states;
     is_dirty_on_master _dirty_on_master = is_dirty_on_master::no;
+    std::optional<shared_promise<>> _stop_promise;
 public:
     std::vector<repair_node_state>& all_nodes() {
         return _all_node_states;
@@ -834,17 +846,42 @@ public:
     }
 
 public:
+    future<> clear_gently() noexcept {
+        co_await utils::clear_gently(_peer_row_hash_sets);
+        co_await utils::clear_gently(_working_row_buf);
+        co_await utils::clear_gently(_row_buf);
+    }
+
     future<> stop() {
+        // Handle deferred stop
+        if (_stop_promise) {
+            if (!_stop_promise->available()) {
+                rlogger.debug("repair_meta::stop: wait on previous stop");
+            }
+            return _stop_promise->get_shared_future();
+        }
+        _stop_promise.emplace();
+        auto ret = _stop_promise->get_shared_future();
         auto gate_future = _gate.close();
         auto f1 = _sink_source_for_get_full_row_hashes.close();
         auto f2 = _sink_source_for_get_row_diff.close();
         auto f3 = _sink_source_for_put_row_diff.close();
         rlogger.debug("repair_meta::stop");
-        return when_all_succeed(std::move(gate_future), std::move(f1), std::move(f2), std::move(f3)).discard_result().finally([this] {
+        // move to background.  waited on via _stop_promise->get_future.
+        (void)when_all_succeed(std::move(gate_future), std::move(f1), std::move(f2), std::move(f3)).discard_result().finally([this] {
             return _repair_writer->wait_for_writer_done().finally([this] {
-                return close();
+                return close().then([this] {
+                    return clear_gently();
+                });
             });
+        }).then_wrapped([this] (future<> f) {
+            if (f.failed()) {
+                _stop_promise->set_exception(f.get_exception());
+            } else {
+                _stop_promise->set_value();
+            }
         });
+        return ret;
     }
 
     static std::unordered_map<node_repair_meta_id, lw_shared_ptr<repair_meta>>& repair_meta_map();
@@ -2796,9 +2833,9 @@ public:
                     _all_live_peer_nodes,
                     _all_live_peer_nodes.size(),
                     this);
-            auto auto_close_master = defer([&master] {
-                master.close().handle_exception([] (std::exception_ptr ep) {
-                    rlogger.warn("Failed auto-closing Row Level Repair (Master): {}. Ignored.", ep);
+            auto auto_stop_master = defer([&master] {
+                master.stop().handle_exception([] (std::exception_ptr ep) {
+                    rlogger.warn("Failed auto-stopping Row Level Repair (Master): {}. Ignored.", ep);
                 }).get();
             });
 

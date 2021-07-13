@@ -149,3 +149,5 @@ public:
 
 future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_config = {});
 future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_test_config = {}, thread_attributes thread_attr = {});
+
+reader_permit make_reader_permit(cql_test_env&);

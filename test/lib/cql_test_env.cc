@@ -30,7 +30,7 @@
 #include <seastar/core/coroutine.hh>
 #include "utils/UUID_gen.hh"
 #include "service/migration_manager.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "message/messaging_service.hh"
 #include "service/raft/raft_group_registry.hh"
 #include "service/storage_service.hh"
@@ -41,7 +41,6 @@
 #include "db/batchlog_manager.hh"
 #include "schema_builder.hh"
 #include "test/lib/tmpdir.hh"
-#include "test/lib/reader_permit.hh"
 #include "db/query_context.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/log.hh"
@@ -185,7 +184,8 @@ public:
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(sstring_view text) override {
         testlog.trace("{}(\"{}\")", __FUNCTION__, text);
         auto qs = make_query_state();
-        return local_qp().execute_direct(text, *qs, cql3::query_options::DEFAULT).finally([qs] {});
+        auto qo = make_shared<cql3::query_options>(cql3::query_options::DEFAULT);
+        return local_qp().execute_direct(text, *qs, *qo).finally([qs, qo] {});
     }
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_cql(
@@ -310,7 +310,8 @@ public:
                                       table_name = std::move(table_name)] (database& db) mutable {
           auto& cf = db.find_column_family(ks_name, table_name);
           auto schema = cf.schema();
-          return cf.find_partition_slow(schema, tests::make_permit(), pkey)
+          auto permit = db.get_reader_concurrency_semaphore().make_permit(schema.get(), "require_column_has_value()");
+          return cf.find_partition_slow(schema, permit, pkey)
                   .then([schema, ckey, column_name, exp] (column_family::const_mutation_partition_ptr p) {
             assert(p != nullptr);
             auto row = p->find_row(*schema, ckey);
@@ -600,7 +601,7 @@ public:
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
-            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), std::ref(sl_controller)).get();
+            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             // In main.cc we call db::system_keyspace::setup which calls
@@ -771,6 +772,10 @@ future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_tes
             return func(e);
         });
     }, std::move(cfg_in));
+}
+
+reader_permit make_reader_permit(cql_test_env& env) {
+    return env.local_db().get_reader_concurrency_semaphore().make_permit(nullptr, "test");
 }
 
 namespace debug {

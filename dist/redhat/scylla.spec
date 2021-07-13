@@ -142,9 +142,9 @@ rm -rf $RPM_BUILD_ROOT
 %ghost /etc/systemd/system/scylla-server.service.d/capabilities.conf
 %ghost /etc/systemd/system/scylla-server.service.d/mounts.conf
 /etc/systemd/system/scylla-server.service.d/dependencies.conf
-%ghost /etc/systemd/system/var-lib-systemd-coredump.mount
+%ghost %config /etc/systemd/system/var-lib-systemd-coredump.mount
 %ghost /etc/systemd/system/scylla-cpupower.service
-%ghost /etc/systemd/system/var-lib-scylla.mount
+%ghost %config /etc/systemd/system/var-lib-scylla.mount
 
 %package conf
 Group:          Applications/Databases
@@ -232,13 +232,13 @@ Prometheus exporter for machine metrics, written in Go with pluggable metric col
 
 %post node-exporter
 if [ $1 -eq 1 ] ; then
-    /usr/bin/systemctl preset node-exporter.service ||:
+    /usr/bin/systemctl preset scylla-node-exporter.service ||:
 fi
 
 %preun node-exporter
 if [ $1 -eq 0 ] ; then
-    /usr/bin/systemctl --no-reload disable node-exporter.service ||:
-    /usr/bin/systemctl stop node-exporter.service ||:
+    /usr/bin/systemctl --no-reload disable scylla-node-exporter.service ||:
+    /usr/bin/systemctl stop scylla-node-exporter.service ||:
 fi
 
 %postun node-exporter

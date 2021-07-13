@@ -326,11 +326,7 @@ public:
     }
 
     data_consumer::processing_result process_state(temporary_buffer<char>& data) {
-        try {
-            return do_process_state(data);
-        } catch (malformed_sstable_exception& exp) {
-            throw malformed_sstable_exception(exp.what(), _sst->get_filename());
-        }
+        return do_process_state(data);
     }
 private:
     data_consumer::processing_result do_process_state(temporary_buffer<char>& data) {
@@ -1607,7 +1603,7 @@ private:
             sstlog.trace("reader {}: no tombstone", fmt::ptr(this));
             return read_from_datafile();
         }
-        auto pk = _index_reader->partition_key().to_partition_key(*_schema);
+        auto pk = _index_reader->get_partition_key();
         auto key = dht::decorate_key(*_schema, std::move(pk));
         _consumer.setup_for_partition(key.key());
         on_next_partition(std::move(key), tombstone(*tomb));
@@ -1822,6 +1818,12 @@ public:
                         return _context->consume_input();
                     });
                 });
+            }
+        }).then_wrapped([this] (future<> f) {
+            try {
+                f.get();
+            } catch(sstables::malformed_sstable_exception& e) {
+                throw sstables::malformed_sstable_exception(format("Failed to read partition from SSTable {} due to {}", _sst->get_filename(), e.what()));
             }
         });
     }

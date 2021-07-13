@@ -8,7 +8,7 @@
  */
 
 #pragma once
-#include "sstables/compaction_backlog_manager.hh"
+#include "compaction_backlog_manager.hh"
 #include <cmath>
 #include <ctgmath>
 

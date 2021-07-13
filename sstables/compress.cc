@@ -19,6 +19,7 @@
 
 #include "../compress.hh"
 #include "compress.hh"
+#include "exceptions.hh"
 #include "unimplemented.hh"
 #include "segmented_compress_params.hh"
 #include "utils/class_registrator.hh"
@@ -258,7 +259,7 @@ local_compression::local_compression(const compression& c)
             if (key == compression_parameters::CHUNK_LENGTH_KB || key == compression_parameters::CHUNK_LENGTH_KB_ERR) {
                 return to_sstring(c.chunk_len / 1024);
             }
-            if (key == compression_parameters::SSTABLE_COMPRESSION) {
+            if (key == compression_parameters::CLASS || key == compression_parameters::SSTABLE_COMPRESSION_DEPRECATED) {
                 return n;
             }
             for (auto& o : c.options.elements) {
@@ -295,7 +296,7 @@ void compression::set_compressor(compressor_ptr c) {
         const sstring& cn = uqn;
         name.value = bytes(cn.begin(), cn.end());
         for (auto& p : c->options()) {
-            if (p.first != compression_parameters::SSTABLE_COMPRESSION) {
+            if (p.first != compression_parameters::CLASS && p.first != compression_parameters::SSTABLE_COMPRESSION_DEPRECATED) {
                 auto& k = p.first;
                 auto& v = p.second;
                 options.elements.push_back({bytes(k.begin(), k.end()), bytes(v.begin(), v.end())});
@@ -393,9 +394,10 @@ public:
                 auto compressed_len = addr.chunk_len - 4;
                 // FIXME: Do not always calculate checksum - Cassandra has a
                 // probability (defaulting to 1.0, but still...)
-                auto checksum = read_be<uint32_t>(buf.get() + compressed_len);
-                if (checksum != ChecksumType::checksum(buf.get(), compressed_len)) {
-                    throw std::runtime_error("compressed chunk failed checksum");
+                auto expected_checksum = read_be<uint32_t>(buf.get() + compressed_len);
+                auto actual_checksum = ChecksumType::checksum(buf.get(), compressed_len);
+                if (expected_checksum != actual_checksum) {
+                    throw sstables::malformed_sstable_exception(format("compressed chunk of size {} at file offset {} failed checksum, expected={}, actual={}", addr.chunk_len, _underlying_pos, expected_checksum, actual_checksum));
                 }
 
                 // We know that the uncompressed data will take exactly

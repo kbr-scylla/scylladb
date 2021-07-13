@@ -2617,7 +2617,7 @@ future<> storage_proxy::send_hint_to_all_replicas(frozen_mutation_and_schema fm_
         return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit());
     }
 
-    std::array<hint_wrapper, 1> ms{hint_wrapper { std::move(fm_a_s.fm.unfreeze(fm_a_s.s)) }};
+    std::array<hint_wrapper, 1> ms{hint_wrapper { fm_a_s.fm.unfreeze(fm_a_s.s) }};
     return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit());
 }
 
@@ -2802,6 +2802,9 @@ public:
             // do not report timeouts, the whole operation will timeout and be reported
             return; // also do not report timeout as replica failure for the same reason
         } catch (timed_out_error&) {
+            // do not report timeouts, the whole operation will timeout and be reported
+            return; // also do not report timeout as replica failure for the same reason
+        } catch (semaphore_timed_out&) {
             // do not report timeouts, the whole operation will timeout and be reported
             return; // also do not report timeout as replica failure for the same reason
         } catch(...) {

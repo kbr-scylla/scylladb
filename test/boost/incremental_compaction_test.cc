@@ -17,10 +17,10 @@
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include "sstables/sstables.hh"
-#include "sstables/incremental_compaction_strategy.hh"
+#include "compaction/incremental_compaction_strategy.hh"
 #include "schema.hh"
 #include "database.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "mutation_reader.hh"
 #include "sstable_test.hh"
 #include "test/lib/tmpdir.hh"
@@ -36,8 +36,8 @@
 
 using namespace sstables;
 
-static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
-    return sst->as_mutation_source().make_reader(s, tests::make_permit(), query::full_partition_range, s->full_slice());
+static flat_mutation_reader sstable_reader(reader_permit permit, shared_sstable sst, schema_ptr s) {
+    return sst->as_mutation_source().make_reader(s, std::move(permit), query::full_partition_range, s->full_slice());
 
 }
 
@@ -60,7 +60,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto cm = make_lw_shared<compaction_manager>();
         auto tracker = make_lw_shared<cache_tracker>();
-        auto cf = make_lw_shared<column_family>(s, column_family_test_config(env.manager()), column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        auto cf = make_lw_shared<column_family>(s, column_family_test_config(env.manager(), env.semaphore()), column_family::no_commitlog(), *cm, cl_stats, *tracker);
         cf->mark_ready_for_writes();
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
@@ -171,7 +171,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto result = do_compaction(16, 16);
         BOOST_REQUIRE(result.size() == 16);
         for (auto i = 0U; i < tokens.size(); i++) {
-            assert_that(sstable_reader(result[i], s))
+            assert_that(sstable_reader(env.semaphore().make_permit(s.get(), "test reader"), result[i], s))
                 .produces(make_insert(tokens[i]))
                 .produces_end_of_stream();
         }
@@ -200,7 +200,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             return incremental_compaction_strategy(options);
         }
         static column_family::config make_table_config(test_env& env) {
-            auto config = column_family_test_config(env.manager());
+            auto config = column_family_test_config(env.manager(), env.semaphore());
             config.compaction_enforce_min_threshold = true;
             return config;
         }

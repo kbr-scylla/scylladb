@@ -19,8 +19,9 @@
 #include "dht/i_partitioner.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/sstable_test_env.hh"
-#include "test/lib/reader_permit.hh"
+#include "test/lib/reader_concurrency_semaphore.hh"
 #include "gc_clock.hh"
+#include <seastar/core/coroutine.hh>
 
 using namespace sstables;
 using namespace std::chrono_literals;
@@ -84,31 +85,36 @@ public:
         return _sst->_components->summary;
     }
 
-    future<temporary_buffer<char>> data_read(uint64_t pos, size_t len) {
-        return _sst->data_read(pos, len, default_priority_class(), tests::make_permit());
+    future<temporary_buffer<char>> data_read(reader_permit permit, uint64_t pos, size_t len) {
+        return _sst->data_read(pos, len, default_priority_class(), std::move(permit));
     }
 
-    future<index_list> read_indexes() {
-        auto l = make_lw_shared<index_list>();
-        return do_with(std::make_unique<index_reader>(_sst, tests::make_permit(), default_priority_class(), tracing::trace_state_ptr()),
-                [this, l] (std::unique_ptr<index_reader>& ir) {
-            return ir->read_partition_data().then([&, l] {
-                l->push_back(std::move(ir->current_partition_entry()));
-            }).then([&, l] {
-                return repeat([&, l] {
-                    return ir->advance_to_next_partition().then([&, l] {
-                        if (ir->eof()) {
-                            return stop_iteration::yes;
-                        }
+    std::unique_ptr<index_reader> make_index_reader(reader_permit permit) {
+        return std::make_unique<index_reader>(_sst, std::move(permit), default_priority_class(), tracing::trace_state_ptr());
+    }
 
-                        l->push_back(std::move(ir->current_partition_entry()));
-                        return stop_iteration::no;
-                    });
-                });
-            });
-        }).then([l] {
-            return std::move(*l);
-        });
+    struct index_entry {
+        sstables::key sstables_key;
+        partition_key key;
+        uint64_t promoted_index_size;
+
+        key_view get_key() const {
+            return sstables_key;
+        }
+    };
+
+    future<std::vector<index_entry>> read_indexes(reader_permit permit) {
+        std::vector<index_entry> entries;
+        auto s = _sst->get_schema();
+        auto ir = make_index_reader(std::move(permit));
+        while (!ir->eof()) {
+            co_await ir->read_partition_data();
+            auto pk = ir->get_partition_key();
+            entries.emplace_back(index_entry{sstables::key::from_partition_key(*s, pk),
+                                       pk, ir->get_promoted_index_size()});
+            co_await ir->advance_to_next_partition();
+        }
+        co_return entries;
     }
 
     future<> read_statistics() {

@@ -12,8 +12,8 @@
 #pragma once
 
 #include "database_fwd.hh"
-#include "shared_sstable.hh"
-#include "sstables/compaction_descriptor.hh"
+#include "sstables/shared_sstable.hh"
+#include "compaction/compaction_descriptor.hh"
 #include "gc_clock.hh"
 #include "compaction_weight_registration.hh"
 #include "service/priority_manager.hh"
@@ -101,4 +101,7 @@ namespace sstables {
 
     // For tests, can drop after we virtualize sstables.
     flat_mutation_reader make_scrubbing_reader(flat_mutation_reader rd, compaction_options::scrub::mode scrub_mode);
+
+    // For tests, can drop after we virtualize sstables.
+    future<bool> validate_compaction_validate_reader(flat_mutation_reader rd, const compaction_info& info);
 }

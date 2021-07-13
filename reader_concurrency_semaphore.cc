@@ -157,6 +157,7 @@ struct reader_concurrency_semaphore::permit_list {
     using list_type = boost::intrusive::list<reader_permit::impl, boost::intrusive::constant_time_size<false>>;
 
     list_type permits;
+    permit_stats stats;
 };
 
 reader_permit::reader_permit(reader_concurrency_semaphore& semaphore, const schema* const schema, std::string_view op_name)
@@ -398,10 +399,17 @@ reader_concurrency_semaphore::reader_concurrency_semaphore(no_limits, sstring na
             std::move(name)) {}
 
 reader_concurrency_semaphore::~reader_concurrency_semaphore() {
-    // FIXME: assert(_stopped) once all reader_concurrency_semaphore:s
-    // are properly closed (needs de-static-fying tests::the_semaphore)
-    assert(_inactive_reads.empty() && !_close_readers_gate.get_count());
-    broken();
+    if (!_permit_list->stats.total_permits) {
+        // We allow destroy without stop() when the semaphore wasn't used at all yet.
+        return;
+    }
+    if (!_stopped) {
+        on_internal_error_noexcept(rcslog, format("~reader_concurrency_semaphore(): semaphore {} not stopped before destruction", _name));
+        // With the below conditions, we can get away with the semaphore being
+        // unstopped. In this case don't force an abort.
+        assert(_inactive_reads.empty() && !_close_readers_gate.get_count() && !_permit_gate.get_count());
+        broken();
+    }
 }
 
 reader_concurrency_semaphore::inactive_read_handle reader_concurrency_semaphore::register_inactive_read(flat_mutation_reader reader) noexcept {
@@ -524,7 +532,7 @@ flat_mutation_reader reader_concurrency_semaphore::detach_inactive_reader(inacti
             break;
     }
     --_stats.inactive_reads;
-    return std::move(reader);
+    return reader;
 }
 
 void reader_concurrency_semaphore::evict(inactive_read& ir, evict_reason reason) noexcept {
@@ -597,11 +605,16 @@ future<reader_permit::resource_units> reader_concurrency_semaphore::do_wait_admi
 void reader_concurrency_semaphore::on_permit_created(reader_permit::impl& permit) {
     _permit_gate.enter();
     _permit_list->permits.push_back(permit);
+    ++_permit_list->stats.total_permits;
 }
 
 void reader_concurrency_semaphore::on_permit_destroyed(reader_permit::impl& permit) noexcept {
     permit.unlink();
     _permit_gate.leave();
+}
+
+reader_concurrency_semaphore::permit_stats reader_concurrency_semaphore::get_permit_stats() const {
+    return _permit_list->stats;
 }
 
 reader_permit reader_concurrency_semaphore::make_permit(const schema* const schema, const char* const op_name) {

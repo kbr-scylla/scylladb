@@ -850,6 +850,7 @@ indexed_table_select_statement::prepare(database& db,
     const auto& im = index_opt->metadata();
     sstring index_table_name = im.name() + "_index";
     schema_ptr view_schema = db.find_schema(schema->ks_name(), index_table_name);
+    restrictions->prepare_indexed(*view_schema, im.local());
 
     return ::make_shared<cql3::statements::indexed_table_select_statement>(
             schema,
@@ -938,7 +939,7 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
 
     auto result_view = query::result_view(*results);
     if (!results->row_count() || *results->row_count() == 0) {
-        return std::move(paging_state);
+        return paging_state;
     }
 
     auto&& last_partition_and_clustering_key = result_view.get_last_partition_and_clustering_key();
@@ -973,7 +974,7 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
     auto index_ck = clustering_key::from_range(std::move(exploded_index_ck));
     if (partition_key::tri_compare(*_view_schema)(paging_state->get_partition_key(), index_pk) == 0
             && (!paging_state->get_clustering_key() || clustering_key::prefix_equal_tri_compare(*_view_schema)(*paging_state->get_clustering_key(), index_ck) == 0)) {
-        return std::move(paging_state);
+        return paging_state;
     }
 
     auto paging_state_copy = make_lw_shared<service::pager::paging_state>(service::pager::paging_state(*paging_state));
@@ -1144,33 +1145,8 @@ query::partition_slice indexed_table_select_statement::get_partition_slice_for_g
         auto single_pk_restrictions = dynamic_pointer_cast<restrictions::single_column_partition_key_restrictions>(_restrictions->get_partition_key_restrictions());
         // Only EQ restrictions on base partition key can be used in an index view query
         if (single_pk_restrictions && single_pk_restrictions->is_all_eq()) {
-            auto clustering_restrictions = ::make_shared<restrictions::single_column_clustering_key_restrictions>(_view_schema, *single_pk_restrictions);
-            // Computed token column needs to be added to index view restrictions
-            const column_definition& token_cdef = *_view_schema->clustering_key_columns().begin();
-            auto base_pk = partition_key::from_optional_exploded(*_schema, single_pk_restrictions->values(options));
-            bytes token_value = compute_idx_token(base_pk);
-            auto token_restriction = ::make_shared<restrictions::single_column_restriction>(token_cdef);
-            token_restriction->expression = expr::binary_operator{
-                    &token_cdef, expr::oper_t::EQ,
-                    ::make_shared<cql3::constants::value>(cql3::raw_value::make_value(token_value))};
-            clustering_restrictions->merge_with(token_restriction);
-
-            if (_restrictions->get_clustering_columns_restrictions()->prefix_size() > 0) {
-                auto single_ck_restrictions = dynamic_pointer_cast<restrictions::single_column_clustering_key_restrictions>(_restrictions->get_clustering_columns_restrictions());
-                if (single_ck_restrictions) {
-                    auto prefix_restrictions = single_ck_restrictions->get_longest_prefix_restrictions();
-                    auto clustering_restrictions_from_base = ::make_shared<restrictions::single_column_clustering_key_restrictions>(_view_schema, *prefix_restrictions);
-                    const auto indexed_column = _view_schema->get_column_definition(to_bytes(_index.target_column()));
-                    for (auto restriction_it : clustering_restrictions_from_base->restrictions()) {
-                        if (restriction_it.first == indexed_column) {
-                            continue; // In the index table, the indexed column is the partition (not clustering) key.
-                        }
-                        clustering_restrictions->merge_with(restriction_it.second);
-                    }
-                }
-            }
-
-            partition_slice_builder.with_ranges(clustering_restrictions->bounds_ranges(options));
+            partition_slice_builder.with_ranges(
+                    _restrictions->get_global_index_clustering_ranges(options, *_view_schema));
         }
     }
 
@@ -1257,7 +1233,7 @@ indexed_table_select_statement::read_posting_list(service::storage_proxy& proxy,
             query::result_view::consume(*qr.query_result,
                                         std::move(partition_slice),
                                         cql3::selection::result_set_builder::visitor(builder, *_view_schema, *selection));
-            return ::make_shared<cql_transport::messages::result_message::rows>(std::move(result(builder.build())));
+            return ::make_shared<cql_transport::messages::result_message::rows>(result(builder.build()));
         });
     }
 

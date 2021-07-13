@@ -35,7 +35,7 @@
 #include "utils/hash.hh"
 #include "service/storage_service.hh"
 #include "service/migration_manager.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "distributed_loader.hh"
 #include "schema_builder.hh"
 #include "db/system_keyspace.hh"

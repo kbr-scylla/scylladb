@@ -68,6 +68,10 @@ public:
         // Total number of reads rejected because the admission queue reached its max capacity
         uint64_t total_reads_shed_due_to_overload = 0;
     };
+    struct permit_stats {
+        // Total number of permits created so far.
+        uint64_t total_permits = 0;
+    };
 
     struct permit_list;
 
@@ -187,6 +191,9 @@ private:
 public:
     struct no_limits { };
 
+    /// Create a semaphore with the specified limits
+    ///
+    /// The semaphore's name has to be unique!
     reader_concurrency_semaphore(int count,
             ssize_t memory,
             sstring name,
@@ -196,7 +203,8 @@ public:
     /// Create a semaphore with practically unlimited count and memory.
     ///
     /// And conversely, no queue limit either.
-    explicit reader_concurrency_semaphore(no_limits, sstring name = "unlimited reader_concurrency_semaphore");
+    /// The semaphore's name has to be unique!
+    explicit reader_concurrency_semaphore(no_limits, sstring name);
 
     ~reader_concurrency_semaphore();
 
@@ -266,6 +274,9 @@ public:
     stats& get_stats() {
         return _stats;
     }
+
+    /// Return stats about the currently existing permits.
+    permit_stats get_permit_stats() const;
 
     /// Make a permit
     ///

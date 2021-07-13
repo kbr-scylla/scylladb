@@ -26,7 +26,6 @@
 #include "test/lib/test_services.hh"
 #include "test/lib/sstable_test_env.hh"
 #include "test/lib/cql_test_env.hh"
-#include "test/lib/reader_permit.hh"
 
 class size_calculator {
     using cells_type = row::sparse_array_type;
@@ -61,7 +60,7 @@ public:
         std::cout << "\n";
 
         std::cout << prefix() << "sizeof(rows_entry) = " << sizeof(rows_entry) << "\n";
-        std::cout << prefix() << "sizeof(lru_link_type) = " << sizeof(rows_entry::lru_link_type) << "\n";
+        std::cout << prefix() << "sizeof(evictable) = " << sizeof(evictable) << "\n";
         std::cout << prefix() << "sizeof(deletable_row) = " << sizeof(deletable_row) << "\n";
         std::cout << prefix() << "sizeof(row) = " << sizeof(row) << "\n";
         std::cout << prefix() << "radix_tree::inner_node::node_sizes = ";
@@ -214,7 +213,7 @@ static sizes calculate_sizes(cache_tracker& tracker, const mutation_settings& se
                 v,
                 sstables::sstable::format_types::big);
             auto mt2 = make_lw_shared<memtable>(s);
-            mt2->apply(*mt, tests::make_permit()).get();
+            mt2->apply(*mt, env.make_reader_permit()).get();
             write_memtable_to_sstable_for_test(*mt2, sst).get();
             sst->load().get();
             result.sstable[v] = sst->data_size();

@@ -28,7 +28,7 @@ create_service_level_statement::create_service_level_statement(sstring service_l
 std::unique_ptr<cql3::statements::prepared_statement>
 cql3::statements::create_service_level_statement::prepare(
         database &db, cql_stats &stats) {
-    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<create_service_level_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<create_service_level_statement>(*this));
 }
 
 void create_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {

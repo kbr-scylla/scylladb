@@ -26,7 +26,7 @@ drop_service_level_statement::drop_service_level_statement(sstring service_level
 std::unique_ptr<cql3::statements::prepared_statement>
 cql3::statements::drop_service_level_statement::prepare(
         database &db, cql_stats &stats) {
-    return std::make_unique<prepared_statement>(std::move(audit_info()), ::make_shared<drop_service_level_statement>(*this));
+    return std::make_unique<prepared_statement>(audit_info(), ::make_shared<drop_service_level_statement>(*this));
 }
 
 void drop_service_level_statement::validate(service::storage_proxy &, const service::client_state &) const {

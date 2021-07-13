@@ -6,8 +6,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "sstables.hh"
-#include "sstable_set.hh"
+#include "sstables/sstables.hh"
+#include "sstables/sstable_set.hh"
 #include "database.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"

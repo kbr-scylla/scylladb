@@ -23,7 +23,7 @@
 #include "view_info.hh"
 #include "db/data_listeners.hh"
 #include "memtable-sstable.hh"
-#include "sstables/compaction_manager.hh"
+#include "compaction/compaction_manager.hh"
 #include "sstables/sstable_directory.hh"
 #include "db/system_keyspace.hh"
 #include "db/query_context.hh"
@@ -583,7 +583,7 @@ table::seal_active_memtable(flush_permit&& permit) {
         _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
 
         if (f.failed()) {
-            return std::move(f);
+            return f;
         }
 
         if (_commitlog) {
@@ -634,7 +634,10 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             });
         });
 
-        auto f = consumer(old->make_flush_reader(old->schema(), service::get_local_memtable_flush_priority()));
+        auto f = consumer(old->make_flush_reader(
+                    old->schema(),
+                    compaction_concurrency_semaphore().make_permit(old->schema().get(), "try_flush_memtable_to_sstable()"),
+                    service::get_local_memtable_flush_priority()));
 
         // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
         // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
@@ -1655,17 +1658,31 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
         tracing::trace_state_ptr tr_state,
         gc_clock::time_point now) const {
     auto base_token = m.token();
-    return db::view::generate_view_updates(
+    db::view::view_update_builder builder = co_await db::view::make_view_update_builder(
             base,
             std::move(views),
             flat_mutation_reader_from_mutations(std::move(permit), {std::move(m)}),
             std::move(existings),
-            now).then([this, base_token = std::move(base_token), tr_state = std::move(tr_state)] (utils::chunked_vector<frozen_mutation_and_schema>&& updates) mutable {
+            now);
+
+    while (true) {
+        try {
+            auto updates = co_await builder.build_some();
+            if (updates.empty()) {
+                break;
+            }
             tracing::trace(tr_state, "Generated {} view update mutations", updates.size());
-        auto units = seastar::consume_units(*_config.view_update_concurrency_semaphore, memory_usage_of(updates));
-        return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats, *_config.cf_stats, std::move(tr_state),
+            auto units = seastar::consume_units(*_config.view_update_concurrency_semaphore, memory_usage_of(updates));
+            co_await db::view::mutate_MV(base_token, std::move(updates), _view_stats, *_config.cf_stats, tr_state,
                 std::move(units), service::allow_hints::yes, db::view::wait_for_all_updates::no).handle_exception([] (auto ignored) { });
-    });
+        } catch (...) {
+            // Ignore exceptions: any individual failure to propagate a view update will be reported
+            // by a separate mechanism in mutate_MV() function. Moreover, we should continue trying
+            // to generate updates even if some of them fail, in order to minimize the potential
+            // inconsistencies caused by not being able to propagate an update
+        }
+    }
+    co_await builder.close();
 }
 
 /**
@@ -1765,25 +1782,37 @@ future<> table::populate_views(
         dht::token base_token,
         flat_mutation_reader&& reader,
         gc_clock::time_point now) {
-    auto& schema = reader.schema();
-    return db::view::generate_view_updates(
+    auto schema = reader.schema();
+    db::view::view_update_builder builder = co_await db::view::make_view_update_builder(
             schema,
             std::move(views),
             std::move(reader),
             { },
-            now).then([base_token = std::move(base_token), this] (utils::chunked_vector<frozen_mutation_and_schema>&& updates) mutable {
-        size_t update_size = memory_usage_of(updates);
-        size_t units_to_wait_for = std::min(_config.view_update_concurrency_semaphore_limit, update_size);
-        return seastar::get_units(*_config.view_update_concurrency_semaphore, units_to_wait_for).then(
-                [base_token = std::move(base_token),
-                 updates = std::move(updates),
-                 units_to_consume = update_size - units_to_wait_for,
-                 this] (db::timeout_semaphore_units&& units) mutable {
-            units.adopt(seastar::consume_units(*_config.view_update_concurrency_semaphore, units_to_consume));
-            return db::view::mutate_MV(std::move(base_token), std::move(updates), _view_stats, *_config.cf_stats,
+            now);
+
+    std::exception_ptr err;
+    while (true) {
+        try {
+            auto updates = co_await builder.build_some();
+            if (updates.empty()) {
+                break;
+            }
+            size_t update_size = memory_usage_of(updates);
+            size_t units_to_wait_for = std::min(_config.view_update_concurrency_semaphore_limit, update_size);
+            auto units = co_await seastar::get_units(*_config.view_update_concurrency_semaphore, units_to_wait_for);
+            units.adopt(seastar::consume_units(*_config.view_update_concurrency_semaphore, update_size - units_to_wait_for));
+            co_await db::view::mutate_MV(base_token, std::move(updates), _view_stats, *_config.cf_stats,
                     tracing::trace_state_ptr(), std::move(units), service::allow_hints::no, db::view::wait_for_all_updates::yes);
-        });
-    });
+        } catch (...) {
+            if (!err) {
+                err = std::current_exception();
+            }
+        }
+    }
+    co_await builder.close();
+    if (err) {
+        std::rethrow_exception(err);
+    }
 }
 
 void table::set_hit_rate(gms::inet_address addr, cache_temperature rate) {
@@ -1885,17 +1914,24 @@ write_memtable_to_sstable(flat_mutation_reader reader,
 }
 
 future<>
-write_memtable_to_sstable(memtable& mt, sstables::shared_sstable sst,
+write_memtable_to_sstable(reader_permit permit, memtable& mt, sstables::shared_sstable sst,
                           sstables::write_monitor& monitor,
                           sstables::sstable_writer_config& cfg,
                           const io_priority_class& pc) {
-    return write_memtable_to_sstable(mt.make_flush_reader(mt.schema(), pc), mt, std::move(sst), monitor, cfg, pc);
+    return write_memtable_to_sstable(mt.make_flush_reader(mt.schema(), std::move(permit), pc), mt, std::move(sst), monitor, cfg, pc);
 }
 
 future<>
 write_memtable_to_sstable(memtable& mt, sstables::shared_sstable sst, sstables::sstable_writer_config cfg) {
-    return do_with(permit_monitor(make_lw_shared(sstable_write_permit::unconditional())), cfg, [&mt, sst] (auto& monitor, auto& cfg) {
-        return write_memtable_to_sstable(mt, std::move(sst), monitor, cfg);
+    return do_with(
+            permit_monitor(make_lw_shared(sstable_write_permit::unconditional())),
+            std::make_unique<reader_concurrency_semaphore>(reader_concurrency_semaphore::no_limits{}, "write_memtable_to_sstable"),
+            cfg,
+            [&mt, sst] (auto& monitor, auto& semaphore, auto& cfg) {
+        return write_memtable_to_sstable(semaphore->make_permit(mt.schema().get(), "mt_to_sst"), mt, std::move(sst), monitor, cfg)
+        .finally([&semaphore] {
+                return semaphore->stop();
+        });
     });
 }
 

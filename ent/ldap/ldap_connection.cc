@@ -75,8 +75,8 @@ void ldap_connection::ldap_deleter::operator()(LDAP* ld) {
 ldap_connection::ldap_connection(seastar::connected_socket&& socket) :
         _fd(file_desc::eventfd(0, EFD_NONBLOCK)) // Never ready for read, always ready for write.
     , _socket(std::move(socket))
-    , _input_stream(std::move(_socket.input()))
-    , _output_stream(std::move(_socket.output()))
+    , _input_stream(_socket.input())
+    , _output_stream(_socket.output())
     , _status(status::up)
     , _read_consumer(now())
     , _read_in_progress(false)

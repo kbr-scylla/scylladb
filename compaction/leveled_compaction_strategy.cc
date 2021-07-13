@@ -9,9 +9,8 @@
  */
 
 #include "leveled_compaction_strategy.hh"
-#include "sstables/leveled_manifest.hh"
+#include "leveled_manifest.hh"
 #include <algorithm>
-#include <ranges>
 
 #include <boost/range/algorithm/remove_if.hpp>
 
