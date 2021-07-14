@@ -90,15 +90,30 @@ future<> service_level_controller::drain() {
     }
     _global_controller_db->notifications_serializer.broken();
     return std::exchange(_global_controller_db->distributed_data_update, make_ready_future<>()).then([this] {
-        return ::parallel_for_each(_service_levels_db.begin(), _service_levels_db.end(), [this] (auto&& sl_record) {
+        // destroy all sg's in _service_levels_db, leaving it empty
+        // if any destroy_scheduling_group call fails, return one of the exceptions
+        auto service_levels_db = std::move(_service_levels_db);
+        auto f0 = parallel_for_each(service_levels_db, [] (auto&& sl_record) {
             return ::destroy_scheduling_group(sl_record.second.sg);
         });
-    }).then([this] () {
-        return ::do_until([this] () { return _global_controller_db->deleted_scheduling_groups.empty(); }, [this] () {
-            return ::destroy_scheduling_group(_global_controller_db->deleted_scheduling_groups.top()).then([this] () {
-                _global_controller_db->deleted_scheduling_groups.pop();
+
+        // destroy all sg's in _global_controller_db->deleted_scheduling_groups, leaving it empty
+        // if any destroy_scheduling_group call fails, return one of the exceptions
+        auto f1 = do_with(std::move(_global_controller_db->deleted_scheduling_groups), std::exception_ptr(),
+                [] (std::stack<scheduling_group>& deleted_scheduling_groups, std::exception_ptr& ex) {
+            return do_until([&] () { return deleted_scheduling_groups.empty(); }, [&] () {
+                return destroy_scheduling_group(deleted_scheduling_groups.top()).then_wrapped([&] (future<> f) {
+                    deleted_scheduling_groups.pop();
+                    if (f.failed()) {
+                        ex = f.get_exception();
+                    }
+                });
+            }).finally([&] () {
+                return ex ? make_exception_future<>(std::move(ex)) : make_ready_future<>();
             });
         });
+
+        return when_all_succeed(std::move(f0), std::move(f1)).discard_result();
     }).then_wrapped([] (future<> f) {
         //unregister from the priority manager
         service::get_local_priority_manager().set_service_level_controller(nullptr);
