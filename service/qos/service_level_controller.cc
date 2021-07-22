@@ -90,30 +90,12 @@ future<> service_level_controller::drain() {
     }
     _global_controller_db->notifications_serializer.broken();
     return std::exchange(_global_controller_db->distributed_data_update, make_ready_future<>()).then([this] {
-        // destroy all sg's in _service_levels_db, leaving it empty
-        // if any destroy_scheduling_group call fails, return one of the exceptions
-        auto service_levels_db = std::move(_service_levels_db);
-        auto f0 = parallel_for_each(service_levels_db, [] (auto&& sl_record) {
-            return ::destroy_scheduling_group(sl_record.second.sg);
-        });
-
-        // destroy all sg's in _global_controller_db->deleted_scheduling_groups, leaving it empty
-        // if any destroy_scheduling_group call fails, return one of the exceptions
-        auto f1 = do_with(std::move(_global_controller_db->deleted_scheduling_groups), std::exception_ptr(),
-                [] (std::stack<scheduling_group>& deleted_scheduling_groups, std::exception_ptr& ex) {
-            return do_until([&] () { return deleted_scheduling_groups.empty(); }, [&] () {
-                return destroy_scheduling_group(deleted_scheduling_groups.top()).then_wrapped([&] (future<> f) {
-                    deleted_scheduling_groups.pop();
-                    if (f.failed()) {
-                        ex = f.get_exception();
-                    }
-                });
-            }).finally([&] () {
-                return ex ? make_exception_future<>(std::move(ex)) : make_ready_future<>();
-            });
-        });
-
-        return when_all_succeed(std::move(f0), std::move(f1)).discard_result();
+        // delete all sg's in _service_levels_db, leaving it empty.
+        for (auto it = _service_levels_db.begin(); it != _service_levels_db.end(); ) {
+            _global_controller_db->deleted_scheduling_groups.emplace(it->second.sg);
+            _global_controller_db->deleted_priority_classes.emplace(it->second.pc);
+            it = _service_levels_db.erase(it);
+        }
     }).then_wrapped([] (future<> f) {
         //unregister from the priority manager
         service::get_local_priority_manager().set_service_level_controller(nullptr);
@@ -128,7 +110,29 @@ future<> service_level_controller::drain() {
 }
 
 future<> service_level_controller::stop() {
-    return drain();
+    return drain().finally([this] {
+        if (this_shard_id() != global_controller) {
+            return make_ready_future<>();
+        }
+
+        // destroy all sg's in _global_controller_db->deleted_scheduling_groups, leaving it empty
+        // if any destroy_scheduling_group call fails, return one of the exceptions
+        return do_with(std::move(_global_controller_db->deleted_scheduling_groups), std::exception_ptr(),
+                [] (std::stack<scheduling_group>& deleted_scheduling_groups, std::exception_ptr& ex) {
+            return do_until([&] () { return deleted_scheduling_groups.empty(); }, [&] () {
+                return destroy_scheduling_group(deleted_scheduling_groups.top()).then_wrapped([&] (future<> f) {
+                    if (f.failed()) {
+                        auto e = f.get_exception();
+                        sl_logger.error("Destroying scheduling group \"{}\" on stop failed: {}.  Ignored.", deleted_scheduling_groups.top().name(), e);
+                        ex = std::move(e);
+                    }
+                    deleted_scheduling_groups.pop();
+                });
+            }).finally([&] () {
+                return ex ? make_exception_future<>(std::move(ex)) : make_ready_future<>();
+            });
+        });
+    });
 }
 
 void service_level_controller::register_with_priority_manager() {
