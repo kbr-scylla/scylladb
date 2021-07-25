@@ -615,7 +615,7 @@ struct segment_descriptor : public log_heap_hook<segment_descriptor_hist_options
     }
 
     segment_kind kind() const {
-        return static_cast<segment_kind>(_free_space >> shift_for_segment_kind);
+        return static_cast<segment_kind>((_free_space & segment_kind_mask) >> shift_for_segment_kind);
     }
 
     void set_kind(segment_kind kind) {
@@ -1389,8 +1389,9 @@ private:
         segment_descriptor& desc = shard_segment_pool.descriptor(_buf_active);
         ptr._desc = &desc;
         desc._buf_pointers.emplace_back(entangled::make_paired_with(ptr._link));
-        desc.record_alloc(buf_size);
-        _buf_active_offset += align_up(buf_size, buf_align);
+        auto alloc_size = align_up(buf_size, buf_align);
+        desc.record_alloc(alloc_size);
+        _buf_active_offset += alloc_size;
 
         return ptr;
     }
@@ -1403,7 +1404,8 @@ private:
             _closed_occupancy -= seg->occupancy();
         }
 
-        desc.record_free(buf._size);
+        auto alloc_size = align_up(buf._size, buf_align);
+        desc.record_free(alloc_size);
         poison(buf._buf, buf._size);
 
         // Pack links so that segment compaction only has to walk live objects.
@@ -2056,6 +2058,10 @@ static void reclaim_from_evictable(region::impl& r, size_t target_mem_in_use, is
                     break;
                 }
                 llogger.debug("Unable to evict more, evicted {} bytes", used - r.occupancy().used_space());
+                return;
+            }
+            if (shard_segment_pool.total_memory_in_use() <= target_mem_in_use) {
+                llogger.debug("Target met after evicting {} bytes", used - r.occupancy().used_space());
                 return;
             }
             if (preempt && need_preempt()) {

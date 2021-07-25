@@ -75,6 +75,7 @@ class reconcilable_result;
 
 namespace service {
 class storage_proxy;
+class storage_service;
 class migration_notifier;
 class migration_manager;
 }
@@ -112,7 +113,7 @@ class data_listeners;
 class large_data_handler;
 
 namespace system_keyspace {
-future<> make(database& db);
+future<> make(database& db, service::storage_service& ss);
 }
 }
 
@@ -154,7 +155,7 @@ private:
     seal_immediate_fn_type _seal_immediate_fn;
     std::function<schema_ptr()> _current_schema;
     dirty_memory_manager* _dirty_memory_manager;
-    std::optional<shared_promise<>> _flush_coalescing;
+    std::optional<shared_future<>> _flush_coalescing;
     seastar::scheduling_group _compaction_scheduling_group;
     table_stats& _table_stats;
 public:
@@ -308,6 +309,8 @@ class database_sstable_write_monitor;
 
 using enable_backlog_tracker = bool_class<class enable_backlog_tracker_tag>;
 
+extern const ssize_t new_reader_base_cost;
+
 struct table_stats {
     /** Number of times flush has resulted in the memtable being switched out. */
     int64_t memtable_switch_count = 0;
@@ -415,6 +418,8 @@ private:
     // This semaphore ensures that off-strategy compaction will be serialized and also
     // protects against candidates being picked more than once.
     seastar::named_semaphore _off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
+    // Ensures that concurrent updates to sstable set will work correctly
+    seastar::named_semaphore _sstable_set_mutation_sem = {1, named_semaphore_exception_factory{"sstable set mutation"}};
     mutable row_cache _cache; // Cache covers only sstables.
     std::optional<int64_t> _sstable_generation = {};
 
@@ -496,6 +501,25 @@ public:
     void notify_bootstrap_or_replace_start();
 
     void notify_bootstrap_or_replace_end();
+
+    // Ensures that concurrent preemptible mutations to sstable lists will produce correct results.
+    // User will hold this permit until done with all updates. As soon as it's released, another concurrent
+    // attempt to update the lists will be able to proceed.
+    struct sstable_list_builder {
+        using permit_t = semaphore_units<seastar::named_semaphore_exception_factory>;
+        permit_t permit;
+
+        explicit sstable_list_builder(permit_t p) : permit(std::move(p)) {}
+        sstable_list_builder& operator=(const sstable_list_builder&) = delete;
+        sstable_list_builder(const sstable_list_builder&) = delete;
+
+        // Builds new sstable set from existing one, with new sstables added to it and old sstables removed from it.
+        future<lw_shared_ptr<sstables::sstable_set>>
+        build_new_list(const sstables::sstable_set& current_sstables,
+                       sstables::sstable_set new_sstable_list,
+                       const std::vector<sstables::shared_sstable>& new_sstables,
+                       const std::vector<sstables::shared_sstable>& old_sstables);
+    };
 private:
     bool cache_enabled() const {
         return _config.enable_cache && _schema->caching_options().enabled();
@@ -514,7 +538,6 @@ private:
     void add_maintenance_sstable(sstables::shared_sstable sst);
     static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     static void remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
-    void load_sstable(sstables::shared_sstable& sstable, bool reset_level = false);
     lw_shared_ptr<memtable> new_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt, sstable_write_permit&& permit);
     // Caller must keep m alive.
@@ -541,13 +564,6 @@ private:
     static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
         return sstable_generation % smp::count;
     }
-
-    // Builds new sstable set from existing one, with new sstables added to it and old sstables removed from it.
-    future<lw_shared_ptr<sstables::sstable_set>>
-    build_new_sstable_list(const sstables::sstable_set& current_sstables,
-                        sstables::sstable_set new_sstable_list,
-                        const std::vector<sstables::shared_sstable>& new_sstables,
-                        const std::vector<sstables::shared_sstable>& old_sstables);
 
     future<>
     update_sstable_lists_on_off_strategy_completion(const std::vector<sstables::shared_sstable>& old_maintenance_sstables,
@@ -659,20 +675,20 @@ public:
     //    reader and a _bounded_ amount of writes which arrive later.
     //  - Does not populate the cache
     // Requires ranges to be sorted and disjoint.
-    flat_mutation_reader make_streaming_reader(schema_ptr schema,
+    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit,
             const dht::partition_range_vector& ranges) const;
 
     // Single range overload.
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, const dht::partition_range& range,
+    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
             const query::partition_slice& slice,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::no) const;
 
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, const dht::partition_range& range) {
-        return make_streaming_reader(schema, range, schema->full_slice());
+    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range) {
+        return make_streaming_reader(std::move(schema), std::move(permit), range, schema->full_slice());
     }
 
     // Stream reader from the given sstables
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, const dht::partition_range& range,
+    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
             lw_shared_ptr<sstables::sstable_set> sstables) const;
 
     sstables::shared_sstable make_streaming_sstable_for_write(std::optional<sstring> subdir = {});
@@ -726,7 +742,13 @@ public:
     void apply(const mutation& m, db::rp_handle&& = {});
 
     // Returns at most "cmd.limit" rows
-    future<lw_shared_ptr<query::result>> query(schema_ptr,
+    // The saved_querier parameter is an input-output parameter which contains
+    // the saved querier from the previous page (if there was one) and after
+    // completion it contains the to-be saved querier for the next page (if
+    // there is one). Pass nullptr when queriers are not saved.
+    future<lw_shared_ptr<query::result>>
+    query(schema_ptr,
+        reader_permit permit,
         const query::read_command& cmd,
         query::query_class_config class_config,
         query::result_options opts,
@@ -734,7 +756,7 @@ public:
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
         db::timeout_clock::time_point timeout,
-        query::querier_cache_context cache_ctx = { });
+        std::optional<query::data_querier>* saved_querier = { });
 
     // Performs a query on given data source returning data in reconcilable form.
     //
@@ -747,15 +769,21 @@ public:
     // is absent in the results.
     //
     // 'source' doesn't have to survive deferring.
+    //
+    // The saved_querier parameter is an input-output parameter which contains
+    // the saved querier from the previous page (if there was one) and after
+    // completion it contains the to-be saved querier for the next page (if
+    // there is one). Pass nullptr when queriers are not saved.
     future<reconcilable_result>
     mutation_query(schema_ptr s,
+            reader_permit permit,
             const query::read_command& cmd,
             query::query_class_config class_config,
             const dht::partition_range& range,
             tracing::trace_state_ptr trace_state,
             query::result_memory_accounter accounter,
             db::timeout_clock::time_point timeout,
-            query::querier_cache_context cache_ctx = { });
+            std::optional<query::mutation_querier>* saved_querier = { });
 
     void start();
     future<> stop();
@@ -987,10 +1015,12 @@ public:
         return *_config.compaction_concurrency_semaphore;
     }
 
+    size_t estimate_read_memory_cost() const;
+
 private:
     future<row_locker::lock_holder> do_push_view_replica_updates(schema_ptr s, mutation m, db::timeout_clock::time_point timeout, mutation_source source,
             tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
-    std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update, gc_clock::time_point now) const;
+    std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update) const;
     future<> generate_and_propagate_view_updates(const schema_ptr& base,
             reader_permit permit,
             std::vector<db::view::view_and_base>&& views,
@@ -1225,8 +1255,8 @@ private:
     ::cf_stats _cf_stats;
     static constexpr size_t max_count_concurrent_reads{100};
     size_t max_memory_concurrent_reads() { return _dbcfg.available_memory * 0.02; }
-    // Assume a queued read takes up 10kB of memory, and allow 2% of memory to be filled up with such reads.
-    size_t max_inactive_queue_length() { return _dbcfg.available_memory * 0.02 / 10000; }
+    // Assume a queued read takes up 1kB of memory, and allow 2% of memory to be filled up with such reads.
+    size_t max_inactive_queue_length() { return _dbcfg.available_memory * 0.02 / 1000; }
     // They're rather heavyweight, so limit more
     static constexpr size_t max_count_streaming_concurrent_reads{10};
     size_t max_memory_streaming_concurrent_reads() { return _dbcfg.available_memory * 0.02; }
@@ -1240,7 +1270,6 @@ private:
         uint64_t total_writes_timedout = 0;
         uint64_t total_reads = 0;
         uint64_t total_reads_failed = 0;
-        uint64_t sstable_read_queue_overloaded = 0;
 
         uint64_t short_data_queries = 0;
         uint64_t short_mutation_queries = 0;
@@ -1270,29 +1299,6 @@ private:
     db::timeout_semaphore _view_update_concurrency_sem{max_memory_pending_view_updates()};
 
     cache_tracker _row_cache_tracker;
-
-    inheriting_concrete_execution_stage<future<lw_shared_ptr<query::result>>,
-        column_family*,
-        schema_ptr,
-        const query::read_command&,
-        query::query_class_config,
-        query::result_options,
-        const dht::partition_range_vector&,
-        tracing::trace_state_ptr,
-        query::result_memory_limiter&,
-        db::timeout_clock::time_point,
-        query::querier_cache_context> _data_query_stage;
-
-    inheriting_concrete_execution_stage<future<reconcilable_result>,
-        table*,
-        schema_ptr,
-        const query::read_command&,
-        query::query_class_config,
-        const dht::partition_range&,
-        tracing::trace_state_ptr,
-        query::result_memory_accounter,
-        db::timeout_clock::time_point,
-        query::querier_cache_context> _mutation_query_stage;
 
     inheriting_concrete_execution_stage<
             future<>,
@@ -1350,7 +1356,7 @@ public:
 private:
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, system_keyspace system);
-    friend future<> db::system_keyspace::make(database& db);
+    friend future<> db::system_keyspace::make(database& db, service::storage_service& ss);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
 
@@ -1598,6 +1604,10 @@ public:
     // which is deduced from the current scheduling group.
     reader_concurrency_semaphore& get_reader_concurrency_semaphore();
 
+    // Convenience method to obtain an admitted permit. See reader_concurrency_semaphore::obtain_permit().
+    future<reader_permit> obtain_reader_permit(table& tbl, const char* const op_name, db::timeout_clock::time_point timeout);
+    future<reader_permit> obtain_reader_permit(schema_ptr schema, const char* const op_name, db::timeout_clock::time_point timeout);
+
     sharded<semaphore>& get_sharded_sst_dir_semaphore() {
         return _sst_dir_semaphore;
     }
@@ -1610,7 +1620,7 @@ future<> stop_database(sharded<database>& db);
 //
 // Shard readers are created via `table::make_streaming_reader()`.
 // Range generator must generate disjoint, monotonically increasing ranges.
-flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, schema_ptr schema,
+flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, schema_ptr schema, reader_permit permit,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 bool is_internal_keyspace(std::string_view name);

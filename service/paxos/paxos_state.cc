@@ -17,8 +17,6 @@
 #include "schema_registry.hh"
 #include "database.hh"
 
-#include "service/storage_service.hh"
-
 #include "utils/error_injection.hh"
 
 #include "db/schema_tables.hh"

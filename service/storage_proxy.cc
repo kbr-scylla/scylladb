@@ -2801,10 +2801,10 @@ public:
         } catch (rpc::timeout_error&) {
             // do not report timeouts, the whole operation will timeout and be reported
             return; // also do not report timeout as replica failure for the same reason
-        } catch (timed_out_error&) {
+        } catch (semaphore_timed_out&) {
             // do not report timeouts, the whole operation will timeout and be reported
             return; // also do not report timeout as replica failure for the same reason
-        } catch (semaphore_timed_out&) {
+        } catch (timed_out_error&) {
             // do not report timeouts, the whole operation will timeout and be reported
             return; // also do not report timeout as replica failure for the same reason
         } catch(...) {
@@ -4293,7 +4293,13 @@ storage_proxy::query(schema_ptr s,
         auto query_id = next_id++;
 
         slogger.trace("query {}.{} cmd={}, ranges={}, id={}", s->ks_name(), s->cf_name(), *cmd, partition_ranges, query_id);
-        return do_query(s, cmd, std::move(partition_ranges), cl, std::move(query_options)).then([query_id, cmd, s] (coordinator_query_result qr) {
+        return do_query(s, cmd, std::move(partition_ranges), cl, std::move(query_options)).then_wrapped([query_id, cmd, s] (future<coordinator_query_result> f) {
+            if (f.failed()) {
+                auto ex = f.get_exception();
+                slogger.trace("query id={} failed: {}", query_id, ex);
+                return make_exception_future<coordinator_query_result>(std::move(ex));
+            }
+            auto qr = f.get0();
             auto& res = qr.query_result;
             if (res->buf().is_linearized()) {
                 res->ensure_counts();

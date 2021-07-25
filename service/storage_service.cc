@@ -106,6 +106,7 @@ storage_service::storage_service(abort_source& abort_source,
     sharded<cdc::generation_service>& cdc_gen_service,
     sharded<repair_service>& repair,
     raft_group_registry& raft_gr,
+    endpoint_lifecycle_notifier& elc_notif,
     sharded<qos::service_level_controller>& sl_controller,
     bool for_testing)
         : _abort_source(abort_source)
@@ -121,6 +122,7 @@ storage_service::storage_service(abort_source& abort_source,
         , _node_ops_abort_thread(node_ops_abort_thread())
         , _shared_token_metadata(stm)
         , _cdc_gen_service(cdc_gen_service)
+        , _lifecycle_notifier(elc_notif)
         , _sys_dist_ks(sys_dist_ks)
         , _view_update_generator(view_update_generator)
         , _snitch_reconfigure([this] { return snitch_reconfigured(); })
@@ -1355,14 +1357,14 @@ std::unordered_set<locator::token> storage_service::get_tokens_for(inet_address 
     return ret;
 }
 
-void storage_service::register_subscriber(endpoint_lifecycle_subscriber* subscriber)
+void endpoint_lifecycle_notifier::register_subscriber(endpoint_lifecycle_subscriber* subscriber)
 {
-    _lifecycle_subscribers.add(subscriber);
+    _subscribers.add(subscriber);
 }
 
-future<> storage_service::unregister_subscriber(endpoint_lifecycle_subscriber* subscriber) noexcept
+future<> endpoint_lifecycle_notifier::unregister_subscriber(endpoint_lifecycle_subscriber* subscriber) noexcept
 {
-    return _lifecycle_subscribers.remove(subscriber);
+    return _subscribers.remove(subscriber);
 }
 
 future<> storage_service::stop_transport() {
@@ -2043,7 +2045,7 @@ future<> storage_service::decommission() {
             slogger.info("DECOMMISSIONING: stopped transport");
 
             db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
-                return bm.stop();
+                return bm.drain();
             }).get();
             slogger.info("DECOMMISSIONING: stop batchlog_manager done");
 
@@ -2736,7 +2738,7 @@ future<> storage_service::do_drain(bool on_shutdown) {
         flush_column_families();
 
         db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
-            return bm.stop();
+            return bm.drain();
         }).get();
 
         set_mode(mode::DRAINING, "shutting down migration manager", false);
@@ -3277,7 +3279,8 @@ future<> storage_service::load_and_stream(sstring ks_name, sstring cf_name,
         size_t num_partitions_processed = 0;
         size_t num_bytes_read = 0;
         nr_sst_current += sst_processed.size();
-        auto reader = table.make_streaming_reader(s, full_partition_range, sst_set);
+        auto permit = co_await _db.local().obtain_reader_permit(table, "storage_service::load_and_stream()", db::no_timeout);
+        auto reader = table.make_streaming_reader(s, std::move(permit), full_partition_range, sst_set);
         std::exception_ptr eptr;
         bool failed = false;
         try {
@@ -3496,11 +3499,11 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
         }
         for (auto endpoint : addresses) {
             endpoint_details details;
-            details._host = boost::lexical_cast<std::string>(endpoint);
+            details._host = endpoint;
             details._datacenter = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(endpoint);
             details._rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(endpoint);
             tr._rpc_endpoints.push_back(get_rpc_address(endpoint));
-            tr._endpoints.push_back(details._host);
+            tr._endpoints.push_back(boost::lexical_cast<std::string>(details._host));
             tr._endpoint_details.push_back(details);
         }
         ranges.push_back(tr);
@@ -3825,6 +3828,7 @@ future<> init_storage_service(sharded<abort_source>& abort_source, distributed<d
         sharded<cdc::generation_service>& cdc_gen_service,
         sharded<repair_service>& repair,
         sharded<service::raft_group_registry>& raft_gr,
+        sharded<service::endpoint_lifecycle_notifier>& elc_notif,
         sharded<qos::service_level_controller>& sl_controller) {
     return
         service::get_storage_service().start(std::ref(abort_source),
@@ -3836,6 +3840,7 @@ future<> init_storage_service(sharded<abort_source>& abort_source, distributed<d
             std::ref(cdc_gen_service),
             std::ref(repair),
             std::ref(raft_gr),
+            std::ref(elc_notif),
             std::ref(sl_controller));
 }
 
@@ -3843,35 +3848,55 @@ future<> deinit_storage_service() {
     return service::get_storage_service().stop();
 }
 
+future<> endpoint_lifecycle_notifier::notify_down(gms::inet_address endpoint) {
+    return seastar::async([this, endpoint] {
+        _subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
+            try {
+                subscriber->on_down(endpoint);
+            } catch (...) {
+                slogger.warn("Down notification failed {}: {}", endpoint, std::current_exception());
+            }
+        });
+    });
+}
+
 void storage_service::notify_down(inet_address endpoint) {
     container().invoke_on_all([endpoint] (auto&& ss) {
         ss._messaging.local().remove_rpc_client(netw::msg_addr{endpoint, 0});
-        return seastar::async([&ss, endpoint] {
-            ss._lifecycle_subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
-                try {
-                    subscriber->on_down(endpoint);
-                } catch (...) {
-                    slogger.warn("Down notification failed {}: {}", endpoint, std::current_exception());
-                }
-            });
-        });
+        return ss._lifecycle_notifier.notify_down(endpoint);
     }).get();
     slogger.debug("Notify node {} has been down", endpoint);
 }
 
+future<> endpoint_lifecycle_notifier::notify_left(gms::inet_address endpoint) {
+    return seastar::async([this, endpoint] {
+        _subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
+            try {
+                subscriber->on_leave_cluster(endpoint);
+            } catch (...) {
+                slogger.warn("Leave cluster notification failed {}: {}", endpoint, std::current_exception());
+            }
+        });
+    });
+}
+
 void storage_service::notify_left(inet_address endpoint) {
     container().invoke_on_all([endpoint] (auto&& ss) {
-        return seastar::async([&ss, endpoint] {
-            ss._lifecycle_subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
-                try {
-                    subscriber->on_leave_cluster(endpoint);
-                } catch (...) {
-                    slogger.warn("Leave cluster notification failed {}: {}", endpoint, std::current_exception());
-                }
-            });
-        });
+        return ss._lifecycle_notifier.notify_left(endpoint);
     }).get();
     slogger.debug("Notify node {} has left the cluster", endpoint);
+}
+
+future<> endpoint_lifecycle_notifier::notify_up(gms::inet_address endpoint) {
+    return seastar::async([this, endpoint] {
+        _subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
+            try {
+                subscriber->on_up(endpoint);
+            } catch (...) {
+                slogger.warn("Up notification failed {}: {}", endpoint, std::current_exception());
+            }
+        });
+    });
 }
 
 void storage_service::notify_up(inet_address endpoint)
@@ -3880,17 +3905,21 @@ void storage_service::notify_up(inet_address endpoint)
         return;
     }
     container().invoke_on_all([endpoint] (auto&& ss) {
-        return seastar::async([&ss, endpoint] {
-            ss._lifecycle_subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
-                try {
-                    subscriber->on_up(endpoint);
-                } catch (...) {
-                    slogger.warn("Up notification failed {}: {}", endpoint, std::current_exception());
-                }
-            });
-        });
+        return ss._lifecycle_notifier.notify_up(endpoint);
     }).get();
     slogger.debug("Notify node {} has been up", endpoint);
+}
+
+future<> endpoint_lifecycle_notifier::notify_joined(gms::inet_address endpoint) {
+    return seastar::async([this, endpoint] {
+        _subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
+            try {
+                subscriber->on_join_cluster(endpoint);
+            } catch (...) {
+                slogger.warn("Join cluster notification failed {}: {}", endpoint, std::current_exception());
+            }
+        });
+    });
 }
 
 void storage_service::notify_joined(inet_address endpoint)
@@ -3900,15 +3929,7 @@ void storage_service::notify_joined(inet_address endpoint)
     }
 
     container().invoke_on_all([endpoint] (auto&& ss) {
-        return seastar::async([&ss, endpoint] {
-            ss._lifecycle_subscribers.for_each([endpoint] (endpoint_lifecycle_subscriber* subscriber) {
-                try {
-                    subscriber->on_join_cluster(endpoint);
-                } catch (...) {
-                    slogger.warn("Join cluster notification failed {}: {}", endpoint, std::current_exception());
-                }
-            });
-        });
+        return ss._lifecycle_notifier.notify_joined(endpoint);
     }).get();
     slogger.debug("Notify node {} has joined the cluster", endpoint);
 }

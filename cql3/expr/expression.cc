@@ -63,29 +63,6 @@ binary_operator::operator=(const binary_operator& x) {
 
 namespace {
 
-static
-managed_bytes_opt do_get_value(const schema& schema,
-        const column_definition& cdef,
-        const partition_key& key,
-        const clustering_key_prefix& ckey,
-        const row& cells,
-        gc_clock::time_point now) {
-    switch (cdef.kind) {
-        case column_kind::partition_key:
-            return managed_bytes(key.get_component(schema, cdef.component_index()));
-        case column_kind::clustering_key:
-            return managed_bytes(ckey.get_component(schema, cdef.component_index()));
-        default:
-            auto cell = cells.find_cell(cdef.id);
-            if (!cell) {
-                return std::nullopt;
-            }
-            assert(cdef.is_atomic());
-            auto c = cell->as_atomic_cell(cdef);
-            return c.is_dead(now) ? std::nullopt : managed_bytes_opt(c.value());
-    }
-}
-
 using children_t = std::vector<expression>; // conjunction's children.
 
 children_t explode_conjunction(expression e) {
@@ -106,26 +83,17 @@ struct row_data_from_partition_slice {
     const selection& sel;
 };
 
-/// Data used to derive cell values from a mutation.
-struct row_data_from_mutation {
-    // Underscores avoid name clashes.
-    const partition_key& partition_key_;
-    const clustering_key_prefix& clustering_key_;
-    const row& other_columns;
-    const schema& schema_;
-    gc_clock::time_point now;
-};
-
 /// Everything needed to compute column values during restriction evaluation.
 struct column_value_eval_bag {
     const query_options& options; // For evaluating subscript terms.
-    std::variant<row_data_from_partition_slice, row_data_from_mutation> row_data;
+    row_data_from_partition_slice row_data;
 };
 
 /// Returns col's value from queried data.
-managed_bytes_opt get_value_from_partition_slice(
-        const column_value& col, row_data_from_partition_slice data, const query_options& options) {
+managed_bytes_opt get_value(const column_value& col, const column_value_eval_bag& bag) {
     auto cdef = col.col;
+    const row_data_from_partition_slice& data = bag.row_data;
+    const query_options& options = bag.options;
     if (col.sub) {
         auto col_type = static_pointer_cast<const collection_type_impl>(cdef->type);
         if (!col_type->is_map()) {
@@ -155,21 +123,6 @@ managed_bytes_opt get_value_from_partition_slice(
             throw exceptions::unsupported_operation_exception("Unknown column kind");
         }
     }
-}
-
-/// Returns col's value from a mutation.
-managed_bytes_opt get_value_from_mutation(const column_value& col, row_data_from_mutation data) {
-    return do_get_value(
-            data.schema_, *col.col, data.partition_key_, data.clustering_key_, data.other_columns, data.now);
-}
-
-/// Returns col's value from the fetched data.
-managed_bytes_opt get_value(const column_value& col, const column_value_eval_bag& bag) {
-    using std::placeholders::_1;
-    return std::visit(overloaded_functor{
-            std::bind(get_value_from_mutation, col, _1),
-            std::bind(get_value_from_partition_slice, col, _1, bag.options),
-        }, bag.row_data);
 }
 
 /// Type for comparing results of get_value().
@@ -673,13 +626,6 @@ bool is_satisfied_by(
             restr, {options, row_data_from_partition_slice{partition_key, clustering_key, regulars, selection}});
 }
 
-bool is_satisfied_by(
-        const expression& restr,
-        const schema& schema, const partition_key& key, const clustering_key_prefix& ckey, const row& cells,
-        const query_options& options, gc_clock::time_point now) {
-    return is_satisfied_by(restr, {options, row_data_from_mutation{key, ckey, cells, schema, now}});
-}
-
 std::vector<managed_bytes_opt> first_multicolumn_bound(
         const expression& restr, const query_options& options, statements::bound bnd) {
     auto found = find_atom(restr, [bnd] (const binary_operator& oper) {
@@ -943,6 +889,27 @@ expression replace_column_def(const expression& expr, const column_definition* n
                 throw std::logic_error(format("replace_column_def invalid with column tuple: {}", to_string(expr)));
             },
             [&] (const token&) { return expr; },
+        }, expr);
+}
+
+expression replace_token(const expression& expr, const column_definition* new_cdef) {
+    return std::visit(overloaded_functor{
+            [] (bool b) { return expression(b); },
+            [&] (const conjunction& conj) {
+                const auto applied = conj.children | transformed(
+                        std::bind(replace_token, std::placeholders::_1, new_cdef));
+                return expression(conjunction{std::vector(applied.begin(), applied.end())});
+            },
+            [&] (const binary_operator& oper) {
+                return expression(binary_operator(replace_token(*oper.lhs, new_cdef), oper.op, oper.rhs));
+            },
+            [&] (const column_value&) {
+                return expr;
+            },
+            [&] (const column_value_tuple&) -> expression {
+                throw std::logic_error(format("replace_token invalid with column tuple: {}", to_string(expr)));
+            },
+            [&] (const token&) -> expression { return column_value{new_cdef}; }
         }, expr);
 }
 

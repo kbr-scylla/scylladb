@@ -512,7 +512,7 @@ protected:
     std::optional<sstable_set::incremental_selector> _selector;
     std::unordered_set<shared_sstable> _compacting_for_max_purgeable_func;
 public:
-    static lw_shared_ptr<compaction_info> create_compaction_info(column_family& cf, compaction_descriptor descriptor) {
+    static lw_shared_ptr<compaction_info> create_compaction_info(column_family& cf, const compaction_descriptor& descriptor) {
         auto info = make_lw_shared<compaction_info>();
         info->ks_name = cf.schema()->ks_name();
         info->cf_name = cf.schema()->cf_name();
@@ -528,7 +528,7 @@ protected:
         : _cf(cf)
         , _sstable_creator(std::move(descriptor.creator))
         , _schema(cf.schema())
-        , _permit(_cf.compaction_concurrency_semaphore().make_permit(_cf.schema().get(), "compaction"))
+        , _permit(_cf.compaction_concurrency_semaphore().make_tracking_only_permit(_cf.schema().get(), "compaction"))
         , _sstables(std::move(descriptor.sstables))
         , _max_sstable_size(descriptor.max_sstable_bytes)
         , _sstable_level(descriptor.level)
@@ -1693,7 +1693,7 @@ static future<compaction_info> validate_sstables(sstables::compaction_descriptor
 
     clogger.info("Validating {}", sstables_list_msg);
 
-    auto permit = cf.compaction_concurrency_semaphore().make_permit(schema.get(), "Validation");
+    auto permit = cf.compaction_concurrency_semaphore().make_tracking_only_permit(schema.get(), "Validation");
     auto reader = sstables->make_local_shard_sstable_reader(schema, permit, query::full_partition_range, schema->full_slice(), descriptor.io_priority,
             tracing::trace_state_ptr(), ::streamed_mutation::forwarding::no, ::mutation_reader::forwarding::no, default_read_monitor_generator());
 

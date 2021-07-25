@@ -16,6 +16,8 @@
 
 #include "seastarx.hh"
 
+namespace utils {
+
 // Represents a deferring operation which defers cooperatively with the caller.
 //
 // The operation is started and resumed by calling run(), which returns
@@ -47,4 +49,6 @@ private:
 inline
 coroutine make_empty_coroutine() {
     return coroutine([] { return stop_iteration::yes; });
+}
+
 }

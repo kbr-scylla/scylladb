@@ -224,6 +224,7 @@ public:
         sharded<cdc::generation_service>&,
         sharded<repair_service>& repair,
         raft_group_registry& raft_gr,
+        endpoint_lifecycle_notifier& elc_notif,
         sharded<qos::service_level_controller>&,
         /* only for tests */ bool for_testing = false);
 
@@ -329,7 +330,7 @@ private:
     drain_progress _drain_progress{};
 
 
-    atomic_vector<endpoint_lifecycle_subscriber*> _lifecycle_subscribers;
+    endpoint_lifecycle_notifier& _lifecycle_notifier;
 
     std::unordered_set<token> _bootstrap_tokens;
 
@@ -350,10 +351,6 @@ private:
 
 public:
     void enable_all_features();
-
-    void register_subscriber(endpoint_lifecycle_subscriber* subscriber);
-
-    future<> unregister_subscriber(endpoint_lifecycle_subscriber* subscriber) noexcept;
 
     // should only be called via JMX
     future<> stop_gossiping();
@@ -927,6 +924,7 @@ future<> init_storage_service(sharded<abort_source>& abort_sources,
     sharded<cdc::generation_service>&,
     sharded<repair_service>& repair,
     sharded<raft_group_registry>& raft_gr,
+    sharded<endpoint_lifecycle_notifier>& elc_notif,
     sharded<qos::service_level_controller>& sl_controller);
 future<> deinit_storage_service();
 

@@ -70,6 +70,7 @@
 #include "transport/controller.hh"
 #include "thrift/controller.hh"
 #include "service/memory_limiter.hh"
+#include "service/endpoint_lifecycle_subscriber.hh"
 
 #include "redis/service.hh"
 #include "cdc/log.hh"
@@ -429,6 +430,7 @@ int main(int ac, char** av) {
     app_cfg.name = "Scylla";
     app_cfg.default_task_quota = 500us;
     app_cfg.auto_handle_sigint_sigterm = false;
+    app_cfg.max_networking_aio_io_control_blocks = 50000;
     app_template app(std::move(app_cfg));
 
     auto ext = std::make_shared<db::extensions>();
@@ -480,6 +482,7 @@ int main(int ac, char** av) {
 
     sharded<locator::shared_token_metadata> token_metadata;
     sharded<service::migration_notifier> mm_notifier;
+    sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
     distributed<database> db;
     extern sharded<database>* hack_database_for_encryption;
     hack_database_for_encryption = &db;
@@ -487,6 +490,7 @@ int main(int ac, char** av) {
     service::load_meter load_meter;
     debug::db = &db;
     auto& proxy = service::get_storage_proxy();
+    auto& ss = service::get_storage_service();
     sharded<service::migration_manager> mm;
     extern sharded<service::migration_manager>* hack_migration_manager_for_encryption;
     hack_migration_manager_for_encryption = &mm;
@@ -530,7 +534,7 @@ int main(int ac, char** av) {
         return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
                 &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair] {
+                &repair, &ss, &lifecycle_notifier] {
           try {
             // disable reactor stall detection during startup
             auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
@@ -742,6 +746,13 @@ int main(int ac, char** av) {
                 mm_notifier.stop().get();
             });
 
+            supervisor::notify("starting lifecycle notifier");
+            lifecycle_notifier.start().get();
+            // storage_service references this notifier and is not stopped yet
+            // auto stop_lifecycle_notifier = defer_verbose_shutdown("lifecycle notifier", [ &lifecycle_notifier ] {
+            //     lifecycle_notifier.stop().get();
+            // });
+
             supervisor::notify("creating tracing");
             tracing::backend_registry tracing_backend_registry;
             tracing::register_tracing_keyspace_backend(tracing_backend_registry);
@@ -884,7 +895,7 @@ int main(int ac, char** av) {
                 db, gossiper, sys_dist_ks, view_update_generator,
                 feature_service, sscfg, mm, token_metadata,
                 messaging, cdc_generation_service, repair,
-                raft_gr, sl_controller).get();
+                raft_gr, lifecycle_notifier, sl_controller).get();
             supervisor::notify("starting per-shard database core");
 
             sst_dir_semaphore.start(cfg->initial_sstable_loading_concurrency()).get();
@@ -939,7 +950,7 @@ int main(int ac, char** av) {
             // Iteration through column family directory for sstable loading is
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
-            distributed_loader::init_system_keyspace(db).get();
+            distributed_loader::init_system_keyspace(db, ss).get();
 
             supervisor::notify("starting gossip");
             // Moved local parameters here, esp since with the
@@ -1005,7 +1016,6 @@ int main(int ac, char** av) {
 
             db::get_batchlog_manager().start(std::ref(qp), bm_cfg).get();
             // #293 - do not stop anything
-            // engine().at_exit([] { return db::get_batchlog_manager().stop(); });
             sstables::init_metrics().get();
 
             db::system_keyspace::minimal_setup(qp);
@@ -1126,16 +1136,14 @@ int main(int ac, char** av) {
             }
             view_hints_dir_initializer.ensure_rebalanced().get();
 
-            proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {
-                auto& ss = service::get_local_storage_service();
-                ss.register_subscriber(&local_proxy);
+            proxy.invoke_on_all([&lifecycle_notifier] (service::storage_proxy& local_proxy) {
+                lifecycle_notifier.local().register_subscriber(&local_proxy);
                 return local_proxy.start_hints_manager(gms::get_local_gossiper().shared_from_this());
             }).get();
 
-            auto drain_proxy = defer_verbose_shutdown("drain storage proxy", [&proxy] {
-                proxy.invoke_on_all([] (service::storage_proxy& local_proxy) mutable {
-                    auto& ss = service::get_local_storage_service();
-                    return ss.unregister_subscriber(&local_proxy).finally([&local_proxy] {
+            auto drain_proxy = defer_verbose_shutdown("drain storage proxy", [&proxy, &lifecycle_notifier] {
+                proxy.invoke_on_all([&lifecycle_notifier] (service::storage_proxy& local_proxy) mutable {
+                    return lifecycle_notifier.local().unregister_subscriber(&local_proxy).finally([&local_proxy] {
                         return local_proxy.drain_on_shutdown();
                     });
                 }).get();
@@ -1180,10 +1188,9 @@ int main(int ac, char** av) {
             });
 
             supervisor::notify("starting storage service", true);
-            auto& ss = service::get_local_storage_service();
-            ss.init_messaging_service_part().get();
+            ss.local().init_messaging_service_part().get();
             auto stop_ss_msg = defer_verbose_shutdown("storage service messaging", [&ss] {
-                ss.uninit_messaging_service_part().get();
+                ss.local().uninit_messaging_service_part().get();
             });
             api::set_server_messaging_service(ctx, messaging).get();
             auto stop_messaging_api = defer_verbose_shutdown("messaging service API", [&ctx] {
@@ -1195,9 +1202,9 @@ int main(int ac, char** av) {
                 api::unset_server_repair(ctx).get();
             });
 
-            gossiper.local().register_(ss.shared_from_this());
+            gossiper.local().register_(ss.local().shared_from_this());
             auto stop_listening = defer_verbose_shutdown("storage service notifications", [&gossiper, &ss] {
-                gossiper.local().unregister_(ss.shared_from_this()).get();
+                gossiper.local().unregister_(ss.local().shared_from_this()).get();
             });
 
             /*
@@ -1216,24 +1223,25 @@ int main(int ac, char** av) {
 
             // Register storage_service to migration_notifier so we can update
             // pending ranges when keyspace is chagned
-            mm_notifier.local().register_listener(&ss);
+            mm_notifier.local().register_listener(&ss.local());
             auto stop_mm_listener = defer_verbose_shutdown("storage service notifications", [&mm_notifier, &ss] {
-                mm_notifier.local().unregister_listener(&ss).get();
+                mm_notifier.local().unregister_listener(&ss.local()).get();
             });
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
-                return ss.init_server();
+                return ss.local().init_server();
             }).get();
 
             sst_format_selector.sync();
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
-                return ss.join_cluster();
+                return ss.local().join_cluster();
             }).get();
 
-            sl_controller.invoke_on_all([] (qos::service_level_controller& controller) {
+            sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
                 controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
                         ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
+                lifecycle_notifier.local().register_subscriber(&controller);
             }).get();
 
             supervisor::notify("starting tracing");
@@ -1286,6 +1294,9 @@ int main(int ac, char** av) {
             db::get_batchlog_manager().invoke_on_all([] (db::batchlog_manager& b) {
                 return b.start();
             }).get();
+            auto stop_batchlog_manager = defer_verbose_shutdown("batchlog manager", [] {
+                db::get_batchlog_manager().invoke_on_all(&db::batchlog_manager::stop).get();
+            });
 
             supervisor::notify("starting load meter");
             load_meter.init(db, gms::get_local_gossiper()).get();
@@ -1347,9 +1358,9 @@ int main(int ac, char** av) {
                 audit::audit::stop_audit().get();
             });
 
-            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper.local(), qp, service_memory_limiter, sl_controller, *cfg);
+            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper.local(), qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg);
 
-            ss.register_client_shutdown_hook("native transport", [&cql_server_ctl] {
+            ss.local().register_client_shutdown_hook("native transport", [&cql_server_ctl] {
                 cql_server_ctl.stop().get();
             });
 
@@ -1373,7 +1384,7 @@ int main(int ac, char** av) {
 
             ::thrift_controller thrift_ctl(db, auth_service, qp, service_memory_limiter);
 
-            ss.register_client_shutdown_hook("rpc server", [&thrift_ctl] {
+            ss.local().register_client_shutdown_hook("rpc server", [&thrift_ctl] {
                 thrift_ctl.stop().get();
             });
 
@@ -1401,7 +1412,7 @@ int main(int ac, char** av) {
                     return alternator_ctl.start();
                 }).get();
 
-                ss.register_client_shutdown_hook("alternator", [&alternator_ctl] {
+                ss.local().register_client_shutdown_hook("alternator", [&alternator_ctl] {
                     alternator_ctl.stop().get();
                 });
             }
@@ -1422,7 +1433,10 @@ int main(int ac, char** av) {
                 repair_shutdown(db).get();
             });
 
-            auto drain_sl_controller = defer_verbose_shutdown("service level controller update loop", [] {
+            auto drain_sl_controller = defer_verbose_shutdown("service level controller update loop", [&lifecycle_notifier] {
+                sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
+                    return lifecycle_notifier.local().unregister_subscriber(&controller);
+                }).get();
                 sl_controller.invoke_on_all(&qos::service_level_controller::drain).get();
             });
 
@@ -1430,8 +1444,8 @@ int main(int ac, char** av) {
                 view_update_generator.stop().get();
             });
 
-            auto do_drain = defer_verbose_shutdown("local storage", [] {
-                service::get_local_storage_service().drain_on_shutdown().get();
+            auto do_drain = defer_verbose_shutdown("local storage", [&ss] {
+                ss.local().drain_on_shutdown().get();
             });
 
             auto stop_view_builder = defer_verbose_shutdown("view builder", [cfg] {

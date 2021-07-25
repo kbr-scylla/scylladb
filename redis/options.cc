@@ -10,7 +10,6 @@
 
 #include "redis/options.hh"
 #include "types.hh"
-#include "service/storage_service.hh"
 #include "service/storage_proxy.hh"
 #include "schema.hh"
 #include "database.hh"

@@ -23,6 +23,7 @@
 #include <stack>
 #include <unordered_set>
 #include "qos_common.hh"
+#include "service/endpoint_lifecycle_subscriber.hh"
 
 namespace db {
     class system_distributed_keyspace;
@@ -50,7 +51,7 @@ struct service_level {
  *      the service level context: i.e functions in their service level's
  *      scheduling group and io operations with their correct io priority.
  */
-class service_level_controller : public peering_sharded_service<service_level_controller> {
+class service_level_controller : public peering_sharded_service<service_level_controller>, public service::endpoint_lifecycle_subscriber {
 public:
     class service_level_distributed_data_accessor {
     public:
@@ -303,5 +304,11 @@ private:
 
 public:
     static sstring default_service_level_name;
+
+public:
+    virtual void on_join_cluster(const gms::inet_address& endpoint) override;
+    virtual void on_leave_cluster(const gms::inet_address& endpoint) override;
+    virtual void on_up(const gms::inet_address& endpoint) override;
+    virtual void on_down(const gms::inet_address& endpoint) override;
 };
 }
