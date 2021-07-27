@@ -23,6 +23,7 @@
 #include "ent/encryption/symmetric_key.hh"
 #include "ent/encryption/encrypted_file_impl.hh"
 #include "test/lib/tmpdir.hh"
+#include "test/lib/random_utils.hh"
 
 using namespace encryption;
 
@@ -39,12 +40,9 @@ static future<std::tuple<file, ::shared_ptr<symmetric_key>>> make_file(const sst
 }
 
 static temporary_buffer<uint8_t> generate_random(size_t n, size_t align) {
-    std::random_device r;
-    std::default_random_engine e1(r());
-    std::uniform_int_distribution<uint8_t> dist('0', 'z');
-
     auto tmp = temporary_buffer<uint8_t>::aligned(align, align_up(n, align));
-    std::generate(tmp.get_write(), tmp.get_write() + tmp.size(), std::bind(dist, std::ref(e1)));
+    auto data = tests::random::get_sstring(n);
+    std::copy(data.begin(), data.end(), tmp.get_write());
     return tmp;
 }
 
