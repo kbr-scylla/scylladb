@@ -1687,10 +1687,7 @@ kmip_lib_ver = '1.9.2a';
 def kmiplib():
     for id in os_ids:
         if id in { 'centos', 'fedora', 'rhel' }:
-            return 'centos70'
-        if id in { 'ubuntu', 'debian' }:
-            ver = os_version.replace('.', '')
-            return id + ver;
+            return 'rhel84'
     print('Could not resolve libkmip.a for platform {}'.format(os_ids))
     sys.exit(1)
 
@@ -1702,13 +1699,11 @@ def kmip_arch():
     arch = target_cpu()
     if arch == 'x86_64':
         return '64'
-    if 'ppc64' in arch:
-        return 'ppc64' 
-    print('Could not resolve kmip arch for platform {}'.format(arch))
-    sys.exit(1)
+    return arch 
         
-libs += ' kmipc/lib/kmipc-' + kmip_lib_ver + '-' + kmiplib() + '_' + kmip_arch() + '/libkmip.a'
-user_cflags += ' -Ikmipc/include -DHAVE_KMIP'
+kmipc_dir = f'kmipc/kmipc-2.1.0t-{kmiplib()}_{kmip_arch()}'
+libs += f' {kmipc_dir}/lib/libkmip.a'
+user_cflags += f' -I{kmipc_dir}/include -DHAVE_KMIP'
 
 buildfile = 'build.ninja'
 
