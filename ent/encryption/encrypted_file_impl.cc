@@ -348,16 +348,18 @@ future<> encrypted_file_impl::truncate(uint64_t length) {
                 }
                 auto n = std::min(t.buf.size(), align_up(size_t(t.length - t.aligned_size), block_size));
                 if (t.aligned_size < t.size) {
-                    return read_dma(t.aligned_size, t.buf.get_write(), n, default_priority_class()).then([&](size_t r) mutable {
+                    return read_dma(t.aligned_size, t.buf.get_write(), n, default_priority_class()).then([&, n](size_t r) mutable {
                         auto rem = size_t(t.size - t.aligned_size);
                         auto ar = align_up(r, block_size);
                         assert(ar <= t.buf.size());
                         if (rem < ar) {
                             std::fill(t.buf.get_write() + rem, t.buf.get_write() + ar, 0);
                         }
-                        return write_dma(t.aligned_size, t.buf.get(), ar, default_priority_class()).then([&, r](size_t w) {
+                        return write_dma(t.aligned_size, t.buf.get(), ar, default_priority_class()).then([&, n](size_t w) {
                             t.aligned_size += w;
-                            std::fill(t.buf.get_write(), t.buf.get_write() + std::min(r + _key->block_size(), t.buf.size()), 0);
+                            // #1869. On btrfs, we get the buffer potentially clobbered up to "n" (max read amount)
+                            // even when "r" (actual bytes read) is less.
+                            std::fill(t.buf.get_write(), t.buf.get_write() + n, 0);
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
                     });
