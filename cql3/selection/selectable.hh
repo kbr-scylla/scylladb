@@ -37,10 +37,13 @@
 #include "cql3/cql3_type.hh"
 #include "cql3/functions/function.hh"
 #include "cql3/functions/function_name.hh"
+#include "cql3/expr/expression.hh"
 
 namespace cql3 {
 
 namespace selection {
+
+class selectable;
 
 class selectable {
 public:
@@ -57,18 +60,6 @@ protected:
         return defs.size() - 1;
     }
 public:
-    class raw {
-    public:
-        virtual ~raw() {}
-
-        virtual ::shared_ptr<selectable> prepare(const schema& s) const = 0;
-
-        /**
-         * Returns true if any processing is performed on the selected column.
-         **/
-        virtual bool processes_selection() const = 0;
-    };
-
     class writetime_or_ttl;
 
     class with_function;
@@ -92,18 +83,9 @@ public:
     virtual sstring to_string() const override;
 
     virtual shared_ptr<selector::factory> new_selector_factory(database& db, schema_ptr s, std::vector<const column_definition*>& defs) override;
-    class raw : public selectable::raw {
-        functions::function_name _function_name;
-        std::vector<shared_ptr<selectable::raw>> _args;
-    public:
-        raw(functions::function_name function_name, std::vector<shared_ptr<selectable::raw>> args)
-                : _function_name(std::move(function_name)), _args(std::move(args)) {
-        }
-        virtual shared_ptr<selectable> prepare(const schema& s) const override;
-        virtual bool processes_selection() const override;
-        static ::shared_ptr<selectable::with_function::raw> make_count_rows_function();
-    };
 };
+
+expr::expression make_count_rows_function_expression();
 
 class selectable::with_anonymous_function : public selectable {
     shared_ptr<functions::function> _function;
@@ -116,16 +98,6 @@ public:
     virtual sstring to_string() const override;
 
     virtual shared_ptr<selector::factory> new_selector_factory(database& db, schema_ptr s, std::vector<const column_definition*>& defs) override;
-    class raw : public selectable::raw {
-        shared_ptr<functions::function> _function;
-        std::vector<shared_ptr<selectable::raw>> _args;
-    public:
-        raw(shared_ptr<functions::function> f, std::vector<shared_ptr<selectable::raw>> args)
-                : _function(f), _args(std::move(args)) {
-        }
-        virtual shared_ptr<selectable> prepare(const schema& s) const override;
-        virtual bool processes_selection() const override;
-    };
 };
 
 class selectable::with_cast : public selectable {
@@ -139,17 +111,10 @@ public:
     virtual sstring to_string() const override;
 
     virtual shared_ptr<selector::factory> new_selector_factory(database& db, schema_ptr s, std::vector<const column_definition*>& defs) override;
-    class raw : public selectable::raw {
-        ::shared_ptr<selectable::raw> _arg;
-        cql3_type _type;
-    public:
-        raw(shared_ptr<selectable::raw> arg, cql3_type type)
-                : _arg(std::move(arg)), _type(std::move(type)) {
-        }
-        virtual shared_ptr<selectable> prepare(const schema& s) const override;
-        virtual bool processes_selection() const override;
-    };
 };
+
+shared_ptr<selectable> prepare_selectable(const schema& s, const expr::expression& raw_selectable);
+bool selectable_processes_selection(const expr::expression& raw_selectable);
 
 }
 

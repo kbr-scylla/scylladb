@@ -99,18 +99,6 @@ namespace service {
 class storage_service;
 class migration_manager;
 
-extern distributed<storage_service> _the_storage_service;
-// DEPRECATED, DON'T USE!
-// Pass references to services through constructor/function parameters. Don't use globals.
-inline distributed<storage_service>& get_storage_service() {
-    return _the_storage_service;
-}
-// DEPRECATED, DON'T USE!
-// Pass references to services through constructor/function parameters. Don't use globals.
-inline storage_service& get_local_storage_service() {
-    return _the_storage_service.local();
-}
-
 enum class disk_error { regular, commit };
 
 struct bind_messaging_port_tag {};
@@ -251,7 +239,7 @@ private:
     future<> keyspace_changed(const sstring& ks_name);
     void register_metrics();
     future<> snitch_reconfigured();
-    static future<> update_topology(inet_address endpoint);
+    future<> update_topology(inet_address endpoint);
     future<> publish_schema_version();
     void install_schema_version_change_listener();
 
@@ -875,7 +863,7 @@ public:
 
     template <typename Func>
     auto run_with_api_lock(sstring operation, Func&& func) {
-        return get_storage_service().invoke_on(0, [operation = std::move(operation),
+        return container().invoke_on(0, [operation = std::move(operation),
                 func = std::forward<Func>(func)] (storage_service& ss) mutable {
             if (!ss._operation_in_progress.empty()) {
                 throw std::runtime_error(format("Operation {} is in progress, try again", ss._operation_in_progress));
@@ -889,7 +877,7 @@ public:
 
     template <typename Func>
     auto run_with_no_api_lock(Func&& func) {
-        return get_storage_service().invoke_on(0, [func = std::forward<Func>(func)] (storage_service& ss) mutable {
+        return container().invoke_on(0, [func = std::forward<Func>(func)] (storage_service& ss) mutable {
             return func(ss);
         });
     }
@@ -910,22 +898,5 @@ private:
     using workload_prioritization_create_tables = bool_class<workload_prioritization_create_tables_tag>;
     void start_workload_prioritization(workload_prioritization_create_tables create_tables);
 };
-
-future<> init_storage_service(sharded<abort_source>& abort_sources,
-    distributed<database>& db,
-    sharded<gms::gossiper>& gossiper,
-    sharded<db::system_distributed_keyspace>& sys_dist_ks,
-    sharded<db::view::view_update_generator>& view_update_generator,
-    sharded<gms::feature_service>& feature_service,
-    storage_service_config config,
-    sharded<service::migration_manager>& mm,
-    sharded<locator::shared_token_metadata>& stm,
-    sharded<netw::messaging_service>& ms,
-    sharded<cdc::generation_service>&,
-    sharded<repair_service>& repair,
-    sharded<raft_group_registry>& raft_gr,
-    sharded<endpoint_lifecycle_notifier>& elc_notif,
-    sharded<qos::service_level_controller>& sl_controller);
-future<> deinit_storage_service();
 
 }

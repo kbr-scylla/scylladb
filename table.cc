@@ -376,7 +376,8 @@ void table::enable_off_strategy_trigger() {
 
 future<>
 table::add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy) {
-    return get_row_cache().invalidate(row_cache::external_updater([this, sst, offstrategy] () noexcept {
+    auto permit = co_await seastar::get_units(_sstable_set_mutation_sem, 1);
+    co_return co_await get_row_cache().invalidate(row_cache::external_updater([this, sst, offstrategy] () noexcept {
         // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
         // atomically load all opened sstables into column family.
         if (!offstrategy) {
@@ -390,6 +391,7 @@ table::add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offs
 
 future<>
 table::update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_sstable> ssts) {
+    auto permit = co_await seastar::get_units(_sstable_set_mutation_sem, 1);
     mutation_source_opt ms_opt;
     if (ssts.size() == 1) {
         ms_opt = ssts.front()->as_mutation_source();
@@ -409,9 +411,9 @@ table::update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_ssta
         try_trigger_compaction();
     });
     if (cache_enabled()) {
-        return _cache.update(std::move(adder), *m);
+        co_return co_await _cache.update(std::move(adder), *m);
     } else {
-        return _cache.invalidate(std::move(adder)).then([m] { return m->clear_gently(); });
+        co_return co_await _cache.invalidate(std::move(adder)).then([m] { return m->clear_gently(); });
     }
 }
 
@@ -1636,7 +1638,7 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
         auto units = seastar::consume_units(*_config.view_update_concurrency_semaphore, memory_usage_of(updates));
         try {
             co_await db::view::mutate_MV(base_token, std::move(updates), _view_stats, *_config.cf_stats, tr_state,
-                std::move(units), service::allow_hints::yes, db::view::wait_for_all_updates::no).handle_exception([] (auto ignored) { });
+                std::move(units), service::allow_hints::yes, db::view::wait_for_all_updates::no);
         } catch (...) {
             // Ignore exceptions: any individual failure to propagate a view update will be reported
             // by a separate mechanism in mutate_MV() function. Moreover, we should continue trying

@@ -108,7 +108,8 @@ static std::string_view to_string(compaction_type type) {
     case compaction_type::Upgrade: return "Upgrade";
     case compaction_type::Reshape: return "Reshape";
     }
-    __builtin_unreachable();
+    on_internal_error_noexcept(clogger, format("Invalid compaction type {}", int(type)));
+    return "(invalid)";
 }
 
 std::ostream& operator<<(std::ostream& os, compaction_type type) {
@@ -125,6 +126,8 @@ std::string_view to_string(compaction_options::scrub::mode scrub_mode) {
         case compaction_options::scrub::mode::segregate:
             return "segregate";
     }
+    on_internal_error_noexcept(clogger, format("Invalid scrub mode {}", int(scrub_mode)));
+    return "(invalid)";
 }
 
 std::ostream& operator<<(std::ostream& os, compaction_options::scrub::mode scrub_mode) {

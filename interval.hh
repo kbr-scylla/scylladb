@@ -101,7 +101,7 @@ private:
     template<typename Comparator>
     static bool greater_than_or_equal(end_bound_ref end, start_bound_ref start, Comparator&& cmp) {
         return !end.b || !start.b || require_ordering_and_on_equal_return(
-                cmp(end.b->value(), start.b->value()) <=> 0,
+                cmp(end.b->value(), start.b->value()),
                 std::strong_ordering::greater,
                 end.b->is_inclusive() && start.b->is_inclusive());
     }
@@ -114,7 +114,7 @@ private:
     template<typename Comparator>
     static bool less_than_or_equal(start_bound_ref first, start_bound_ref second, Comparator&& cmp) {
         return !first.b || (second.b && require_ordering_and_on_equal_return(
-                cmp(first.b->value(), second.b->value()) <=> 0,
+                cmp(first.b->value(), second.b->value()),
                 std::strong_ordering::less,
                 first.b->is_inclusive() || !second.b->is_inclusive()));
     }
@@ -122,7 +122,7 @@ private:
     template<typename Comparator>
     static bool less_than(start_bound_ref first, start_bound_ref second, Comparator&& cmp) {
         return second.b && (!first.b || require_ordering_and_on_equal_return(
-                cmp(first.b->value(), second.b->value()) <=> 0,
+                cmp(first.b->value(), second.b->value()),
                 std::strong_ordering::less,
                 first.b->is_inclusive() && !second.b->is_inclusive()));
     }
@@ -130,7 +130,7 @@ private:
     template<typename Comparator>
     static bool greater_than_or_equal(end_bound_ref first, end_bound_ref second, Comparator&& cmp) {
         return !first.b || (second.b && require_ordering_and_on_equal_return(
-                cmp(first.b->value(), second.b->value()) <=> 0,
+                cmp(first.b->value(), second.b->value()),
                 std::strong_ordering::greater,
                 first.b->is_inclusive() || !second.b->is_inclusive()));
     }
@@ -273,11 +273,11 @@ public:
 
         if (this_wraps && other_wraps) {
             return require_ordering_and_on_equal_return(
-                            cmp(start()->value(), other.start()->value()) <=> 0,
+                            cmp(start()->value(), other.start()->value()),
                             std::strong_ordering::less,
                             start()->is_inclusive() || !other.start()->is_inclusive())
                 && require_ordering_and_on_equal_return(
-                            cmp(end()->value(), other.end()->value()) <=> 0,
+                            cmp(end()->value(), other.end()->value()),
                             std::strong_ordering::greater,
                             end()->is_inclusive() || !other.end()->is_inclusive());
         }
@@ -293,11 +293,11 @@ public:
 
         // !other_wraps && this_wraps
         return (other.start() && require_ordering_and_on_equal_return(
-                                    cmp(start()->value(), other.start()->value()) <=> 0,
+                                    cmp(start()->value(), other.start()->value()),
                                     std::strong_ordering::less,
                                     start()->is_inclusive() || !other.start()->is_inclusive()))
                 || (other.end() && (require_ordering_and_on_equal_return(
-                                        cmp(end()->value(), other.end()->value()) <=> 0,
+                                        cmp(end()->value(), other.end()->value()),
                                         std::strong_ordering::greater,
                                         end()->is_inclusive() || !other.end()->is_inclusive())));
     }

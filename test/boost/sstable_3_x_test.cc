@@ -358,7 +358,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_read) {
             rc text,
             PRIMARY KEY (pk, ck)
         )
-        WITH compression = { 'class' : '' }
+        WITH compression = { 'sstable_compression' : '' }
         AND caching = {'keys': 'NONE', 'rows_per_partition': 'NONE'}
         """)
 
@@ -623,7 +623,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_skip_using_index_rows) {
             rc int,
             PRIMARY KEY (pk, ck1, ck2)
         )
-        WITH compression = { 'class' : '' }
+        WITH compression = { 'sstable_compression' : '' }
         AND caching = {'keys': 'NONE', 'rows_per_partition': 'NONE'}
         """)
 
@@ -959,7 +959,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_filtering_and_forwarding_range_tombst
             rc int,
             PRIMARY KEY (pk, ck1, ck2)
         )
-        WITH compression = { 'class' : '' }
+        WITH compression = { 'sstable_compression' : '' }
         AND caching = {'keys': 'NONE', 'rows_per_partition': 'NONE'}
         """)
 
@@ -1640,10 +1640,10 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_counters_read) {
 //
 //  where <compression> is one of the following:
 //  {'enabled': false} for the uncompressed case,
-//  {'class': 'org.apache.cassandra.io.compress.LZ4Compressor'} for the LZ4 case,
-//  {'class': 'org.apache.cassandra.io.compress.SnappyCompressor'} for the Snappy case,
-//  {'class': 'org.apache.cassandra.io.compress.DeflateCompressor'} for the Deflate case,
-//  {'class': 'org.apache.cassandra.io.compress.ZstdCompressor', 'compression_level': 1} for the Zstd case.
+//  {'sstable_compression': 'org.apache.cassandra.io.compress.LZ4Compressor'} for the LZ4 case,
+//  {'sstable_compression': 'org.apache.cassandra.io.compress.SnappyCompressor'} for the Snappy case,
+//  {'sstable_compression': 'org.apache.cassandra.io.compress.DeflateCompressor'} for the Deflate case,
+//  {'sstable_compression': 'org.apache.cassandra.io.compress.ZstdCompressor', 'compression_level': 1} for the Zstd case.
 //
 // INSERT INTO test_ks.test_table(pk, bool_val, double_val, float_val, int_val, long_val, timestamp_val, timeuuid_val,
 //                                uuid_val, text_val)
@@ -1815,7 +1815,7 @@ SEASTAR_THREAD_TEST_CASE(test_deflate_partition_key_with_values_of_different_typ
 SEASTAR_THREAD_TEST_CASE(test_zstd_partition_key_with_values_of_different_types_read) {
     test_partition_key_with_values_of_different_types_read(
         ZSTD_PARTITION_KEY_WITH_VALUES_OF_DIFFERENT_TYPES_PATH, compressor::create({
-            {"class", "org.apache.cassandra.io.compress.ZstdCompressor"},
+            {"sstable_compression", "org.apache.cassandra.io.compress.ZstdCompressor"},
             {"compression_level", "1"}}));
 }
 
@@ -1826,7 +1826,7 @@ SEASTAR_THREAD_TEST_CASE(test_zstd_partition_key_with_values_of_different_types_
 // CREATE KEYSPACE test_ks WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
 //
 // CREATE TABLE test_ks.test_table (val1 INT, val2 INT, PRIMARY KEY (val1, val2))
-//      WITH compression = {'class': 'org.apache.cassandra.io.compress.ZstdCompressor',
+//      WITH compression = {'sstable_compression': 'org.apache.cassandra.io.compress.ZstdCompressor',
 //                          'compression_level': 5,
 //                          'chunk_length_in_kb': 4};
 //
@@ -1841,7 +1841,7 @@ static schema_ptr make_zstd_multiple_chunks_schema() {
         .with_column("val1", int32_type, column_kind::partition_key)
         .with_column("val2", int32_type, column_kind::clustering_key)
         .set_compressor_params(compression_parameters{compressor::create({
-            {"class", "org.apache.cassandra.io.compress.ZstdCompressor"},
+            {"sstable_compression", "org.apache.cassandra.io.compress.ZstdCompressor"},
             {"compression_level", "5"},
             {"chunk_length_in_kb", "4"}})})
         .build();
@@ -3125,7 +3125,7 @@ SEASTAR_THREAD_TEST_CASE(compact_deleted_row) {
   test_env::do_with_async([] (test_env& env) {
     BOOST_REQUIRE(smp::count == 1);
     sstring table_name = "compact_deleted_row";
-    // CREATE TABLE test_deleted_row (pk text, ck text, rc1 text, rc2 text, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE test_deleted_row (pk text, ck text, rc1 text, rc2 text, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -3180,7 +3180,7 @@ SEASTAR_THREAD_TEST_CASE(compact_deleted_row) {
     BOOST_REQUIRE(m);
     BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, data_value(sstring("key")))));
     BOOST_REQUIRE(!m->partition().partition_tombstone());
-    auto& rows = m->partition().clustered_rows();
+    auto rows = m->partition().clustered_rows();
     BOOST_REQUIRE(rows.calculate_size() == 1);
     auto& row = rows.begin()->row();
     BOOST_REQUIRE(row.deleted_at());
@@ -3196,7 +3196,7 @@ SEASTAR_THREAD_TEST_CASE(compact_deleted_cell) {
   test_env::do_with_async([] (test_env& env) {
     BOOST_REQUIRE(smp::count == 1);
     sstring table_name = "compact_deleted_cell";
-    //  CREATE TABLE compact_deleted_cell (pk text, ck text, rc text, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    //  CREATE TABLE compact_deleted_cell (pk text, ck text, rc text, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -3252,7 +3252,7 @@ SEASTAR_THREAD_TEST_CASE(compact_deleted_cell) {
     BOOST_REQUIRE(m);
     BOOST_REQUIRE(m->key().equal(*s, partition_key::from_singular(*s, data_value(sstring("key")))));
     BOOST_REQUIRE(!m->partition().partition_tombstone());
-    auto& rows = m->partition().clustered_rows();
+    auto rows = m->partition().clustered_rows();
     BOOST_REQUIRE(rows.calculate_size() == 1);
     auto& row = rows.begin()->row();
     BOOST_REQUIRE(row.is_live(*s));
@@ -3485,7 +3485,7 @@ static void write_mut_and_validate(test_env& env, schema_ptr s, const sstring& t
 SEASTAR_THREAD_TEST_CASE(test_write_static_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "static_row";
-    // CREATE TABLE static_row (pk text, ck int, st1 int static, st2 text static, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE static_row (pk text, ck int, st1 int static, st2 text static, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -3507,7 +3507,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_row) {
 SEASTAR_THREAD_TEST_CASE(test_write_composite_partition_key) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "composite_partition_key";
-    // CREATE TABLE composite_partition_key (a int , b text, c boolean, d int, e text, f int, g text, PRIMARY KEY ((a, b, c), d, e)) WITH compression = {'class': ''};
+    // CREATE TABLE composite_partition_key (a int , b text, c boolean, d int, e text, f int, g text, PRIMARY KEY ((a, b, c), d, e)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("a", int32_type, column_kind::partition_key);
     builder.with_column("b", utf8_type, column_kind::partition_key);
@@ -3534,7 +3534,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_partition_key) {
 SEASTAR_THREAD_TEST_CASE(test_write_composite_clustering_key) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "composite_clustering_key";
-    // CREATE TABLE composite_clustering_key (a int , b text, c int, d text, e int, f text, PRIMARY KEY (a, b, c, d)) WITH compression = {'class': ''};
+    // CREATE TABLE composite_clustering_key (a int , b text, c int, d text, e int, f text, PRIMARY KEY (a, b, c, d)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("a", int32_type, column_kind::partition_key);
     builder.with_column("b", utf8_type, column_kind::clustering_key);
@@ -3560,7 +3560,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_composite_clustering_key) {
 SEASTAR_THREAD_TEST_CASE(test_write_wide_partitions) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "wide_partitions";
-    // CREATE TABLE wide_partitions (pk text, ck text, st text, rc text, PRIMARY KEY (pk, ck) WITH compression = {'class': ''};
+    // CREATE TABLE wide_partitions (pk text, ck text, st text, rc text, PRIMARY KEY (pk, ck) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -3603,7 +3603,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_wide_partitions) {
 SEASTAR_THREAD_TEST_CASE(test_write_ttled_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "ttled_row";
-    // CREATE TABLE ttled_row (pk int, ck int, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE ttled_row (pk int, ck int, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -3634,7 +3634,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_row) {
 SEASTAR_THREAD_TEST_CASE(test_write_ttled_column) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "ttled_column";
-    // CREATE TABLE ttled_column (pk text, rc int, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // CREATE TABLE ttled_column (pk text, rc int, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("rc", int32_type);
@@ -3662,7 +3662,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_ttled_column) {
 SEASTAR_THREAD_TEST_CASE(test_write_deleted_column) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "deleted_column";
-    // CREATE TABLE deleted_column (pk int, rc int, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // CREATE TABLE deleted_column (pk int, rc int, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("rc", int32_type);
@@ -3686,7 +3686,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_deleted_column) {
 SEASTAR_THREAD_TEST_CASE(test_write_deleted_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "deleted_row";
-    // CREATE TABLE deleted_row (pk int, ck int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE deleted_row (pk int, ck int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -3708,7 +3708,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_wide_update) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "collection_wide_update";
     auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
-    // CREATE TABLE collection_wide_update (pk int, col set<int>, PRIMARY KEY (pk)) with compression = {'class': ''};
+    // CREATE TABLE collection_wide_update (pk int, col set<int>, PRIMARY KEY (pk)) with compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("col", set_of_ints_type);
@@ -3736,7 +3736,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_incremental_update) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "collection_incremental_update";
     auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
-    // CREATE TABLE collection_incremental_update (pk int, col set<int>, PRIMARY KEY (pk)) with compression = {'class': ''};
+    // CREATE TABLE collection_incremental_update (pk int, col set<int>, PRIMARY KEY (pk)) with compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("col", set_of_ints_type);
@@ -3759,7 +3759,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_collection_incremental_update) {
 SEASTAR_THREAD_TEST_CASE(test_write_multiple_partitions) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "multiple_partitions";
-    // CREATE TABLE multiple_partitions (pk int, rc1 int, rc2 int, rc3 int, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // CREATE TABLE multiple_partitions (pk int, rc1 int, rc2 int, rc3 int, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("rc1", int32_type);
@@ -3789,7 +3789,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_partitions) {
 
 static void test_write_many_partitions(sstring table_name, tombstone partition_tomb, compression_parameters cp) {
   test_env::do_with_async([table_name, partition_tomb, cp] (test_env& env) {
-    // CREATE TABLE <table_name> (pk int, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // CREATE TABLE <table_name> (pk int, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.set_compressor_params(cp);
@@ -3858,14 +3858,14 @@ SEASTAR_THREAD_TEST_CASE(test_write_many_partitions_zstd) {
             "many_partitions_zstd",
             tombstone{},
             compression_parameters{compressor::create({
-                {"class", "org.apache.cassandra.io.compress.ZstdCompressor"}
+                {"sstable_compression", "org.apache.cassandra.io.compress.ZstdCompressor"}
             })});
 }
 
 SEASTAR_THREAD_TEST_CASE(test_write_multiple_rows) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "multiple_rows";
-    // CREATE TABLE multiple_rows (pk int, ck int, rc1 int, rc2 int, rc3 int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE multiple_rows (pk int, ck int, rc1 int, rc2 int, rc3 int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -3898,7 +3898,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_multiple_rows) {
 SEASTAR_THREAD_TEST_CASE(test_write_missing_columns_large_set) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "missing_columns_large_set";
-    // CREATE TABLE missing_columns_large_set (pk int, ck int, rc1 int, ..., rc64 int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE missing_columns_large_set (pk int, ck int, rc1 int, ..., rc64 int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -3939,7 +3939,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_missing_columns_large_set) {
 SEASTAR_THREAD_TEST_CASE(test_write_empty_counter) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "empty_counter";
-    // CREATE TABLE empty_counter (pk text, ck text, val counter, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE empty_counter (pk text, ck text, val counter, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -3963,7 +3963,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_empty_counter) {
 SEASTAR_THREAD_TEST_CASE(test_write_counter_table) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "counter_table";
-    // CREATE TABLE counter_table (pk text, ck text, rc1 counter, rc2 counter, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE counter_table (pk text, ck text, rc1 counter, rc2 counter, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -4014,7 +4014,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_different_types) {
     // doubleval double, floatval float, inetval inet, intval int,
     // smallintval smallint, timeval time, tsval timestamp, timeuuidval timeuuid,
     // tinyintval tinyint,  uuidval uuid, varcharval varchar, varintval varint,
-    // durationval duration, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // durationval duration, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("asciival", ascii_type);
@@ -4078,7 +4078,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_different_types) {
 SEASTAR_THREAD_TEST_CASE(test_write_empty_clustering_values) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "empty_clustering_values";
-    // CREATE TABLE empty_clustering_values (pk int, ck1 text, ck2 int, ck3 text, rc int, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'class': ''};
+    // CREATE TABLE empty_clustering_values (pk int, ck1 text, ck2 int, ck3 text, rc int, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4103,7 +4103,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_empty_clustering_values) {
 SEASTAR_THREAD_TEST_CASE(test_write_large_clustering_key) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "large_clustering_key";
-    // CREATE TABLE large_clustering_key (pk int, ck1 text, ck2 text, ..., ck35 text, rc int, PRIMARY KEY (pk, ck1, ck2, ..., ck35)) WITH compression = {'class': ''};
+    // CREATE TABLE large_clustering_key (pk int, ck1 text, ck2 text, ..., ck35 text, rc int, PRIMARY KEY (pk, ck1, ck2, ..., ck35)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     for (auto idx: boost::irange(1, 36)) {
@@ -4135,7 +4135,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_large_clustering_key) {
 SEASTAR_THREAD_TEST_CASE(test_write_compact_table) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "compact_table";
-    // CREATE TABLE compact_table (pk int, ck1 int, ck2 int, rc int, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''} AND COMPACT STORAGE;
+    // CREATE TABLE compact_table (pk int, ck1 int, ck2 int, rc int, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''} AND COMPACT STORAGE;
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", int32_type, column_kind::clustering_key);
@@ -4163,7 +4163,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_user_defined_type_table) {
             {int32_type, boolean_type, utf8_type}, false);
 
     sstring table_name = "user_defined_type_table";
-    // CREATE TABLE user_defined_type_table (pk int, rc frozen <ut>, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+    // CREATE TABLE user_defined_type_table (pk int, rc frozen <ut>, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("rc", ut);
@@ -4186,7 +4186,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_user_defined_type_table) {
 SEASTAR_THREAD_TEST_CASE(test_write_simple_range_tombstone) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "simple_range_tombstone";
-    // CREATE TABLE simple_range_tombstone (pk int, ck1 text, ck2 text, rc text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE simple_range_tombstone (pk int, ck1 text, ck2 text, rc text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4211,7 +4211,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_simple_range_tombstone) {
 SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "adjacent_range_tombstones";
-    // CREATE TABLE adjacent_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'class': ''};
+    // CREATE TABLE adjacent_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4252,7 +4252,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_non_adjacent_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "non_adjacent_range_tombstones";
-    // CREATE TABLE non_adjacent_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'class': ''};
+    // CREATE TABLE non_adjacent_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4291,7 +4291,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_non_adjacent_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_mixed_rows_and_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "mixed_rows_and_range_tombstones";
-    // CREATE TABLE mixed_rows_and_range_tombstones (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE mixed_rows_and_range_tombstones (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4360,7 +4360,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_mixed_rows_and_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_many_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "many_range_tombstones";
-    // CREATE TABLE many_range_tombstones (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'class': ''};
+    // CREATE TABLE many_range_tombstones (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4390,7 +4390,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_many_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones_with_rows) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "adjacent_range_tombstones_with_rows";
-    // CREATE TABLE adjacent_range_tombstones_with_rows (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'class': ''};
+    // CREATE TABLE adjacent_range_tombstones_with_rows (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4443,7 +4443,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_adjacent_range_tombstones_with_rows) {
 SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_start_with_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "range_tombstone_same_start_with_row";
-    // CREATE TABLE range_tombstone_same_start_with_row (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE range_tombstone_same_start_with_row (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4478,7 +4478,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_start_with_row) {
 SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_end_with_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "range_tombstone_same_end_with_row";
-    // CREATE TABLE range_tombstone_same_end_with_row (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE range_tombstone_same_end_with_row (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4513,7 +4513,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_range_tombstone_same_end_with_row) {
 SEASTAR_THREAD_TEST_CASE(test_write_overlapped_start_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "overlapped_start_range_tombstones";
-    // CREATE TABLE overlapped_start_range_tombstones (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE overlapped_start_range_tombstones (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4562,7 +4562,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_overlapped_start_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_two_non_adjacent_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "two_non_adjacent_range_tombstones";
-    // CREATE TABLE two_non_adjacent_range_tombstones (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'class': ''};
+    // CREATE TABLE two_non_adjacent_range_tombstones (pk int, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4606,7 +4606,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_two_non_adjacent_range_tombstones) {
 SEASTAR_THREAD_TEST_CASE(test_write_overlapped_range_tombstones) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "overlapped_range_tombstones";
-    // CREATE TABLE overlapped_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'class': ''};
+    // CREATE TABLE overlapped_range_tombstones (pk text, ck1 text, ck2 text, ck3 text, PRIMARY KEY (pk, ck1, ck2, ck3)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4649,7 +4649,8 @@ static sstring get_read_index_test_path(sstring table_name) {
 }
 
 static std::unique_ptr<index_reader> get_index_reader(shared_sstable sst, reader_permit permit) {
-    return std::make_unique<index_reader>(sst, std::move(permit), default_priority_class(), tracing::trace_state_ptr());
+    return std::make_unique<index_reader>(sst, std::move(permit), default_priority_class(),
+                                          tracing::trace_state_ptr(), use_caching::yes);
 }
 
 shared_sstable make_test_sstable(test_env& env, schema_ptr schema, const sstring& table_name, int64_t gen = 1) {
@@ -4659,7 +4660,7 @@ shared_sstable make_test_sstable(test_env& env, schema_ptr schema, const sstring
 /*
  * The SSTables read is generated using the following queries:
  *
- *  CREATE TABLE empty_index (pk text, PRIMARY KEY (pk)) WITH compression = {'class': ''};
+ *  CREATE TABLE empty_index (pk text, PRIMARY KEY (pk)) WITH compression = {'sstable_compression': ''};
  *  INSERT INTO empty_index (pk) VALUES ('привет');
 */
 
@@ -4682,7 +4683,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_empty_index) {
 SEASTAR_THREAD_TEST_CASE(test_read_rows_only_index) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "rows_only_index";
-    // CREATE TABLE rows_only_index (pk text, ck text, st text, rc text, PRIMARY KEY (pk, ck) WITH compression = {'class': ''};
+    // CREATE TABLE rows_only_index (pk text, ck text, st text, rc text, PRIMARY KEY (pk, ck) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck", utf8_type, column_kind::clustering_key);
@@ -4702,7 +4703,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_rows_only_index) {
 SEASTAR_THREAD_TEST_CASE(test_read_range_tombstones_only_index) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "range_tombstones_only_index";
-    // CREATE TABLE range_tombstones_only_index (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'class': ''};
+    // CREATE TABLE range_tombstones_only_index (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4729,7 +4730,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_range_tombstones_only_index) {
 SEASTAR_THREAD_TEST_CASE(test_read_range_tombstone_boundaries_index) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "range_tombstone_boundaries_index";
-    // CREATE TABLE range_tombstone_boundaries_index (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'class': ''};
+    // CREATE TABLE range_tombstone_boundaries_index (pk text, ck1 text, ck2 text, PRIMARY KEY (pk, ck1, ck2) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", utf8_type, column_kind::partition_key);
     builder.with_column("ck1", utf8_type, column_kind::clustering_key);
@@ -4744,7 +4745,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_range_tombstone_boundaries_index) {
 
 SEASTAR_THREAD_TEST_CASE(test_read_table_empty_clustering_key) {
   test_env::do_with_async([] (test_env& env) {
-    // CREATE TABLE empty_clustering_key (pk int, v int, PRIMARY KEY (pk)) with compression = {'class': ''};
+    // CREATE TABLE empty_clustering_key (pk int, v int, PRIMARY KEY (pk)) with compression = {'sstable_compression': ''};
     schema_builder builder("sst3", "empty_clustering_key");
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("v", int32_type);
@@ -4823,7 +4824,7 @@ SEASTAR_THREAD_TEST_CASE(test_uncompressed_read_two_rows_fast_forwarding) {
     // Following tests run on files in test/resource/sstables/3.x/uncompressed/read_two_rows_fast_forwarding
     // They were created using following CQL statements:
     //
-    // CREATE TABLE two_rows_fast_forwarding (pk int, ck int, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE two_rows_fast_forwarding (pk int, ck int, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     // INSERT INTO two_rows_fast_forwarding (pk, ck, rc) VALUES (0, 7, 7);
     // INSERT INTO two_rows_fast_forwarding (pk, ck, rc) VALUES (0, 8, 8);
 
@@ -4882,7 +4883,7 @@ SEASTAR_THREAD_TEST_CASE(test_dead_row_marker) {
     api::timestamp_type ts = 1543494402386839;
     gc_clock::time_point tp = gc_clock::time_point{} + gc_clock::duration{1543494402};
     sstring table_name = "dead_row_marker";
-    // CREATE TABLE dead_row_marker (pk int, ck int, st int static, rc int , PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE dead_row_marker (pk int, ck int, st int static, rc int , PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -4910,7 +4911,7 @@ SEASTAR_THREAD_TEST_CASE(test_shadowable_deletion) {
     /* The created SSTables content should match that of
      * an MV filled with the following queries:
      *
-     * CREATE TABLE cf (p int PRIMARY KEY, v int) WITH compression = {'class': ''};
+     * CREATE TABLE cf (p int PRIMARY KEY, v int) WITH compression = {'sstable_compression': ''};
      * CREATE MATERIALIZED VIEW mv AS SELECT * FROM cf WHERE p IS NOT NULL AND v IS NOT NULL PRIMARY KEY (v, p);
      * INSERT INTO cf (p, v) VALUES (1, 0);
      * UPDATE cf SET v = 1 WHERE p = 1;
@@ -4994,7 +4995,7 @@ SEASTAR_THREAD_TEST_CASE(test_regular_and_shadowable_deletion) {
 SEASTAR_THREAD_TEST_CASE(test_write_static_row_with_missing_columns) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "static_row_with_missing_columns";
-    // CREATE TABLE static_row (pk int, ck int, st1 int static, st2 int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE static_row (pk int, ck int, st1 int static, st2 int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);
@@ -5020,7 +5021,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_interleaved_atomic_and_collection_columns) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "interleaved_atomic_and_collection_columns";
     // CREATE TABLE interleaved_atomic_and_collection_columns ( pk int, ck int, rc1 int, rc2 set<int>, rc3 int, rc4 set<int>,
-    //     rc5 int, rc6 set<int>, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    //     rc5 int, rc6 set<int>, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
@@ -5059,7 +5060,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_interleaved_atomic_and_collection_col
     sstring table_name = "static_interleaved_atomic_and_collection_columns";
     // CREATE TABLE static_interleaved_atomic_and_collection_columns ( pk int, ck int, st1 int static,
     //     st2 set<int> static, st3 int static, st4 set<int> static, st5 int static, st6 set<int> static,
-    //     PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    //     PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     auto set_of_ints_type = set_type_impl::get_instance(int32_type, true);
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
@@ -5096,7 +5097,7 @@ SEASTAR_THREAD_TEST_CASE(test_write_static_interleaved_atomic_and_collection_col
 SEASTAR_THREAD_TEST_CASE(test_write_empty_static_row) {
   test_env::do_with_async([] (test_env& env) {
     sstring table_name = "empty_static_row";
-    // CREATE TABLE empty_static_row (pk int, ck int, st int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'class': ''};
+    // CREATE TABLE empty_static_row (pk int, ck int, st int static, rc int, PRIMARY KEY (pk, ck)) WITH compression = {'sstable_compression': ''};
     schema_builder builder("sst3", table_name);
     builder.with_column("pk", int32_type, column_kind::partition_key);
     builder.with_column("ck", int32_type, column_kind::clustering_key);

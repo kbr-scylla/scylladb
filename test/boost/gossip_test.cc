@@ -93,7 +93,8 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         elc_notif.start().get();
         auto stop_elc_notif = defer([&elc_notif] { elc_notif.stop().get(); });
 
-        service::get_storage_service().start(std::ref(abort_sources),
+        sharded<service::storage_service> ss;
+        ss.start(std::ref(abort_sources),
             std::ref(db), std::ref(gms::get_gossiper()),
             std::ref(sys_dist_ks),
             std::ref(view_update_generator),
@@ -104,7 +105,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
             std::ref(raft_gr), std::ref(elc_notif),
             std::ref(sl_controller),
             true).get();
-        auto stop_ss = defer([&] { service::get_storage_service().stop().get(); });
+        auto stop_ss = defer([&] { ss.stop().get(); });
 
         sharded<semaphore> sst_dir_semaphore;
         sst_dir_semaphore.start(cfg->initial_sstable_loading_concurrency()).get();

@@ -32,6 +32,7 @@
 #pragma once
 
 #include "cql3/selection/selectable.hh"
+#include "cql3/expr/expression.hh"
 #include "cql3/column_identifier.hh"
 
 namespace cql3 {
@@ -40,11 +41,11 @@ namespace selection {
 
 class raw_selector {
 public:
-    const ::shared_ptr<selectable::raw> selectable_;
+    const expr::expression selectable_;
     const ::shared_ptr<column_identifier> alias;
 
-    raw_selector(shared_ptr<selectable::raw> selectable__, shared_ptr<column_identifier> alias_)
-        : selectable_{selectable__}
+    raw_selector(expr::expression selectable__, shared_ptr<column_identifier> alias_)
+        : selectable_{std::move(selectable__)}
         , alias{alias_}
     { }
 
@@ -59,13 +60,13 @@ public:
         std::vector<::shared_ptr<selectable>> r;
         r.reserve(raws.size());
         for (auto&& raw : raws) {
-            r.emplace_back(raw->selectable_->prepare(schema));
+            r.emplace_back(prepare_selectable(schema, raw->selectable_));
         }
         return r;
     }
 
     bool processes_selection() const {
-        return selectable_->processes_selection();
+        return selectable_processes_selection(selectable_);
     }
 };
 

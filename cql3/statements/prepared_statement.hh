@@ -43,7 +43,7 @@
 
 namespace cql3 {
 
-class variable_specifications;
+class prepare_context;
 class column_specification;
 class cql_statement;
 
@@ -66,9 +66,9 @@ public:
 
     prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement> statement_, std::vector<seastar::lw_shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices);
 
-    prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement> statement_, const variable_specifications& names, const std::vector<uint16_t>& partition_key_bind_indices);
+    prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement> statement_, const prepare_context& ctx, const std::vector<uint16_t>& partition_key_bind_indices);
 
-    prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement> statement_, variable_specifications&& names, std::vector<uint16_t>&& partition_key_bind_indices);
+    prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement> statement_, prepare_context&& ctx, std::vector<uint16_t>&& partition_key_bind_indices);
 
     prepared_statement(audit::audit_info_ptr&& audit_info, seastar::shared_ptr<cql_statement>&& statement_);
 

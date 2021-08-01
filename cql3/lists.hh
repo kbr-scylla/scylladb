@@ -93,7 +93,7 @@ public:
                 : _elements(std::move(elements)) {
         }
         virtual bool contains_bind_marker() const override;
-        virtual void collect_marker_specification(variable_specifications& bound_names) const override;
+        virtual void fill_prepare_context(prepare_context& ctx) const override;
         virtual shared_ptr<terminal> bind(const query_options& options) override;
         const std::vector<shared_ptr<term>>& get_elements() const {
             return _elements;
@@ -129,7 +129,7 @@ public:
             : operation(column, std::move(t)), _idx(std::move(idx)) {
         }
         virtual bool requires_read() const override;
-        virtual void collect_marker_specification(variable_specifications& bound_names) const;
+        virtual void fill_prepare_context(prepare_context& ctx) const;
         virtual void execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) override;
     };
 
