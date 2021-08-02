@@ -48,6 +48,7 @@ public:
     constexpr static bool is_setting_range_tombstone_start_supported = false;
 private:
     mp_row_consumer_reader_k_l* _reader;
+    const shared_sstable& _sst;
     schema_ptr _schema;
     const query::partition_slice& _slice;
     bool _out_of_range = false;
@@ -336,6 +337,7 @@ public:
         , _trace_state(std::move(trace_state))
         , _pc(pc) 
         , _reader(reader)
+        , _sst(sst)
         , _schema(schema)
         , _slice(slice)
         , _fwd(fwd)
@@ -634,7 +636,11 @@ public:
         auto ret = flush_if_needed(std::move(ck));
         if (!_skip_in_progress) {
             _in_progress->mutate_as_clustering_row(*_schema, [&] (clustering_row& cr) mutable {
+                bool was_dead{cr.tomb()};
                 cr.apply(shadowable_tombstone(tombstone(deltime)));
+                if (!was_dead && cr.tomb()) {
+                    _sst->get_stats().on_row_tombstone_read();
+                }
             });
         }
         return ret;
@@ -691,7 +697,11 @@ public:
                 auto ret = flush_if_needed(std::move(start_ck));
                 if (!_skip_in_progress) {
                     _in_progress->mutate_as_clustering_row(*_schema, [&] (clustering_row& cr) mutable {
+                        bool was_dead{cr.tomb()};
                         cr.apply(tombstone(deltime));
+                        if (!was_dead && cr.tomb()) {
+                            _sst->get_stats().on_row_tombstone_read();
+                        }
                     });
                 }
                 return ret;

@@ -647,7 +647,7 @@ future<page_consume_result<ResultBuilder>> read_page(
         ex = std::current_exception();
     }
     co_await reader.close();
-    std::rethrow_exception(std::move(ex));
+    co_return coroutine::exception(std::move(ex));
 }
 
 template <typename ResultBuilder>
@@ -680,8 +680,7 @@ future<typename ResultBuilder::result_type> do_query(
     }
 
     co_await ctx->stop();
-
-    std::rethrow_exception(std::move(ex));
+    co_return coroutine::exception(std::move(ex));
 }
 
 template <typename ResultBuilder>
