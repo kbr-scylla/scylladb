@@ -142,6 +142,7 @@ class fsm {
     server_id _voted_for;
     // Index of the highest log entry known to be committed.
     // Currently not persisted.
+    // Invariant: _commit_idx >= _log.get_snapshot().idx
     index_t _commit_idx = index_t(0);
     // Log entries; each entry contains a command for state machine,
     // and the term when the entry was received by the leader.
@@ -334,6 +335,15 @@ public:
     term_t log_last_term() const {
         return _log.last_term();
     }
+    index_t log_last_snapshot_idx() const {
+        return _log.get_snapshot().idx;
+    }
+
+    // Return the last configuration entry with index smaller than or equal to `idx`.
+    // Precondition: `log_last_idx()` >= `idx` >= `log_last_snapshot_idx()`.
+    const configuration& log_last_conf_for(index_t idx) const {
+        return _log.last_conf_for(idx);
+    }
 
     // Call this function to wait for the number of log entries to
     // go below  max_log_size.
@@ -406,7 +416,7 @@ public:
     // This call will update the log to point to the new snapshot
     // and will truncate the log prefix up to (snp.idx - trailing)
     // entry. Returns false if the snapshot is older than existing one.
-    bool apply_snapshot(snapshot snp, size_t traling);
+    bool apply_snapshot(snapshot snp, size_t traling, bool local);
 
     size_t in_memory_log_size() const {
         return _log.in_memory_size();
@@ -456,7 +466,7 @@ void fsm::step(server_id from, const follower& c, Message&& msg) {
         request_vote(from, std::move(msg));
     } else if constexpr (std::is_same_v<Message, install_snapshot>) {
         send_to(from, snapshot_reply{.current_term = _current_term,
-                    .success = apply_snapshot(std::move(msg.snp), 0)});
+                    .success = apply_snapshot(std::move(msg.snp), 0, false)});
     } else if constexpr (std::is_same_v<Message, timeout_now>) {
         // Leadership transfers never use pre-vote; we know we are not
         // recovering from a partition so there is no need for the

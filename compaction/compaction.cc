@@ -125,6 +125,8 @@ std::string_view to_string(compaction_options::scrub::mode scrub_mode) {
             return "skip";
         case compaction_options::scrub::mode::segregate:
             return "segregate";
+        case compaction_options::scrub::mode::validate:
+            return "validate";
     }
     on_internal_error_noexcept(clogger, format("Invalid scrub mode {}", int(scrub_mode)));
     return "(invalid)";
@@ -171,20 +173,27 @@ static api::timestamp_type get_max_purgeable_timestamp(const column_family& cf, 
     return timestamp;
 }
 
-static bool belongs_to_current_node(const dht::token& t, const dht::token_range_vector& sorted_owned_ranges) {
-    auto low = std::lower_bound(sorted_owned_ranges.begin(), sorted_owned_ranges.end(), t,
-            [] (const range<dht::token>& a, const dht::token& b) {
-        // check that range a is before token b.
-        return a.after(b, dht::token_comparator());
-    });
-
-    if (low != sorted_owned_ranges.end()) {
-        const dht::token_range& r = *low;
-        return r.contains(t, dht::token_comparator());
+class incremental_owned_ranges_checker {
+    const dht::token_range_vector& _sorted_owned_ranges;
+    mutable dht::token_range_vector::const_iterator _it;
+public:
+    incremental_owned_ranges_checker(const dht::token_range_vector& sorted_owned_ranges)
+        : _sorted_owned_ranges(sorted_owned_ranges)
+        , _it(_sorted_owned_ranges.begin()) {
     }
 
-    return false;
-}
+    // Must be called with increasing token values.
+    bool belongs_to_current_node(const dht::token& t) const {
+        // While token T is after a range Rn, advance the iterator.
+        // iterator will be stopped at a range which either overlaps with T (if T belongs to node),
+        // or at a range which is after T (if T doesn't belong to this node).
+        while (_it != _sorted_owned_ranges.end() && _it->after(t, dht::token_comparator())) {
+            _it++;
+        }
+
+        return _it != _sorted_owned_ranges.end() && _it->contains(t, dht::token_comparator());
+    }
+};
 
 static std::vector<shared_sstable> get_uncompacting_sstables(column_family& cf, std::vector<shared_sstable> sstables) {
     auto all_sstables = boost::copy_range<std::vector<shared_sstable>>(*cf.get_sstables_including_compacted_undeleted());
@@ -1105,6 +1114,7 @@ private:
 
 class cleanup_compaction final : public regular_compaction {
     dht::token_range_vector _owned_ranges;
+    incremental_owned_ranges_checker _owned_ranges_checker;
 private:
     // Called in a seastar thread
     dht::partition_range_vector
@@ -1144,6 +1154,7 @@ private:
     cleanup_compaction(database& db, column_family& cf, compaction_descriptor descriptor)
         : regular_compaction(cf, std::move(descriptor))
         , _owned_ranges(db.get_keyspace_local_ranges(_schema->ks_name()))
+        , _owned_ranges_checker(_owned_ranges)
     {
     }
 
@@ -1172,7 +1183,7 @@ public:
             assert(dht::shard_of(*_schema, dk.token()) == this_shard_id());
 #endif
 
-            if (!belongs_to_current_node(dk.token(), _owned_ranges)) {
+            if (!_owned_ranges_checker.belongs_to_current_node(dk.token())) {
                 log_trace("Token {} does not belong to this node, skipping", dk.token());
                 return false;
             }
@@ -1582,7 +1593,6 @@ compaction_type compaction_options::type() const {
     static const compaction_type index_to_type[] = {
         compaction_type::Compaction,
         compaction_type::Cleanup,
-        compaction_type::Validation,
         compaction_type::Upgrade,
         compaction_type::Scrub,
         compaction_type::Reshard,
@@ -1609,9 +1619,6 @@ static std::unique_ptr<compaction> make_compaction(column_family& cf, sstables::
         std::unique_ptr<compaction> operator()(compaction_options::cleanup options) {
             return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(options));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::validation) {
-            return nullptr; // this compaction doesn't go through the regular path
-        }
         std::unique_ptr<compaction> operator()(compaction_options::upgrade options) {
             return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(options));
         }
@@ -1623,7 +1630,7 @@ static std::unique_ptr<compaction> make_compaction(column_family& cf, sstables::
     return descriptor.options.visit(visitor_factory);
 }
 
-future<bool> validate_compaction_validate_reader(flat_mutation_reader reader, const compaction_info& info) {
+future<bool> scrub_validate_mode_validate_reader(flat_mutation_reader reader, const compaction_info& info) {
     auto schema = reader.schema();
 
     bool valid = true;
@@ -1643,25 +1650,25 @@ future<bool> validate_compaction_validate_reader(flat_mutation_reader reader, co
             if (mf.is_partition_start()) {
                 const auto& ps = mf.as_partition_start();
                 if (!validator(mf)) {
-                    scrub_compaction::report_invalid_partition_start(compaction_type::Validation, validator, ps.key());
+                    scrub_compaction::report_invalid_partition_start(compaction_type::Scrub, validator, ps.key());
                     validator.reset(mf);
                     valid = false;
                 }
                 if (!validator(ps.key())) {
-                    scrub_compaction::report_invalid_partition(compaction_type::Validation, validator, ps.key());
+                    scrub_compaction::report_invalid_partition(compaction_type::Scrub, validator, ps.key());
                     validator.reset(ps.key());
                     valid = false;
                 }
             } else {
                 if (!validator(mf)) {
-                    scrub_compaction::report_invalid_mutation_fragment(compaction_type::Validation, validator, mf);
+                    scrub_compaction::report_invalid_mutation_fragment(compaction_type::Scrub, validator, mf);
                     validator.reset(mf);
                     valid = false;
                 }
             }
         }
         if (!validator.on_end_of_stream()) {
-            scrub_compaction::report_invalid_end_of_stream(compaction_type::Validation, validator);
+            scrub_compaction::report_invalid_end_of_stream(compaction_type::Scrub, validator);
             valid = false;
         }
     } catch (...) {
@@ -1677,7 +1684,7 @@ future<bool> validate_compaction_validate_reader(flat_mutation_reader reader, co
     co_return valid;
 }
 
-static future<compaction_info> validate_sstables(sstables::compaction_descriptor descriptor, column_family& cf) {
+static future<compaction_info> scrub_sstables_validate_mode(sstables::compaction_descriptor descriptor, column_family& cf) {
     auto schema = cf.schema();
 
     formatted_sstables_list sstables_list_msg;
@@ -1694,15 +1701,15 @@ static future<compaction_info> validate_sstables(sstables::compaction_descriptor
         cf.get_compaction_manager().deregister_compaction(info);
     });
 
-    clogger.info("Validating {}", sstables_list_msg);
+    clogger.info("Scrubbing in validate mode {}", sstables_list_msg);
 
-    auto permit = cf.compaction_concurrency_semaphore().make_tracking_only_permit(schema.get(), "Validation");
+    auto permit = cf.compaction_concurrency_semaphore().make_tracking_only_permit(schema.get(), "scrub:validate");
     auto reader = sstables->make_local_shard_sstable_reader(schema, permit, query::full_partition_range, schema->full_slice(), descriptor.io_priority,
             tracing::trace_state_ptr(), ::streamed_mutation::forwarding::no, ::mutation_reader::forwarding::no, default_read_monitor_generator());
 
-    const auto valid = co_await validate_compaction_validate_reader(std::move(reader), *info);
+    const auto valid = co_await scrub_validate_mode_validate_reader(std::move(reader), *info);
 
-    clogger.info("Validated {} - sstable(s) are {}", sstables_list_msg, valid ? "valid" : "invalid");
+    clogger.info("Finished scrubbing in validate mode {} - sstable(s) are {}", sstables_list_msg, valid ? "valid" : "invalid");
 
     co_return *info;
 }
@@ -1713,9 +1720,10 @@ compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf) 
         return make_exception_future<compaction_info>(std::runtime_error(format("Called {} compaction with empty set on behalf of {}.{}",
                 compaction_name(descriptor.options.type()), cf.schema()->ks_name(), cf.schema()->cf_name())));
     }
-    if (descriptor.options.type() == compaction_type::Validation) {
-        // Bypass the usual compaction machinery for validation compaction
-        return validate_sstables(std::move(descriptor), cf);
+    if (descriptor.options.type() == compaction_type::Scrub
+            && std::get<compaction_options::scrub>(descriptor.options.options()).operation_mode == compaction_options::scrub::mode::validate) {
+        // Bypass the usual compaction machinery for dry-mode scrub
+        return scrub_sstables_validate_mode(std::move(descriptor), cf);
     }
     auto c = make_compaction(cf, std::move(descriptor));
     if (c->enable_garbage_collected_sstable_writer()) {

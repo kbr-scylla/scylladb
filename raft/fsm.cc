@@ -192,11 +192,39 @@ void fsm::become_candidate(bool is_prevote, bool is_leadership_transfer) {
 
     const auto& voters = votes.voters();
     if (!voters.contains(server_address{_my_id})) {
-        // If the server is not part of the current configuration,
-        // revert to the follower state without increasing
-        // the current term.
-        become_follower(server_id{});
-        return;
+        // We're not a voter in the current configuration (perhaps we completely left it).
+        //
+        // But sometimes, if we're transitioning between configurations
+        // such that we were a voter in the previous configuration, we may still need
+        // to become a candidate: the new configuration may be unable to proceed without us.
+        //
+        // For example, if Cold = {A, B}, Cnew = {B}, A is a leader, switching from Cold to Cnew,
+        // and Cnew wasn't yet received by B, then B won't be able to win an election:
+        // B will ask A for a vote because it is still in the joint configuration
+        // and A won't grant it because B has a shorter log. A is the only node
+        // that can become a leader at this point.
+        //
+        // However we can easily determine when we don't need to become a candidate:
+        // If Cnew is already committed, that means that a quorum in Cnew had to accept
+        // the Cnew entry, so there is a quorum in Cnew that can proceed on their own.
+        //
+        // Ref. Raft PhD 4.2.2.
+        if (_log.last_conf_idx() <= _commit_idx) {
+            // Cnew already committed, no need to become a candidate.
+            become_follower(server_id{});
+            return;
+        }
+
+        // The last configuration is not committed yet.
+        // This means we must still have access to the previous configuration.
+        // Become a candidate only if we were previously a voter.
+        auto prev_cfg = _log.get_prev_configuration();
+        assert(prev_cfg);
+        if (!prev_cfg->can_vote(_my_id)) {
+            // We weren't a voter before.
+            become_follower(server_id{});
+            return;
+        }
     }
 
     term_t term{_current_term + 1};
@@ -899,16 +927,27 @@ void fsm::install_snapshot_reply(server_id from, snapshot_reply&& reply) {
     // again and snapshot transfer will be attempted one more time.
 }
 
-bool fsm::apply_snapshot(snapshot snp, size_t trailing) {
-    logger.trace("apply_snapshot[{}]: term: {}, idx: {}", _my_id, _current_term, snp.idx);
+bool fsm::apply_snapshot(snapshot snp, size_t trailing, bool local) {
+    logger.trace("apply_snapshot[{}]: current term: {}, term: {}, idx: {}, id: {}, local: {}",
+            _my_id, _current_term, snp.term, snp.idx, snp.id, local);
+    // If the snapshot is locally generated, all entries up to its index must have been locally applied,
+    // so in particular they must have been observed as committed.
+    // Remote snapshots are only applied if we're a follower.
+    assert((local && snp.idx <= _observed._commit_idx) || (!local && is_follower()));
+
+    // We don't apply snapshots older than the last applied one.
+    // Furthermore, for remote snapshots, we can *only* apply them if they are fresher than our commit index.
+    // Applying older snapshots could result in out-of-order command application to the replicated state machine,
+    // leading to serializability violations.
     const auto& current_snp = _log.get_snapshot();
-    // Uncommitted entries can not appear in the snapshot
-    assert(snp.idx <= _commit_idx || is_follower());
-    if (snp.idx <= current_snp.idx) {
-        logger.error("apply_snapshot[{}]: ignore outdated snapshot {}/{} current one is {}/{}",
-                        _my_id, snp.id, snp.idx, current_snp.id, current_snp.idx);
+    if (snp.idx <= current_snp.idx || (!local && snp.idx <= _commit_idx)) {
+        logger.error("apply_snapshot[{}]: ignore outdated snapshot {}/{} current one is {}/{}, commit_idx={}",
+                        _my_id, snp.id, snp.idx, current_snp.id, current_snp.idx, _commit_idx);
         return false;
     }
+    // If the snapshot is local, _commit_idx is larger than snp.idx.
+    // Otherwise snp.idx becomes the new commit nidex.
+    _commit_idx = std::max(_commit_idx, snp.idx);
     size_t units = _log.apply_snapshot(std::move(snp), trailing);
     if (is_leader()) {
         logger.trace("apply_snapshot[{}]: signal {} available units", _my_id, units);

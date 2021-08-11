@@ -15,6 +15,10 @@ log_entry_ptr& log::get_entry(index_t i) {
     return _log[i - _first_idx];
 }
 
+const log_entry_ptr& log::get_entry(index_t i) const {
+    return _log[i - _first_idx];
+}
+
 log_entry_ptr& log::operator[](size_t i) {
     assert(!_log.empty() && index_t(i) >= _first_idx);
     return get_entry(index_t(i));
@@ -134,6 +138,37 @@ const configuration& log::get_configuration() const {
     return _last_conf_idx ? std::get<configuration>(_log[_last_conf_idx - _first_idx]->data) : _snapshot.config;
 }
 
+const configuration& log::last_conf_for(index_t idx) const {
+    assert(last_idx() >= idx);
+    assert(idx >= _snapshot.idx);
+
+    if (!_last_conf_idx) {
+        assert(!_prev_conf_idx);
+        return _snapshot.config;
+    }
+
+    if (idx >= _last_conf_idx) {
+        return std::get<configuration>(get_entry(_last_conf_idx)->data);
+    }
+
+    if (!_prev_conf_idx) {
+        // There are no config entries between _snapshot and _last_conf_idx.
+        return _snapshot.config;
+    }
+
+    if (idx >= _prev_conf_idx) {
+        return std::get<configuration>(get_entry(_prev_conf_idx)->data);
+    }
+
+    for (; idx > _snapshot.idx; --idx) {
+        if (auto cfg = std::get_if<configuration>(&get_entry(idx)->data)) {
+            return *cfg;
+        }
+    }
+
+    return _snapshot.config;
+}
+
 index_t log::maybe_append(std::vector<log_entry_ptr>&& entries) {
     assert(!entries.empty());
 
@@ -165,6 +200,19 @@ index_t log::maybe_append(std::vector<log_entry_ptr>&& entries) {
     }
 
     return last_new_idx;
+}
+
+const configuration* log::get_prev_configuration() const {
+    if (_prev_conf_idx) {
+        return &std::get<configuration>(get_entry(_prev_conf_idx)->data);
+    }
+
+    if (_last_conf_idx > _snapshot.idx) {
+        return &_snapshot.config;
+    }
+
+    // _last_conf_idx <= _snapshot.idx means we only have the last configuration (from the snapshot).
+    return nullptr;
 }
 
 size_t log::apply_snapshot(snapshot&& snp, size_t trailing) {

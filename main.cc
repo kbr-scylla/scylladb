@@ -1038,6 +1038,9 @@ int main(int ac, char** av) {
 
             distributed_loader::ensure_system_table_directories(db).get();
 
+            // making compaction manager api available, after system keyspace has already been established.
+            api::set_server_compaction_manager(ctx).get();
+
             supervisor::notify("loading non-system sstables");
             distributed_loader::init_non_system_keyspaces(db, proxy, mm).get();
 
@@ -1335,6 +1338,11 @@ int main(int ac, char** av) {
             proxy.invoke_on_all([] (service::storage_proxy& local_proxy) {
                 local_proxy.allow_replaying_hints();
             }).get();
+
+            api::set_hinted_handoff(ctx).get();
+            auto stop_hinted_handoff_api = defer_verbose_shutdown("hinted handoff API", [&ctx] {
+                api::unset_hinted_handoff(ctx).get();
+            });
 
             if (cfg->view_building()) {
                 supervisor::notify("Launching generate_mv_updates for non system tables");

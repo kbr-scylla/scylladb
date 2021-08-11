@@ -27,7 +27,7 @@ namespace sstables {
 enum class compaction_type {
     Compaction = 0,
     Cleanup = 1,
-    Validation = 2,
+    Validation = 2, // Origin uses this for a compaction that is used exclusively for repair
     Scrub = 3,
     Index_build = 4,
     Reshard = 5,
@@ -58,8 +58,6 @@ public:
     struct cleanup {
         std::reference_wrapper<database> db;
     };
-    struct validation {
-    };
     struct upgrade {
         std::reference_wrapper<database> db;
     };
@@ -68,6 +66,7 @@ public:
             abort, // abort scrub on the first sign of corruption
             skip, // skip corrupt data, including range of rows and/or partitions that are out-of-order
             segregate, // segregate out-of-order data into streams that all contain data with correct order
+            validate, // validate data, printing all errors found (sstables are only read, not rewritten)
         };
         mode operation_mode = mode::abort;
     };
@@ -76,7 +75,7 @@ public:
     struct reshape {
     };
 private:
-    using options_variant = std::variant<regular, cleanup, validation, upgrade, scrub, reshard, reshape>;
+    using options_variant = std::variant<regular, cleanup, upgrade, scrub, reshard, reshape>;
 
 private:
     options_variant _options;
@@ -102,10 +101,6 @@ public:
         return compaction_options(cleanup{db});
     }
 
-    static compaction_options make_validation() {
-        return compaction_options(validation{});
-    }
-
     static compaction_options make_upgrade(database& db) {
         return compaction_options(upgrade{db});
     }
@@ -118,6 +113,8 @@ public:
     auto visit(Visitor&&... visitor) const {
         return std::visit(std::forward<Visitor>(visitor)..., _options);
     }
+
+    const options_variant& options() const { return _options; }
 
     compaction_type type() const;
 };

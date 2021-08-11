@@ -42,7 +42,7 @@
 #include "memtable.hh"
 #include "mutation_reader.hh"
 #include "row_cache.hh"
-#include "compaction_strategy.hh"
+#include "compaction/compaction_strategy.hh"
 #include "utils/estimated_histogram.hh"
 #include "sstables/sstable_set.hh"
 #include <seastar/core/metrics_registration.hh>
@@ -870,7 +870,6 @@ public:
     void start_compaction();
     void trigger_compaction();
     void try_trigger_compaction() noexcept;
-    future<> run_compaction(sstables::compaction_descriptor descriptor);
     void trigger_offstrategy_compaction();
     future<> run_offstrategy_compaction();
     void set_compaction_strategy(sstables::compaction_strategy_type strategy);

@@ -8,10 +8,6 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-// The DynamoAPI dictates that "binary" (a.k.a. "bytes" or "blob") values
-// be encoded in the JSON API as base64-encoded strings. This is code to
-// convert byte arrays to base64-encoded strings, and back.
-
 #include "base64.hh"
 
 #include <ctype.h>

@@ -306,6 +306,7 @@ future<> compaction_manager::run_custom_job(column_family* cf, sstables::compact
             f.get();
         } catch (sstables::compaction_stop_exception& e) {
             cmlog.info("{} was abruptly stopped, reason: {}", task->type, e.what());
+            throw;
         } catch (...) {
             cmlog.error("{} failed: {}", task->type, std::current_exception());
             throw;
@@ -583,7 +584,7 @@ void compaction_manager::submit(column_family* cf) {
             _stats.pending_tasks--;
             _stats.active_tasks++;
             task->compaction_running = true;
-            return cf.run_compaction(std::move(descriptor)).then_wrapped([this, task, compacting = std::move(compacting), weight_r = std::move(weight_r)] (future<> f) mutable {
+            return cf.compact_sstables(std::move(descriptor)).then_wrapped([this, task, compacting = std::move(compacting), weight_r = std::move(weight_r)] (future<> f) mutable {
                 _stats.active_tasks--;
                 task->compaction_running = false;
 
@@ -712,7 +713,7 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
                 compaction_backlog_tracker user_initiated(std::make_unique<user_initiated_backlog_tracker>(_compaction_controller.backlog_of_shares(200), _available_memory));
                 return do_with(std::move(user_initiated), [this, &cf, descriptor = std::move(descriptor)] (compaction_backlog_tracker& bt) mutable {
                     return with_scheduling_group(_maintenance_sg.cpu, [this, &cf, descriptor = std::move(descriptor)]() mutable {
-                        return cf.run_compaction(std::move(descriptor));
+                        return cf.compact_sstables(std::move(descriptor));
                     });
                 });
             }).then_wrapped([this, task, compacting] (future<> f) mutable {
@@ -742,8 +743,8 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
     return task->compaction_done.get_future().then([task] {});
 }
 
-future<> compaction_manager::perform_sstable_validation(column_family* cf) {
-    return run_custom_job(cf, sstables::compaction_type::Validation, [this, &cf = *cf, sstables = get_candidates(*cf)] () mutable -> future<> {
+future<> compaction_manager::perform_sstable_scrub_validate_mode(column_family* cf) {
+    return run_custom_job(cf, sstables::compaction_type::Scrub, [this, &cf = *cf, sstables = get_candidates(*cf)] () mutable -> future<> {
         class pending_tasks {
             compaction_manager::stats& _stats;
             size_t _n;
@@ -763,8 +764,14 @@ future<> compaction_manager::perform_sstable_validation(column_family* cf) {
 
             try {
                 co_await with_scheduling_group(_maintenance_sg.cpu, [&] () {
-                    auto desc = sstables::compaction_descriptor({ sst }, {}, _maintenance_sg.io, sst->get_sstable_level(),
-                            sstables::compaction_descriptor::default_max_sstable_bytes, sst->run_identifier(), sstables::compaction_options::make_validation());
+                    auto desc = sstables::compaction_descriptor(
+                            { sst },
+                            {},
+                            _maintenance_sg.io,
+                            sst->get_sstable_level(),
+                            sstables::compaction_descriptor::default_max_sstable_bytes,
+                            sst->run_identifier(),
+                            sstables::compaction_options::make_scrub(sstables::compaction_options::scrub::mode::validate));
                     return compact_sstables(std::move(desc), cf);
                 });
             } catch (sstables::compaction_stop_exception&) {
@@ -776,7 +783,7 @@ future<> compaction_manager::perform_sstable_validation(column_family* cf) {
                 // expected, just continue with the other sstables when seeing
                 // one.
                 _stats.errors++;
-                cmlog.error("Validating {} failed due to {}, continuing.", sst->get_filename(), std::current_exception());
+                cmlog.error("Scrubbing in validate mode {} failed due to {}, continuing.", sst->get_filename(), std::current_exception());
             }
 
             pending--;
@@ -866,6 +873,9 @@ future<> compaction_manager::perform_sstable_upgrade(database& db, column_family
 
 // Submit a column family to be scrubbed and wait for its termination.
 future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::compaction_options::scrub::mode scrub_mode) {
+    if (scrub_mode == sstables::compaction_options::scrub::mode::validate) {
+        return perform_sstable_scrub_validate_mode(cf);
+    }
     return rewrite_sstables(cf, sstables::compaction_options::make_scrub(scrub_mode), [this] (const table& cf) {
         return get_candidates(cf);
     });

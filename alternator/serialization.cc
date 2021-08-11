@@ -8,7 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "base64.hh"
+#include "utils/base64.hh"
 #include "log.hh"
 #include "serialization.hh"
 #include "error.hh"

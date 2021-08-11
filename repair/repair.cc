@@ -15,7 +15,8 @@
 #include "dht/sharder.hh"
 #include "streaming/stream_reason.hh"
 #include "gms/inet_address.hh"
-#include "service/storage_proxy.hh"
+#include "utils/fb_utilities.hh"
+#include "gms/gossiper.hh"
 #include "service/priority_manager.hh"
 #include "message/messaging_service.hh"
 #include "sstables/sstables.hh"
@@ -514,7 +515,6 @@ future<> tracker::run(repair_uniq_id id, std::function<void ()> func) {
             rlogger.info("repair id {} completed successfully", id);
             done(id, true);
         }).handle_exception([this, id] (std::exception_ptr ep) {
-            rlogger.warn("repair id {} failed: {}", id, ep);
             done(id, false);
             return make_exception_future(std::move(ep));
         });
@@ -601,11 +601,11 @@ repair_info::repair_info(repair_service& repair,
 }
 
 void repair_info::check_failed_ranges() {
-    rlogger.info("repair id {} on shard {} stats: repair_reason={}, keyspace={}, tables={}, ranges_nr={}, sub_ranges_nr={}, {}",
-        id, shard, reason, keyspace, table_names(), ranges.size(), _sub_ranges_nr, _stats.get_stats());
+    rlogger.info("repair id {} on shard {} stats: repair_reason={}, keyspace={}, tables={}, ranges_nr={}, {}",
+        id, shard, reason, keyspace, table_names(), ranges.size(), _stats.get_stats());
     if (nr_failed_ranges) {
-        rlogger.warn("repair id {} on shard {} failed - {} ranges failed", id, shard, nr_failed_ranges);
-        throw std::runtime_error(format("repair id {} on shard {} failed to repair {} sub ranges", id, shard, nr_failed_ranges));
+        rlogger.warn("repair id {} on shard {} failed - {} out of {} ranges failed", id, shard, nr_failed_ranges, ranges.size());
+        throw std::runtime_error(format("repair id {} on shard {} failed to repair {} out of {} ranges", id, shard, nr_failed_ranges, ranges.size()));
     } else {
         if (dropped_tables.size()) {
             rlogger.warn("repair id {} on shard {} completed successfully, keyspace={}, ignoring dropped tables={}", id, shard, keyspace, dropped_tables);
@@ -634,9 +634,11 @@ repair_neighbors repair_info::get_repair_neighbors(const dht::token_range& range
 // Repair a single local range, multiple column families.
 // Comparable to RepairSession in Origin
 future<> repair_info::repair_range(const dht::token_range& range) {
-    auto id = utils::UUID_gen::get_time_UUID();
+    check_in_shutdown();
+    check_in_abort();
+    ranges_index++;
     repair_neighbors neighbors = get_repair_neighbors(range);
-    return do_with(std::move(neighbors.all), std::move(neighbors.mandatory), [this, range, id] (auto& neighbors, auto& mandatory_neighbors) {
+    return do_with(std::move(neighbors.all), std::move(neighbors.mandatory), [this, range] (auto& neighbors, auto& mandatory_neighbors) {
       auto live_neighbors = boost::copy_range<std::vector<gms::inet_address>>(neighbors |
                     boost::adaptors::filtered([] (const gms::inet_address& node) { return gms::get_local_gossiper().is_alive(node); }));
       for (auto& node : mandatory_neighbors) {
@@ -667,7 +669,9 @@ future<> repair_info::repair_range(const dht::token_range& range) {
             ranges_index, ranges.size(), id, shard, keyspace, table_names(), range, neighbors, live_neighbors, status);
             return make_ready_future<>();
       }
-      return mm.sync_schema(db.local(), neighbors).then([this, &neighbors, range, id] {
+      rlogger.info("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}, peers={}, live_peers={}",
+            ranges_index, ranges.size(), id, shard, keyspace, table_names(), range, neighbors, live_neighbors);
+      return mm.sync_schema(db.local(), neighbors).then([this, &neighbors, range] {
         return do_for_each(table_ids.begin(), table_ids.end(), [this, &neighbors, range] (utils::UUID table_id) {
             sstring cf;
             try {
@@ -675,7 +679,6 @@ future<> repair_info::repair_range(const dht::token_range& range) {
             } catch (no_such_column_family&) {
                 return make_ready_future<>();
             }
-            _sub_ranges_nr++;
             // Row level repair
             if (dropped_tables.contains(cf)) {
                 return make_ready_future<>();
@@ -966,11 +969,6 @@ static future<> do_repair_ranges(lw_shared_ptr<repair_info> ri) {
     // repair all the ranges in limited parallelism
     return parallel_for_each(ri->ranges, [ri] (auto&& range) {
         return with_semaphore(repair_tracker().range_parallelism_semaphore(), 1, [ri, &range] {
-            check_in_shutdown();
-            ri->check_in_abort();
-            ri->ranges_index++;
-            rlogger.info("Repair {} out of {} ranges, id={}, shard={}, keyspace={}, table={}, range={}",
-                ri->ranges_index, ri->ranges.size(), ri->id, ri->shard, ri->keyspace, ri->table_names(), range);
             return ri->repair_range(range).then([ri] {
                 if (ri->reason == streaming::stream_reason::bootstrap) {
                     _node_ops_metrics.bootstrap_finished_ranges++;
@@ -1002,38 +1000,9 @@ static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
         repair_tracker().remove_repair_info(ri->id.id);
         return make_ready_future<>();
     }).handle_exception([ri] (std::exception_ptr eptr) {
-        rlogger.warn("repair id {} on shard {} failed: {}", ri->id, this_shard_id(), eptr);
         repair_tracker().remove_repair_info(ri->id.id);
         return make_exception_future<>(std::move(eptr));
     });
-}
-
-static future<> try_wait_for_hints_to_be_replayed(repair_uniq_id id, std::vector<gms::inet_address> source_nodes, std::vector<gms::inet_address> target_nodes) {
-    auto get_elapsed_seconds = [start_time = lowres_clock::now()] {
-        return std::chrono::duration_cast<std::chrono::seconds>(lowres_clock::now() - start_time).count();
-    };
-    auto& sp = service::get_local_storage_proxy();
-    rlogger.info("repair id {}: started replaying hints before repair, source nodes: {}, target nodes: {}", id, source_nodes, target_nodes);
-    try {
-        seastar::abort_source combined_as;
-        auto attach = [&] (seastar::abort_source& as) {
-            as.check();
-            return as.subscribe([&] () noexcept {
-                if (!combined_as.abort_requested()) {
-                    combined_as.request_abort();
-                }
-            });
-        };
-
-        const auto shutdown_sub = attach(repair_tracker().get_shutdown_abort_source());
-        const auto abort_all_sub = attach(repair_tracker().get_abort_all_abort_source());
-
-        co_await sp.wait_for_hints_to_be_replayed(id.uuid, std::move(source_nodes), std::move(target_nodes), combined_as);
-        rlogger.info("repair id {}: finished replaying hints (took {}s), continuing with repair", id, get_elapsed_seconds());
-    } catch (...) {
-        rlogger.warn("repair id {}: failed to replay hints before repair (took {}s): {}, the repair will continue", id, get_elapsed_seconds(), std::current_exception());
-    }
-    co_return;
 }
 
 // repair_start() can run on any cpu; It runs on cpu0 the function
@@ -1137,15 +1106,6 @@ int repair_service::do_repair_start(sstring keyspace, std::unordered_map<sstring
     (void)repair_tracker().run(id, [this, &db, id, keyspace = std::move(keyspace),
             cfs = std::move(cfs), ranges = std::move(ranges), options = std::move(options), ignore_nodes = std::move(ignore_nodes)] () mutable {
         auto participants = get_hosts_participating_in_repair(db.local(), keyspace, ranges, options.data_centers, options.hosts, ignore_nodes).get();
-
-        if (db.local().get_config().wait_for_hint_replay_before_repair()) {
-            auto waiting_nodes = db.local().get_token_metadata().get_all_endpoints();
-            std::erase_if(waiting_nodes, [&] (const auto& addr) {
-                return ignore_nodes.contains(addr);
-            });
-            try_wait_for_hints_to_be_replayed(id, std::move(waiting_nodes), participants).get();
-        }
-
         std::vector<future<>> repair_results;
         repair_results.reserve(smp::count);
         auto table_ids = get_table_ids(db.local(), keyspace, cfs);

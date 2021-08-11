@@ -47,7 +47,7 @@
 #include "types/listlike_partial_deserializing_iterator.hh"
 #include "tracing/trace_state.hh"
 #include "stats.hh"
-#include "compaction_strategy.hh"
+#include "compaction/compaction_strategy.hh"
 
 namespace std {
 

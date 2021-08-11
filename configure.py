@@ -414,6 +414,7 @@ scylla_tests = set([
     'test/boost/gossiping_property_file_snitch_test',
     'test/boost/hash_test',
     'test/boost/hashers_test',
+    'test/boost/hint_test',
     'test/boost/idl_test',
     'test/boost/input_stream_test',
     'test/boost/json_cql_query_test',
@@ -467,6 +468,7 @@ scylla_tests = set([
     'test/boost/sstable_partition_index_cache_test',
     'test/boost/schema_changes_test',
     'test/boost/sstable_conforms_to_mutation_source_test',
+    'test/boost/sstable_compaction_test',
     'test/boost/sstable_resharding_test',
     'test/boost/sstable_directory_test',
     'test/boost/incremental_compaction_test',
@@ -673,6 +675,7 @@ scylla_core = (['database.cc',
                 'schema_mutations.cc',
                 'generic_server.cc',
                 'utils/array-search.cc',
+                'utils/base64.cc',
                 'utils/logalloc.cc',
                 'utils/large_bitset.cc',
                 'utils/buffer_input_stream.cc',
@@ -852,6 +855,7 @@ scylla_core = (['database.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
                 'db/hints/host_filter.cc',
+                'db/hints/sync_point.cc',
                 'db/config.cc',
                 'db/extensions.cc',
                 'db/heat_load_balance.cc',
@@ -898,6 +902,7 @@ scylla_core = (['database.cc',
                 'query.cc',
                 'query-result-set.cc',
                 'locator/abstract_replication_strategy.cc',
+                'locator/azure_snitch.cc',
                 'locator/simple_strategy.cc',
                 'locator/local_strategy.cc',
                 'locator/network_topology_strategy.cc',
@@ -1056,7 +1061,6 @@ alternator = [
        'alternator/server.cc',
        'alternator/executor.cc',
        'alternator/stats.cc',
-       'alternator/base64.cc',
        'alternator/serialization.cc',
        'alternator/expressions.cc',
        Antlr3Grammar('alternator/expressions.g'),
@@ -1262,7 +1266,6 @@ deps['test/boost/linearizing_input_stream_test'] = [
 ]
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
-deps['test/boost/alternator_unit_test'] += ['alternator/base64.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc'] + scylla_raft_dependencies
 deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc'] + scylla_raft_dependencies
