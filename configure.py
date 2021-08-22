@@ -499,6 +499,7 @@ scylla_tests = set([
     'test/boost/stall_free_test',
     'test/boost/sstable_set_test',
     'test/boost/reader_concurrency_semaphore_test',
+    'test/boost/service_level_controller_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -757,12 +758,14 @@ scylla_core = (['database.cc',
                 'cql3/statements/create_view_statement.cc',
                 'cql3/statements/create_type_statement.cc',
                 'cql3/statements/create_function_statement.cc',
+                'cql3/statements/create_aggregate_statement.cc',
                 'cql3/statements/drop_index_statement.cc',
                 'cql3/statements/drop_keyspace_statement.cc',
                 'cql3/statements/drop_table_statement.cc',
                 'cql3/statements/drop_view_statement.cc',
                 'cql3/statements/drop_type_statement.cc',
                 'cql3/statements/drop_function_statement.cc',
+                'cql3/statements/drop_aggregate_statement.cc',
                 'cql3/statements/schema_altering_statement.cc',
                 'cql3/statements/ks_prop_defs.cc',
                 'cql3/statements/function_statement.cc',
@@ -1350,6 +1353,14 @@ for mode_level in args.mode_o_levels:
 for mode in modes:
     modes[mode]['cxxflags'] += f' -O{modes[mode]["optimization-level"]}'
 
+has_wasmtime = os.path.isfile('/usr/lib64/libwasmtime.a') and os.path.isdir('/usr/local/include/wasmtime')
+
+if has_wasmtime:
+    for mode in modes:
+        modes[mode]['cxxflags'] += ' -DSCYLLA_ENABLE_WASMTIME'
+else:
+    print("wasmtime not found - WASM support will not be enabled in this build")
+
 linker_flags = linker_flags(compiler=args.cxx)
 
 dbgflag = '-g -gz' if args.debuginfo else ''
@@ -1656,7 +1667,11 @@ libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-l
                  # experimental APIs that we use are only present there.
                  maybe_static(True, '-lzstd'),
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc -licui18n'),
-                 '-lxxhash'])
+                 '-lxxhash',
+                ])
+if has_wasmtime:
+    print("Found wasmtime dependency, linking with libwasmtime")
+    libs += ' -lwasmtime'
 
 if not args.staticboost:
     args.user_cflags += ' -DBOOST_TEST_DYN_LINK'

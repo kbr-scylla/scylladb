@@ -55,6 +55,7 @@ constexpr std::string_view features::CORRECT_IDX_TOKEN_IN_SECONDARY_INDEX = "COR
 constexpr std::string_view features::ALTERNATOR_STREAMS = "ALTERNATOR_STREAMS";
 constexpr std::string_view features::RANGE_SCAN_DATA_VARIANT = "RANGE_SCAN_DATA_VARIANT";
 constexpr std::string_view features::CDC_GENERATIONS_V2 = "CDC_GENERATIONS_V2";
+constexpr std::string_view features::UDA = "UDA";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 constexpr std::string_view features::WORKLOAD_PRIORITIZATION = "WORKLOAD_PRIORITIZATION";
 
@@ -80,6 +81,7 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _alternator_streams_feature(*this, features::ALTERNATOR_STREAMS)
         , _range_scan_data_variant(*this, features::RANGE_SCAN_DATA_VARIANT)
         , _cdc_generations_v2(*this, features::CDC_GENERATIONS_V2)
+        , _uda(*this, features::UDA)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
         , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION)
 {}
@@ -177,6 +179,7 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::ALTERNATOR_STREAMS,
         gms::features::RANGE_SCAN_DATA_VARIANT,
         gms::features::CDC_GENERATIONS_V2,
+        gms::features::UDA,
         gms::features::IN_MEMORY_TABLES,
         gms::features::WORKLOAD_PRIORITIZATION,
     };
@@ -258,6 +261,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_alternator_streams_feature),
         std::ref(_range_scan_data_variant),
         std::ref(_cdc_generations_v2),
+        std::ref(_uda),
         std::ref(_in_memory_tables),
         std::ref(_workload_prioritization),
     })

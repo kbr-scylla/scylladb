@@ -605,14 +605,7 @@ public:
         return _config.dirty_memory_manager->region_group();
     }
 
-    // Used for asynchronous operations that may defer and need to guarantee that the column
-    // family will be alive until their termination
-    template<typename Func, typename Futurator = futurize<std::result_of_t<Func()>>, typename... Args>
-    typename Futurator::type run_async(Func&& func, Args&&... args) {
-        return with_gate(_async_gate, [func = std::forward<Func>(func), args = std::make_tuple(std::forward<Args>(args)...)] () mutable {
-            return Futurator::apply(func, std::move(args));
-        });
-    }
+    seastar::gate& async_gate() { return _async_gate; }
 
     uint64_t failed_counter_applies_to_memtable() const {
         return _failed_counter_applies_to_memtable;
@@ -1533,6 +1526,8 @@ public:
         return *_system_sstables_manager;
     }
 
+    // Returns the list of ranges held by this endpoint
+    // The returned list is sorted, and its elements are non overlapping and non wrap-around.
     dht::token_range_vector get_keyspace_local_ranges(sstring ks);
 
     void set_format(sstables::sstable_version_types format);

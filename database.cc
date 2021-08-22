@@ -1780,7 +1780,7 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
 
     data_listeners().on_write(m_schema, m);
 
-  return cf.run_async([this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf, timeout]() mutable {
+  return with_gate(cf.async_gate(), [this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf, timeout] () mutable -> future<> {
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf]() mutable {
         cf.apply(m, m_schema, std::move(h));
     }, timeout);
@@ -1788,8 +1788,8 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
 }
 
 future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
-  return cf.run_async([this, &m, h = std::move(h), &cf, timeout]() mutable {
-    return cf.dirty_memory_region_group().run_when_memory_available([this, &m, &cf, h = std::move(h)]() mutable {
+  return with_gate(cf.async_gate(), [this, &m, h = std::move(h), &cf, timeout]() mutable -> future<> {
+    return cf.dirty_memory_region_group().run_when_memory_available([this, &m, &cf, h = std::move(h)] () mutable {
         cf.apply(m, std::move(h));
     }, timeout);
   });
@@ -2081,33 +2081,23 @@ database::stop() {
     assert(!_large_data_handler->running());
 
     // try to ensure that CL has done disk flushing
-    future<> maybe_shutdown_commitlog = _commitlog != nullptr ? _commitlog->shutdown() : make_ready_future<>();
-    return maybe_shutdown_commitlog.then([this] {
-        return _view_update_concurrency_sem.wait(max_memory_pending_view_updates());
-    }).then([this] {
-        if (_commitlog != nullptr) {
-            return _commitlog->release();
-        }
-        return make_ready_future<>();
-    }).then([this] {
-        return _system_dirty_memory_manager.shutdown();
-    }).then([this] {
-        return _dirty_memory_manager.shutdown();
-    }).then([this] {
-        return _memtable_controller.shutdown();
-    }).then([this] {
-        return _user_sstables_manager->close();
-    }).then([this] {
-        return _system_sstables_manager->close();
-    }).finally([this] {
-        return _querier_cache.stop().finally([this] {
-            return when_all_succeed(
-                    _read_concurrency_sem.stop(),
-                    _streaming_concurrency_sem.stop(),
-                    _compaction_concurrency_sem.stop(),
-                    _system_read_concurrency_sem.stop()).discard_result();
-        });
-    });
+    if (_commitlog) {
+        co_await _commitlog->shutdown();
+    }
+    co_await _view_update_concurrency_sem.wait(max_memory_pending_view_updates());
+    if (_commitlog) {
+        co_await _commitlog->release();
+    }
+    co_await _system_dirty_memory_manager.shutdown();
+    co_await _dirty_memory_manager.shutdown();
+    co_await _memtable_controller.shutdown();
+    co_await _user_sstables_manager->close();
+    co_await _system_sstables_manager->close();
+    co_await _querier_cache.stop();
+    co_await _read_concurrency_sem.stop();
+    co_await _streaming_concurrency_sem.stop();
+    co_await _compaction_concurrency_sem.stop();
+    co_await _system_read_concurrency_sem.stop();
 }
 
 future<> database::flush_all_memtables() {
@@ -2128,7 +2118,7 @@ future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) 
 }
 
 future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_func tsf, bool with_snapshot) {
-    return cf.run_async([this, &ks, &cf, tsf = std::move(tsf), with_snapshot] {
+    return with_gate(cf.async_gate(), [this, &ks, &cf, tsf = std::move(tsf), with_snapshot] () mutable -> future<> {
         const auto auto_snapshot = with_snapshot && get_config().auto_snapshot();
         const auto should_flush = auto_snapshot;
 

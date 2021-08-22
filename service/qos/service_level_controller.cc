@@ -268,31 +268,51 @@ future<std::optional<service_level_options>> service_level_controller::find_serv
 }
 
 future<>  service_level_controller::notify_service_level_added(sstring name, service_level sl_data) {
-    auto result= _service_levels_db.emplace(name, sl_data);
-    if (result.second) {
-        unsigned sl_idx = internal::scheduling_group_index(sl_data.sg);
-        _sl_lookup[sl_idx].first = &(result.first->first);
-        _sl_lookup[sl_idx].second = &(result.first->second);
-    }
-    return make_ready_future();
+    return seastar::async( [this, name, sl_data] {
+        _subscribers.for_each([name, sl_data] (qos_configuration_change_subscriber* subscriber) {
+            try {
+                subscriber->on_before_service_level_add(name, sl_data.slo).get();
+            } catch (...) {
+                sl_logger.error("notify_service_level_added: exception occurred in one of the observers callbacks {}", std::current_exception());
+            }
+        });
+        auto result= _service_levels_db.emplace(name, sl_data);
+        if (result.second) {
+            unsigned sl_idx = internal::scheduling_group_index(sl_data.sg);
+            _sl_lookup[sl_idx].first = &(result.first->first);
+            _sl_lookup[sl_idx].second = &(result.first->second);
+        }
+    });
+
 }
 
 future<> service_level_controller::notify_service_level_updated(sstring name, service_level_options slo) {
     auto sl_it = _service_levels_db.find(name);
     future<> f = make_ready_future();
     if (sl_it != _service_levels_db.end()) {
-        if (sl_it->second.slo.shares != slo.shares) {
-            int32_t new_shares = 1000;
-            if (auto new_shares_p = std::get_if<int32_t>(&sl_it->second.slo.shares)) {
-                new_shares = *new_shares_p;
-            }
-            sl_it->second.sg.set_shares(new_shares);
-            f = f.then([pc = sl_it->second.pc, shares = new_shares] () {
-                return engine().update_shares_for_class(pc, shares);
+        service_level_options slo_before = sl_it->second.slo;
+        return seastar::async( [this,sl_it, name, slo_before, slo] {
+            future<> f = make_ready_future();
+            _subscribers.for_each([name, slo_before, slo] (qos_configuration_change_subscriber* subscriber) {
+                try {
+                    subscriber->on_before_service_level_change(name, slo_before, slo).get();
+                } catch (...) {
+                    sl_logger.error("notify_service_level_updated: exception occurred in one of the observers callbacks {}", std::current_exception());
+                }
             });
-        }
+            if (sl_it->second.slo.shares != slo.shares) {
+                int32_t new_shares = 1000;
+                if (auto new_shares_p = std::get_if<int32_t>(&sl_it->second.slo.shares)) {
+                    new_shares = *new_shares_p;
+                }
+                sl_it->second.sg.set_shares(new_shares);
+                f = f.then([pc = sl_it->second.pc, shares = new_shares] () {
+                    return engine().update_shares_for_class(pc, shares);
+                });
+            }
 
-        sl_it->second.slo = slo;
+            sl_it->second.slo = slo;
+        });
     }
     return f;
 }
@@ -309,7 +329,15 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         }
         _service_levels_db.erase(sl_it);
     }
-    return make_ready_future();
+    return seastar::async( [this, name] {
+        _subscribers.for_each([name] (qos_configuration_change_subscriber* subscriber) {
+            try {
+                subscriber->on_after_service_level_remove(name).get();
+            } catch (...) {
+                sl_logger.error("notify_service_level_removed: exception occurred in one of the observers callbacks {}", std::current_exception());
+            }
+        });
+    });
 }
 
 io_priority_class* service_level_controller::get_current_priority_class() {
@@ -564,5 +592,13 @@ void service_level_controller::on_leave_cluster(const gms::inet_address& endpoin
 void service_level_controller::on_up(const gms::inet_address& endpoint) { }
 
 void service_level_controller::on_down(const gms::inet_address& endpoint) { }
+
+void service_level_controller::register_subscriber(qos_configuration_change_subscriber* subscriber) {
+    _subscribers.add(subscriber);
+}
+
+future<> service_level_controller::unregister_subscriber(qos_configuration_change_subscriber* subscriber) {
+    return _subscribers.remove(subscriber);
+}
 
 }

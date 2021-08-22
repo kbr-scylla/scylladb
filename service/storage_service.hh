@@ -45,6 +45,7 @@
 #include "database_fwd.hh"
 #include "db/schema_features.hh"
 #include "streaming/stream_state.hh"
+#include "streaming/stream_reason.hh"
 #include <seastar/core/distributed.hh>
 #include "utils/disk-error-handler.hh"
 #include "service/migration_listener.hh"
@@ -892,7 +893,7 @@ private:
     void notify_cql_change(inet_address endpoint, bool ready);
 public:
     future<bool> is_cleanup_allowed(sstring keyspace);
-    bool is_repair_based_node_ops_enabled();
+    bool is_repair_based_node_ops_enabled(streaming::stream_reason reason);
 private:
     struct workload_prioritization_create_tables_tag {};
     using workload_prioritization_create_tables = bool_class<workload_prioritization_create_tables_tag>;

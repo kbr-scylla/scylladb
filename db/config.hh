@@ -163,6 +163,7 @@ public:
     named_value<int64_t> commitlog_total_space_in_mb;
     named_value<bool> commitlog_reuse_segments;
     named_value<bool> commitlog_use_o_dsync;
+    named_value<bool> commitlog_use_hard_size_limit;
     named_value<bool> compaction_preheat_key_cache;
     named_value<uint32_t> concurrent_compactors;
     named_value<uint32_t> in_memory_compaction_limit_in_mb;
@@ -280,6 +281,7 @@ public:
     named_value<sstring> replace_address_first_boot;
     named_value<bool> override_decommission;
     named_value<bool> enable_repair_based_node_ops;
+    named_value<sstring> allowed_repair_based_node_ops;
     named_value<uint32_t> ring_delay_ms;
     named_value<uint32_t> shadow_round_ms;
     named_value<uint32_t> fd_max_interval_ms;
