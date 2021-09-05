@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/util/closeable.hh>
 #include "distributed_loader.hh"
 #include "database.hh"
 #include "db/config.hh"
@@ -384,9 +385,7 @@ distributed_loader::process_upload_dir(distributed<database>& db, distributed<db
 
         }).get();
 
-        auto stop = defer([&directory] {
-            directory.stop().get();
-        });
+        auto stop = deferred_stop(directory);
 
         lock_table(directory, db, ks, cf).get();
         process_sstable_dir(directory).get();
@@ -452,9 +451,7 @@ distributed_loader::get_sstables_from_upload_dir(distributed<database>& db, sstr
 
         }).get();
 
-        auto stop = defer([&directory] {
-            directory.stop().get();
-        });
+        auto stop = deferred_stop(directory);
 
         std::vector<std::vector<sstables::shared_sstable>> sstables_on_shards(smp::count);
         lock_table(directory, db, ks, cf).get();
@@ -464,7 +461,7 @@ distributed_loader::get_sstables_from_upload_dir(distributed<database>& db, sstr
             sstables_on_shards[this_shard_id()] = d.get_unsorted_sstables();
         }).get();
 
-        return std::make_tuple(table_id, sstables_on_shards);
+        return std::make_tuple(table_id, std::move(sstables_on_shards));
     });
 }
 
@@ -536,9 +533,7 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
                 return global_table->make_sstable(dir.native(), gen, v, f);
         }).get();
 
-        auto stop = defer([&directory] {
-            directory.stop().get();
-        });
+        auto stop = deferred_stop(directory);
 
         lock_table(directory, db, ks, cf).get();
         process_sstable_dir(directory).get();

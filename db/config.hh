@@ -24,7 +24,13 @@
 #include "utils/enum_option.hh"
 #include "db/hints/host_filter.hh"
 
-namespace seastar { class file; struct logging_settings; }
+namespace seastar {
+class file;
+struct logging_settings;
+namespace tls {
+class credentials_builder;
+}
+}
 
 namespace db {
 
@@ -71,7 +77,9 @@ namespace db {
 
 /// Enumeration of all valid values for the `experimental` config entry.
 struct experimental_features_t {
-    enum feature { UNUSED, UDF, UNUSED_CDC, ALTERNATOR_STREAMS };
+    // NOTE: RAFT feature is not enabled via `experimental` umbrella flag.
+    // This option should be enabled explicitly.
+    enum feature { UNUSED, UDF, UNUSED_CDC, ALTERNATOR_STREAMS, RAFT };
     static std::unordered_map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();
 };
@@ -326,6 +334,7 @@ public:
     named_value<uint32_t> schema_registry_grace_period;
     named_value<uint32_t> max_concurrent_requests_per_shard;
     named_value<bool> cdc_dont_rewrite_streams;
+    named_value<tri_mode_restriction> strict_allow_filtering;
 
     named_value<uint16_t> alternator_port;
     named_value<uint16_t> alternator_https_port;
@@ -395,5 +404,25 @@ private:
 
     std::shared_ptr<db::extensions> _extensions;
 };
+
+}
+
+namespace utils {
+
+template<typename K, typename V, typename... Args, typename K2, typename V2 = V>
+V get_or_default(const std::unordered_map<K, V, Args...>& ss, const K2& key, const V2& def = V()) {
+    const auto iter = ss.find(key);
+    if (iter != ss.end()) {
+        return iter->second;
+    }
+    return def;
+}
+
+inline bool is_true(sstring val) {
+    std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+    return val == "true" || val == "1";
+}
+
+future<> configure_tls_creds_builder(seastar::tls::credentials_builder& creds, db::config::string_map options);
 
 }

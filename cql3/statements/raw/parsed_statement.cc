@@ -59,16 +59,23 @@ void parsed_statement::set_bound_variables(const std::vector<::shared_ptr<column
 
 }
 
-prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, std::vector<lw_shared_ptr<column_specification>> bound_names_, std::vector<uint16_t> partition_key_bind_indices)
+prepared_statement::prepared_statement(
+        audit::audit_info_ptr&& audit_info,
+        ::shared_ptr<cql_statement> statement_, std::vector<lw_shared_ptr<column_specification>> bound_names_,
+        std::vector<uint16_t> partition_key_bind_indices, std::vector<sstring> warnings)
     : statement(std::move(statement_))
     , bound_names(std::move(bound_names_))
     , partition_key_bind_indices(std::move(partition_key_bind_indices))
+    , warnings(move(warnings))
 {
     statement->set_audit_info(std::move(audit_info));
 }
 
-prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, const prepare_context& ctx, const std::vector<uint16_t>& partition_key_bind_indices)
-    : prepared_statement(std::move(audit_info), statement_, ctx.get_variable_specifications(), partition_key_bind_indices)
+prepared_statement::prepared_statement(
+        audit::audit_info_ptr&& audit_info, 
+        ::shared_ptr<cql_statement> statement_, const prepare_context& ctx,
+        const std::vector<uint16_t>& partition_key_bind_indices, std::vector<sstring> warnings)
+    : prepared_statement(std::move(audit_info), statement_, ctx.get_variable_specifications(), partition_key_bind_indices, move(warnings))
 { }
 
 prepared_statement::prepared_statement(audit::audit_info_ptr&& audit_info, ::shared_ptr<cql_statement> statement_, prepare_context&& ctx, std::vector<uint16_t>&& partition_key_bind_indices)

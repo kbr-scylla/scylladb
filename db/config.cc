@@ -17,8 +17,10 @@
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/print.hh>
 #include <seastar/util/log.hh>
+#include <seastar/net/tls.hh>
 
 #include "cdc/cdc_extension.hh"
 #include "config.hh"
@@ -220,6 +222,10 @@ public:
 
 #define str(x)  #x
 #define _mk_init(name, type, deflt, status, desc, ...)  , name(this, str(name), value_status::status, type(deflt), desc)
+
+static db::tri_mode_restriction_t::mode strict_allow_filtering_default() {
+    return db::tri_mode_restriction_t::mode::WARN; // TODO: make it TRUE after Scylla 4.6.
+}
 
 db::config::config(std::shared_ptr<db::extensions> exts)
     : utils::config_file()
@@ -798,6 +804,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Maximum number of concurrent requests a single shard can handle before it starts shedding extra load. By default, no requests will be shed.")
     , cdc_dont_rewrite_streams(this, "cdc_dont_rewrite_streams", value_status::Used, false,
             "Disable rewriting streams from cdc_streams_descriptions to cdc_streams_descriptions_v2. Should not be necessary, but the procedure is expensive and prone to failures; this config option is left as a backdoor in case some user requires manual intervention.")
+    , strict_allow_filtering(this, "strict_allow_filtering", liveness::LiveUpdate, value_status::Used, strict_allow_filtering_default(), "Match Cassandra in requiring ALLOW FILTERING on slow queries. Can be true, false, or warn. When false, Scylla accepts some slow queries even without ALLOW FILTERING that Cassandra rejects. Warn is same as false, but with warning.")
     , alternator_port(this, "alternator_port", value_status::Used, 0, "Alternator API port")
     , alternator_https_port(this, "alternator_https_port", value_status::Used, 0, "Alternator API HTTPS port")
     , alternator_address(this, "alternator_address", value_status::Used, "0.0.0.0", "Alternator API listening address")
@@ -940,8 +947,11 @@ db::fs::path db::config::get_conf_sub(db::fs::path sub) {
 }
 
 bool db::config::check_experimental(experimental_features_t::feature f) const {
-    if (experimental() && f != experimental_features_t::UNUSED && f != experimental_features_t::UNUSED_CDC) {
-        return true;
+    if (experimental()
+        && f != experimental_features_t::UNUSED
+        && f != experimental_features_t::UNUSED_CDC
+        && f != experimental_features_t::RAFT) {
+            return true;
     }
     const auto& optval = experimental_features();
     return find(begin(optval), end(optval), enum_option<experimental_features_t>{f}) != end(optval);
@@ -996,11 +1006,17 @@ std::unordered_map<sstring, db::experimental_features_t::feature> db::experiment
     // to UNUSED switch for a while, then remove altogether.
     // Change Data Capture is no longer experimental. Map it
     // to UNUSED_CDC switch for a while, then remove altogether.
-    return {{"lwt", UNUSED}, {"udf", UDF}, {"cdc", UNUSED_CDC}, {"alternator-streams", ALTERNATOR_STREAMS}};
+    return {
+        {"lwt", UNUSED},
+        {"udf", UDF},
+        {"cdc", UNUSED_CDC},
+        {"alternator-streams", ALTERNATOR_STREAMS},
+        {"raft", RAFT}
+    };
 }
 
 std::vector<enum_option<db::experimental_features_t>> db::experimental_features_t::all() {
-    return {UDF, ALTERNATOR_STREAMS};
+    return {UDF, ALTERNATOR_STREAMS, RAFT};
 }
 
 std::unordered_map<sstring, db::tri_mode_restriction_t::mode> db::tri_mode_restriction_t::map() {
@@ -1032,6 +1048,26 @@ sstring config_value_as_json(const std::unordered_map<sstring, log_level>& v) {
     // We don't support converting this to json yet; and because the log_level config items
     // aren't part of config_file::value(), it won't be listed
     throw std::runtime_error("config_value_as_json(const std::unordered_map<sstring, log_level>& v) is not implemented");
+}
+
+future<> configure_tls_creds_builder(seastar::tls::credentials_builder& creds, db::config::string_map options) {
+    creds.set_dh_level(seastar::tls::dh_params::level::MEDIUM);
+    creds.set_priority_string(db::config::default_tls_priority);
+
+    if (options.contains("priority_string")) {
+        creds.set_priority_string(options.at("priority_string"));
+    }
+    if (is_true(get_or_default(options, "require_client_auth", "false"))) {
+        creds.set_client_auth(seastar::tls::client_auth::REQUIRE);
+    }
+
+    auto cert = get_or_default(options, "certificate", db::config::get_conf_sub("scylla.crt").string());
+    auto key = get_or_default(options, "keyfile", db::config::get_conf_sub("scylla.key").string());
+    co_await creds.set_x509_key_file(cert, key, seastar::tls::x509_crt_format::PEM);
+
+    if (options.contains("truststore")) {
+        co_await creds.set_x509_trust_file(options.at("truststore"), seastar::tls::x509_crt_format::PEM);
+    }
 }
 
 }

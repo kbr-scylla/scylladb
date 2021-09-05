@@ -328,16 +328,17 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
             _global_controller_db->deleted_priority_classes.emplace(sl_it->second.pc);
         }
         _service_levels_db.erase(sl_it);
-    }
-    return seastar::async( [this, name] {
-        _subscribers.for_each([name] (qos_configuration_change_subscriber* subscriber) {
-            try {
-                subscriber->on_after_service_level_remove(name).get();
-            } catch (...) {
-                sl_logger.error("notify_service_level_removed: exception occurred in one of the observers callbacks {}", std::current_exception());
-            }
+        return seastar::async( [this, name] {
+            _subscribers.for_each([name] (qos_configuration_change_subscriber* subscriber) {
+                try {
+                    subscriber->on_after_service_level_remove(name).get();
+                } catch (...) {
+                    sl_logger.error("notify_service_level_removed: exception occurred in one of the observers callbacks {}", std::current_exception());
+                }
+            });
         });
-    });
+    }
+    return make_ready_future<>();
 }
 
 io_priority_class* service_level_controller::get_current_priority_class() {

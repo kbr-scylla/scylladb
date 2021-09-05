@@ -171,7 +171,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto result = do_compaction(16, 16);
         BOOST_REQUIRE(result.size() == 16);
         for (auto i = 0U; i < tokens.size(); i++) {
-            assert_that(sstable_reader(env.semaphore().make_tracking_only_permit(s.get(), "test reader"), result[i], s))
+            assert_that(sstable_reader(env.semaphore().make_tracking_only_permit(s.get(), "test reader", db::no_timeout), result[i], s))
                 .produces(make_insert(tokens[i]))
                 .produces_end_of_stream();
         }

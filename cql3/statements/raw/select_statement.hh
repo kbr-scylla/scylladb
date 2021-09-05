@@ -34,6 +34,7 @@
 #include "cql3/statements/prepared_statement.hh"
 #include "cql3/relation.hh"
 #include "cql3/attributes.hh"
+#include "db/config.hh"
 #include <seastar/core/shared_ptr.hh>
 
 namespace cql3 {
@@ -95,8 +96,8 @@ private:
     lw_shared_ptr<const parameters> _parameters;
     std::vector<::shared_ptr<selection::raw_selector>> _select_clause;
     std::vector<::shared_ptr<relation>> _where_clause;
-    ::shared_ptr<term::raw> _limit;
-    ::shared_ptr<term::raw> _per_partition_limit;
+    std::optional<expr::expression> _limit;
+    std::optional<expr::expression> _per_partition_limit;
     std::vector<::shared_ptr<cql3::column_identifier::raw>> _group_by_columns;
     std::unique_ptr<cql3::attributes::raw> _attrs;
 public:
@@ -104,8 +105,8 @@ public:
             lw_shared_ptr<const parameters> parameters,
             std::vector<::shared_ptr<selection::raw_selector>> select_clause,
             std::vector<::shared_ptr<relation>> where_clause,
-            ::shared_ptr<term::raw> limit,
-            ::shared_ptr<term::raw> per_partition_limit,
+            std::optional<expr::expression> limit,
+            std::optional<expr::expression> per_partition_limit,
             std::vector<::shared_ptr<cql3::column_identifier::raw>> group_by_columns,
             std::unique_ptr<cql3::attributes::raw> attrs);
 
@@ -124,7 +125,7 @@ private:
         bool allow_filtering = false);
 
     /** Returns a ::shared_ptr<term> for the limit or null if no limit is set */
-    ::shared_ptr<term> prepare_limit(database& db, prepare_context& ctx, ::shared_ptr<term::raw> limit);
+    ::shared_ptr<term> prepare_limit(database& db, prepare_context& ctx, const std::optional<expr::expression>& limit);
 
     static void verify_ordering_is_allowed(const restrictions::statement_restrictions& restrictions);
 
@@ -141,7 +142,10 @@ private:
     bool is_reversed(const schema& schema) const;
 
     /** If ALLOW FILTERING was not specified, this verifies that it is not needed */
-    void check_needs_filtering(const restrictions::statement_restrictions& restrictions);
+    void check_needs_filtering(
+            const restrictions::statement_restrictions& restrictions,
+            db::tri_mode_restriction_t::mode strict_allow_filtering,
+            std::vector<sstring>& warnings);
 
     void ensure_filtering_columns_retrieval(database& db,
                                             selection::selection& selection,

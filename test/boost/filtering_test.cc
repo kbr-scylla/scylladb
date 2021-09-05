@@ -187,7 +187,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_multi_column) {
         e.execute_cql("INSERT INTO t (a,b,c,d,e) VALUES (1, 2, 1, 2, 25)").get();
         e.execute_cql("INSERT INTO t (a,b,c,d,e) VALUES (1, 2, 1, 3, 35)").get();
 
-        auto msg = e.execute_cql("SELECT * FROM t WHERE (c, d) = (1, 2)").get0();
+        auto msg = e.execute_cql("SELECT * FROM t WHERE (c, d) = (1, 2) ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows_ignore_order({
             {
                 int32_type->decompose(1),
@@ -205,7 +205,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_multi_column) {
             },
         });
 
-        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) IN ((1, 2), (1,3), (1,4))").get0();
+        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) IN ((1, 2), (1,3), (1,4)) ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows_ignore_order({
             {
                 int32_type->decompose(1),
@@ -230,7 +230,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_multi_column) {
             },
         });
 
-        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) < (1, 3)").get0();
+        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) < (1, 3) ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows_ignore_order({
             {
                 int32_type->decompose(1),
@@ -255,7 +255,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_multi_column) {
             },
         });
 
-        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) < (1, 3) AND (c, d) > (1, 1)").get0();
+        msg = e.execute_cql("SELECT * FROM t WHERE (c, d) < (1, 3) AND (c, d) > (1, 1) ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows_ignore_order({
             {
                 int32_type->decompose(1),
@@ -323,7 +323,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_clustering_column) {
             int32_type->decompose(1)
         }});
 
-        msg = e.execute_cql("SELECT * FROM t WHERE c = 2").get0();
+        msg = e.execute_cql("SELECT * FROM t WHERE c = 2 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 int32_type->decompose(1),
@@ -337,7 +337,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_clustering_column) {
            }
         });
 
-        msg = e.execute_cql("SELECT * FROM t WHERE c > 2 AND c <= 4").get0();
+        msg = e.execute_cql("SELECT * FROM t WHERE c > 2 AND c <= 4 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({{
             int32_type->decompose(1),
             int32_type->decompose(3),
@@ -590,7 +590,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_desc) {
         e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 2, 5, 1, 9)").get();
         e.execute_cql("INSERT INTO t (a, b, c, d, e) VALUES (1, 2, 6, 7, 5)").get();
 
-        auto msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c > 3").get0();
+        auto msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c > 3 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 int32_type->decompose(1),
@@ -608,7 +608,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_desc) {
             }
         });
 
-        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c < 4").get0();
+        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c < 4 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_rows({
             {
                 int32_type->decompose(1),
@@ -626,7 +626,7 @@ SEASTAR_TEST_CASE(test_allow_filtering_desc) {
             }
         });
 
-        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 4").get0();
+        msg = e.execute_cql("SELECT a, b, c, d, e FROM t WHERE c = 4 ALLOW FILTERING").get0();
         assert_that(msg).is_rows().with_size(0);
     });
 }
@@ -1065,7 +1065,7 @@ SEASTAR_TEST_CASE(test_filtering_on_empty_partition_with_a_static_row) {
         cquery_nofail(e, "INSERT INTO t (p, s) VALUES (1, 1);");
         auto msg = cquery_nofail(e, "SELECT * FROM t WHERE s = 2 ALLOW FILTERING;");
         assert_that(msg).is_rows().is_empty();
-        msg = cquery_nofail(e, "SELECT * FROM t WHERE c = 1");
+        msg = cquery_nofail(e, "SELECT * FROM t WHERE c = 1 ALLOW FILTERING");
         assert_that(msg).is_rows().is_empty();
         cquery_nofail(e, "INSERT INTO t (p, c, s) VALUES (2, 2, 2);");
         msg = cquery_nofail(e, "SELECT * FROM t WHERE s = 1 ALLOW FILTERING");

@@ -145,7 +145,7 @@ future<> combined::consume_all(flat_mutation_reader mr) const
         return mr.consume_pausable([] (mutation_fragment mf) {
             perf_tests::do_not_optimize(mf);
             return stop_iteration::no;
-        }, db::no_timeout).then([] {
+        }).then([] {
             perf_tests::stop_measuring_time();
         });
     });
@@ -266,7 +266,7 @@ future<size_t> clustering_combined::consume_all(flat_mutation_reader mr) const
             ++num_mfs;
             perf_tests::do_not_optimize(mf);
             return stop_iteration::no;
-        }, db::no_timeout).then([&num_mfs] {
+        }).then([&num_mfs] {
             perf_tests::stop_measuring_time();
             return num_mfs;
         }).finally([&mr] {
@@ -387,7 +387,7 @@ protected:
             return mr.consume_pausable([] (mutation_fragment mf) {
                 perf_tests::do_not_optimize(mf);
                 return stop_iteration::no;
-            }, db::no_timeout);
+            });
         });
     }
 };

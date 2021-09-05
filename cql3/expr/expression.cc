@@ -36,7 +36,7 @@
 namespace cql3 {
 namespace expr {
 
-static logging::logger expr_logger("cql_expression");
+logging::logger expr_logger("cql_expression");
 
 using boost::adaptors::filtered;
 using boost::adaptors::transformed;
@@ -430,22 +430,6 @@ bool is_one_of(const column_value_tuple& tuple, term& rhs, const column_value_ev
     throw std::logic_error("unexpected term type in is_one_of(multi-column)");
 }
 
-/// True iff op means bnd type of bound.
-bool matches(oper_t op, statements::bound bnd) {
-    switch (op) {
-    case oper_t::GT:
-    case oper_t::GTE:
-        return is_start(bnd); // These set a lower bound.
-    case oper_t::LT:
-    case oper_t::LTE:
-        return is_end(bnd); // These set an upper bound.
-    case oper_t::EQ:
-        return true; // Bounds from both sides.
-    default:
-        return false;
-    }
-}
-
 const value_set empty_value_set = value_list{};
 const value_set unbounded_value_set = nonwrapping_range<managed_bytes>::make_open_ended_both_sides();
 
@@ -539,6 +523,24 @@ bool is_satisfied_by(const binary_operator& opr, const column_value_eval_bag& ba
             [] (const field_selection&) -> bool {
                 on_internal_error(expr_logger, "is_satisified_by: field_selection cannot serve as the LHS of a binary expression");
             },
+            [] (const null&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: null cannot serve as the LHS of a binary expression");
+            },
+            [] (const bind_variable&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: bind_variable cannot serve as the LHS of a binary expression");
+            },
+            [] (const untyped_constant&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: untyped_constant cannot serve as the LHS of a binary expression");
+            },
+            [] (const tuple_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: tuple_constructor cannot serve as the LHS of a binary expression (yet!)");
+            },
+            [] (const collection_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: collection_constructor cannot serve as the LHS of a binary expression");
+            },
+            [] (const usertype_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisified_by: usertype_constructor cannot serve as the LHS of a binary expression");
+            },
         }, *opr.lhs);
 }
 
@@ -574,6 +576,24 @@ bool is_satisfied_by(const expression& restr, const column_value_eval_bag& bag) 
             },
             [] (const field_selection&) -> bool {
                 on_internal_error(expr_logger, "is_satisfied_by: a field selection cannot serve as a restriction by itself");
+            },
+            [] (const null&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: NULL cannot serve as a restriction by itself");
+            },
+            [] (const bind_variable&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: a bind variable cannot serve as a restriction by itself");
+            },
+            [] (const untyped_constant&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: an untyped constant cannot serve as a restriction by itself");
+            },
+            [] (const tuple_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: a tuple constructor cannot serve as a restriction by itself");
+            },
+            [] (const collection_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: a collection constructor cannot serve as a restriction by itself");
+            },
+            [] (const usertype_constructor&) -> bool {
+                on_internal_error(expr_logger, "is_satisfied_by: a user type constructor cannot serve as a restriction by itself");
             },
         }, restr);
 }
@@ -661,18 +681,6 @@ bool is_satisfied_by(
     const auto regulars = get_non_pk_values(selection, static_row, row);
     return is_satisfied_by(
             restr, {options, row_data_from_partition_slice{partition_key, clustering_key, regulars, selection}});
-}
-
-std::vector<managed_bytes_opt> first_multicolumn_bound(
-        const expression& restr, const query_options& options, statements::bound bnd) {
-    auto found = find_atom(restr, [bnd] (const binary_operator& oper) {
-        return matches(oper.op, bnd) && is_multi_column(oper);
-    });
-    if (found) {
-        return static_pointer_cast<tuples::value>(found->rhs->bind(options))->get_elements();
-    } else {
-        return std::vector<managed_bytes_opt>{};
-    }
 }
 
 template<typename T>
@@ -811,6 +819,24 @@ value_set possible_lhs_values(const column_definition* cdef, const expression& e
                         [] (const field_selection&) -> value_set {
                             on_internal_error(expr_logger, "possible_lhs_values: field selections are not supported as the LHS of a binary expression");
                         },
+                        [] (const null&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: nulls are not supported as the LHS of a binary expression");
+                        },
+                        [] (const bind_variable&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: bind variables are not supported as the LHS of a binary expression");
+                        },
+                        [] (const untyped_constant&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: untyped constants are not supported as the LHS of a binary expression");
+                        },
+                        [] (const tuple_constructor&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: tuple constructors are not supported as the LHS of a binary expression yet");
+                        },
+                        [] (const collection_constructor&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: collection constructors are not supported as the LHS of a binary expression");
+                        },
+                        [] (const usertype_constructor&) -> value_set {
+                            on_internal_error(expr_logger, "possible_lhs_values: user type constructors are not supported as the LHS of a binary expression");
+                        },
                     }, *oper.lhs);
             },
             [] (const column_value&) -> value_set {
@@ -836,6 +862,24 @@ value_set possible_lhs_values(const column_definition* cdef, const expression& e
             },
             [] (const field_selection&) -> value_set {
                 on_internal_error(expr_logger, "possible_lhs_values: a field selection cannot serve as a restriction by itself");
+            },
+            [] (const null&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: a NULL cannot serve as a restriction by itself");
+            },
+            [] (const bind_variable&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: a bind variable cannot serve as a restriction by itself");
+            },
+            [] (const untyped_constant&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: an untyped constant cannot serve as a restriction by itself");
+            },
+            [] (const tuple_constructor&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: an tuple constructor cannot serve as a restriction by itself");
+            },
+            [] (const collection_constructor&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: a collection constructor cannot serve as a restriction by itself");
+            },
+            [] (const usertype_constructor&) -> value_set {
+                on_internal_error(expr_logger, "possible_lhs_values: a user type constructor cannot serve as a restriction by itself");
             },
         }, expr);
 }
@@ -894,6 +938,24 @@ bool is_supported_by(const expression& expr, const secondary_index::index& idx) 
                         },
                         [&] (const field_selection&) -> bool {
                             on_internal_error(expr_logger, "is_supported_by: field selections are not supported as the LHS of a binary expression");
+                        },
+                        [&] (const null&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: nulls are not supported as the LHS of a binary expression");
+                        },
+                        [&] (const bind_variable&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: bind variables are not supported as the LHS of a binary expression");
+                        },
+                        [&] (const untyped_constant&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: untyped constants are not supported as the LHS of a binary expression");
+                        },
+                        [&] (const tuple_constructor&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: tuple constructors are not supported as the LHS of a binary expression yet");
+                        },
+                        [&] (const collection_constructor&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: collection constructors are not supported as the LHS of a binary expression");
+                        },
+                        [&] (const usertype_constructor&) -> bool {
+                            on_internal_error(expr_logger, "is_supported_by: user type constructors are not supported as the LHS of a binary expression");
                         },
                     }, *oper.lhs);
             },
@@ -954,10 +1016,74 @@ std::ostream& operator<<(std::ostream& os, const expression& expr) {
                 }, fc.func);
             },
             [&] (const cast& c)  {
-                fmt::print(os, "({} AS {})", *c.arg, c.type);
+                std::visit(overloaded_functor{
+                    [&] (const cql3_type& t) {
+                        fmt::print(os, "({} AS {})", *c.arg, t);
+                    },
+                    [&] (const shared_ptr<cql3_type::raw>& t) {
+                        fmt::print(os, "({}) {}", t, *c.arg);
+                    },
+                }, c.type);
             },
             [&] (const field_selection& fs)  {
                 fmt::print(os, "({}.{})", *fs.structure, fs.field);
+            },
+            [&] (const null&) {
+                // FIXME: adjust tests and change to NULL
+                fmt::print(os, "null");
+            },
+            [&] (const bind_variable&) {
+                // FIXME: store and present bind variable name
+                fmt::print(os, "?");
+            },
+            [&] (const untyped_constant& uc) {
+                if (uc.partial_type == untyped_constant::type_class::string) {
+                    fmt::print(os, "'{}'", uc.raw_text);
+                } else {
+                    fmt::print(os, "{}", uc.raw_text);
+                }
+            },
+            [&] (const tuple_constructor& tc) {
+                fmt::print(os, "({})", join(", ", tc.elements));
+            },
+            [&] (const collection_constructor& cc) {
+                switch (cc.style) {
+                case collection_constructor::style_type::list: fmt::print(os, "{}", std::to_string(cc.elements)); return;
+                case collection_constructor::style_type::set: {
+                    fmt::print(os, "{{{}}}", fmt::join(cc.elements, ", "));
+                    return;
+                }
+                case collection_constructor::style_type::map: {
+                    fmt::print(os, "{{");
+                    bool first = true;
+                    for (auto& e : cc.elements) {
+                        if (!first) {
+                            fmt::print(os, ", ");
+                        }
+                        first = false;
+                        auto& tuple = std::get<tuple_constructor>(e);
+                        if (tuple.elements.size() != 2) {
+                            on_internal_error(expr_logger, "map constructor element is not a tuple of arity 2");
+                        }
+                        fmt::print(os, "{}:{}", tuple.elements[0], tuple.elements[1]);
+                    }
+                    fmt::print(os, "}}");
+                    return;
+                }
+                }
+                on_internal_error(expr_logger, fmt::format("unexpected collection_constructor style {}", static_cast<unsigned>(cc.style)));
+            },
+            [&] (const usertype_constructor& uc) {
+                fmt::print(os, "{{");
+                bool first = true;
+                for (auto& [k, v] : uc.elements) {
+                    if (!first) {
+                        fmt::print(os, ", ");
+                    }
+                    first = false;
+                    fmt::print(os, "{}:{}", k, *v);
+                }
+                fmt::print(os, "}}");
             },
         }, expr);
     return os;
@@ -978,69 +1104,92 @@ bool is_on_collection(const binary_operator& b) {
 }
 
 expression replace_column_def(const expression& expr, const column_definition* new_cdef) {
-    return std::visit(overloaded_functor{
-            [] (bool b){ return expression(b); },
-            [&] (const conjunction& conj) {
-                const auto applied = conj.children | transformed(
-                        std::bind(replace_column_def, std::placeholders::_1, new_cdef));
-                return expression(conjunction{std::vector(applied.begin(), applied.end())});
-            },
-            [&] (const binary_operator& oper) {
-                return expression(binary_operator(replace_column_def(*oper.lhs, new_cdef), oper.op, oper.rhs));
-            },
-            [&] (const column_value& col) {
-                return expression(column_value{new_cdef});
-            },
-            [&] (const column_value_tuple& tuple) -> expression {
-                throw std::logic_error(format("replace_column_def invalid with column tuple: {}", to_string(expr)));
-            },
-            [&] (const token&) { return expr; },
-            [&] (const unresolved_identifier&) { return expr; },
-            [&] (const column_mutation_attribute&) { return expr; },
-            [&] (const function_call&) { return expr; },
-            [&] (const cast&) { return expr; },
-            [&] (const field_selection&) { return expr; },
-        }, expr);
+    return search_and_replace(expr, [&] (const expression& expr) -> std::optional<expression> {
+        if (std::holds_alternative<column_value>(expr)) {
+            return column_value{new_cdef};
+        } else if (std::holds_alternative<column_value_tuple>(expr)) {
+            throw std::logic_error(format("replace_column_def invalid with column tuple: {}", to_string(expr)));
+        } else {
+            return std::nullopt;
+        }
+    });
 }
 
 expression replace_token(const expression& expr, const column_definition* new_cdef) {
-    return std::visit(overloaded_functor{
-            [] (bool b) { return expression(b); },
-            [&] (const conjunction& conj) {
-                const auto applied = conj.children | transformed(
-                        std::bind(replace_token, std::placeholders::_1, new_cdef));
-                return expression(conjunction{std::vector(applied.begin(), applied.end())});
-            },
-            [&] (const binary_operator& oper) {
-                return expression(binary_operator(replace_token(*oper.lhs, new_cdef), oper.op, oper.rhs));
-            },
-            [&] (const column_value&) {
-                return expr;
-            },
-            [&] (const column_value_tuple&) -> expression {
-                throw std::logic_error(format("replace_token invalid with column tuple: {}", to_string(expr)));
-            },
-            [&] (const token&) -> expression { return column_value{new_cdef}; },
-            [&] (const unresolved_identifier&) -> expression {
-                throw std::logic_error(format("replace_token invalid with unresolved identifier: {}", to_string(expr)));
-            },
-            [&] (const column_mutation_attribute&) -> expression {
-                return expr;
-            },
-            [&] (const function_call&) -> expression {
-                // A token function could be one of the arguments, but it doesn't help the caller to replace it
-                // since we can't index function of the token function.
-                return expr;
-            },
-            [&] (const cast&) -> expression {
-                // A token function could be what's being casted, but it doesn't help the caller to replace it
-                // since we can't index function of the token function.
-                return expr;
-            },
-            [&] (const field_selection&) -> expression {
-                return expr;
-            },
-        }, expr);
+    return search_and_replace(expr, [&] (const expression& expr) -> std::optional<expression> {
+        if (std::holds_alternative<token>(expr)) {
+            return column_value{new_cdef};
+        } else {
+            return std::nullopt;
+        }
+    });
+}
+
+expression search_and_replace(const expression& e,
+        const noncopyable_function<std::optional<expression> (const expression& candidate)>& replace_candidate) {
+    auto recurse = [&] (const expression& e) -> expression {
+        return search_and_replace(e, replace_candidate);
+    };
+    auto replace_result = replace_candidate(e);
+    if (replace_result) {
+        return std::move(*replace_result);
+    } else {
+        return std::visit(
+            overloaded_functor{
+                [&] (const conjunction& conj) -> expression {
+                    return conjunction{
+                        boost::copy_range<std::vector<expression>>(
+                            conj.children | boost::adaptors::transformed(recurse)
+                        )
+                    };
+                },
+                [&] (const binary_operator& oper) -> expression {
+                    return binary_operator(recurse(*oper.lhs), oper.op, oper.rhs);
+                },
+                [&] (const column_mutation_attribute& cma) -> expression {
+                    return column_mutation_attribute{cma.kind, recurse(*cma.column)};
+                },
+                [&] (const tuple_constructor& tc) -> expression {
+                    return tuple_constructor{
+                        boost::copy_range<std::vector<expression>>(
+                            tc.elements | boost::adaptors::transformed(recurse)
+                        )
+                    };
+                },
+                [&] (const collection_constructor& c) -> expression {
+                    return collection_constructor{
+                        c.style,
+                        boost::copy_range<std::vector<expression>>(
+                            c.elements | boost::adaptors::transformed(recurse)
+                        )
+                    };
+                },
+                [&] (const usertype_constructor& uc) -> expression {
+                    usertype_constructor::elements_map_type m;
+                    for (auto& [k, v] : uc.elements) {
+                        m.emplace(k, recurse(*v));
+                    }
+                    return usertype_constructor{std::move(m)};
+                },
+                [&] (const function_call& fc) -> expression {
+                    return function_call{
+                        fc.func,
+                        boost::copy_range<std::vector<expression>>(
+                            fc.args | boost::adaptors::transformed(recurse)
+                        )
+                    };
+                },
+                [&] (const cast& c) -> expression {
+                    return cast{recurse(*c.arg), c.type};
+                },
+                [&] (const field_selection& fs) -> expression {
+                    return field_selection{recurse(*fs.structure), fs.field};
+                },
+                [&] (LeafExpression auto const& e) -> expression {
+                    return e;
+                },
+            }, e);
+    }
 }
 
 std::ostream& operator<<(std::ostream& s, oper_t op) {
@@ -1110,6 +1259,12 @@ std::vector<expression> extract_single_column_restrictions_for_column(const expr
         void operator()(const function_call&) {}
         void operator()(const cast&) {}
         void operator()(const field_selection&) {}
+        void operator()(const null&) {}
+        void operator()(const bind_variable&) {}
+        void operator()(const untyped_constant&) {}
+        void operator()(const tuple_constructor&) {}
+        void operator()(const collection_constructor&) {}
+        void operator()(const usertype_constructor&) {}
     };
 
     visitor v {

@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/util/defer.hh>
 #include <boost/range/adaptor/map.hpp>
 #include "view_update_generator.hh"
 #include "service/priority_manager.hh"
@@ -27,7 +28,7 @@ future<> view_update_generator::start() {
     thread_attributes attr;
     attr.sched_group = _db.get_streaming_scheduling_group();
     _started = seastar::async(std::move(attr), [this]() mutable {
-        auto drop_sstable_references = defer([&] {
+        auto drop_sstable_references = defer([&] () noexcept {
             // Clear sstable references so sstables_manager::stop() doesn't hang.
             vug_logger.info("leaving {} unstaged sstables unprocessed",
                     _sstables_to_move.size(), _sstables_with_tables.size());
@@ -85,7 +86,7 @@ future<> view_update_generator::start() {
                             ::mutation_reader::forwarding::no);
 
                     inject_failure("view_update_generator_consume_staging_sstable");
-                    auto result = staging_sstable_reader.consume_in_thread(view_updating_consumer(s, std::move(permit), *t, sstables, _as, staging_sstable_reader_handle), db::no_timeout);
+                    auto result = staging_sstable_reader.consume_in_thread(view_updating_consumer(s, std::move(permit), *t, sstables, _as, staging_sstable_reader_handle));
                     staging_sstable_reader.close().get();
                     if (result == stop_iteration::yes) {
                         break;

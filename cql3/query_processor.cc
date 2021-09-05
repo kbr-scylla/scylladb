@@ -467,6 +467,7 @@ query_processor::execute_direct(const sstring_view& query_string, service::query
     tracing::trace(query_state.get_trace_state(), "Parsing a statement");
     auto p = get_statement(query_string, query_state.get_client_state());
     auto cql_statement = p->statement;
+    const auto warnings = std::move(p->warnings);
     if (cql_statement->get_bound_terms() != options.get_values_count()) {
         const auto msg = format("Invalid amount of bind variables: expected {:d} received {:d}",
                 cql_statement->get_bound_terms(),
@@ -481,13 +482,19 @@ query_processor::execute_direct(const sstring_view& query_string, service::query
             metrics.regularStatementsExecuted.inc();
 #endif
     tracing::trace(query_state.get_trace_state(), "Processing a statement");
-    return cql_statement->check_access(_proxy, query_state.get_client_state()).then_wrapped([this, cql_statement, &query_state, &options] (auto&& access_future) mutable {
+    return cql_statement->check_access(_proxy, query_state.get_client_state()).then_wrapped([this, cql_statement, warnings = std::move(warnings), &query_state, &options] (auto&& access_future) mutable {
       bool failed = access_future.failed();
-      return audit::inspect(cql_statement, query_state, options, failed).then([this, cql_statement, &query_state, &options, access_future = std::move(access_future)] () mutable {
+      return audit::inspect(cql_statement, query_state, options, failed).then([this, cql_statement, warnings = std::move(warnings), &query_state, &options, access_future = std::move(access_future)] () mutable {
         if (access_future.failed()) {
             std::rethrow_exception(access_future.get_exception());
         }
-        return process_authorized_statement(std::move(cql_statement), query_state, options);
+        return process_authorized_statement(std::move(cql_statement), query_state, options).then(
+                [warnings = move(warnings)] (::shared_ptr<result_message> m) {
+                    for (const auto& w : warnings) {
+                        m->add_warning(w);
+                    }
+                    return make_ready_future<::shared_ptr<result_message>>(m);
+                });
       });
     });
 }

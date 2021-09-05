@@ -29,9 +29,11 @@
 #include "storage_service.hh"
 #include "dht/boot_strapper.hh"
 #include <seastar/core/distributed.hh>
+#include <seastar/util/defer.hh>
 #include "locator/snitch_base.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
+#include "db/consistency_level.hh"
 #include "utils/UUID.hh"
 #include "gms/inet_address.hh"
 #include "log.hh"
@@ -138,11 +140,6 @@ storage_service::storage_service(abort_source& abort_source,
         _listeners.emplace_back(make_lw_shared(snitch.local()->when_reconfigured(_snitch_reconfigure)));
     }
     (void) _raft_gr;
-}
-
-void storage_service::enable_all_features() {
-    auto features = _feature_service.known_feature_set();
-    _feature_service.enable(features);
 }
 
 enum class node_external_status {
@@ -804,16 +801,12 @@ storage_service::get_range_to_address_map(const sstring& keyspace) const {
 std::unordered_map<dht::token_range, inet_address_vector_replica_set>
 storage_service::get_range_to_address_map_in_local_dc(
         const sstring& keyspace) const {
-    std::function<bool(const inet_address&)> filter =  [this](const inet_address& address) {
-        return is_local_dc(address);
-    };
-
     auto orig_map = get_range_to_address_map(keyspace, get_tokens_in_local_dc());
     std::unordered_map<dht::token_range, inet_address_vector_replica_set> filtered_map;
     for (auto entry : orig_map) {
         auto& addresses = filtered_map[entry.first];
         addresses.reserve(entry.second.size());
-        std::copy_if(entry.second.begin(), entry.second.end(), std::back_inserter(addresses), filter);
+        std::copy_if(entry.second.begin(), entry.second.end(), std::back_inserter(addresses), db::is_local);
     }
 
     return filtered_map;
@@ -825,17 +818,10 @@ storage_service::get_tokens_in_local_dc() const {
     const auto& tm = get_token_metadata();
     for (auto token : tm.sorted_tokens()) {
         auto endpoint = tm.get_endpoint(token);
-        if (is_local_dc(*endpoint))
+        if (db::is_local(*endpoint))
             filtered_tokens.push_back(token);
     }
     return filtered_tokens;
-}
-
-bool
-storage_service::is_local_dc(const inet_address& targetHost) const {
-    auto remote_dc = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(targetHost);
-    auto local_dc = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(get_broadcast_address());
-    return remote_dc == local_dc;
 }
 
 std::unordered_map<dht::token_range, inet_address_vector_replica_set>
@@ -3278,7 +3264,7 @@ future<> storage_service::load_and_stream(sstring ks_name, sstring cf_name,
         bool failed = false;
         try {
             netw::messaging_service& ms = _messaging.local();
-            while (auto mf = co_await reader(db::no_timeout)) {
+            while (auto mf = co_await reader()) {
                 bool is_partition_start = mf->is_partition_start();
                 if (is_partition_start) {
                     ++num_partitions_processed;

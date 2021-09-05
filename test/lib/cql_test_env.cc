@@ -330,7 +330,7 @@ public:
                                       table_name = std::move(table_name)] (database& db) mutable {
           auto& cf = db.find_column_family(ks_name, table_name);
           auto schema = cf.schema();
-          auto permit = db.get_reader_concurrency_semaphore().make_tracking_only_permit(schema.get(), "require_column_has_value()");
+          auto permit = db.get_reader_concurrency_semaphore().make_tracking_only_permit(schema.get(), "require_column_has_value()", db::no_timeout);
           return cf.find_partition_slow(schema, permit, pkey)
                   .then([schema, ckey, column_name, exp] (column_family::const_mutation_partition_ptr p) {
             assert(p != nullptr);
@@ -603,8 +603,8 @@ public:
                 gms::get_gossiper().stop().get();
             });
 
-            ss.invoke_on_all([] (auto&& ss) {
-                ss.enable_all_features();
+            feature_service.invoke_on_all([] (auto& fs) {
+                fs.enable(fs.known_feature_set());
             }).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
@@ -676,12 +676,18 @@ public:
 
             sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
 
-            // We need to have a system keyspace started and
-            // initialized to initialize Raft service.
-            raft_gr.invoke_on_all(&service::raft_group_registry::init).get();
+            const bool raft_enabled = cfg->check_experimental(db::experimental_features_t::RAFT);
+            if (raft_enabled) {
+                // We need to have a system keyspace started and
+                // initialized to initialize Raft service.
+                raft_gr.invoke_on_all(&service::raft_group_registry::init).get();
+            }
             auto stop_raft_rpc = defer([&raft_gr] {
                 raft_gr.invoke_on_all(&service::raft_group_registry::uninit).get();
             });
+            if (!raft_enabled) {
+                stop_raft_rpc.cancel();
+            }
 
             cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
             auto stop_cdc_generation_service = defer([&cdc_generation_service] {
@@ -799,7 +805,13 @@ future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_tes
 }
 
 reader_permit make_reader_permit(cql_test_env& env) {
-    return env.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "test");
+    return env.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "test", db::no_timeout);
+}
+
+cql_test_config raft_cql_test_config() {
+    cql_test_config c;
+    c.db_config->experimental_features({db::experimental_features_t::RAFT});
+    return c;
 }
 
 namespace debug {

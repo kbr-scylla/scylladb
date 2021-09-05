@@ -41,6 +41,12 @@ namespace cql3 {
     class query_processor;
 }
 
+namespace service {
+
+class client_state;
+
+}
+
 class not_prepared_exception : public std::runtime_error {
 public:
     not_prepared_exception(const cql3::prepared_cache_key_type& id) : std::runtime_error(format("Not prepared: {}", id)) {}
@@ -151,3 +157,6 @@ future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_c
 future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_test_config = {}, thread_attributes thread_attr = {});
 
 reader_permit make_reader_permit(cql_test_env&);
+
+// CQL test config with raft experimental feature enabled
+cql_test_config raft_cql_test_config();

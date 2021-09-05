@@ -45,13 +45,13 @@ namespace cql3 {
 
 ::shared_ptr<term>
 single_column_relation::to_term(const std::vector<lw_shared_ptr<column_specification>>& receivers,
-                                const term::raw& raw,
+                                const expr::expression& raw,
                                 database& db,
                                 const sstring& keyspace,
                                 prepare_context& ctx) const {
     // TODO: optimize vector away, accept single column_specification
     assert(receivers.size() == 1);
-    auto term = raw.prepare(db, keyspace, receivers[0]);
+    auto term = prepare_term(raw, db, keyspace, receivers[0]);
     term->fill_prepare_context(ctx);
     return term;
 }
@@ -59,7 +59,7 @@ single_column_relation::to_term(const std::vector<lw_shared_ptr<column_specifica
 ::shared_ptr<restrictions::restriction>
 single_column_relation::new_EQ_restriction(database& db, schema_ptr schema, prepare_context& ctx) {
     const column_definition& column_def = to_column_definition(*schema, *_entity);
-    auto reset_processing_pk_column = defer([&ctx] { ctx.set_processing_pk_restrictions(false); });
+    auto reset_processing_pk_column = defer([&ctx] () noexcept { ctx.set_processing_pk_restrictions(false); });
     if (column_def.is_partition_key()) {
         ctx.set_processing_pk_restrictions(true);
     }
@@ -82,7 +82,7 @@ single_column_relation::new_EQ_restriction(database& db, schema_ptr schema, prep
 single_column_relation::new_IN_restriction(database& db, schema_ptr schema, prepare_context& ctx) {
     using namespace restrictions;
     const column_definition& column_def = to_column_definition(*schema, *_entity);
-    auto reset_processing_pk_column = defer([&ctx] { ctx.set_processing_pk_restrictions(false); });
+    auto reset_processing_pk_column = defer([&ctx] () noexcept { ctx.set_processing_pk_restrictions(false); });
     if (column_def.is_partition_key()) {
         ctx.set_processing_pk_restrictions(true);
     }

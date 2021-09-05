@@ -17,6 +17,7 @@
 #include <map>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/future-util.hh>
+#include <seastar/core/shared_future.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/pipe.hh>
 #include <seastar/core/metrics.hh>
@@ -28,6 +29,12 @@
 using namespace std::chrono_literals;
 
 namespace raft {
+
+struct active_read {
+    read_id id;
+    index_t idx;
+    promise<read_barrier_reply> promise;
+};
 
 static const seastar::metrics::label server_id_label("id");
 static const seastar::metrics::label log_entry_type("log_entry_type");
@@ -49,6 +56,10 @@ public:
     void request_vote(server_id from, vote_request vote_request) override;
     void request_vote_reply(server_id from, vote_reply vote_reply) override;
     void timeout_now_request(server_id from, timeout_now timeout_now) override;
+    void read_quorum_request(server_id from, struct read_quorum read_quorum) override;
+    void read_quorum_reply(server_id from, struct read_quorum_reply read_quorum_reply) override;
+    future<read_barrier_reply> execute_read_barrier(server_id) override;
+
 
     // server interface
     future<> add_entry(command command, wait_type type);
@@ -78,11 +89,14 @@ private:
     server_id _id;
     server::configuration _config;
     std::optional<promise<>> _stepdown_promise;
+    std::optional<shared_promise<>> _leader_promise;
     // Index of the last entry applied to `_state_machine`.
     index_t _applied_idx;
+    std::list<active_read> _reads;
+    std::multimap<index_t, promise<>> _awaited_indexes;
 
     struct stop_apply_fiber{}; // exception to send when apply fiber is needs to be stopepd
-    queue<std::variant<std::vector<log_entry_ptr>, snapshot>> _apply_entries = queue<std::variant<std::vector<log_entry_ptr>, snapshot>>(10);
+    queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>> _apply_entries = queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>>(10);
 
     struct stats {
         uint64_t add_command = 0;
@@ -111,6 +125,10 @@ private:
         uint64_t snapshots_taken = 0;
         uint64_t timeout_now_sent = 0;
         uint64_t timeout_now_received = 0;
+        uint64_t read_quorum_sent = 0;
+        uint64_t read_quorum_received = 0;
+        uint64_t read_quorum_reply_sent = 0;
+        uint64_t read_quorum_reply_received = 0;
     } _stats;
 
     struct op_status {
@@ -150,15 +168,16 @@ private:
     };
     absl::flat_hash_map<server_id, append_request_queue> _append_request_status;
 
-    // An id of last loaded snapshot into a state machine
-    snapshot_id _last_loaded_snapshot_id;
-
     // Called to commit entries (on a leader or otherwise).
     void notify_waiters(std::map<index_t, op_status>& waiters, const std::vector<log_entry_ptr>& entries);
 
     // Drop waiter that we lost track of, can happen due to a snapshot transfer,
     // or a leader removed from cluster while some entries added on it are uncommitted.
     void drop_waiters(std::optional<index_t> idx = {});
+
+    // Wake up all waiter that wait for entries with idx smaller of equal to the one provided
+    // to be applied.
+    void signal_applied();
 
     // This fiber processes FSM output by doing the following steps in order:
     //  - persist the current term and vote
@@ -218,6 +237,14 @@ private:
     void add_to_rpc_config(server_address srv);
     void remove_from_rpc_config(const server_address& srv);
 
+    // A helper to wait for a leader to get elected
+    future<> wait_for_leader();
+
+    // Get "safe to read" index from a leader
+    future<read_barrier_reply> get_read_idx(server_id leader);
+    // Wait for the index to be applied
+    future<> wait_for_apply(index_t idx);
+
     friend std::ostream& operator<<(std::ostream& os, const server_impl& s);
 };
 
@@ -235,7 +262,7 @@ server_impl::server_impl(server_id uuid, std::unique_ptr<rpc> rpc,
 
 future<> server_impl::start() {
     auto [term, vote] = co_await _persistence->load_term_and_vote();
-    auto snapshot  = co_await _persistence->load_snapshot();
+    auto snapshot  = co_await _persistence->load_snapshot_descriptor();
     auto log_entries = co_await _persistence->load_log();
     auto log = raft::log(snapshot, std::move(log_entries));
     raft::configuration rpc_config = log.get_configuration();
@@ -250,7 +277,6 @@ future<> server_impl::start() {
     _applied_idx = index_t{0};
     if (snapshot.id) {
         co_await _state_machine->load_snapshot(snapshot.id);
-        _last_loaded_snapshot_id = snapshot.id;
         _applied_idx = snapshot.idx;
     }
 
@@ -275,6 +301,13 @@ future<> server_impl::start() {
     // Metrics access _fsm, so create them only after the pointer is populated
     register_metrics();
     co_return;
+}
+
+future<> server_impl::wait_for_leader() {
+    if (!_leader_promise) {
+        _leader_promise.emplace();
+    }
+    return _leader_promise->get_shared_future();
 }
 
 template <typename T>
@@ -328,6 +361,16 @@ void server_impl::request_vote_reply(server_id from, vote_reply vote_reply) {
 void server_impl::timeout_now_request(server_id from, timeout_now timeout_now) {
     _stats.timeout_now_received++;
     _fsm->step(from, std::move(timeout_now));
+}
+
+void server_impl::read_quorum_request(server_id from, struct read_quorum read_quorum) {
+    _stats.read_quorum_received++;
+    _fsm->step(from, std::move(read_quorum));
+}
+
+void server_impl::read_quorum_reply(server_id from, struct read_quorum_reply read_quorum_reply) {
+    _stats.read_quorum_reply_received++;
+    _fsm->step(from, std::move(read_quorum_reply));
 }
 
 void server_impl::notify_waiters(std::map<index_t, op_status>& waiters,
@@ -390,6 +433,18 @@ void server_impl::drop_waiters(std::optional<index_t> idx) {
     drop(_awaited_applies);
 }
 
+void server_impl::signal_applied() {
+    auto it = _awaited_indexes.begin();
+
+    while (it != _awaited_indexes.end()) {
+        if (it->first > _applied_idx) {
+            break;
+        }
+        it->second.set_value();
+        it = _awaited_indexes.erase(it);
+    }
+}
+
 template <typename Message>
 void server_impl::send_message(server_id id, Message m) {
     std::visit([this, id] (auto&& m) {
@@ -424,6 +479,12 @@ void server_impl::send_message(server_id id, Message m) {
         } else if constexpr (std::is_same_v<T, timeout_now>) {
             _stats.timeout_now_sent++;
             _rpc->send_timeout_now(id, m);
+        } else if constexpr (std::is_same_v<T, struct read_quorum>) {
+            _stats.read_quorum_sent++;
+            _rpc->send_read_quorum(id, std::move(m));
+        } else if constexpr (std::is_same_v<T, struct read_quorum_reply>) {
+            _stats.read_quorum_reply_sent++;
+            _rpc->send_read_quorum_reply(id, std::move(m));
         } else if constexpr (std::is_same_v<T, install_snapshot>) {
             _stats.install_snapshot_sent++;
             // Send in the background.
@@ -473,14 +534,17 @@ future<> server_impl::io_fiber(index_t last_stable) {
             }
 
             if (batch.snp) {
-                logger.trace("[{}] io_fiber storing snapshot {}", _id, batch.snp->id);
+                auto& [snp, is_local, old_id] = *batch.snp;
+                logger.trace("[{}] io_fiber storing snapshot {}", _id, snp.id);
                 // Persist the snapshot
-                co_await _persistence->store_snapshot(*batch.snp, _config.snapshot_trailing);
+                co_await _persistence->store_snapshot_descriptor(snp, _config.snapshot_trailing);
                 _stats.store_snapshot++;
+                // Drop previous snapshot since it is no longer used
+                 _state_machine->drop_snapshot(old_id);
                 // If this is locally generated snapshot there is no need to
                 // load it.
-                if (_last_loaded_snapshot_id != batch.snp->id) {
-                    co_await _apply_entries.push_eventually(std::move(*batch.snp));
+                if (!is_local) {
+                    co_await _apply_entries.push_eventually(std::move(snp));
                 }
             }
 
@@ -541,6 +605,12 @@ future<> server_impl::io_fiber(index_t last_stable) {
                 co_await _apply_entries.push_eventually(std::move(batch.committed));
             }
 
+            if (batch.max_read_id_with_quorum) {
+                while (!_reads.empty() && _reads.front().id <= batch.max_read_id_with_quorum) {
+                    _reads.front().promise.set_value(_reads.front().idx);
+                    _reads.pop_front();
+                }
+            }
             if (!_fsm->is_leader()) {
                 if (_stepdown_promise) {
                     std::exchange(_stepdown_promise, std::nullopt)->set_value();
@@ -552,10 +622,18 @@ future<> server_impl::io_fiber(index_t last_stable) {
                 }
                 // request aborts of snapshot transfers
                 abort_snapshot_transfers();
+                // abort all read barriers
+                for (auto& r : _reads) {
+                    r.promise.set_value(not_a_leader{_fsm->current_leader()});
+                }
+                _reads.clear();
             } else if (batch.abort_leadership_transfer) {
                 if (_stepdown_promise) {
                     std::exchange(_stepdown_promise, std::nullopt)->set_exception(timeout_error("Stepdown process timed out"));
                 }
+            }
+            if (_leader_promise && _fsm->current_leader()) {
+                std::exchange(_leader_promise, std::nullopt)->set_value();
             }
         }
     } catch (seastar::broken_condition_variable&) {
@@ -595,7 +673,18 @@ future<snapshot_reply> server_impl::apply_snapshot(server_id from, install_snaps
     _fsm->step(from, std::move(snp));
     // Only one snapshot can be received at a time from each node
     assert(! _snapshot_application_done.contains(from));
-    return _snapshot_application_done[from].get_future();
+    snapshot_reply reply{_fsm->get_current_term(), false};
+    try {
+        reply = co_await _snapshot_application_done[from].get_future();
+    } catch (...) {
+        logger.error("apply_snapshot[{}] failed with {}", _id, std::current_exception());
+    }
+    if (!reply.success) {
+        // Drop snapshot that failed to be applied
+        _state_machine->drop_snapshot(snp.snp.id);
+    }
+
+    co_return reply;
 }
 
 future<> server_impl::applier_fiber() {
@@ -625,10 +714,10 @@ future<> server_impl::applier_fiber() {
                        boost::adaptors::transformed([] (log_entry_ptr& entry) { return std::cref(std::get<command>(entry->data)); }),
                        std::back_inserter(commands));
 
-               auto size = commands.size();
+                auto size = commands.size();
                 if (size) {
-                  co_await _state_machine->apply(std::move(commands));
-                  _stats.applied_entries += size;
+                    co_await _state_machine->apply(std::move(commands));
+                    _stats.applied_entries += size;
                 }
 
                _applied_idx = last_idx;
@@ -639,13 +728,12 @@ future<> server_impl::applier_fiber() {
                // of taking snapshots ourselves but comparing our last index directly with what's currently in _fsm.
                auto last_snap_idx = _fsm->log_last_snapshot_idx();
                if (_applied_idx >= last_snap_idx && _applied_idx - last_snap_idx >= _config.snapshot_threshold) {
-                   snapshot snp;
+                   snapshot_descriptor snp;
                    snp.term = last_term;
                    snp.idx = _applied_idx;
                    snp.config = _fsm->log_last_conf_for(_applied_idx);
                    logger.trace("[{}] applier fiber: taking snapshot term={}, idx={}", _id, snp.term, snp.idx);
                    snp.id = co_await _state_machine->take_snapshot();
-                   _last_loaded_snapshot_id = snp.id;
                    // Note that at this point (after the `co_await`), _fsm may already have applied a later snapshot.
                    // That's fine, `_fsm->apply_snapshot` will simply ignore our current attempt; we will soon receive
                    // a later snapshot from the queue.
@@ -656,17 +744,16 @@ future<> server_impl::applier_fiber() {
                    _stats.snapshots_taken++;
                }
             } else {
-                snapshot& snp = std::get<1>(v);
+                snapshot_descriptor& snp = std::get<1>(v);
                 assert(snp.idx >= _applied_idx);
                 // Apply snapshot it to the state machine
                 logger.trace("[{}] apply_fiber applying snapshot {}", _id, snp.id);
                 co_await _state_machine->load_snapshot(snp.id);
-                _state_machine->drop_snapshot(_last_loaded_snapshot_id);
                 drop_waiters(snp.idx);
-                _last_loaded_snapshot_id = snp.id;
                 _applied_idx = snp.idx;
                 _stats.sm_load_snapshot++;
             }
+            signal_applied();
         }
     } catch(stop_apply_fiber& ex) {
         // the fiber is aborted
@@ -680,13 +767,72 @@ term_t server_impl::get_current_term() const {
     return _fsm->get_current_term();
 }
 
+future<> server_impl::wait_for_apply(index_t idx) {
+    if (idx > _applied_idx) {
+        // The index is not applied yet. Wait for it.
+        // This will be signalled when read_idx is applied
+        auto it = _awaited_indexes.emplace(idx, promise<>());
+        co_await it->second.get_future();
+    }
+}
+
+future<read_barrier_reply> server_impl::execute_read_barrier(server_id from) {
+    logger.trace("[{}] execute_read_barrier start", _id);
+
+    std::optional<std::pair<read_id, index_t>> rid;
+    try {
+        rid = _fsm->start_read_barrier(from);
+        if (!rid) {
+            // cannot start a barrier yet
+            return make_ready_future<read_barrier_reply>(std::monostate{});
+        }
+    } catch (not_a_leader& err) {
+        return make_ready_future<read_barrier_reply>(err);
+    }
+    logger.trace("[{}] execute_read_barrier read id is {} for commit idx {}",
+        _id, rid->first, rid->second);
+    _reads.push_back({rid->first, rid->second, {}});
+    return _reads.back().promise.get_future();
+}
+
+future<read_barrier_reply> server_impl::get_read_idx(server_id leader) {
+    if (_id == leader) {
+        return execute_read_barrier(_id);
+    } else {
+        return _rpc->execute_read_barrier_on_leader(leader);
+    }
+}
+
 future<> server_impl::read_barrier() {
-    if (_fsm->can_read()) {
-        co_return;
+    server_id leader = _fsm->current_leader();
+
+    logger.trace("[{}] read_barrier start", _id);
+    index_t read_idx;
+
+    while (read_idx == index_t{}) {
+        logger.trace("[{}] read_barrier forward to  {}", _id, leader);
+        if (leader == server_id{}) {
+            co_await wait_for_leader();
+            leader = _fsm->current_leader();
+        } else {
+            auto applied = _applied_idx;
+            auto res = co_await get_read_idx(leader);
+            if (std::holds_alternative<std::monostate>(res)) {
+                // the leader is not ready to answer because it did not
+                // committed any entries yet, so wait for any entry to be
+                // committed (if non were since start of the attempt) and retry.
+                logger.trace("[{}] read_barrier leader not ready", _id);
+                co_await wait_for_apply(++applied);
+            } else if (std::holds_alternative<raft::not_a_leader>(res)) {
+                leader = std::get<not_a_leader>(res).leader;
+            } else {
+                read_idx = std::get<index_t>(res);
+            }
+        }
     }
 
-    co_await apply_dummy_entry();
-    co_return;
+    logger.trace("[{}] read_barrier read index {}, append index {}", _id, read_idx, _applied_idx);
+    co_return co_await wait_for_apply(read_idx);
 }
 
 void server_impl::abort_snapshot_transfers() {
@@ -716,6 +862,21 @@ future<> server_impl::abort() {
     }
     _awaited_commits.clear();
     _awaited_applies.clear();
+    if (_leader_promise) {
+        _leader_promise->set_exception(stopped_error());
+    }
+
+    // Complete all read attempts with not_a_leader
+    for (auto& r: _reads) {
+        r.promise.set_value(raft::not_a_leader{server_id{}});
+    }
+    _reads.clear();
+
+    // Abort all read_barriers with an exception
+    for (auto& i : _awaited_indexes) {
+        i.second.set_exception(stopped_error());
+    }
+    _awaited_indexes.clear();
 
     for (auto&& [_, f] : _snapshot_application_done) {
         f.set_exception(std::runtime_error("Snapshot application aborted"));
@@ -780,6 +941,10 @@ void server_impl::register_metrics() {
              sm::description("how many messages were received"), {server_id_label(_id), message_type("request_vote_reply")}),
         sm::make_total_operations("messages_received", _stats.timeout_now_received,
              sm::description("how many messages were received"), {server_id_label(_id), message_type("timeout_now")}),
+        sm::make_total_operations("messages_received", _stats.read_quorum_received,
+             sm::description("how many messages were received"), {server_id_label(_id), message_type("read_quorum")}),
+        sm::make_total_operations("messages_received", _stats.read_quorum_reply_received,
+             sm::description("how many messages were received"), {server_id_label(_id), message_type("read_quorum_reply")}),
 
         sm::make_total_operations("messages_sent", _stats.append_entries_sent,
              sm::description("how many messages were send"), {server_id_label(_id), message_type("append_entries")}),
@@ -795,6 +960,10 @@ void server_impl::register_metrics() {
              sm::description("how many messages were sent"), {server_id_label(_id), message_type("snapshot_reply")}),
         sm::make_total_operations("messages_sent", _stats.timeout_now_sent,
              sm::description("how many messages were sent"), {server_id_label(_id), message_type("timeout_now")}),
+        sm::make_total_operations("messages_sent", _stats.read_quorum_sent,
+             sm::description("how many messages were sent"), {server_id_label(_id), message_type("read_quorum")}),
+        sm::make_total_operations("messages_sent", _stats.read_quorum_reply_sent,
+             sm::description("how many messages were sent"), {server_id_label(_id), message_type("read_quorum_reply")}),
 
         sm::make_total_operations("waiter_awaken", _stats.waiters_awaken,
              sm::description("how many waiters got result back"), {server_id_label(_id)}),

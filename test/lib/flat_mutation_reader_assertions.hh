@@ -24,7 +24,7 @@ class flat_reader_assertions {
     range_tombstone_list _tombstones;
 private:
     mutation_fragment_opt read_next() {
-        return _reader(db::no_timeout).get0();
+        return _reader().get0();
     }
 
     static bool are_tombstones_mergeable(const schema& s, const range_tombstone& a, const range_tombstone& b) {
@@ -110,14 +110,14 @@ public:
     }
 
     flat_reader_assertions& may_produce_tombstones(position_range range) {
-        while (mutation_fragment* next = _reader.peek(db::no_timeout).get0()) {
+        while (mutation_fragment* next = _reader.peek().get0()) {
             if (next->is_range_tombstone()) {
                 if (!range.overlaps(*_reader.schema(), next->as_range_tombstone().position(), next->as_range_tombstone().end_position())) {
                     break;
                 }
                 testlog.trace("Received range tombstone: {}", mutation_fragment::printer(*_reader.schema(), *next));
                 range = position_range(position_in_partition(next->position()), range.end());
-                _tombstones.apply(*_reader.schema(), _reader(db::no_timeout).get0()->as_range_tombstone());
+                _tombstones.apply(*_reader.schema(), _reader().get0()->as_range_tombstone());
             } else if (next->is_clustering_row() && next->as_clustering_row().empty()) {
                 if (!range.contains(*_reader.schema(), next->position())) {
                     break;
@@ -127,7 +127,7 @@ public:
                 // incorrect to do so, so let's ignore them.
                 testlog.trace("Received empty clustered row: {}", mutation_fragment::printer(*_reader.schema(), *next));
                 range = position_range(position_in_partition(next->position()), range.end());
-                _reader(db::no_timeout).get();
+                _reader().get();
             } else {
                 break;
             }
@@ -258,11 +258,11 @@ public:
         actual_list.apply(s, mfo->as_range_tombstone());
         _tombstones.apply(s, mfo->as_range_tombstone());
         position_in_partition::equal_compare eq(s);
-        while (mutation_fragment* next = _reader.peek(db::no_timeout).get0()) {
+        while (mutation_fragment* next = _reader.peek().get0()) {
             if (!next->is_range_tombstone() || !are_tombstones_mergeable(s, *actual_list.begin(), next->as_range_tombstone())) {
                 break;
             }
-            auto rt = _reader(db::no_timeout).get0()->as_range_tombstone();
+            auto rt = _reader().get0()->as_range_tombstone();
             actual_list.apply(s, rt);
             assert(actual_list.size() == 1);
             _tombstones.apply(s, rt);
@@ -347,7 +347,7 @@ public:
     }
 
     flat_reader_assertions& produces(const mutation& m, const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         if (!mo) {
             BOOST_FAIL(format("Expected {}, but got end of stream, at: {}", m, seastar::current_backtrace()));
         }
@@ -372,7 +372,7 @@ public:
 
     flat_reader_assertions& produces_eos_or_empty_mutation() {
         testlog.trace("Expecting eos or empty mutation");
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         if (mo) {
             if (!mo->partition().empty()) {
                 BOOST_FAIL(format("Mutation is not empty: {}", *mo));
@@ -421,7 +421,7 @@ public:
     flat_reader_assertions& fast_forward_to(const dht::partition_range& pr) {
         testlog.trace("Fast forward to partition range: {}", pr);
         _pr = pr;
-        _reader.fast_forward_to(_pr, db::no_timeout).get();
+        _reader.fast_forward_to(_pr).get();
         return *this;
     }
 
@@ -433,7 +433,7 @@ public:
 
     flat_reader_assertions& fast_forward_to(position_range pr) {
         testlog.trace("Fast forward to clustering range: {}", pr);
-        _reader.fast_forward_to(std::move(pr), db::no_timeout).get();
+        _reader.fast_forward_to(std::move(pr)).get();
         return *this;
     }
 
@@ -447,7 +447,7 @@ public:
 
     flat_reader_assertions& produces_compacted(const mutation& m, gc_clock::time_point query_time,
             const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         // If the passed in mutation is empty, allow for the reader to produce an empty or no partition.
         if (m.partition().empty() && !mo) {
             return *this;
@@ -461,13 +461,13 @@ public:
     }
 
     mutation_assertion next_mutation() {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         BOOST_REQUIRE(bool(mo));
         return mutation_assertion(std::move(*mo));
     }
 
     future<> fill_buffer() {
-        return _reader.fill_buffer(db::no_timeout);
+        return _reader.fill_buffer();
     }
 
     bool is_buffer_full() const {
@@ -490,7 +490,7 @@ class flat_reader_assertions_v2 {
     dht::partition_range _pr;
 private:
     mutation_fragment_v2_opt read_next() {
-        return _reader(db::no_timeout).get0();
+        return _reader().get0();
     }
 public:
     flat_reader_assertions_v2(flat_mutation_reader_v2 reader)
@@ -744,7 +744,7 @@ public:
     }
 
     flat_reader_assertions_v2& produces(const mutation& m, const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         if (!mo) {
             BOOST_FAIL(format("Expected {}, but got end of stream, at: {}", m, seastar::current_backtrace()));
         }
@@ -769,7 +769,7 @@ public:
 
     flat_reader_assertions_v2& produces_eos_or_empty_mutation() {
         testlog.trace("Expecting eos or empty mutation");
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         if (mo) {
             if (!mo->partition().empty()) {
                 BOOST_FAIL(format("Mutation is not empty: {}", *mo));
@@ -818,7 +818,7 @@ public:
     flat_reader_assertions_v2& fast_forward_to(const dht::partition_range& pr) {
         testlog.trace("Fast forward to partition range: {}", pr);
         _pr = pr;
-        _reader.fast_forward_to(_pr, db::no_timeout).get();
+        _reader.fast_forward_to(_pr).get();
         return *this;
     }
 
@@ -830,7 +830,7 @@ public:
 
     flat_reader_assertions_v2& fast_forward_to(position_range pr) {
         testlog.trace("Fast forward to clustering range: {}", pr);
-        _reader.fast_forward_to(std::move(pr), db::no_timeout).get();
+        _reader.fast_forward_to(std::move(pr)).get();
         return *this;
     }
 
@@ -844,7 +844,7 @@ public:
 
     flat_reader_assertions_v2& produces_compacted(const mutation& m, gc_clock::time_point query_time,
                                                const std::optional<query::clustering_row_ranges>& ck_ranges = {}) {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         // If the passed in mutation is empty, allow for the reader to produce an empty or no partition.
         if (m.partition().empty() && !mo) {
             return *this;
@@ -858,13 +858,13 @@ public:
     }
 
     mutation_assertion next_mutation() {
-        auto mo = read_mutation_from_flat_mutation_reader(_reader, db::no_timeout).get0();
+        auto mo = read_mutation_from_flat_mutation_reader(_reader).get0();
         BOOST_REQUIRE(bool(mo));
         return mutation_assertion(std::move(*mo));
     }
 
     future<> fill_buffer() {
-        return _reader.fill_buffer(db::no_timeout);
+        return _reader.fill_buffer();
     }
 
     bool is_buffer_full() const {

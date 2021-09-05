@@ -1325,8 +1325,8 @@ select_statement::select_statement(cf_name cf_name,
                                    lw_shared_ptr<const parameters> parameters,
                                    std::vector<::shared_ptr<selection::raw_selector>> select_clause,
                                    std::vector<::shared_ptr<relation>> where_clause,
-                                   ::shared_ptr<term::raw> limit,
-                                   ::shared_ptr<term::raw> per_partition_limit,
+                                   std::optional<expr::expression> limit,
+                                   std::optional<expr::expression> per_partition_limit,
                                    std::vector<::shared_ptr<cql3::column_identifier::raw>> group_by_columns,
                                    std::unique_ptr<attributes::raw> attrs)
     : cf_statement(cf_name)
@@ -1406,7 +1406,8 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
         is_reversed_ = is_reversed(*schema);
     }
 
-    check_needs_filtering(*restrictions);
+    std::vector<sstring> warnings;
+    check_needs_filtering(*restrictions, db.get_config().strict_allow_filtering(), warnings);
     ensure_filtering_columns_retrieval(db, *selection, *restrictions);
     auto group_by_cell_indices = ::make_shared<std::vector<size_t>>(prepare_group_by(*schema, *selection));
 
@@ -1446,7 +1447,7 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
 
     auto partition_key_bind_indices = ctx.get_partition_key_bind_indexes(*schema);
 
-    return std::make_unique<prepared_statement>(audit_info(), std::move(stmt), ctx, std::move(partition_key_bind_indices));
+    return make_unique<prepared_statement>(audit_info(), std::move(stmt), ctx, move(partition_key_bind_indices), move(warnings));
 }
 
 ::shared_ptr<restrictions::statement_restrictions>
@@ -1470,13 +1471,13 @@ select_statement::prepare_restrictions(database& db,
 
 /** Returns a ::shared_ptr<term> for the limit or null if no limit is set */
 ::shared_ptr<term>
-select_statement::prepare_limit(database& db, prepare_context& ctx, ::shared_ptr<term::raw> limit)
+select_statement::prepare_limit(database& db, prepare_context& ctx, const std::optional<expr::expression>& limit)
 {
     if (!limit) {
         return {};
     }
 
-    auto prep_limit = limit->prepare(db, keyspace(), limit_receiver());
+    auto prep_limit = prepare_term(*limit, db, keyspace(), limit_receiver());
     prep_limit->fill_prepare_context(ctx);
     return prep_limit;
 }
@@ -1620,15 +1621,40 @@ bool select_statement::is_reversed(const schema& schema) const {
     return is_reversed_;
 }
 
+/// True iff restrictions require ALLOW FILTERING despite there being no coordinator-side filtering.
+static bool needs_allow_filtering_anyway(
+        const restrictions::statement_restrictions& restrictions,
+        db::tri_mode_restriction_t::mode strict_allow_filtering,
+        std::vector<sstring>& warnings) {
+    using flag_t = db::tri_mode_restriction_t::mode;
+    if (strict_allow_filtering == flag_t::FALSE) {
+        return false;
+    }
+    const auto& ck_restrictions = *restrictions.get_clustering_columns_restrictions();
+    const auto& pk_restrictions = *restrictions.get_partition_key_restrictions();
+    // Even if no filtering happens on the coordinator, we still warn about poor performance when partition
+    // slice is defined but in potentially unlimited number of partitions (see #7608).
+    if ((pk_restrictions.empty() || has_token(pk_restrictions.expression)) // Potentially unlimited partitions.
+        && !ck_restrictions.empty() // Slice defined.
+        && !restrictions.uses_secondary_indexing()) { // Base-table is used. (Index-table use always limits partitions.)
+        if (strict_allow_filtering == flag_t::WARN) {
+            warnings.emplace_back("This query should use ALLOW FILTERING and will be rejected in future versions.");
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 /** If ALLOW FILTERING was not specified, this verifies that it is not needed */
-void select_statement::check_needs_filtering(const restrictions::statement_restrictions& restrictions)
+void select_statement::check_needs_filtering(
+        const restrictions::statement_restrictions& restrictions,
+        db::tri_mode_restriction_t::mode strict_allow_filtering,
+        std::vector<sstring>& warnings)
 {
     // non-key-range non-indexed queries cannot involve filtering underneath
     if (!_parameters->allow_filtering() && (restrictions.is_key_range() || restrictions.uses_secondary_indexing())) {
-        // We will potentially filter data if either:
-        //  - Have more than one IndexExpression
-        //  - Have no index expression and the column filter is not the identity
-        if (restrictions.need_filtering()) {
+        if (restrictions.need_filtering() || needs_allow_filtering_anyway(restrictions, strict_allow_filtering, warnings)) {
             throw exceptions::invalid_request_exception(
                 "Cannot execute this query as it might involve data filtering and "
                     "thus may have unpredictable performance. If you want to execute "

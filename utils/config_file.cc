@@ -26,6 +26,7 @@
 #include <seastar/core/do_with.hh>
 #include <seastar/core/print.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/util/defer.hh>
 
 #include <seastar/json/json_elements.hh>
 

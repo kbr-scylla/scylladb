@@ -99,5 +99,12 @@ struct hash<raft::internal::tagged_id<Tag>> {
     }
 };
 
+template<typename Tag>
+struct hash<raft::internal::tagged_uint64<Tag>> {
+    size_t operator()(const raft::internal::tagged_uint64<Tag>& val) const {
+        return hash<uint64_t>()(val);
+    }
+};
+
 } // end of namespace std
 

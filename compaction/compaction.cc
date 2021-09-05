@@ -540,7 +540,7 @@ protected:
         : _cf(cf)
         , _sstable_creator(std::move(descriptor.creator))
         , _schema(cf.schema())
-        , _permit(_cf.compaction_concurrency_semaphore().make_tracking_only_permit(_cf.schema().get(), "compaction"))
+        , _permit(_cf.compaction_concurrency_semaphore().make_tracking_only_permit(_cf.schema().get(), "compaction", db::no_timeout))
         , _sstables(std::move(descriptor.sstables))
         , _max_sstable_size(descriptor.max_sstable_bytes)
         , _sstable_level(descriptor.level)
@@ -704,7 +704,7 @@ private:
                                          get_compacting_sstable_writer(),
                                          std::move(gc_consumer));
 
-                reader.consume_in_thread(std::move(cfc), db::no_timeout);
+                reader.consume_in_thread(std::move(cfc));
             });
         });
         return consumer(make_sstable_reader());
@@ -1386,12 +1386,12 @@ private:
             , _reader(std::move(underlying))
             , _validator(*_schema)
         { }
-        virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+        virtual future<> fill_buffer() override {
             if (_end_of_stream) {
                 return make_ready_future<>();
             }
-            return repeat([this, timeout] {
-                return _reader.fill_buffer(timeout).then([this] {
+            return repeat([this] {
+                return _reader.fill_buffer().then([this] {
                     fill_buffer_from_underlying();
                     return stop_iteration(is_buffer_full() || _end_of_stream);
                 });
@@ -1417,10 +1417,10 @@ private:
         virtual future<> next_partition() override {
             return make_exception_future<>(make_backtraced_exception_ptr<std::bad_function_call>());
         }
-        virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
+        virtual future<> fast_forward_to(const dht::partition_range& pr) override {
             return make_exception_future<>(make_backtraced_exception_ptr<std::bad_function_call>());
         }
-        virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
+        virtual future<> fast_forward_to(position_range pr) override {
             return make_exception_future<>(make_backtraced_exception_ptr<std::bad_function_call>());
         }
         virtual future<> close() noexcept override {
@@ -1450,7 +1450,8 @@ public:
     }
 
     flat_mutation_reader make_sstable_reader() const override {
-        return make_flat_mutation_reader<reader>(regular_compaction::make_sstable_reader(), _options.operation_mode);
+        auto crawling_reader = _compacting->make_crawling_reader(_schema, _permit, _io_priority, nullptr);
+        return make_flat_mutation_reader<reader>(std::move(crawling_reader), _options.operation_mode);
     }
 
     reader_consumer make_interposer_consumer(reader_consumer end_consumer) override {
@@ -1639,7 +1640,7 @@ future<bool> scrub_validate_mode_validate_reader(flat_mutation_reader reader, co
     try {
         auto validator = mutation_fragment_stream_validator(*schema);
 
-        while (auto mf_opt = co_await reader(db::no_timeout)) {
+        while (auto mf_opt = co_await reader()) {
             if (info.is_stop_requested()) [[unlikely]] {
                 // Compaction manager will catch this exception and re-schedule the compaction.
                 co_return coroutine::make_exception(compaction_stop_exception(info.ks_name, info.cf_name, info.stop_requested));
@@ -1697,15 +1698,18 @@ static future<compaction_info> scrub_sstables_validate_mode(sstables::compaction
     auto info = compaction::create_compaction_info(cf, descriptor);
     info->sstables = descriptor.sstables.size();
     cf.get_compaction_manager().register_compaction(info);
-    auto deregister_compaction = defer([&cf, info] {
-        cf.get_compaction_manager().deregister_compaction(info);
+    auto deregister_compaction = defer([&cf, info] () noexcept {
+        try {
+            cf.get_compaction_manager().deregister_compaction(info);
+        } catch (...) {
+            clogger.warn("Could not deregister compaction: {}. Ignored.", std::current_exception());
+        }
     });
 
     clogger.info("Scrubbing in validate mode {}", sstables_list_msg);
 
-    auto permit = cf.compaction_concurrency_semaphore().make_tracking_only_permit(schema.get(), "scrub:validate");
-    auto reader = sstables->make_local_shard_sstable_reader(schema, permit, query::full_partition_range, schema->full_slice(), descriptor.io_priority,
-            tracing::trace_state_ptr(), ::streamed_mutation::forwarding::no, ::mutation_reader::forwarding::no, default_read_monitor_generator());
+    auto permit = cf.compaction_concurrency_semaphore().make_tracking_only_permit(schema.get(), "scrub:validate", db::no_timeout);
+    auto reader = sstables->make_crawling_reader(schema, permit, descriptor.io_priority, nullptr);
 
     const auto valid = co_await scrub_validate_mode_validate_reader(std::move(reader), *info);
 

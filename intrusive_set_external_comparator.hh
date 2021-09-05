@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <seastar/util/defer.hh>
 #include <boost/intrusive/set.hpp>
 #include <iterator>
 #include <boost/intrusive/parent_from_member.hpp>
@@ -211,7 +212,11 @@ public:
     void clone_from(const intrusive_set_external_comparator &src, Cloner cloner, Disposer disposer) {
         clear_and_dispose(disposer);
         if (!src.empty()) {
-            auto rollback = defer([this, &disposer] { this->clear_and_dispose(disposer); });
+            auto rollback = defer([this, &disposer] () noexcept {
+                // terminate if clear_and_dispose throws
+                // since we cannot recover from that.
+                this->clear_and_dispose(disposer);
+            });
             algo::clone(src._header.this_ptr(),
                         _header.this_ptr(),
                         [&cloner] (const node_ptr& p) {

@@ -8,15 +8,16 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#define BOOST_TEST_MODULE btree
-
 #include <boost/test/unit_test.hpp>
 #include <fmt/core.h>
 
+#include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include "test/unit/tree_test_key.hh"
 #include "utils/intrusive_btree.hh"
 
 using namespace intrusive_b;
+using namespace seastar;
 
 class test_key : public tree_test_key_base {
     member_hook b_hook;
@@ -30,7 +31,7 @@ public:
     using test_tree = tree<test_key, &test_key::b_hook, tri_compare, 4, 5, key_search::both, with_debug::yes>;
     test_key(int nr, int cookie) noexcept : tree_test_key_base(nr, cookie) {}
     test_key(int nr) noexcept : tree_test_key_base(nr) {}
-    test_key(const test_key& o) noexcept : tree_test_key_base(o, tree_test_key_base::force_copy_tag{}) {}
+    test_key(const test_key& o) : tree_test_key_base(o, tree_test_key_base::force_copy_tag{}) {}
     test_key(test_key&&) = delete;
 };
 
@@ -546,4 +547,46 @@ BOOST_AUTO_TEST_CASE(test_unlink_leftmost_without_rebalance) {
     test_unlink_leftmost_n(1);
     test_unlink_leftmost_n(3);
     test_unlink_leftmost_n(32);
+}
+
+static future<> test_exception_safety_of_clone(unsigned nr_keys) {
+    return seastar::async([nr_keys] {
+        test_tree t;
+
+        for (unsigned i = 0; i < nr_keys; i++) {
+            t.insert(std::make_unique<test_key>(i), cmp);
+        }
+
+        test_tree ct;
+        unsigned nr_cloned_keys = 0;
+
+        auto cloner = [&] (test_key* key) -> test_key* {
+            auto* k = new test_key(*key);
+            nr_cloned_keys++;
+            return k;
+        };
+        auto key_deleter = [&] (test_key* key) noexcept {
+            nr_cloned_keys--;
+            delete key;
+        };
+
+        memory::with_allocation_failures([&] {
+            ct.clone_from(t, cloner, key_deleter);
+        });
+
+        BOOST_REQUIRE(std::equal(t.begin(), t.end(), ct.begin(), ct.end()));
+        // Check that no keys left cloned but not rolled-back on exception
+        BOOST_REQUIRE_EQUAL(nr_cloned_keys, ct.calculate_size());
+
+        t.clear_and_dispose(key_deleter);
+        ct.clear_and_dispose(key_deleter);
+    });
+}
+
+SEASTAR_TEST_CASE(test_exception_safety_of_clone_linear) {
+    return test_exception_safety_of_clone(3);
+}
+
+SEASTAR_TEST_CASE(test_exception_safety_of_clone_large) {
+    return test_exception_safety_of_clone(2534);
 }

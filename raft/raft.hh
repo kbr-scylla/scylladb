@@ -42,6 +42,8 @@ using group_id = raft::internal::tagged_id<struct group_id_tag>;
 using term_t = internal::tagged_uint64<struct term_tag>;
 // This type represensts the index into the raft log
 using index_t = internal::tagged_uint64<struct index_tag>;
+// Identifier for a read barrier request
+using read_id = internal::tagged_uint64<struct read_id_tag>;
 
 // Opaque connection properties. May contain ip:port pair for instance.
 // This value is disseminated between cluster member
@@ -245,7 +247,7 @@ inline bool is_transient_error(const std::exception& e) {
            dynamic_cast<const stopped_error*>(&e);
 }
 
-struct snapshot {
+struct snapshot_descriptor {
     // Index and term of last entry in the snapshot
     index_t idx = index_t(0);
     term_t term = term_t(0);
@@ -321,7 +323,7 @@ struct install_snapshot {
     // Current term on a leader
     term_t current_term;
     // A snapshot to install
-    snapshot snp;
+    snapshot_descriptor snp;
 };
 
 struct snapshot_reply {
@@ -337,7 +339,42 @@ struct timeout_now {
     term_t current_term;
 };
 
-using rpc_message = std::variant<append_request, append_reply, vote_request, vote_reply, install_snapshot, snapshot_reply, timeout_now>;
+struct read_quorum {
+    // The leader's term.
+    term_t current_term;
+    // The leader's commit_idx. Has the same semantics
+    // as in append_entries.
+    index_t leader_commit_idx;
+    // The id of the read barrier. Only valid within this term.
+    read_id id;
+};
+
+struct read_quorum_reply {
+    // The leader's term, as sent in the read_quorum request.
+    // read_id is only valid (and unique) within a given term.
+    term_t current_term;
+    // Piggy-back follower's commit_idx, for the same purposes
+    // as in append_reply::commit_idx
+    index_t commit_idx;
+    // Copy of the id from a read_quorum request
+    read_id id;
+};
+
+// std::monostate {} if the leader cannot execute the barrier because
+// it did not commit any entries yet
+// raft::not_a_leader if the node is not a leader
+// index_t index that is safe to read without breaking linearizability
+using read_barrier_reply = std::variant<std::monostate, index_t, raft::not_a_leader>;
+
+using rpc_message = std::variant<append_request,
+      append_reply,
+      vote_request,
+      vote_reply,
+      install_snapshot,
+      snapshot_reply,
+      timeout_now,
+      read_quorum,
+      read_quorum_reply>;
 
 // we need something that can be truncated form both sides.
 // std::deque move constructor is not nothrow hence cannot be used
@@ -437,6 +474,15 @@ public:
     // Send a request to start leader election.
     virtual void send_timeout_now(server_id, const timeout_now& timeout_now) = 0;
 
+    // Send a read barrier request.
+    virtual void send_read_quorum(server_id id, const read_quorum& read_quorum) = 0;
+
+    // Send a reply to read barrier request.
+    virtual void send_read_quorum_reply(server_id id, const read_quorum_reply& read_quorum_reply) = 0;
+
+    // Forward a read barrier request to the leader.
+    virtual future<read_barrier_reply> execute_read_barrier_on_leader(server_id id) = 0;
+
     // When a new server is learn this function is called with the
     // info about the server.
     virtual void add_server(server_id id, server_info info) = 0;
@@ -473,8 +519,15 @@ public:
 
     virtual void timeout_now_request(server_id from, timeout_now timeout_now) = 0;
 
+    virtual void read_quorum_request(server_id from, read_quorum read_quorum) = 0;
+
+    virtual void read_quorum_reply(server_id from, read_quorum_reply read_quorum_reply) = 0;
+
     // Apply incoming snapshot, future resolves when application is complete
     virtual future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) = 0;
+
+    // Try to execute read barrier, future resolves when the barrier is completed or error happens
+    virtual future<read_barrier_reply> execute_read_barrier(server_id from) = 0;
 
     // Update RPC implementation with this client as
     // the receiver of RPC input.
@@ -506,14 +559,14 @@ public:
     // calls to this function. Can be called in parallel with
     // store_log_entries() but snap.index should belong to an already
     // persisted entry.
-    virtual future<> store_snapshot(const snapshot& snap, size_t preserve_log_entries) = 0;
+    virtual future<> store_snapshot_descriptor(const snapshot_descriptor& snap, size_t preserve_log_entries) = 0;
 
     // Load a saved snapshot.
     // This only loads it into memory, but does not apply yet. To
     // apply call 'state_machine::load_snapshot(snapshot::id)'
     // Called during Raft server initialization only, should not
     // run in parallel with store.
-    virtual future<snapshot> load_snapshot() = 0;
+    virtual future<snapshot_descriptor> load_snapshot_descriptor() = 0;
 
     // Persist given log entries.
     // Can be called without waiting for previous call to resolve,

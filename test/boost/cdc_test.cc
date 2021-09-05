@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/util/defer.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <string>
 #include <boost/range/adaptor/map.hpp>

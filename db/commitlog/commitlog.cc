@@ -54,6 +54,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/net/byteorder.hh>
+#include <seastar/util/defer.hh>
 
 #include "seastarx.hh"
 
@@ -282,11 +283,11 @@ public:
     std::unordered_map<sstring, descriptor> _files_to_delete;
     std::vector<file> _files_to_close;
 
-    void account_memory_usage(size_t size) {
+    void account_memory_usage(size_t size) noexcept {
         _request_controller.consume(size);
     }
 
-    void notify_memory_written(size_t size) {
+    void notify_memory_written(size_t size) noexcept {
         _request_controller.signal(size);
     }
 
@@ -327,7 +328,7 @@ public:
         }
         return _flush_semaphore.wait();
     }
-    void end_flush() {
+    void end_flush() noexcept {
         _flush_semaphore.signal();
         --totals.pending_flushes;
     }
@@ -720,7 +721,7 @@ public:
         auto me = shared_from_this();
         co_await begin_flush();
 
-        auto finally = defer([&] {
+        auto finally = defer([&] () noexcept {
             end_flush();
         });
 
@@ -847,7 +848,7 @@ public:
 
             auto&& priority_class = service::get_local_commitlog_priority();
 
-            auto finally = defer([&] {
+            auto finally = defer([&] () noexcept {
                 _segment_manager->notify_memory_written(size);
                 _segment_manager->totals.buffer_list_bytes -= buf.size_bytes();
                 if (_size_on_disk < _file_pos) {
@@ -1100,22 +1101,22 @@ public:
     void mark_clean() {
         _cf_dirty.clear();
     }
-    bool is_still_allocating() const {
+    bool is_still_allocating() const noexcept {
         return !_closed && position() < _segment_manager->max_size;
     }
-    bool is_clean() const {
+    bool is_clean() const noexcept {
         return _cf_dirty.empty();
     }
-    bool is_unused() const {
+    bool is_unused() const noexcept {
         return !is_still_allocating() && is_clean();
     }
-    bool is_flushed() const {
+    bool is_flushed() const noexcept {
         return position() <= _flush_pos;
     }
-    bool can_delete() const {
+    bool can_delete() const noexcept {
         return is_unused() && is_flushed();
     }
-    bool contains(const replay_position& pos) const {
+    bool contains(const replay_position& pos) const noexcept {
         return pos.id == _desc.id;
     }
     sstring get_segment_name() const {
@@ -1619,7 +1620,7 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
 
         promise<> p;
         _segment_allocating.emplace(p.get_future());
-        auto finally = defer([&] { _segment_allocating = std::nullopt; });
+        auto finally = defer([&] () noexcept { _segment_allocating = std::nullopt; });
         try {
             gate::holder g(_gate);
             auto s = co_await with_timeout(timeout, new_segment());

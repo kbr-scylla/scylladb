@@ -53,7 +53,7 @@ namespace cql3 {
 class token_relation : public relation {
 private:
     std::vector<::shared_ptr<column_identifier::raw>> _entities;
-    ::shared_ptr<term::raw> _value;
+    expr::expression _value;
 
     /**
      * Returns the definition of the columns to which apply the token restriction.
@@ -76,7 +76,7 @@ private:
 
 public:
     token_relation(std::vector<::shared_ptr<column_identifier::raw>> entities,
-            expr::oper_t type, ::shared_ptr<term::raw> value)
+            expr::oper_t type, expr::expression value)
             : relation(type), _entities(std::move(entities)), _value(
                     std::move(value)) {
     }
@@ -113,7 +113,7 @@ public:
 
 protected:
     ::shared_ptr<term> to_term(const std::vector<lw_shared_ptr<column_specification>>& receivers,
-                                       const term::raw& raw,
+                                       const expr::expression& raw,
                                        database& db,
                                        const sstring& keyspace,
                                        prepare_context& ctx) const override;

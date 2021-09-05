@@ -23,7 +23,6 @@
 #include <boost/range/algorithm/find_if.hpp>
 
 #include "clustering_bounds_comparator.hh"
-#include "db/timeout_clock.hh"
 #include "dht/i_partitioner.hh"
 #include "mutation_fragment.hh"
 #include "mutation_reader.hh"
@@ -47,7 +46,7 @@ public:
     virtual ~enormous_table_reader() {
     }
 
-    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+    virtual future<> fill_buffer() override {
         if (!_partition_in_range) {
             return make_ready_future<>();
         }
@@ -112,12 +111,12 @@ public:
         return make_ready_future<>();
     }
 
-    virtual future<> fast_forward_to(const dht::partition_range& pr, db::timeout_clock::time_point timeout) override {
+    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
         do_fast_forward_to(pr);
         return make_ready_future<>();
     }
 
-    virtual future<> fast_forward_to(position_range pr, db::timeout_clock::time_point timeout) override {
+    virtual future<> fast_forward_to(position_range pr) override {
         throw runtime_exception("not forwardable");
         return make_ready_future<>();
     }

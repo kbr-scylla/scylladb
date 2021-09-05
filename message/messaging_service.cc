@@ -585,6 +585,9 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::RAFT_VOTE_REQUEST:
     case messaging_verb::RAFT_VOTE_REPLY:
     case messaging_verb::RAFT_TIMEOUT_NOW:
+    case messaging_verb::RAFT_READ_QUORUM:
+    case messaging_verb::RAFT_READ_QUORUM_REPLY:
+    case messaging_verb::RAFT_EXECUTE_READ_BARRIER_ON_LEADER:
         return 2;
     case messaging_verb::MUTATION_DONE:
     case messaging_verb::MUTATION_FAILED:
@@ -1642,35 +1645,58 @@ future<> messaging_service::send_raft_timeout_now(msg_addr id, clock_type::time_
    return send_message_oneway_timeout(this, timeout, messaging_verb::RAFT_TIMEOUT_NOW, std::move(id), std::move(gid), std::move(from_id), std::move(dst_id), timeout_now);
 }
 
+void messaging_service::register_raft_read_quorum(std::function<future<> (const rpc::client_info&, rpc::opt_time_point, raft::group_id, raft::server_id from_id, raft::server_id dst_id, raft::read_quorum)>&& func) {
+    register_handler(this, netw::messaging_verb::RAFT_READ_QUORUM, std::move(func));
+}
+future<> messaging_service::unregister_raft_read_quorum() {
+   return unregister_handler(netw::messaging_verb::RAFT_READ_QUORUM);
+}
+future<> messaging_service::send_raft_read_quorum(msg_addr id, clock_type::time_point timeout, raft::group_id gid, raft::server_id from_id, raft::server_id dst_id, const raft::read_quorum& check_quorum) {
+   return send_message_oneway_timeout(this, timeout, messaging_verb::RAFT_READ_QUORUM, std::move(id), std::move(gid), std::move(from_id), std::move(dst_id), check_quorum);
+}
+
+void messaging_service::register_raft_read_quorum_reply(std::function<future<> (const rpc::client_info&, rpc::opt_time_point, raft::group_id, raft::server_id from_id, raft::server_id dst_id, raft::read_quorum_reply)>&& func) {
+    register_handler(this, netw::messaging_verb::RAFT_READ_QUORUM_REPLY, std::move(func));
+}
+future<> messaging_service::unregister_raft_read_quorum_reply() {
+   return unregister_handler(netw::messaging_verb::RAFT_READ_QUORUM_REPLY);
+}
+future<> messaging_service::send_raft_read_quorum_reply(msg_addr id, clock_type::time_point timeout, raft::group_id gid, raft::server_id from_id, raft::server_id dst_id, const raft::read_quorum_reply& check_quorum_reply) {
+   return send_message_oneway_timeout(this, timeout, messaging_verb::RAFT_READ_QUORUM_REPLY, std::move(id), std::move(gid), std::move(from_id), std::move(dst_id), check_quorum_reply);
+}
+
+void messaging_service::register_raft_execute_read_barrier_on_leader(std::function<future<raft::read_barrier_reply> (const rpc::client_info&, rpc::opt_time_point, raft::group_id, raft::server_id from_id, raft::server_id dst_id)>&& func){
+    register_handler(this, netw::messaging_verb::RAFT_EXECUTE_READ_BARRIER_ON_LEADER, std::move(func));
+}
+future<> messaging_service::unregister_raft_execute_read_barrier_on_leader(){
+   return unregister_handler(netw::messaging_verb::RAFT_EXECUTE_READ_BARRIER_ON_LEADER);
+}
+future<raft::read_barrier_reply> messaging_service::send_raft_execute_read_barrier_on_leader(msg_addr id, clock_type::time_point timeout, raft::group_id gid, raft::server_id from_id, raft::server_id dst_id){
+   return send_message_timeout<future<raft::read_barrier_reply>>(this, messaging_verb::RAFT_EXECUTE_READ_BARRIER_ON_LEADER, std::move(id), timeout, std::move(gid), std::move(from_id), std::move(dst_id));
+}
 
 void init_messaging_service(sharded<messaging_service>& ms,
                 sharded<qos::service_level_controller>& sl_controller,
-                messaging_service::config mscfg, netw::messaging_service::scheduling_config scfg,
-                sstring ms_trust_store, sstring ms_cert, sstring ms_key, sstring ms_tls_prio, bool ms_client_auth) {
+                messaging_service::config mscfg, netw::messaging_service::scheduling_config scfg, const db::config& db_config) {
     using encrypt_what = messaging_service::encrypt_what;
     using namespace seastar::tls;
+
+    const auto& ssl_opts = db_config.server_encryption_options();
+    auto encrypt = utils::get_or_default(ssl_opts, "internode_encryption", "none");
+
+    if (encrypt == "all") {
+        mscfg.encrypt = encrypt_what::all;
+    } else if (encrypt == "dc") {
+        mscfg.encrypt = encrypt_what::dc;
+    } else if (encrypt == "rack") {
+        mscfg.encrypt = encrypt_what::rack;
+    }
 
     std::shared_ptr<credentials_builder> creds;
 
     if (mscfg.encrypt != encrypt_what::none) {
         creds = std::make_shared<credentials_builder>();
-        creds->set_dh_level(dh_params::level::MEDIUM);
-
-        creds->set_x509_key_file(ms_cert, ms_key, x509_crt_format::PEM).get();
-        if (ms_trust_store.empty()) {
-            creds->set_system_trust().get();
-        } else {
-            creds->set_x509_trust_file(ms_trust_store, x509_crt_format::PEM).get();
-        }
-
-        creds->set_priority_string(db::config::default_tls_priority);
-
-        if (!ms_tls_prio.empty()) {
-            creds->set_priority_string(ms_tls_prio);
-        }
-        if (ms_client_auth) {
-            creds->set_client_auth(seastar::tls::client_auth::REQUIRE);
-        }
+        utils::configure_tls_creds_builder(*creds, std::move(ssl_opts)).get();
     }
 
     // Init messaging_service

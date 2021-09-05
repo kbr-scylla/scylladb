@@ -177,7 +177,7 @@ stop_iteration consume_clustering_fragments(const schema& s, mutation_partition&
             emit_rt = rts_it != rts_end;
         }
         if (emit_rt) {
-            stop = consumer.consume(std::move(*rts_it));
+            stop = consumer.consume(range_tombstone(std::move(*rts_it), range_tombstone::without_link{}));
             ++rts_it;
         } else {
             stop = consumer.consume(clustering_row(std::move(*crs_it)));
@@ -280,4 +280,4 @@ boost::iterator_range<std::vector<mutation>::const_iterator> slice(
 class flat_mutation_reader;
 
 // Reads a single partition from a reader. Returns empty optional if there are no more partitions to be read.
-future<mutation_opt> read_mutation_from_flat_mutation_reader(flat_mutation_reader& reader, db::timeout_clock::time_point timeout);
+future<mutation_opt> read_mutation_from_flat_mutation_reader(flat_mutation_reader& reader);
