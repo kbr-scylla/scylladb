@@ -20,6 +20,10 @@ namespace db {
 class config;
 }
 
+namespace gms {
+class gossiper;
+}
+
 namespace redis {
 
 static constexpr auto DATA_COLUMN_NAME = "data";
@@ -29,6 +33,6 @@ static constexpr auto HASHes          = "HASHes";
 static constexpr auto SETs            = "SETs";
 static constexpr auto ZSETs           = "ZSETs";
 
-seastar::future<> maybe_create_keyspace(seastar::sharded<service::migration_manager>& mm, db::config& cfg);
+seastar::future<> maybe_create_keyspace(seastar::sharded<service::migration_manager>& mm, db::config& cfg, seastar::sharded<gms::gossiper>& g);
 
 }

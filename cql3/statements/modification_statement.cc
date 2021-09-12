@@ -127,6 +127,9 @@ future<> modification_statement::check_access(service::storage_proxy& proxy, con
 
 future<std::vector<mutation>>
 modification_statement::get_mutations(service::storage_proxy& proxy, const query_options& options, db::timeout_clock::time_point timeout, bool local, int64_t now, service::query_state& qs) const {
+    if (_restrictions->range_or_slice_eq_null(options)) { // See #7852 and #9290.
+        throw exceptions::invalid_request_exception("Invalid null value in condition for a key column");
+    }
     auto cl = options.get_consistency();
     auto json_cache = maybe_prepare_json_cache(options);
     auto keys = build_partition_keys(options, json_cache);

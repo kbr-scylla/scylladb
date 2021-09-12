@@ -31,6 +31,7 @@
 #include "test/lib/log.hh"
 #include "serializer_impl.hh"
 #include "cdc/cdc_extension.hh"
+#include "utils/UUID_gen.hh"
 
 SEASTAR_TEST_CASE(test_new_schema_with_no_structural_change_is_propagated) {
     return do_with_cql_env([](cql_test_env& e) {
@@ -792,6 +793,10 @@ SEASTAR_TEST_CASE(test_schema_tables_use_null_sharder) {
             BOOST_REQUIRE(it != cf_metadata.end());
             BOOST_REQUIRE_EQUAL(it->second->get_sharder().shard_count(), 1);
 
+            it = cf_metadata.find("raft_config");
+            BOOST_REQUIRE(it != cf_metadata.end());
+            BOOST_REQUIRE_EQUAL(it->second->get_sharder().shard_count(), 1);
+
             // The schemas returned by all_tables() may be different than those stored in the `db` object:
             // the schemas stored inside `db` come from deserializing mutations. The schemas in all_tables()
             // are hardcoded. If there is some information in the schema object that is not serialized into
@@ -802,4 +807,27 @@ SEASTAR_TEST_CASE(test_schema_tables_use_null_sharder) {
             }
         }).get();
     }, raft_cql_test_config());
+}
+
+SEASTAR_TEST_CASE(test_schema_make_reversed) {
+    auto schema = schema_builder("tests", get_name())
+            .with_column("pk", bytes_type, column_kind::partition_key)
+            .with_column("ck", bytes_type, column_kind::clustering_key)
+            .with_column("v1", bytes_type)
+            .build();
+    testlog.info("            schema->version(): {}", schema->version());
+
+    auto reversed_schema = schema->make_reversed();
+    testlog.info("   reversed_schema->version(): {}", reversed_schema->version());
+
+    BOOST_REQUIRE(schema->version() != reversed_schema->version());
+    BOOST_REQUIRE(utils::UUID_gen::negate(schema->version()) == reversed_schema->version());
+
+    auto re_reversed_schema = reversed_schema->make_reversed();
+    testlog.info("re_reversed_schema->version(): {}", re_reversed_schema->version());
+
+    BOOST_REQUIRE(schema->version() == re_reversed_schema->version());
+    BOOST_REQUIRE(reversed_schema->version() != re_reversed_schema->version());
+
+    return make_ready_future<>();
 }

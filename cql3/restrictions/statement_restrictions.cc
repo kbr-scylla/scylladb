@@ -189,7 +189,7 @@ static std::vector<expr::expression> extract_partition_range(
             });
         }
 
-        void operator()(const column_value_tuple& s) {
+        void operator()(const tuple_constructor& s) {
             // Partition key columns are not legal in tuples, so ignore tuples.
         }
 
@@ -225,10 +225,6 @@ static std::vector<expr::expression> extract_partition_range(
 
         void operator()(const untyped_constant&) {
             on_internal_error(rlogger, "extract_partition_range(untyped_constant)");
-        }
-
-        void operator()(const tuple_constructor&) {
-            on_internal_error(rlogger, "extract_partition_range(tuple_constructor)");
         }
 
         void operator()(const collection_constructor&) {
@@ -278,7 +274,12 @@ static std::vector<expr::expression> extract_clustering_prefix_restrictions(
             current_binary_operator = nullptr;
         }
 
-        void operator()(const column_value_tuple&) {
+        void operator()(const tuple_constructor& tc) {
+            for (auto& e : tc.elements) {
+                if (!std::holds_alternative<column_value>(e)) {
+                    on_internal_error(rlogger, fmt::format("extract_clustering_prefix_restrictions: tuple of non-column_value: {}", tc));
+                }
+            }
             with_current_binary_operator(*this, [&] (const binary_operator& b) {
                 multi.push_back(b);
             });
@@ -334,10 +335,6 @@ static std::vector<expr::expression> extract_clustering_prefix_restrictions(
 
         void operator()(const untyped_constant&) {
             on_internal_error(rlogger, "extract_clustering_prefix_restrictions(untyped_constant)");
-        }
-
-        void operator()(const tuple_constructor&) {
-            on_internal_error(rlogger, "extract_clustering_prefix_restrictions(tuple_constructor)");
         }
 
         void operator()(const collection_constructor&) {
@@ -969,12 +966,13 @@ struct multi_column_range_accumulator {
     void operator()(const binary_operator& binop) {
         if (is_compare(binop.op)) {
             auto opt_values = dynamic_pointer_cast<tuples::value>(binop.rhs->bind(options))->get_elements();
-            auto& lhs = std::get<column_value_tuple>(*binop.lhs);
+            auto& lhs = std::get<tuple_constructor>(*binop.lhs);
             std::vector<managed_bytes> values(lhs.elements.size());
             for (size_t i = 0; i < lhs.elements.size(); ++i) {
+                auto& col = std::get<column_value>(lhs.elements.at(i));
                 values[i] = *statements::request_validations::check_not_null(
                         opt_values[i],
-                        "Invalid null value in condition for column %s", lhs.elements.at(i).col->name_as_text());
+                        "Invalid null value in condition for column %s", col.col->name_as_text());
             }
             intersect_all(to_range(binop.op, clustering_key_prefix(std::move(values))));
         } else if (binop.op == oper_t::IN) {
@@ -1010,10 +1008,6 @@ struct multi_column_range_accumulator {
 
     void operator()(const column_value&) {
         on_internal_error(rlogger, "Column encountered outside binary operator");
-    }
-
-    void operator()(const column_value_tuple&) {
-        on_internal_error(rlogger, "Column tuple encountered outside binary operator");
     }
 
     void operator()(const token&) {
@@ -1434,7 +1428,8 @@ std::vector<query::clustering_range> statement_restrictions::get_clustering_boun
             if (is_clustering_order(binop)) {
                 return {range_from_raw_bounds(_clustering_prefix_restrictions, options, *_schema)};
             }
-            for (auto& cv : std::get<column_value_tuple>(*binop.lhs).elements) {
+            for (auto& element : std::get<tuple_constructor>(*binop.lhs).elements) {
+                auto& cv = std::get<column_value>(element);
                 if (cv.col->type->is_reversed()) {
                     all_natural = false;
                 } else {
@@ -1550,14 +1545,6 @@ void statement_restrictions::validate_secondary_index_selections(bool selects_on
     if (key_is_in_relation()) {
         throw exceptions::invalid_request_exception(
             "Select on indexed columns and with IN clause for the PRIMARY KEY are not supported");
-    }
-    // When the user only select static columns, the intent is that we don't query the whole partition but just
-    // the static parts. But 1) we don't have an easy way to do that with 2i and 2) since we don't support index on
-    // static columns
-    // so far, 2i means that you've restricted a non static column, so the query is somewhat non-sensical.
-    if (selects_only_static_columns) {
-        throw exceptions::invalid_request_exception(
-            "Queries using 2ndary indexes don't support selecting only static columns");
     }
 }
 
@@ -1735,6 +1722,17 @@ std::vector<query::clustering_range> statement_restrictions::get_local_index_clu
 
 sstring statement_restrictions::to_string() const {
     return _where ? expr::to_string(*_where) : "";
+}
+
+static bool has_eq_null(const query_options& options, const expression& expr) {
+    return find_atom(expr, [&] (const binary_operator& binop) {
+        return binop.op == oper_t::EQ && !binop.rhs->bind_and_get(options);
+    });
+}
+
+bool statement_restrictions::range_or_slice_eq_null(const query_options& options) const {
+    return boost::algorithm::any_of(_partition_range_restrictions, std::bind_front(has_eq_null, options))
+            || boost::algorithm::any_of(_clustering_prefix_restrictions, std::bind_front(has_eq_null, options));
 }
 
 } // namespace restrictions

@@ -173,7 +173,7 @@ mutation_partition::mutation_partition(const mutation_partition& x, const schema
                 _rows.insert_before_hint(_rows.end(), std::move(ce), rows_entry::tri_compare(schema));
             }
             for (auto&& rt : x._row_tombstones.slice(schema, r)) {
-                _row_tombstones.apply(schema, rt);
+                _row_tombstones.apply(schema, rt.tombstone());
             }
         }
     } catch (...) {
@@ -206,10 +206,9 @@ mutation_partition::mutation_partition(mutation_partition&& x, const schema& sch
         _rows.erase_and_dispose(it, _rows.end(), deleter);
     }
     {
-        range_tombstone_list::const_iterator it = _row_tombstones.begin();
         for (auto&& range : ck_ranges.ranges()) {
             for (auto&& x_rt : x._row_tombstones.slice(schema, range)) {
-                auto rt = x_rt;
+                auto rt = x_rt.tombstone();
                 rt.trim(schema,
                         position_in_partition_view::for_range_start(range),
                         position_in_partition_view::for_range_end(range));
@@ -1109,7 +1108,7 @@ bool mutation_partition::equal(const schema& this_schema, const mutation_partiti
 
     if (!std::equal(_row_tombstones.begin(), _row_tombstones.end(),
         p._row_tombstones.begin(), p._row_tombstones.end(),
-        [&] (const range_tombstone& rt1, const range_tombstone& rt2) { return rt1.equal(this_schema, rt2); }
+        [&] (const auto& rt1, const auto& rt2) { return rt1.tombstone().equal(this_schema, rt2.tombstone()); }
     )) {
         return false;
     }
@@ -1228,10 +1227,7 @@ size_t mutation_partition::external_memory_usage(const schema& s) const {
     for (auto& clr : clustered_rows()) {
         sum += clr.memory_usage(s);
     }
-
-    for (auto& rtb : row_tombstones()) {
-        sum += rtb.memory_usage(s);
-    }
+    sum += row_tombstones().external_memory_usage(s);
 
     return sum;
 }
@@ -1765,8 +1761,8 @@ void mutation_partition::accept(const schema& s, mutation_partition_visitor& v) 
             v.accept_static_cell(id, cell.as_collection_mutation());
         }
     });
-    for (const range_tombstone& rt : _row_tombstones) {
-        v.accept_row_tombstone(rt);
+    for (const auto& rt : _row_tombstones) {
+        v.accept_row_tombstone(rt.tombstone());
     }
     for (const rows_entry& e : _rows) {
         const deletable_row& dr = e.row();
@@ -1971,8 +1967,7 @@ void reconcilable_result_builder::consume_new_partition(const dht::decorated_key
         !has_ck_selector(_slice.row_ranges(_schema, dk.key()));
     _static_row_is_alive = false;
     _live_rows = 0;
-    auto is_reversed = _slice.options.contains(query::partition_slice::option::reversed);
-    _mutation_consumer.emplace(streamed_mutation_freezer(_schema, dk.key(), is_reversed));
+    _mutation_consumer.emplace(streamed_mutation_freezer(_schema, dk.key(), _reversed));
 }
 
 void reconcilable_result_builder::consume(tombstone t) {
@@ -2001,6 +1996,10 @@ stop_iteration reconcilable_result_builder::consume(clustering_row&& cr, row_tom
 
 stop_iteration reconcilable_result_builder::consume(range_tombstone&& rt) {
     _memory_accounter.update(rt.memory_usage(_schema));
+    if (_reversed) {
+        // undo reversing done for the native reversed format, coordinator still uses old reversing format
+        rt.reverse();
+    }
     return _mutation_consumer->consume(std::move(rt));
 }
 
@@ -2033,7 +2032,7 @@ to_data_query_result(const reconcilable_result& r, schema_ptr s, const query::pa
     query::result::builder builder(slice, opts, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size });
     auto consumer = compact_for_query<emit_only_live_rows::yes, query_result_builder>(*s, gc_clock::time_point::min(), slice, max_rows,
             max_partitions, query_result_builder(*s, builder));
-    const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::yes : consume_in_reverse::no;
+    const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::legacy_half_reverse : consume_in_reverse::no;
 
     for (const partition& p : r.partitions()) {
         const auto res = p.mut().unfreeze(s).consume(consumer, reverse);
@@ -2052,7 +2051,7 @@ query_mutation(mutation&& m, const query::partition_slice& slice, uint64_t row_l
     query::result::builder builder(slice, opts, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size });
     auto consumer = compact_for_query<emit_only_live_rows::yes, query_result_builder>(*m.schema(), now, slice, row_limit,
             query::max_partitions, query_result_builder(*m.schema(), builder));
-    const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::yes : consume_in_reverse::no;
+    const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::legacy_half_reverse : consume_in_reverse::no;
     std::move(m).consume(consumer, reverse);
     return builder.build();
 }

@@ -35,6 +35,10 @@ class storage_proxy;
 class migration_manager;
 }
 
+namespace gms {
+class gossiper;
+}
+
 class database;
 
 class redis_service {
@@ -46,6 +50,7 @@ public:
     redis_service();
     ~redis_service();
     seastar::future<> init(seastar::sharded<service::storage_proxy>& proxy, seastar::sharded<database>& db,
-            seastar::sharded<auth::service>& auth_service, seastar::sharded<service::migration_manager>& mm, db::config& cfg);
+            seastar::sharded<auth::service>& auth_service, seastar::sharded<service::migration_manager>& mm, db::config& cfg,
+            seastar::sharded<gms::gossiper>& gossiper);
     seastar::future<> stop();
 };

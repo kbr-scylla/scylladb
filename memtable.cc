@@ -96,7 +96,7 @@ void memtable::memtable_encoding_stats_collector::update(const ::schema& s, cons
         update(s, row_entry.row());
     }
     for (auto&& rt : mp.row_tombstones()) {
-        update(rt);
+        update(rt.tombstone());
     }
 }
 

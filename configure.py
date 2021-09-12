@@ -501,6 +501,7 @@ scylla_tests = set([
     'test/boost/sstable_set_test',
     'test/boost/reader_concurrency_semaphore_test',
     'test/boost/service_level_controller_test',
+    'test/boost/schema_loader_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -560,7 +561,7 @@ apps = set([
     'scylla',
     'test/tools/cql_repl',
     'tools/scylla-types',
-    'tools/scylla-sstable-index',
+    'tools/scylla-sstable',
 ])
 
 tests = scylla_tests | perf_tests | raft_tests
@@ -1152,7 +1153,7 @@ deps = {
     'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
     #FIXME: we don't need all of scylla_core here, only the types module, need to modularize scylla_core.
     'tools/scylla-types': idls + ['tools/scylla-types.cc'] + scylla_core,
-    'tools/scylla-sstable-index': idls + ['tools/scylla-sstable-index.cc'] + scylla_core,
+    'tools/scylla-sstable': idls + ['tools/scylla-sstable.cc', 'tools/schema_loader.cc'] + scylla_core,
 }
 
 pure_boost_tests = set([
@@ -1274,6 +1275,7 @@ deps['test/boost/linearizing_input_stream_test'] = [
 ]
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
+deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc'] + scylla_raft_dependencies

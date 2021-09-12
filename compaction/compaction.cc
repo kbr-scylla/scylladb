@@ -64,6 +64,7 @@
 #include "mutation_source_metadata.hh"
 #include "mutation_fragment_stream_validator.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/utf8.hh"
 
 namespace sstables {
 
@@ -117,22 +118,22 @@ std::ostream& operator<<(std::ostream& os, compaction_type type) {
     return os;
 }
 
-std::string_view to_string(compaction_options::scrub::mode scrub_mode) {
+std::string_view to_string(compaction_type_options::scrub::mode scrub_mode) {
     switch (scrub_mode) {
-        case compaction_options::scrub::mode::abort:
+        case compaction_type_options::scrub::mode::abort:
             return "abort";
-        case compaction_options::scrub::mode::skip:
+        case compaction_type_options::scrub::mode::skip:
             return "skip";
-        case compaction_options::scrub::mode::segregate:
+        case compaction_type_options::scrub::mode::segregate:
             return "segregate";
-        case compaction_options::scrub::mode::validate:
+        case compaction_type_options::scrub::mode::validate:
             return "validate";
     }
     on_internal_error_noexcept(clogger, format("Invalid scrub mode {}", int(scrub_mode)));
     return "(invalid)";
 }
 
-std::ostream& operator<<(std::ostream& os, compaction_options::scrub::mode scrub_mode) {
+std::ostream& operator<<(std::ostream& os, compaction_type_options::scrub::mode scrub_mode) {
     return os << to_string(scrub_mode);
 }
 
@@ -1159,9 +1160,9 @@ private:
     }
 
 public:
-    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, compaction_options::cleanup opts)
+    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, compaction_type_options::cleanup opts)
         : cleanup_compaction(opts.db, cf, std::move(descriptor)) {}
-    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, compaction_options::upgrade opts)
+    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, compaction_type_options::upgrade opts)
         : cleanup_compaction(opts.db, cf, std::move(descriptor)) {}
 
     flat_mutation_reader make_sstable_reader() const override {
@@ -1202,9 +1203,9 @@ public:
                 type,
                 schema.ks_name(),
                 schema.cf_name(),
-                new_key.key().with_schema(schema),
+                partition_key_to_string(new_key.key(), schema),
                 new_key,
-                current_key.key().with_schema(schema),
+                partition_key_to_string(current_key.key(), schema),
                 current_key,
                 action.empty() ? "" : "; ",
                 action);
@@ -1217,9 +1218,9 @@ public:
                 type,
                 schema.ks_name(),
                 schema.cf_name(),
-                new_key.key().with_schema(schema),
+                partition_key_to_string(new_key.key(), schema),
                 new_key,
-                current_key.key().with_schema(schema),
+                partition_key_to_string(current_key.key(), schema),
                 current_key,
                 action.empty() ? "" : "; ",
                 action);
@@ -1237,7 +1238,7 @@ public:
                 mf.mutation_fragment_kind(),
                 mf.has_key() ? format(" with key {}", mf.key().with_schema(schema)) : "",
                 mf.position(),
-                key.key().with_schema(schema),
+                partition_key_to_string(key.key(), schema),
                 key,
                 prev_pos.region(),
                 prev_pos.has_key() ? format(" with key {}", prev_pos.key().with_schema(schema)) : "",
@@ -1249,21 +1250,26 @@ public:
         const auto& schema = validator.schema();
         const auto& key = validator.previous_partition_key();
         clogger.error("[{} compaction {}.{}] Invalid end-of-stream, last partition {} ({}) didn't end with a partition-end fragment{}{}",
-                type, schema.ks_name(), schema.cf_name(), key.key().with_schema(schema), key, action.empty() ? "" : "; ", action);
+                type, schema.ks_name(), schema.cf_name(), partition_key_to_string(key.key(), schema), key, action.empty() ? "" : "; ", action);
     }
 
 private:
+    static sstring partition_key_to_string(const partition_key& key, const ::schema& s) {
+        sstring ret = format("{}", key.with_schema(s));
+        return utils::utf8::validate((const uint8_t*)ret.data(), ret.size()) ? ret : "<non-utf8-key>";
+    }
+
     class reader : public flat_mutation_reader::impl {
         using skip = bool_class<class skip_tag>;
     private:
-        compaction_options::scrub::mode _scrub_mode;
+        compaction_type_options::scrub::mode _scrub_mode;
         flat_mutation_reader _reader;
         mutation_fragment_stream_validator _validator;
         bool _skip_to_next_partition = false;
 
     private:
         void maybe_abort_scrub() {
-            if (_scrub_mode == compaction_options::scrub::mode::abort) {
+            if (_scrub_mode == compaction_type_options::scrub::mode::abort) {
                 throw compaction_stop_exception(_schema->ks_name(), _schema->cf_name(), "scrub compaction found invalid data", false);
             }
         }
@@ -1294,7 +1300,7 @@ private:
 
         skip on_invalid_partition(const dht::decorated_key& new_key) {
             maybe_abort_scrub();
-            if (_scrub_mode == compaction_options::scrub::mode::segregate) {
+            if (_scrub_mode == compaction_type_options::scrub::mode::segregate) {
                 report_invalid_partition(compaction_type::Scrub, _validator, new_key, "Detected");
                 _validator.reset(new_key);
                 // Let the segregating interposer consumer handle this.
@@ -1313,7 +1319,7 @@ private:
             // If the unexpected fragment is a partition end, we just drop it.
             // The only case a partition end is invalid is when it comes after
             // another partition end, and we can just drop it in that case.
-            if (!mf.is_end_of_partition() && _scrub_mode == compaction_options::scrub::mode::segregate) {
+            if (!mf.is_end_of_partition() && _scrub_mode == compaction_type_options::scrub::mode::segregate) {
                 report_invalid_mutation_fragment(compaction_type::Scrub, _validator, mf,
                         "Injecting partition start/end to segregate out-of-order fragment");
                 push_mutation_fragment(*_schema, _permit, partition_end{});
@@ -1380,7 +1386,7 @@ private:
         }
 
     public:
-        reader(flat_mutation_reader underlying, compaction_options::scrub::mode scrub_mode)
+        reader(flat_mutation_reader underlying, compaction_type_options::scrub::mode scrub_mode)
             : impl(underlying.schema(), underlying.permit())
             , _scrub_mode(scrub_mode)
             , _reader(std::move(underlying))
@@ -1429,12 +1435,12 @@ private:
     };
 
 private:
-    compaction_options::scrub _options;
+    compaction_type_options::scrub _options;
     std::string _scrub_start_description;
     std::string _scrub_finish_description;
 
 public:
-    scrub_compaction(column_family& cf, compaction_descriptor descriptor, compaction_options::scrub options)
+    scrub_compaction(column_family& cf, compaction_descriptor descriptor, compaction_type_options::scrub options)
         : regular_compaction(cf, std::move(descriptor))
         , _options(options)
         , _scrub_start_description(fmt::format("Scrubbing in {} mode", _options.operation_mode))
@@ -1461,13 +1467,13 @@ public:
     }
 
     bool use_interposer_consumer() const override {
-        return _options.operation_mode == compaction_options::scrub::mode::segregate;
+        return _options.operation_mode == compaction_type_options::scrub::mode::segregate;
     }
 
-    friend flat_mutation_reader make_scrubbing_reader(flat_mutation_reader rd, compaction_options::scrub::mode scrub_mode);
+    friend flat_mutation_reader make_scrubbing_reader(flat_mutation_reader rd, compaction_type_options::scrub::mode scrub_mode);
 };
 
-flat_mutation_reader make_scrubbing_reader(flat_mutation_reader rd, compaction_options::scrub::mode scrub_mode) {
+flat_mutation_reader make_scrubbing_reader(flat_mutation_reader rd, compaction_type_options::scrub::mode scrub_mode) {
     return make_flat_mutation_reader<scrub_compaction::reader>(std::move(rd), scrub_mode);
 }
 
@@ -1589,7 +1595,7 @@ future<compaction_info> compaction::run(std::unique_ptr<compaction> c, GCConsume
     });
 }
 
-compaction_type compaction_options::type() const {
+compaction_type compaction_type_options::type() const {
     // Maps options_variant indexes to the corresponding compaction_type member.
     static const compaction_type index_to_type[] = {
         compaction_type::Compaction,
@@ -1599,7 +1605,7 @@ compaction_type compaction_options::type() const {
         compaction_type::Reshard,
         compaction_type::Reshape,
     };
-    static_assert(std::variant_size_v<compaction_options::options_variant> == std::size(index_to_type));
+    static_assert(std::variant_size_v<compaction_type_options::options_variant> == std::size(index_to_type));
     return index_to_type[_options.index()];
 }
 
@@ -1608,22 +1614,22 @@ static std::unique_ptr<compaction> make_compaction(column_family& cf, sstables::
         column_family& cf;
         sstables::compaction_descriptor&& descriptor;
 
-        std::unique_ptr<compaction> operator()(compaction_options::reshape) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::reshape) {
             return std::make_unique<reshape_compaction>(cf, std::move(descriptor));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::reshard) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::reshard) {
             return std::make_unique<resharding_compaction>(cf, std::move(descriptor));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::regular) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::regular) {
             return std::make_unique<regular_compaction>(cf, std::move(descriptor));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::cleanup options) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::cleanup options) {
             return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(options));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::upgrade options) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::upgrade options) {
             return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(options));
         }
-        std::unique_ptr<compaction> operator()(compaction_options::scrub scrub_options) {
+        std::unique_ptr<compaction> operator()(compaction_type_options::scrub scrub_options) {
             return std::make_unique<scrub_compaction>(cf, std::move(descriptor), scrub_options);
         }
     } visitor_factory{cf, std::move(descriptor)};
@@ -1725,7 +1731,7 @@ compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf) 
                 compaction_name(descriptor.options.type()), cf.schema()->ks_name(), cf.schema()->cf_name())));
     }
     if (descriptor.options.type() == compaction_type::Scrub
-            && std::get<compaction_options::scrub>(descriptor.options.options()).operation_mode == compaction_options::scrub::mode::validate) {
+            && std::get<compaction_type_options::scrub>(descriptor.options.options()).operation_mode == compaction_type_options::scrub::mode::validate) {
         // Bypass the usual compaction machinery for dry-mode scrub
         return scrub_sstables_validate_mode(std::move(descriptor), cf);
     }

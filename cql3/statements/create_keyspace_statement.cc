@@ -139,7 +139,6 @@ future<> cql3::statements::create_keyspace_statement::grant_permissions_to_creat
 
 using strategy_class_registry = class_registry<
     locator::abstract_replication_strategy,
-    const sstring&,
     const locator::shared_token_metadata&,
     locator::snitch_ptr&,
     const std::map<sstring, sstring>&>;
@@ -202,6 +201,11 @@ create_keyspace_statement::execute(query_processor& qp, service::query_state& st
         }
         return msg;
     });
+}
+
+lw_shared_ptr<keyspace_metadata> create_keyspace_statement::get_keyspace_metadata(const locator::token_metadata& tm) {
+    _attrs->validate();
+    return _attrs->as_ks_metadata(_name, tm);
 }
 
 }

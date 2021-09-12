@@ -1033,7 +1033,7 @@ keyspace::create_replication_strategy(const locator::shared_token_metadata& stm,
 
     _replication_strategy =
             abstract_replication_strategy::create_replication_strategy(
-                _metadata->name(), _metadata->strategy_name(), stm, options);
+                _metadata->strategy_name(), stm, options);
 }
 
 locator::abstract_replication_strategy&
@@ -1045,11 +1045,6 @@ keyspace::get_replication_strategy() {
 const locator::abstract_replication_strategy&
 keyspace::get_replication_strategy() const {
     return *_replication_strategy;
-}
-
-void
-keyspace::set_replication_strategy(std::unique_ptr<locator::abstract_replication_strategy> replication_strategy) {
-    _replication_strategy = std::move(replication_strategy);
 }
 
 void keyspace::update_from(const locator::shared_token_metadata& stm, ::lw_shared_ptr<keyspace_metadata> ksm) {
@@ -1172,7 +1167,6 @@ const column_family& database::find_column_family(const schema_ptr& schema) cons
 
 using strategy_class_registry = class_registry<
     locator::abstract_replication_strategy,
-    const sstring&,
     const locator::shared_token_metadata&,
     locator::snitch_ptr&,
     const std::map<sstring, sstring>&>;
@@ -1371,6 +1365,11 @@ compare_atomic_cell_for_merge(atomic_cell_view left, atomic_cell_view right) {
 future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
+    const auto reversed = cmd.slice.options.contains(query::partition_slice::option::reversed);
+    if (reversed) {
+        s = s->make_reversed();
+    }
+
     column_family& cf = find_column_family(cmd.cf_id);
     auto& semaphore = get_reader_concurrency_semaphore();
     auto class_config = query::query_class_config{.semaphore = semaphore, .max_memory_for_unlimited_query = *cmd.max_result_size};
@@ -1424,6 +1423,11 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
 future<std::tuple<reconcilable_result, cache_temperature>>
 database::query_mutations(schema_ptr s, const query::read_command& cmd, const dht::partition_range& range,
                           tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
+    const auto reversed = cmd.slice.options.contains(query::partition_slice::option::reversed);
+    if (reversed) {
+        s = s->make_reversed();
+    }
+
     const auto short_read_allwoed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
     auto accounter = co_await get_result_memory_limiter().new_mutation_read(*cmd.max_result_size, short_read_allwoed);
     column_family& cf = find_column_family(cmd.cf_id);

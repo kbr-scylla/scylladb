@@ -37,7 +37,6 @@ def test_insert_missing_key(cql, table1):
 
 # A null key, like a missing one, is also not allowed.
 # This reproduces issue #7852.
-@pytest.mark.xfail(reason="issue #7852")
 def test_insert_null_key(cql, table1):
     s = random_string()
     with pytest.raises(InvalidRequest, match='null value'):
@@ -69,6 +68,20 @@ def test_regular_column_in_null(scylla_only, cql, table1):
     cql.execute(f"INSERT INTO {table1} (p,c) VALUES ('p', 'c')")
     with pytest.raises(InvalidRequest, match='null value'):
         cql.execute(cql.prepare(f"SELECT v FROM {table1} WHERE v IN ? ALLOW FILTERING"), [None])
+
+# Though nonsensical, this operation is allowed by Cassandra.  Ensure we allow it, too.
+def test_delete_impossible_clustering_range(cql, table1):
+    cql.execute(f"DELETE FROM {table1} WHERE p='p' and c<'a' and c>'a'")
+
+def test_delete_null_key(cql, table1):
+    with pytest.raises(InvalidRequest, match='null value'):
+        cql.execute(f"DELETE FROM {table1} WHERE p=null")
+    with pytest.raises(InvalidRequest, match='null value'):
+        cql.execute(cql.prepare(f"DELETE FROM {table1} WHERE p=?"), [None])
+    with pytest.raises(InvalidRequest, match='null value'):
+        cql.execute(f"DELETE FROM {table1} WHERE p='p' AND c=null")
+    with pytest.raises(InvalidRequest, match='null value'):
+        cql.execute(cql.prepare(f"DELETE FROM {table1} WHERE p='p' AND c=?"), [None])
 
 # Test what SELECT does with the restriction "WHERE v=NULL".
 # In SQL, "WHERE v=NULL" doesn't match anything - because nothing is equal

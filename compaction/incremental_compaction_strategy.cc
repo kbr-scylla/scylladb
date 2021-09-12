@@ -264,7 +264,7 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
                 bucket.resize(max_sstables);
             }
             compaction_descriptor desc(runs_to_sstables(std::move(bucket)), std::optional<sstables::sstable_set>(), iop);
-            desc.options = compaction_options::make_reshape();
+            desc.options = compaction_type_options::make_reshape();
             return desc;
         }
     }
