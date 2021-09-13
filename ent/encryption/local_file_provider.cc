@@ -180,7 +180,9 @@ future<> local_file_provider::read_key_file() {
         return make_ready_future();
     }
 
-    static const std::regex key_line_expr(R"foo((\w+\/\w+\/\w+)\:(\d+)\:(\S+)\s*)foo");
+    // #1923 - a key can have a descriptor string line "AES:128:<data>" iff user relies on
+    // defaults. Must match this as well.
+    static const std::regex key_line_expr(R"foo((\w+(?:\/\w+)?(?:\/\w+)?)\:(\d+)\:(\S+)\s*)foo");
 
     return with_semaphore(_sem, 1, [this] {
         // could do this twice, but it is only reading
