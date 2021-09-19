@@ -247,7 +247,7 @@ public:
         }
     }
 
-    virtual uint64_t written() const {
+    virtual uint64_t written() const override {
         if (_tracker) {
             return _tracker->offset;
         }

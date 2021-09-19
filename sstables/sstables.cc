@@ -85,8 +85,6 @@ namespace sstables {
 
 logging::logger sstlog("sstable");
 
-bool use_binary_search_in_promoted_index = true;
-
 namespace bi = boost::intrusive;
 
 class sstable_tracker {
@@ -104,7 +102,7 @@ static thread_local sstable_tracker tracker;
 // Because this is a noop and won't hold any state, it is better to use a global than a
 // thread_local. It will be faster, specially on non-x86.
 struct noop_write_monitor final : public write_monitor {
-    virtual void on_write_started(const writer_offset_tracker&) { };
+    virtual void on_write_started(const writer_offset_tracker&) override { };
     virtual void on_data_write_completed() override { }
 };
 static noop_write_monitor default_noop_write_monitor;
@@ -420,7 +418,7 @@ template <typename DiskSetOfTaggedUnion, typename Member>
 struct single_tagged_union_member_serdes_for final : single_tagged_union_member_serdes<DiskSetOfTaggedUnion> {
     using base = single_tagged_union_member_serdes<DiskSetOfTaggedUnion>;
     using value_type = typename base::value_type;
-    virtual future<> do_parse(const schema& s, sstable_version_types version, random_access_reader& in, value_type& v) const {
+    virtual future<> do_parse(const schema& s, sstable_version_types version, random_access_reader& in, value_type& v) const override {
         v = Member();
         return parse(s, version, in, boost::get<Member>(v).value);
     }

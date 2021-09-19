@@ -591,8 +591,8 @@ struct sst_factory {
     }
 };
 
-SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
-  sstables::test_env::do_with_async([] (sstables::test_env& env) {
+SEASTAR_TEST_CASE(combined_mutation_reader_test) {
+  return sstables::test_env::do_with_async([] (sstables::test_env& env) {
     simple_schema s;
 
     auto pkeys = s.make_pkeys(6);
@@ -693,7 +693,7 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_test) {
         .produces(expexted_mutation_4)
         .produces(expexted_mutation_5)
         .produces_end_of_stream();
-  }).get();
+  });
 }
 
 static mutation make_mutation_with_key(simple_schema& s, dht::decorated_key dk) {
@@ -3408,7 +3408,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_recreate_before_fast_forward_to) 
 }
 
 SEASTAR_THREAD_TEST_CASE(test_evictable_reader_drop_flags) {
-    reader_concurrency_semaphore semaphore(1, 0, get_name());
+    reader_concurrency_semaphore semaphore(reader_concurrency_semaphore::for_tests{}, get_name(), 1, 0);
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
     auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
@@ -3786,8 +3786,8 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_in_memory) {
     }
 }
 
-SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_sstable_set) {
-  sstables::test_env::do_with_async([] (sstables::test_env& env) {
+SEASTAR_TEST_CASE(test_clustering_order_merger_sstable_set) {
+  return sstables::test_env::do_with_async([] (sstables::test_env& env) {
     auto pkeys = make_local_keys(2, clustering_order_merger_test_generator::make_schema());
     clustering_order_merger_test_generator g(pkeys[0]);
 
@@ -3859,7 +3859,7 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_sstable_set) {
                 make_tested(sst_set, included_gens, fwd), scenario.fwd_ranges);
     }
 
-  }).get();
+  });
 }
 
 SEASTAR_THREAD_TEST_CASE(clustering_combined_reader_mutation_source_test) {

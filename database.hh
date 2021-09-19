@@ -112,9 +112,8 @@ class rp_handle;
 class data_listeners;
 class large_data_handler;
 
-namespace system_keyspace {
-future<> make(database& db, service::storage_service& ss);
-}
+future<> system_keyspace_make(database& db, service::storage_service& ss);
+
 }
 
 namespace locator {
@@ -122,6 +121,10 @@ namespace locator {
 class abstract_replication_strategy;
 
 } // namespace locator
+
+namespace wasm {
+class engine;
+}
 
 class mutation_reordered_with_truncate_exception : public std::exception {};
 
@@ -741,7 +744,6 @@ public:
     query(schema_ptr,
         reader_permit permit,
         const query::read_command& cmd,
-        query::query_class_config class_config,
         query::result_options opts,
         const dht::partition_range_vector& ranges,
         tracing::trace_state_ptr trace_state,
@@ -769,7 +771,6 @@ public:
     mutation_query(schema_ptr s,
             reader_permit permit,
             const query::read_command& cmd,
-            query::query_class_config class_config,
             const dht::partition_range& range,
             tracing::trace_state_ptr trace_state,
             query::result_memory_accounter accounter,
@@ -1332,6 +1333,8 @@ private:
     bool _supports_infinite_bound_range_deletions = false;
     gms::feature::listener_registration _infinite_bound_range_deletions_reg;
 
+    wasm::engine* _wasm_engine;
+
     future<> init_commitlog();
 public:
     const gms::feature_service& features() const { return _feat; }
@@ -1340,10 +1343,18 @@ public:
 
     void set_local_id(utils::UUID uuid) noexcept { _local_host_id = std::move(uuid); }
 
+    wasm::engine* wasm_engine() {
+        return _wasm_engine;
+    }
+
+    void set_wasm_engine(wasm::engine* engine) {
+        _wasm_engine = engine;
+    }
+
 private:
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, system_keyspace system);
-    friend future<> db::system_keyspace::make(database& db, service::storage_service& ss);
+    friend future<> db::system_keyspace_make(database& db, service::storage_service& ss);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
 

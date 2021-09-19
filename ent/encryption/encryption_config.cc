@@ -78,7 +78,7 @@ KMIP requests will fail over/retry 'max_command_retries' times (default 3)
 
 static class : public encryption::encryption_config, public configurable {
 public:
-    void append_options(db::config& cfg, boost::program_options::options_description_easy_init& init) {
+    void append_options(db::config& cfg, boost::program_options::options_description_easy_init& init) override {
         // hook into main scylla.yaml.
         cfg.add(values());
     }

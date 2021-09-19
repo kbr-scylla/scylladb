@@ -512,7 +512,7 @@ public:
         }
         return _f.close();
     }
-    std::unique_ptr<file_handle_impl> dup() {
+    std::unique_ptr<file_handle_impl> dup() override {
         if (_impl) {
             return _impl->dup();
         }

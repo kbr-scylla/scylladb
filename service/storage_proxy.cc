@@ -3792,7 +3792,7 @@ class speculating_read_executor : public abstract_read_executor {
     timer<storage_proxy::clock_type> _speculate_timer;
 public:
     using abstract_read_executor::abstract_read_executor;
-    virtual void make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) {
+    virtual void make_requests(digest_resolver_ptr resolver, storage_proxy::clock_type::time_point timeout) override {
         _speculate_timer.set_callback([this, resolver, timeout] {
             if (!resolver->is_completed()) { // at the time the callback runs request may be completed already
                 resolver->add_wait_targets(1); // we send one more request so wait for it too
@@ -3842,13 +3842,15 @@ public:
 };
 
 db::read_repair_decision storage_proxy::new_read_repair_decision(const schema& s) {
-    double chance = _read_repair_chance(_urandom);
-    if (s.read_repair_chance() > chance) {
-        return db::read_repair_decision::GLOBAL;
-    }
+    if (s.dc_local_read_repair_chance() > 0 || s.read_repair_chance() > 0) {
+        double chance = _read_repair_chance(_urandom);
+        if (s.read_repair_chance() > chance) {
+            return db::read_repair_decision::GLOBAL;
+        }
 
-    if (s.dc_local_read_repair_chance() > chance) {
-        return db::read_repair_decision::DC_LOCAL;
+        if (s.dc_local_read_repair_chance() > chance) {
+            return db::read_repair_decision::DC_LOCAL;
+        }
     }
 
     return db::read_repair_decision::NONE;
@@ -5368,9 +5370,6 @@ future<> storage_proxy::wait_for_hint_sync_point(const db::hints::sync_point spo
     co_await container().invoke_on_all([this, original_shard, &sources, &spoint, &was_aborted] (storage_proxy& sp) {
         auto wait_for = [&sources, original_shard, &was_aborted] (db::hints::manager& mgr, const std::vector<db::hints::sync_point::shard_rps>& shard_rps) {
             const unsigned shard = this_shard_id();
-            if (shard_rps.size() < shard) {
-                return make_ready_future<>();
-            }
             return mgr.wait_for_sync_point(sources[shard], shard_rps[shard]).handle_exception([original_shard, &sources, &was_aborted] (auto eptr) {
                 // Make sure other blocking operations are cancelled soon
                 // by requesting an abort on all shards

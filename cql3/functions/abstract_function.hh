@@ -62,7 +62,7 @@ protected:
 
 public:
 
-    virtual bool requires_thread() const;
+    virtual bool requires_thread() const override;
 
     virtual const function_name& name() const override {
         return _name;
@@ -72,7 +72,7 @@ public:
         return _arg_types;
     }
 
-    virtual const data_type& return_type() const {
+    virtual const data_type& return_type() const override {
         return _return_type;
     }
 

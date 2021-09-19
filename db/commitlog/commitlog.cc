@@ -1187,6 +1187,10 @@ db::commitlog::segment_manager::segment_manager(config c)
         }
         cfg.max_active_flushes = std::max(uint64_t(1), cfg.max_active_flushes / smp::count);
 
+        if (!cfg.base_segment_id) {
+            cfg.base_segment_id = std::chrono::duration_cast<std::chrono::milliseconds>(runtime::get_boot_time().time_since_epoch()).count() + 1;
+        }
+
         return cfg;
     }())
     , max_size(std::min<size_t>(std::numeric_limits<position_type>::max() / (1024 * 1024), std::max<size_t>(cfg.commitlog_segment_size_in_mb, 1)) * 1024 * 1024)
@@ -1288,7 +1292,7 @@ future<> db::commitlog::segment_manager::init() {
     auto descs = co_await list_descriptors(cfg.commit_log_location);
 
     assert(_reserve_segments.empty()); // _segments_to_replay must not pick them up
-    segment_id_type id = std::chrono::duration_cast<std::chrono::milliseconds>(runtime::get_boot_time().time_since_epoch()).count() + 1;
+    segment_id_type id = *cfg.base_segment_id;
     for (auto& d : descs) {
         id = std::max(id, replay_position(d.id).base_id());
         _segments_to_replay.push_back(cfg.commit_log_location + "/" + d.filename());
@@ -2050,7 +2054,7 @@ future<db::rp_handle> db::commitlog::add(const cf_id_type& id,
         serializer_func_entry_writer(const cf_id_type& id, size_t sz, serializer_func func, db::commitlog::force_sync sync)
             : entry_writer(sync), _id(id), _func(std::move(func)), _size(sz)
         {}
-        const cf_id_type& id(size_t) const { return _id; }
+        const cf_id_type& id(size_t) const override { return _id; }
         size_t size(segment&, size_t) override { return _size; }
         size_t size(segment&) override { return _size; }
         size_t size() const override { return _size; }

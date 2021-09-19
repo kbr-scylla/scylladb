@@ -94,7 +94,7 @@ public:
         return _type->field_type(_field);
     }
 
-    virtual void reset() {
+    virtual void reset() override {
         _selected->reset();
     }
 

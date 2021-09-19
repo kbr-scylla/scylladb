@@ -79,7 +79,7 @@
 #include "user_types_metadata.hh"
 
 #include "index/target_parser.hh"
-#include "lua.hh"
+#include "lang/lua.hh"
 
 #include "db/query_context.hh"
 #include "serializer.hh"
@@ -90,7 +90,7 @@
 #include "cql3/untyped_result_set.hh"
 #include "cql3/functions/user_aggregate.hh"
 
-using namespace db::system_keyspace;
+using namespace db;
 using namespace std::chrono_literals;
 
 
@@ -225,12 +225,12 @@ future<> save_system_schema(cql3::query_processor& qp, const sstring & ksname) {
 
     // delete old, possibly obsolete entries in schema tables
     co_await parallel_for_each(all_table_names(schema_features::full()), [ksm] (sstring cf) -> future<> {
-        auto deletion_timestamp = schema_creation_timestamp() - 1;
+        auto deletion_timestamp = system_keyspace::schema_creation_timestamp() - 1;
         co_await qctx->execute_cql(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
             deletion_timestamp), ksm->name()).discard_result();
     });
     {
-        auto mvec  = make_create_keyspace_mutations(ksm, schema_creation_timestamp(), true);
+        auto mvec  = make_create_keyspace_mutations(ksm, system_keyspace::schema_creation_timestamp(), true);
         co_await qp.proxy().mutate_locally(std::move(mvec), tracing::trace_state_ptr());
     }
 }
@@ -264,7 +264,7 @@ schema_ptr keyspaces() {
         "keyspace definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -306,7 +306,7 @@ schema_ptr tables() {
         "table definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -348,7 +348,7 @@ schema_ptr scylla_tables(schema_features features) {
             offset += 4;
         }
 
-        sb.with_version(generate_schema_version(id, offset));
+        sb.with_version(system_keyspace::generate_schema_version(id, offset));
         sb.with_null_sharder();
         return sb.build();
     };
@@ -400,7 +400,7 @@ static schema_ptr columns_schema(const char* columns_table_name) {
         "column definitions"
         ));
     builder.set_gc_grace_seconds(schema_gc_grace);
-    builder.with_version(generate_schema_version(builder.uuid()));
+    builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
     builder.with_null_sharder();
     return builder.build();
 }
@@ -436,7 +436,7 @@ static schema_ptr computed_columns_schema(const char* columns_table_name) {
         "computed columns"
         ));
     builder.set_gc_grace_seconds(schema_gc_grace);
-    builder.with_version(generate_schema_version(builder.uuid()));
+    builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
     builder.with_null_sharder();
     return builder.build();
 }
@@ -466,7 +466,7 @@ schema_ptr dropped_columns() {
         "dropped column registry"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -492,7 +492,7 @@ schema_ptr triggers() {
         "trigger definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -537,7 +537,7 @@ schema_ptr views() {
         "view definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -564,7 +564,7 @@ schema_ptr indexes() {
         "secondary index definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -591,7 +591,7 @@ schema_ptr types() {
         "user defined type definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -621,7 +621,7 @@ schema_ptr functions() {
         "user defined function definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -651,7 +651,7 @@ schema_ptr aggregates() {
         "user defined aggregate definitions"
         ));
         builder.set_gc_grace_seconds(schema_gc_grace);
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build();
     }();
@@ -671,7 +671,7 @@ schema_ptr scylla_table_schema_history() {
         builder.with_column("type", utf8_type);
         builder.set_comment("Scylla specific table to store a history of column mappings "
             "for each table schema version upon an CREATE TABLE/ALTER TABLE operations");
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
         builder.with_null_sharder();
         return builder.build(schema_builder::compact_storage::no);
     }();
@@ -1560,12 +1560,26 @@ static shared_ptr<cql3::functions::user_function> create_func(database& db, cons
 
     auto arg_names = get_list<sstring>(row, "argument_names");
     auto body = row.get_nonnull<sstring>("body");
-    lua::runtime_config cfg = lua::make_runtime_config(db.get_config());
-    auto bitcode = lua::compile(cfg, arg_names, body);
+    auto language = row.get_nonnull<sstring>("language");
+    if (language == "lua") {
+        lua::runtime_config cfg = lua::make_runtime_config(db.get_config());
+        cql3::functions::user_function::context ctx = cql3::functions::user_function::lua_context {
+            .bitcode = lua::compile(cfg, arg_names, body),
+            .cfg = cfg,
+        };
 
-    return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
-            std::move(body), row.get_nonnull<sstring>("language"), std::move(return_type),
-            row.get_nonnull<bool>("called_on_null_input"), std::move(bitcode), std::move(cfg));
+        return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
+                std::move(body), language, std::move(return_type),
+                row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
+    } else if (language == "xwasm") {
+       wasm::context ctx{db.wasm_engine(), name.name};
+        wasm::compile(ctx, arg_names, body);
+        return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
+                std::move(body), language, std::move(return_type),
+                row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
+    } else {
+        throw std::runtime_error(format("Unsupported language for UDF: {}", language));
+    }
 }
 
 static shared_ptr<cql3::functions::user_aggregate> create_aggregate(database& db, const query::result_set_row& row) {
@@ -2486,7 +2500,7 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
                 bytes serialize() const override {
                     return _bytes;
                 }
-                bool is_placeholder() const {
+                virtual bool is_placeholder() const override {
                     return true;
                 }
             };
