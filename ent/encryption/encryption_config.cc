@@ -34,7 +34,7 @@ This directory should have 700 permissions and belong to the scylla user)foo")
 
         , system_info_encryption(this, "system_info_encryption", value_status::Used,
                                 { { "enabled", "false" }, { "cipher_algorithm",
-                                                "AES" }, {
+                                                "AES/CBC/PKCS5Padding" }, {
                                                 "secret_key_strength", "128" },
                                                 },
                                 R"foo(System information encryption settings

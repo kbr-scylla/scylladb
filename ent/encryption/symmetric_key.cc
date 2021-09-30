@@ -99,6 +99,17 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
             type = "des-ede3";
         }
     }
+    // OpenSSL only supports one form of padding. We used to just allow
+    // non-empty string -> pkcs5/pcks7. Better to verify
+    // (note: pcks5 is sortof a misnomeanor here, as in the Sun world, it
+    // sort of means "pkcs7 with automatic block size" - which is pretty
+    // much how things are in the OpenSSL universe as well)
+    if (padd == "no") {
+        padd = "";
+    }
+    if (!padd.empty() && padd != "pkcs5" && padd != "pkcs" && padd != "pkcs7") {
+        throw std::invalid_argument("non-supported padding option: " + padd);
+    }
 
     auto str = sprint("%s-%d-%s", type, info.len, mode);
     auto cipher = EVP_get_cipherbyname(str.c_str());
