@@ -81,7 +81,8 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         _messaging.start(std::ref(sl_controller), gms::inet_address("127.0.0.1"), 7000).get();
         auto stop_messaging_service = defer([&] { _messaging.stop().get(); });
 
-        gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(_messaging), std::ref(*cfg)).get();
+        gms::gossip_config gcfg;
+        gms::get_gossiper().start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(_messaging), std::ref(*cfg), std::move(gcfg)).get();
         auto stop_gossiper = defer([&] { gms::get_gossiper().stop().get(); });
 
         service::storage_service_config sscfg;
@@ -114,14 +115,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
         });
 
         db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources), std::ref(sst_dir_semaphore)).get();
-        db.invoke_on_all([] (database& db) {
-            db.get_compaction_manager().enable();
-        }).get();
-
         auto stop_db = defer([&] { db.stop().get(); });
-        auto stop_database_d = defer([&db] {
-            stop_database(db).get();
-        });
 
         cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
         auto stop_cdc_generation_service = defer([&cdc_generation_service] {

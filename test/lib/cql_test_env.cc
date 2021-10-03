@@ -58,6 +58,7 @@
 #include "db/system_distributed_keyspace.hh"
 #include "db/sstables-format-selector.hh"
 #include "repair/row_level.hh"
+#include "utils/cross-shard-barrier.hh"
 #include "debug.hh"
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -106,28 +107,6 @@ cql_test_config::~cql_test_config() = default;
 
 static const sstring testing_superuser = "tester";
 
-static future<> tst_init_ms_fd_gossiper(sharded<gms::feature_service>& features, sharded<locator::shared_token_metadata>& stm, sharded<netw::messaging_service>& ms, db::config& cfg, db::seed_provider_type seed_provider,
-            sharded<abort_source>& abort_sources, sstring cluster_name = "Test Cluster") {
-        // Init gossiper
-        std::set<gms::inet_address> seeds;
-        if (seed_provider.parameters.contains("seeds")) {
-            size_t begin = 0;
-            size_t next = 0;
-            sstring seeds_str = seed_provider.parameters.find("seeds")->second;
-            while (begin < seeds_str.length() && begin != (next=seeds_str.find(",",begin))) {
-                seeds.emplace(gms::inet_address(seeds_str.substr(begin,next-begin)));
-                begin = next+1;
-            }
-        }
-        if (seeds.empty()) {
-            seeds.emplace(gms::inet_address("127.0.0.1"));
-        }
-        return gms::get_gossiper().start(std::ref(abort_sources), std::ref(features), std::ref(stm), std::ref(ms), std::ref(cfg)).then([seeds, cluster_name] {
-            auto& gossiper = gms::get_local_gossiper();
-            gossiper.set_seeds(seeds);
-            gossiper.set_cluster_name(cluster_name);
-        });
-}
 // END TODO
 
 class single_node_cql_env : public cql_test_env {
@@ -454,9 +433,9 @@ public:
             abort_sources.start().get();
             auto stop_abort_sources = defer([&] { abort_sources.stop().get(); });
             sharded<database> db;
-            debug::db = &db;
+            debug::the_database = &db;
             auto reset_db_ptr = defer([] {
-                debug::db = nullptr;
+                debug::the_database = nullptr;
             });
             auto cfg = cfg_in.db_config;
             tmpdir data_dir;
@@ -536,14 +515,38 @@ public:
             feature_service.start(fcfg).get();
             auto stop_feature_service = defer([&] { feature_service.stop().get(); });
 
-            // FIXME: split
-            tst_init_ms_fd_gossiper(feature_service, token_metadata, ms, *cfg, db::config::seed_provider_type(), abort_sources).get();
+            sharded<gms::gossiper>& gossiper = gms::get_gossiper();
+
+            // Init gossiper
+            std::set<gms::inet_address> seeds;
+            auto seed_provider = db::config::seed_provider_type();
+            if (seed_provider.parameters.contains("seeds")) {
+                size_t begin = 0;
+                size_t next = 0;
+                sstring seeds_str = seed_provider.parameters.find("seeds")->second;
+                while (begin < seeds_str.length() && begin != (next=seeds_str.find(",",begin))) {
+                    seeds.emplace(gms::inet_address(seeds_str.substr(begin,next-begin)));
+                    begin = next+1;
+                }
+            }
+            if (seeds.empty()) {
+                seeds.emplace(gms::inet_address("127.0.0.1"));
+            }
+
+            gms::gossip_config gcfg;
+            gcfg.cluster_name = "Test Cluster";
+            gcfg.seeds = std::move(seeds);
+            gossiper.start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(ms), std::ref(*cfg), std::move(gcfg)).get();
+            auto stop_ms_fd_gossiper = defer([&gossiper] {
+                gossiper.stop().get();
+            });
+            gossiper.invoke_on_all(&gms::gossiper::start).get();
 
             distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
             distributed<service::migration_manager> mm;
             distributed<db::batchlog_manager>& bm = db::get_batchlog_manager();
             sharded<cql3::cql_config> cql_config;
-            cql_config.start().get();
+            cql_config.start(cql3::cql_config::default_tag{}).get();
             auto stop_cql_config = defer([&] { cql_config.stop().get(); });
 
             sharded<db::view::view_update_generator> view_update_generator;
@@ -551,14 +554,14 @@ public:
             sharded<repair_service> repair;
             sharded<cql3::query_processor> qp;
             sharded<service::raft_group_registry> raft_gr;
-            raft_gr.start(std::ref(ms), std::ref(gms::get_gossiper()), std::ref(qp)).get();
+            raft_gr.start(std::ref(ms), std::ref(gossiper), std::ref(qp)).get();
             auto stop_raft = defer([&raft_gr] { raft_gr.stop().get(); });
 
             sharded<service::storage_service> ss;
             service::storage_service_config sscfg;
             sscfg.available_memory = memory::stats().total_memory();
             ss.start(std::ref(abort_sources), std::ref(db),
-                std::ref(gms::get_gossiper()),
+                std::ref(gossiper),
                 std::ref(sys_dist_ks),
                 std::ref(view_update_generator),
                 std::ref(feature_service), sscfg, std::ref(mm),
@@ -591,19 +594,14 @@ public:
             dbcfg.memtable_scheduling_group = scheduling_groups.memtable_scheduling_group;
             dbcfg.memtable_to_cache_scheduling_group = scheduling_groups.memtable_to_cache_scheduling_group;
             dbcfg.gossip_scheduling_group = scheduling_groups.gossip_scheduling_group;
+            dbcfg.sstables_format = cfg->enable_sstables_md_format() ? sstables::sstable_version_types::md : sstables::sstable_version_types::mc;
 
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources), std::ref(sst_dir_semaphore)).get();
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(abort_sources), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
             auto stop_db = defer([&db] {
                 db.stop().get();
             });
 
-            db.invoke_on_all([] (database& db) {
-                db.set_format_by_config();
-            }).get();
-
-            auto stop_ms_fd_gossiper = defer([] {
-                gms::get_gossiper().stop().get();
-            });
+            db.invoke_on_all(&database::start).get();
 
             feature_service.invoke_on_all([] (auto& fs) {
                 fs.enable(fs.known_feature_set());
@@ -620,10 +618,10 @@ public:
             db::view::node_update_backlog b(smp::count, 10ms);
             scheduling_group_key_config sg_conf =
                     make_scheduling_group_key_config<service::storage_proxy_stats::stats>();
-            proxy.start(std::ref(db), std::ref(gms::get_gossiper()), spcfg, std::ref(b), scheduling_group_key_create(sg_conf).get0(), std::ref(feature_service), std::ref(token_metadata), std::ref(ms)).get();
+            proxy.start(std::ref(db), std::ref(gossiper), spcfg, std::ref(b), scheduling_group_key_create(sg_conf).get0(), std::ref(feature_service), std::ref(token_metadata), std::ref(ms)).get();
             auto stop_proxy = defer([&proxy] { proxy.stop().get(); });
 
-            mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(gms::get_gossiper())).get();
+            mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(gossiper)).get();
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
@@ -653,7 +651,7 @@ public:
                 auto cfm = pair.second;
                 return ks.make_directory_for_column_family(cfm->cf_name(), cfm->id());
             }).get();
-            distributed_loader::init_non_system_keyspaces(db, proxy, mm).get();
+            distributed_loader::init_non_system_keyspaces(db, proxy).get();
 
             db.invoke_on_all([] (database& db) {
                 for (auto& x : db.get_column_families()) {
@@ -663,14 +661,9 @@ public:
             }).get();
 
             auto stop_system_keyspace = defer([] { db::qctx = {}; });
-            start_large_data_handler(db).get();
 
-            db.invoke_on_all([] (database& db) {
-                db.get_compaction_manager().enable();
-            }).get();
-
-            auto stop_database_d = defer([&db] {
-                stop_database(db).get();
+            auto shutdown_db = defer([&db] {
+                db.invoke_on_all(&database::shutdown).get();
             });
 
             db::system_keyspace::init_local_cache().get();
@@ -691,7 +684,7 @@ public:
                 stop_raft_rpc.cancel();
             }
 
-            cdc_generation_service.start(std::ref(*cfg), std::ref(gms::get_gossiper()), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
+            cdc_generation_service.start(std::ref(*cfg), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(abort_sources), std::ref(token_metadata), std::ref(feature_service)).get();
             auto stop_cdc_generation_service = defer([&cdc_generation_service] {
                 cdc_generation_service.stop().get();
             });
@@ -703,7 +696,7 @@ public:
                 cdc.stop().get();
             });
 
-            ss.local().init_server(service::bind_messaging_port(false)).get();
+            ss.local().init_server().get();
             ss.local().join_cluster().get();
 
             auth::permissions_cache_config perm_cache_config;
@@ -725,8 +718,8 @@ public:
                 return auth.start(mm.local());
             }).get();
 
-            auto deinit_storage_service_server = defer([&auth_service] {
-                gms::stop_gossiping(gms::get_gossiper()).get();
+            auto deinit_storage_service_server = defer([&auth_service, &gossiper] {
+                gossiper.invoke_on_all(&gms::gossiper::shutdown).get();
                 auth_service.stop().get();
             });
 
@@ -818,6 +811,6 @@ cql_test_config raft_cql_test_config() {
 
 namespace debug {
 
-seastar::sharded<database>* db;
+seastar::sharded<database>* the_database;
 
 }

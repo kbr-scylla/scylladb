@@ -35,6 +35,7 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/gate.hh>
 #include "db/commitlog/replay_position.hh"
+#include "db/commitlog/commitlog_types.hh"
 #include <limits>
 #include "schema_fwd.hh"
 #include "db/view/view.hh"
@@ -64,6 +65,7 @@
 #include "user_types_metadata.hh"
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
+#include "utils/cross-shard-barrier.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -77,11 +79,6 @@ namespace service {
 class storage_proxy;
 class storage_service;
 class migration_notifier;
-class migration_manager;
-}
-
-namespace netw {
-class messaging_service;
 }
 
 namespace gms {
@@ -539,6 +536,8 @@ private:
     void add_maintenance_sstable(sstables::shared_sstable sst);
     static void add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
     static void remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable);
+    // Update compaction backlog tracker with the same changes applied to the underlying sstable set.
+    void backlog_tracker_adjust_charges(const std::vector<sstables::shared_sstable>& old_sstables, const std::vector<sstables::shared_sstable>& new_sstables);
     lw_shared_ptr<memtable> new_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt, sstable_write_permit&& permit);
     // Caller must keep m alive.
@@ -1218,6 +1217,7 @@ struct database_config {
     seastar::scheduling_group streaming_scheduling_group;
     seastar::scheduling_group gossip_scheduling_group;
     size_t available_memory;
+    std::optional<sstables::sstable_version_types> sstables_format;
 };
 
 struct string_pair_eq {
@@ -1295,7 +1295,7 @@ private:
             const frozen_mutation&,
             tracing::trace_state_ptr,
             db::timeout_clock::time_point,
-            db::commitlog::force_sync> _apply_stage;
+            db::commitlog_force_sync> _apply_stage;
 
     flat_hash_map<sstring, keyspace> _keyspaces;
     std::unordered_map<utils::UUID, lw_shared_ptr<column_family>> _column_families;
@@ -1309,8 +1309,7 @@ private:
     std::unique_ptr<compaction_manager> _compaction_manager;
     seastar::metrics::metric_groups _metrics;
     bool _enable_incremental_backups = false;
-    utils::UUID _local_host_id;
-
+    bool _shutdown = false;
     query::querier_cache _querier_cache;
 
     std::unique_ptr<db::large_data_handler> _large_data_handler;
@@ -1333,22 +1332,17 @@ private:
     bool _supports_infinite_bound_range_deletions = false;
     gms::feature::listener_registration _infinite_bound_range_deletions_reg;
 
-    wasm::engine* _wasm_engine;
+    std::unique_ptr<wasm::engine> _wasm_engine;
+    utils::cross_shard_barrier _stop_barrier;
 
-    future<> init_commitlog();
 public:
+    future<> init_commitlog();
     const gms::feature_service& features() const { return _feat; }
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
 
-    void set_local_id(utils::UUID uuid) noexcept { _local_host_id = std::move(uuid); }
-
     wasm::engine* wasm_engine() {
-        return _wasm_engine;
-    }
-
-    void set_wasm_engine(wasm::engine* engine) {
-        _wasm_engine = engine;
+        return _wasm_engine.get();
     }
 
 private:
@@ -1359,8 +1353,8 @@ private:
     void setup_scylla_memory_diagnostics_producer();
 
     friend class db_apply_executor;
-    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
-    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync);
+    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
+    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
@@ -1379,8 +1373,9 @@ public:
 
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
 
-    future<> parse_system_tables(distributed<service::storage_proxy>&, distributed<service::migration_manager>&);
-    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm, abort_source& as, sharded<semaphore>& sst_dir_sem);
+    future<> parse_system_tables(distributed<service::storage_proxy>&);
+    database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
+            abort_source& as, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
     database(database&&) = delete;
     ~database();
 
@@ -1398,7 +1393,6 @@ public:
 
     seastar::scheduling_group get_statement_scheduling_group() const { return _dbcfg.statement_scheduling_group; }
     seastar::scheduling_group get_streaming_scheduling_group() const { return _dbcfg.streaming_scheduling_group; }
-    size_t get_available_memory() const { return _dbcfg.available_memory; }
 
     compaction_manager& get_compaction_manager() {
         return *_compaction_manager;
@@ -1455,10 +1449,11 @@ public:
     /// reads, to speed up startup. After startup this should be reverted to
     /// the normal concurrency.
     void revert_initial_system_read_concurrency_boost();
+    future<> start();
+    future<> shutdown();
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
-    future<> stop_large_data_handler();
     unsigned shard_of(const mutation& m);
     unsigned shard_of(const frozen_mutation& m);
     future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
@@ -1468,7 +1463,7 @@ public:
                                                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout);
+    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout);
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
@@ -1516,20 +1511,12 @@ public:
     }
     const db::extensions& extensions() const;
 
-    db::large_data_handler* get_large_data_handler() const {
-        return _large_data_handler.get();
-    }
-
-    db::large_data_handler* get_nop_large_data_handler() const {
-        return _nop_large_data_handler.get();
-    }
-
-    sstables::sstables_manager& get_user_sstables_manager() const {
+    sstables::sstables_manager& get_user_sstables_manager() const noexcept {
         assert(_user_sstables_manager);
         return *_user_sstables_manager;
     }
 
-    sstables::sstables_manager& get_system_sstables_manager() const {
+    sstables::sstables_manager& get_system_sstables_manager() const noexcept {
         assert(_system_sstables_manager);
         return *_system_sstables_manager;
     }
@@ -1538,7 +1525,7 @@ public:
     // The returned list is sorted, and its elements are non overlapping and non wrap-around.
     dht::token_range_vector get_keyspace_local_ranges(sstring ks);
 
-    void set_format(sstables::sstable_version_types format);
+    void set_format(sstables::sstable_version_types format) noexcept;
     void set_format_by_config();
 
     future<> flush_all_memtables();
@@ -1564,7 +1551,6 @@ public:
     std::unordered_set<sstring> get_initial_tokens();
     std::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
-    void register_connection_drop_notifier(netw::messaging_service& ms);
 
     db_stats& get_stats() {
         return *_stats;
@@ -1585,8 +1571,6 @@ public:
     db::view::update_backlog get_view_update_backlog() const {
         return {max_memory_pending_view_updates() - _view_update_concurrency_sem.current(), max_memory_pending_view_updates()};
     }
-
-    friend class distributed_loader;
 
     db::data_listeners& data_listeners() const {
         return *_data_listeners;
@@ -1614,7 +1598,6 @@ public:
 };
 
 future<> start_large_data_handler(sharded<database>& db);
-future<> stop_database(sharded<database>& db);
 
 // Creates a streaming reader that reads from all shards.
 //

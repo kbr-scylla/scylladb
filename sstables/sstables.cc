@@ -26,6 +26,7 @@
 #include <seastar/util/closeable.hh>
 #include <iterator>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 
 #include "dht/sharder.hh"
 #include "types.hh"
@@ -511,7 +512,7 @@ future<> parse(const schema& schema, sstable_version_types v, random_access_read
     while (s.positions.size() != s.header.size) {
         s.positions.push_back(seastar::read_le<pos_type>(b));
         b += sizeof(pos_type);
-        co_await make_ready_future<>(); // yield
+        co_await coroutine::maybe_yield();
     }
     // Since the keys in the index are not sized, we need to calculate
     // the start position of the index i+1 to determine the boundaries
@@ -672,7 +673,7 @@ future<> parse(const schema& s, sstable_version_types v, random_access_reader& i
             eh.bucket_offsets.push_back(offset);
         }
         eh.buckets.push_back(bucket);
-        co_await make_ready_future<>(); // yield
+        co_await coroutine::maybe_yield();
     }
 }
 
@@ -2128,10 +2129,27 @@ sstable::make_reader_v1(
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr,
         read_monitor& mon) {
-    if (_version >= version_types::mc) {
-        return downgrade_to_v1(mx::make_reader(shared_from_this(), std::move(schema), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon));
+    const auto reversed = slice.options.contains(query::partition_slice::option::reversed);
+    auto fwd_sm = fwd;
+    if (reversed) {
+        fwd_sm = streamed_mutation::forwarding::no;
+        schema = schema->make_reversed();
     }
-    return kl::make_reader(shared_from_this(), std::move(schema), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon);
+
+    flat_mutation_reader rd(nullptr);
+    if (_version >= version_types::mc) {
+        rd = downgrade_to_v1(mx::make_reader(shared_from_this(), std::move(schema), permit, range, slice, pc, std::move(trace_state), fwd_sm, fwd_mr, mon));
+    } else {
+        rd = kl::make_reader(shared_from_this(), std::move(schema), permit, range, slice, pc, std::move(trace_state), fwd_sm, fwd_mr, mon);
+    }
+
+    if (reversed) {
+        rd = make_reversing_reader(std::move(rd), permit.max_result_size());
+        if (fwd) {
+            rd = make_forwardable(std::move(rd));
+        }
+    }
+    return rd;
 }
 
 flat_mutation_reader_v2

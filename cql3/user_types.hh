@@ -69,6 +69,8 @@ public:
         std::vector<managed_bytes_opt> bind_internal(const query_options& options);
     public:
         virtual shared_ptr<terminal> bind(const query_options& options) override;
+
+        virtual expr::expression to_expression() override;
     };
 
     class marker : public abstract_marker {
@@ -80,6 +82,7 @@ public:
         }
 
         virtual shared_ptr<terminal> bind(const query_options& options) override;
+        virtual expr::expression to_expression() override;
     };
 
     class setter : public operation {

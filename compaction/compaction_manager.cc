@@ -434,7 +434,7 @@ void compaction_manager::reevaluate_postponed_compactions() {
 }
 
 void compaction_manager::postpone_compaction_for_column_family(column_family* cf) {
-    _postponed.push_back(cf);
+    _postponed.insert(cf);
 }
 
 future<> compaction_manager::stop_ongoing_compactions(sstring reason) {
@@ -919,7 +919,7 @@ future<> compaction_manager::remove(column_family* cf) {
             task->stopping = true;
         }
     }
-    _postponed.erase(boost::remove(_postponed, cf), _postponed.end());
+    _postponed.erase(cf);
 
     // Wait for the termination of an ongoing compaction on cf, if any.
     return do_for_each(*tasks_to_stop, [this, cf] (auto& task) {
@@ -927,14 +927,6 @@ future<> compaction_manager::remove(column_family* cf) {
     }).then([this, cf, tasks_to_stop] {
         _compaction_locks.erase(cf);
     });
-}
-
-void compaction_manager::stop_tracking_ongoing_compactions(column_family* cf) {
-    for (auto& info : _compactions) {
-        if (info->cf == cf) {
-            info->stop_tracking();
-        }
-    }
 }
 
 void compaction_manager::stop_compaction(sstring type) {

@@ -1770,16 +1770,6 @@ SEASTAR_TEST_CASE(min_max_clustering_key_test_2) {
     });
 }
 
-// Must be run in a seastar thread
-static
-shared_sstable make_sstable_easy(test_env& env, const fs::path& path, flat_mutation_reader rd, sstable_writer_config cfg, const sstables::sstable::version_types version, int64_t generation = 1) {
-    auto s = rd.schema();
-    auto sst = env.make_sstable(s, path.string(), generation, version, big);
-    sst->write_components(std::move(rd), 1, s, cfg, encoding_stats{}).get();
-    sst->load().get();
-    return sst;
-}
-
 SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
   return test_env::do_with([] (test_env& env) {
     column_family_for_tests cf(env.manager());
@@ -2632,7 +2622,7 @@ SEASTAR_THREAD_TEST_CASE(test_scrub_segregate_stack) {
     std::list<std::deque<mutation_fragment>> segregated_fragment_streams;
 
     mutation_writer::segregate_by_partition(make_scrubbing_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(all_fragments)),
-                sstables::compaction_type_options::scrub::mode::segregate), [&schema, &segregated_fragment_streams] (flat_mutation_reader rd) {
+                sstables::compaction_type_options::scrub::mode::segregate), 100, [&schema, &segregated_fragment_streams] (flat_mutation_reader rd) {
         return async([&schema, &segregated_fragment_streams, rd = std::move(rd)] () mutable {
             auto close = deferred_close(rd);
             auto& fragments = segregated_fragment_streams.emplace_back();
@@ -2957,11 +2947,11 @@ SEASTAR_TEST_CASE(compaction_strategy_aware_major_compaction_test) {
     });
 }
 
-SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
+SEASTAR_TEST_CASE(backlog_tracker_correctness_after_changing_compaction_strategy) {
     return test_env::do_with_async([] (test_env& env) {
         cell_locker_stats cl_stats;
 
-        auto builder = schema_builder("tests", "backlog_correctness_after_stop_tracking_compaction")
+        auto builder = schema_builder("tests", "backlog_tracker_correctness_after_changing_compaction_strategy")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type);
         auto s = builder.build();
@@ -3003,15 +2993,7 @@ SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
 
             auto fut = compact_sstables(sstables::compaction_descriptor(ssts, cf->get_sstable_set(), default_priority_class()), *cf, sst_gen);
 
-            bool stopped_tracking = false;
-            for (auto& info : cf._data->cm.get_compactions()) {
-                if (info->cf == &*cf) {
-                    info->stop_tracking();
-                    stopped_tracking = true;
-                }
-            }
-            BOOST_REQUIRE(stopped_tracking);
-
+            // set_compaction_strategy() itself is responsible for transferring charges from old to new backlog tracker.
             cf->set_compaction_strategy(sstables::compaction_strategy_type::time_window);
             for (auto& sst : ssts) {
                 cf->get_compaction_strategy().get_backlog_tracker().add_sstable(sst);
@@ -3019,7 +3001,6 @@ SEASTAR_TEST_CASE(backlog_tracker_correctness_after_stop_tracking_compaction) {
 
             auto ret = fut.get0();
             BOOST_REQUIRE(ret.new_sstables.size() == 1);
-            BOOST_REQUIRE(ret.tracking == false);
         }
         // triggers code that iterates through registered compactions.
         cf._data->cm.backlog();
@@ -3055,8 +3036,7 @@ SEASTAR_TEST_CASE(partial_sstable_run_filtered_out_test) {
 
         sstable_writer_config sst_cfg = env.manager().configure_writer();
         sst_cfg.run_identifier = partial_sstable_run_identifier;
-        auto partial_sstable_run_sst = make_sstable_easy(env, tmp.path(), flat_mutation_reader_from_mutations(env.make_reader_permit(), { std::move(mut) }),
-                                                         sst_cfg, sstables::get_highest_sstable_version(), 1);
+        auto partial_sstable_run_sst = make_sstable_easy(env, tmp.path(), flat_mutation_reader_from_mutations(env.make_reader_permit(), { std::move(mut) }), sst_cfg);
 
         column_family_test(cf).add_sstable(partial_sstable_run_sst);
         column_family_test::update_sstables_known_generation(*cf, partial_sstable_run_sst->generation());

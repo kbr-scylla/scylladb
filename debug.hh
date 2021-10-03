@@ -16,7 +16,7 @@ class database;
 
 namespace debug {
 
-extern seastar::sharded<database>* db;
+extern seastar::sharded<database>* the_database;
 
 
 }

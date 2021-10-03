@@ -957,14 +957,10 @@ SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic) {
 
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(std::move(m));
-
-        auto sst = env.make_sstable(s,
-                                dir.path().string(),
-                                1 /* generation */);
         sstable_writer_config cfg = env.manager().configure_writer();
         cfg.promoted_index_block_size = 1;
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, cfg, mt->get_encoding_stats()).get();
-        sst->load().get();
+
+        auto sst = make_sstable_easy(env, dir.path(), mt, cfg);
         assert_that(get_index_reader(sst, env.make_reader_permit())).has_monotonic_positions(*s);
     });
 }
@@ -1005,16 +1001,10 @@ SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic_compound_dense) {
 
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(std::move(m));
-
-        auto sst = env.make_sstable(s,
-                                          dir.path().string(),
-                                          1 /* generation */,
-                                          version,
-                                          sstables::sstable::format_types::big);
         sstable_writer_config cfg = env.manager().configure_writer();
         cfg.promoted_index_block_size = 1;
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, cfg, mt->get_encoding_stats()).get();
-        sst->load().get();
+
+        auto sst = make_sstable_easy(env, dir.path(), mt, cfg, 1, version);
 
         {
             assert_that(get_index_reader(sst, env.make_reader_permit())).has_monotonic_positions(*s);
@@ -1062,16 +1052,10 @@ SEASTAR_TEST_CASE(test_promoted_index_blocks_are_monotonic_non_compound_dense) {
 
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(std::move(m));
-
-        auto sst = env.make_sstable(s,
-                                          dir.path().string(),
-                                          1 /* generation */,
-                                          version,
-                                          sstables::sstable::format_types::big);
         sstable_writer_config cfg = env.manager().configure_writer();
         cfg.promoted_index_block_size = 1;
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, cfg, mt->get_encoding_stats()).get();
-        sst->load().get();
+
+        auto sst = make_sstable_easy(env, dir.path(), mt, cfg, 1, version);
 
         {
             assert_that(get_index_reader(sst, env.make_reader_permit())).has_monotonic_positions(*s);
@@ -1116,16 +1100,10 @@ SEASTAR_TEST_CASE(test_promoted_index_repeats_open_tombstones) {
 
             auto mt = make_lw_shared<memtable>(s);
             mt->apply(m);
-
-            auto sst = env.make_sstable(s,
-                                              dir.path().string(),
-                                              generation,
-                                              version,
-                                              sstables::sstable::format_types::big);
             sstable_writer_config cfg = env.manager().configure_writer();
             cfg.promoted_index_block_size = 1;
-            sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, cfg, mt->get_encoding_stats()).get();
-            sst->load().get();
+
+            auto sst = make_sstable_easy(env, dir.path(), mt, cfg, generation, version);
 
             {
                 auto slice = partition_slice_builder(*s).with_range(query::clustering_range::make_starting_with({ck})).build();
@@ -1160,14 +1138,9 @@ SEASTAR_TEST_CASE(test_range_tombstones_are_correctly_seralized_for_non_compound
 
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(m);
+        sstable_writer_config cfg = env.manager().configure_writer();
 
-        auto sst = env.make_sstable(s,
-                                          dir.path().string(),
-                                          1 /* generation */,
-                                          version,
-                                          sstables::sstable::format_types::big);
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, env.manager().configure_writer(), mt->get_encoding_stats()).get();
-        sst->load().get();
+        auto sst = make_sstable_easy(env, dir.path(), mt, cfg, 1, version);
 
         {
             auto slice = partition_slice_builder(*s).build();
@@ -1196,17 +1169,10 @@ SEASTAR_TEST_CASE(test_promoted_index_is_absent_for_schemas_without_clustering_k
         }
         auto mt = make_lw_shared<memtable>(s);
         mt->apply(m);
-
-        auto sst = env.make_sstable(s,
-                                          dir.path().string(),
-                                          1 /* generation */,
-                                          version,
-                                          sstables::sstable::format_types::big);
         sstable_writer_config cfg = env.manager().configure_writer();
         cfg.promoted_index_block_size = 1;
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, cfg, mt->get_encoding_stats()).get();
-        sst->load().get();
 
+        auto sst = make_sstable_easy(env, dir.path(), mt, cfg, 1, version);
         assert_that(get_index_reader(sst, env.make_reader_permit())).is_empty(*s);
       }
     });
@@ -1242,17 +1208,10 @@ SEASTAR_TEST_CASE(test_writing_combined_stream_with_tombstones_at_the_same_posit
 
         auto mt2 = make_lw_shared<memtable>(s);
         mt2->apply(m2);
-
-        auto sst = env.make_sstable(s,
-                                          dir.path().string(),
-                                          1 /* generation */,
-                                          version,
-                                          sstables::sstable::format_types::big);
         auto combined_permit = env.make_reader_permit();
-        sst->write_components(make_combined_reader(s, combined_permit,
-            mt1->make_flat_reader(s, combined_permit),
-            mt2->make_flat_reader(s, combined_permit)), 1, s, env.manager().configure_writer(), encoding_stats{}).get();
-        sst->load().get();
+        auto mr = make_combined_reader(s, combined_permit,
+            mt1->make_flat_reader(s, combined_permit), mt2->make_flat_reader(s, combined_permit));
+        auto sst = make_sstable_easy(env, dir.path(), std::move(mr), env.manager().configure_writer(), 1, version);
 
         assert_that(sst->as_mutation_source().make_reader(s, env.make_reader_permit()))
             .produces(m1 + m2)
@@ -1420,13 +1379,8 @@ SEASTAR_TEST_CASE(test_large_index_pages_do_not_cause_large_allocations) {
         mt->apply(m);
     }
 
-    auto sst = env.make_sstable(s,
-                                      dir.path().string(),
-                                      1 /* generation */,
-                                      sstables::get_highest_sstable_version(),
-                                      sstables::sstable::format_types::big);
-    sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, env.manager().configure_writer(), mt->get_encoding_stats()).get();
-    sst->load().get();
+    sstable_writer_config cfg = env.manager().configure_writer();
+    auto sst = make_sstable_easy(env, dir.path(), mt, cfg);
 
     auto pr = dht::partition_range::make_singular(small_keys[0]);
 
@@ -1587,10 +1541,7 @@ SEASTAR_TEST_CASE(test_counter_header_size) {
     mt->apply(m);
 
     for (const auto version : writable_sstable_versions) {
-        auto sst = env.make_sstable(s, dir.path().string(), 1, version, sstables::sstable::format_types::big);
-        sst->write_components(mt->make_flat_reader(s, env.make_reader_permit()), 1, s, env.manager().configure_writer(), mt->get_encoding_stats()).get();
-        sst->load().get();
-
+        auto sst = make_sstable_easy(env, dir.path(), mt, env.manager().configure_writer(), 1, version);
         assert_that(sst->as_mutation_source().make_reader(s, env.make_reader_permit()))
             .produces(m)
             .produces_end_of_stream();

@@ -79,7 +79,7 @@ namespace db {
 struct experimental_features_t {
     // NOTE: RAFT feature is not enabled via `experimental` umbrella flag.
     // This option should be enabled explicitly.
-    enum feature { UNUSED, UDF, UNUSED_CDC, ALTERNATOR_STREAMS, RAFT };
+    enum feature { UNUSED, UDF, UNUSED_CDC, ALTERNATOR_STREAMS, ALTERNATOR_TTL, RAFT };
     static std::unordered_map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();
 };
@@ -283,8 +283,6 @@ public:
     named_value<bool> consistent_rangemovement;
     named_value<bool> join_ring;
     named_value<bool> load_ring_state;
-    named_value<sstring> replace_node;
-    named_value<sstring> replace_token;
     named_value<sstring> replace_address;
     named_value<sstring> replace_address_first_boot;
     named_value<bool> override_decommission;

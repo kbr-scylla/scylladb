@@ -48,11 +48,14 @@ inline
 expr::tuple_constructor
 column_definitions_as_tuple_constructor(const std::vector<const column_definition*>& defs) {
     std::vector<expr::expression> columns;
+    std::vector<data_type> column_types;
     columns.reserve(defs.size());
     for (auto& def : defs) {
         columns.push_back(expr::column_value{def});
+        column_types.push_back(def->type);
     }
-    return expr::tuple_constructor{std::move(columns)};
+    data_type ttype = tuple_type_impl::get_instance(std::move(column_types));
+    return expr::tuple_constructor{std::move(columns), std::move(ttype)};
 }
 
 class multi_column_restriction : public clustering_key_restrictions {
@@ -463,7 +466,7 @@ private:
         using namespace expr;
         if (!bound){
             auto r = ::make_shared<cql3::restrictions::single_column_restriction>(*_column_defs[column_pos]);
-            r->expression = binary_operator{_column_defs[column_pos], expr::oper_t::EQ, std::move(term)};
+            r->expression = binary_operator{column_value{_column_defs[column_pos]}, expr::oper_t::EQ, std::move(term)};
             return r;
         } else {
             auto r = ::make_shared<cql3::restrictions::single_column_restriction>(*_column_defs[column_pos]);

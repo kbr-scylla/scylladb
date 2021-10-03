@@ -18,7 +18,6 @@
 
 #include "bytes.hh"
 #include "cql3/statements/bound.hh"
-#include "cql3/term.hh"
 #include "cql3/column_identifier.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/functions/function_name.hh"
@@ -28,6 +27,7 @@
 #include "seastarx.hh"
 #include "utils/overloaded_functor.hh"
 #include "utils/variant_element.hh"
+#include "cql3/values.hh"
 
 class row;
 
@@ -41,6 +41,7 @@ namespace query {
 } // namespace query
 
 namespace cql3 {
+struct term;
 
 class column_identifier_raw;
 class query_options;
@@ -77,14 +78,73 @@ struct tuple_constructor;
 struct collection_constructor;
 struct usertype_constructor;
 
-/// A CQL expression -- union of all possible expression types.  bool means a Boolean constant.
-using expression = std::variant<conjunction, binary_operator, column_value, token,
-                                unresolved_identifier, column_mutation_attribute, function_call, cast,
-                                field_selection, null, bind_variable, untyped_constant, constant,
-                                tuple_constructor, collection_constructor, usertype_constructor>;
-
 template <typename T>
-concept ExpressionElement = utils::VariantElement<T, expression>;
+concept ExpressionElement
+        = std::same_as<T, conjunction>
+        || std::same_as<T, binary_operator>
+        || std::same_as<T, column_value>
+        || std::same_as<T, token>
+        || std::same_as<T, unresolved_identifier>
+        || std::same_as<T, column_mutation_attribute>
+        || std::same_as<T, function_call>
+        || std::same_as<T, cast>
+        || std::same_as<T, field_selection>
+        || std::same_as<T, null>
+        || std::same_as<T, bind_variable>
+        || std::same_as<T, untyped_constant>
+        || std::same_as<T, constant>
+        || std::same_as<T, tuple_constructor>
+        || std::same_as<T, collection_constructor>
+        || std::same_as<T, usertype_constructor>
+        ;
+
+template <typename Func>
+concept invocable_on_expression
+        = std::invocable<Func, conjunction>
+        && std::invocable<Func, binary_operator>
+        && std::invocable<Func, column_value>
+        && std::invocable<Func, token>
+        && std::invocable<Func, unresolved_identifier>
+        && std::invocable<Func, column_mutation_attribute>
+        && std::invocable<Func, function_call>
+        && std::invocable<Func, cast>
+        && std::invocable<Func, field_selection>
+        && std::invocable<Func, null>
+        && std::invocable<Func, bind_variable>
+        && std::invocable<Func, untyped_constant>
+        && std::invocable<Func, constant>
+        && std::invocable<Func, tuple_constructor>
+        && std::invocable<Func, collection_constructor>
+        && std::invocable<Func, usertype_constructor>
+        ;
+
+/// A CQL expression -- union of all possible expression types.  bool means a Boolean constant.
+class expression final {
+    // 'impl' holds a variant of all expression types, but since 
+    // variants of incomplete types are not allowed, we forward declare it
+    // here and fully define it later.
+    struct impl;                 
+    std::unique_ptr<impl> _v;
+public:
+    expression(); // FIXME: remove
+    expression(ExpressionElement auto e);
+
+    expression(const expression&);
+    expression(expression&&) noexcept = default;
+    expression& operator=(const expression&);
+    expression& operator=(expression&&) noexcept = default;
+
+    friend auto visit(invocable_on_expression auto&& visitor, const expression& e);
+
+    template <ExpressionElement E>
+    friend bool is(const expression& e);
+
+    template <ExpressionElement E>
+    friend const E& as(const expression& e);
+
+    template <ExpressionElement E>
+    friend const E* as_if(const expression* e);
+};
 
 // An expression that doesn't contain subexpressions
 template <typename E>
@@ -98,26 +158,6 @@ concept LeafExpression
         || std::same_as<untyped_constant, E> 
         || std::same_as<constant, E>
         ;
-
-// An expression variant element can't contain an expression by value, since the size of the variant
-// will be infinite. `nested_expression` contains an expression indirectly, but has value semantics and
-// is copyable.
-class nested_expression {
-    std::unique_ptr<expression> _e;
-public:
-    // not explicit, an expression _is_ a nested expression
-    nested_expression(expression e);
-    // not explicit, an ExpressionElement _is_ an expression
-    nested_expression(ExpressionElement auto e);
-    nested_expression(const nested_expression&);
-    nested_expression(nested_expression&&) = default;
-    nested_expression& operator=(const nested_expression&);
-    nested_expression& operator=(nested_expression&&) = default;
-    const expression* operator->() const { return _e.get(); }
-    expression* operator->() { return _e.get(); }
-    const expression& operator*() const { return *_e.get(); }
-    expression& operator*() { return *_e.get(); }
-};
 
 /// A column, optionally subscripted by a term (eg, c1 or c2['abc']).
 struct column_value {
@@ -143,7 +183,7 @@ enum class comparison_order : char {
 
 /// Operator restriction: LHS op RHS.
 struct binary_operator {
-    nested_expression lhs;
+    expression lhs;
     oper_t op;
     ::shared_ptr<term> rhs;
     comparison_order order;
@@ -170,21 +210,36 @@ struct column_mutation_attribute {
     attribute_kind kind;
     // note: only unresolved_identifier is legal here now. One day, when prepare()
     // on expressions yields expressions, column_value will also be legal here.
-    nested_expression column;
+    expression column;
 };
 
 struct function_call {
     std::variant<functions::function_name, shared_ptr<functions::function>> func;
     std::vector<expression> args;
+
+    // 0-based index of the function call within a CQL statement.
+    // Used to populate the cache of execution results while passing to
+    // another shard (handling `bounce_to_shard` messages) in LWT statements.
+    //
+    // The id is set only for the function calls that are a part of LWT
+    // statement restrictions for the partition key. Otherwise, the id is not
+    // set and the call is not considered when using or populating the cache.
+    //
+    // For example in a query like:
+    // INSERT INTO t (pk) VALUES (uuid()) IF NOT EXISTS
+    // The query should be executed on a shard that has the pk partition,
+    // but it changes with each uuid() call.
+    // uuid() call result is cached and sent to the proper shard.
+    std::optional<uint8_t> lwt_cache_id;
 };
 
 struct cast {
-    nested_expression arg;
+    expression arg;
     std::variant<cql3_type, shared_ptr<cql3_type::raw>> type;
 };
 
 struct field_selection {
-    nested_expression structure;
+    expression structure;
     shared_ptr<column_identifier_raw> field;
 };
 
@@ -196,6 +251,11 @@ struct bind_variable {
     // FIXME: infer shape from expression rather than from grammar
     shape_type shape;
     int32_t bind_index;
+
+    // Type of the bound value.
+    // Before preparing can be nullptr.
+    // After preparing always holds a valid type.
+    data_type value_type;
 };
 
 // A constant which does not yet have a date type. It is partially typed
@@ -229,6 +289,10 @@ struct constant {
 // Denotes construction of a tuple from its elements, e.g.  ('a', ?, some_column) in CQL.
 struct tuple_constructor {
     std::vector<expression> elements;
+
+    // Might be nullptr before prepare.
+    // After prepare always holds a valid type, although it might be reversed_type(tuple_type).
+    data_type type;
 };
 
 // Constructs a collection of same-typed elements
@@ -236,13 +300,59 @@ struct collection_constructor {
     enum class style_type { list, set, map };
     style_type style;
     std::vector<expression> elements;
+
+    // Might be nullptr before prepare.
+    // After prepare always holds a valid type, although it might be reversed_type(collection_type).
+    data_type type;
 };
 
 // Constructs an object of a user-defined type
 struct usertype_constructor {
-    using elements_map_type = std::unordered_map<column_identifier, nested_expression>;
+    using elements_map_type = std::unordered_map<column_identifier, expression>;
     elements_map_type elements;
+
+    // Might be nullptr before prepare.
+    // After prepare always holds a valid type, although it might be reversed_type(user_type).
+    data_type type;
 };
+
+// now that all expression types are fully defined, we can define expression::impl
+struct expression::impl final {
+    using variant_type = std::variant<
+            conjunction, binary_operator, column_value, token, unresolved_identifier,
+            column_mutation_attribute, function_call, cast, field_selection, null,
+            bind_variable, untyped_constant, constant, tuple_constructor, collection_constructor,
+            usertype_constructor>;
+    variant_type v;
+    impl(variant_type v) : v(std::move(v)) {}
+};
+
+expression::expression(ExpressionElement auto e)
+        : _v(std::make_unique<impl>(std::move(e))) {
+}
+
+inline expression::expression()
+        : expression(conjunction{}) {
+}
+
+auto visit(invocable_on_expression auto&& visitor, const expression& e) {
+    return std::visit(visitor, e._v->v);
+}
+
+template <ExpressionElement E>
+bool is(const expression& e) {
+    return std::holds_alternative<E>(e._v->v);
+}
+
+template <ExpressionElement E>
+const E& as(const expression& e) {
+    return std::get<E>(e._v->v);
+}
+
+template <ExpressionElement E>
+const E* as_if(const expression* e) {
+    return std::get_if<E>(&e->_v->v);
+}
 
 /// Creates a conjunction of a and b.  If either a or b is itself a conjunction, its children are inserted
 /// directly into the resulting conjunction's children, flattening the expression tree.
@@ -301,7 +411,7 @@ extern std::ostream& operator<<(std::ostream&, const expression&);
 template<typename Fn>
 requires std::regular_invocable<Fn, const binary_operator&>
 const binary_operator* find_atom(const expression& e, Fn f) {
-    return std::visit(overloaded_functor{
+    return expr::visit(overloaded_functor{
             [&] (const binary_operator& op) { return f(op) ? &op : nullptr; },
             [] (const constant&) -> const binary_operator* { return nullptr; },
             [&] (const conjunction& conj) -> const binary_operator* {
@@ -325,10 +435,10 @@ const binary_operator* find_atom(const expression& e, Fn f) {
                 return nullptr;
             },
             [&] (const cast& c) -> const binary_operator* {
-                return find_atom(*c.arg, f);
+                return find_atom(c.arg, f);
             },
             [&] (const field_selection& fs) -> const binary_operator* {
-                return find_atom(*fs.structure, f);
+                return find_atom(fs.structure, f);
             },
             [&] (const null&) -> const binary_operator* {
                 return nullptr;
@@ -357,7 +467,7 @@ const binary_operator* find_atom(const expression& e, Fn f) {
             },
             [&] (const usertype_constructor& c) -> const binary_operator* {
                 for (auto& [k, v] : c.elements) {
-                    if (auto found = find_atom(*v, f)) {
+                    if (auto found = find_atom(v, f)) {
                         return found;
                     }
                 }
@@ -370,7 +480,7 @@ const binary_operator* find_atom(const expression& e, Fn f) {
 template<typename Fn>
 requires std::regular_invocable<Fn, const binary_operator&>
 size_t count_if(const expression& e, Fn f) {
-    return std::visit(overloaded_functor{
+    return expr::visit(overloaded_functor{
             [&] (const binary_operator& op) -> size_t { return f(op) ? 1 : 0; },
             [&] (const conjunction& conj) {
                 return std::accumulate(conj.children.cbegin(), conj.children.cend(), size_t{0},
@@ -386,9 +496,9 @@ size_t count_if(const expression& e, Fn f) {
                                        [&] (size_t acc, const expression& c) { return acc + count_if(c, f); });
             },
             [&] (const cast& c) -> size_t {
-                return count_if(*c.arg, f); },
+                return count_if(c.arg, f); },
             [&] (const field_selection& fs) -> size_t {
-                return count_if(*fs.structure, f);
+                return count_if(fs.structure, f);
             },
             [&] (const null&) -> size_t {
                 return 0;
@@ -409,7 +519,7 @@ size_t count_if(const expression& e, Fn f) {
             },
             [&] (const usertype_constructor& c) -> size_t {
                 return std::accumulate(c.elements.cbegin(), c.elements.cend(), size_t{0},
-                                       [&] (size_t acc, const usertype_constructor::elements_map_type::value_type& e) { return acc + count_if(*e.second, f); });
+                                       [&] (size_t acc, const usertype_constructor::elements_map_type::value_type& e) { return acc + count_if(e.second, f); });
             },
         }, e);
 }
@@ -450,11 +560,11 @@ inline bool is_compare(oper_t op) {
 }
 
 inline bool is_multi_column(const binary_operator& op) {
-    return holds_alternative<tuple_constructor>(*op.lhs);
+    return expr::is<tuple_constructor>(op.lhs);
 }
 
 inline bool has_token(const expression& e) {
-    return find_atom(e, [] (const binary_operator& o) { return std::holds_alternative<token>(*o.lhs); });
+    return find_atom(e, [] (const binary_operator& o) { return expr::is<token>(o.lhs); });
 }
 
 inline bool has_slice_or_needs_filtering(const expression& e) {
@@ -515,10 +625,6 @@ inline oper_t pick_operator(statements::bound b, bool inclusive) {
             (inclusive ? oper_t::LTE : oper_t::LT);
 }
 
-nested_expression::nested_expression(ExpressionElement auto e)
-        : nested_expression(expression(std::move(e))) {
-}
-
 // Extracts all binary operators which have the given column on their left hand side.
 // Extracts only single-column restrictions.
 // Does not include multi-column restrictions.
@@ -545,6 +651,15 @@ constant evaluate_IN_list(term&, const query_options&);
 cql3::raw_value_view evaluate_to_raw_view(const ::shared_ptr<term>&, const query_options&);
 cql3::raw_value_view evaluate_to_raw_view(term&, const query_options&);
 
+// Takes a prepared expression and calculates its value.
+// Evaluates bound values, calls functions and returns just the bytes and type.
+constant evaluate(const expression& e, const query_options&);
+constant evaluate(const bind_variable&, const query_options&);
+constant evaluate(const tuple_constructor&, const query_options&);
+constant evaluate(const collection_constructor&, const query_options&);
+constant evaluate(const usertype_constructor&, const query_options&);
+constant evaluate(const function_call&, const query_options&);
+
 utils::chunked_vector<managed_bytes> get_list_elements(const constant&);
 utils::chunked_vector<managed_bytes> get_set_elements(const constant&);
 std::vector<managed_bytes_opt> get_tuple_elements(const constant&);
@@ -557,6 +672,8 @@ std::vector<managed_bytes_opt> get_elements(const constant&);
 // Get elements of list<tuple<>> as vector<vector<managed_bytes_opt>
 // It is useful with IN restrictions like (a, b) IN [(1, 2), (3, 4)].
 utils::chunked_vector<std::vector<managed_bytes_opt>> get_list_of_tuples_elements(const constant&);
+
+expression to_expression(const ::shared_ptr<term>&);
 } // namespace expr
 
 } // namespace cql3

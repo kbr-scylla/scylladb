@@ -97,7 +97,7 @@ private:
     future<> _waiting_reevalution = make_ready_future<>();
     condition_variable _postponed_reevaluation;
     // column families that wait for compaction but had its submission postponed due to ongoing compaction.
-    std::vector<column_family*> _postponed;
+    std::unordered_set<column_family*> _postponed;
     // tracks taken weights of ongoing compactions, only one compaction per weight is allowed.
     // weight is value assigned to a compaction job that is log base N of total size of all input sstables.
     std::unordered_set<int> _weight_tracker;
@@ -229,10 +229,6 @@ public:
     // Remove a column family from the compaction manager.
     // Cancel requests on cf and wait for a possible ongoing compaction on cf.
     future<> remove(column_family* cf);
-
-    // No longer interested in tracking backlog for compactions in this column
-    // family. For instance, we could be ALTERing TABLE to a different strategy.
-    void stop_tracking_ongoing_compactions(column_family* cf);
 
     const stats& get_stats() const {
         return _stats;

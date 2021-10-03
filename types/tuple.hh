@@ -203,6 +203,7 @@ public:
         return ret;
     }
 private:
+    void set_contains_collections();
     static sstring make_name(const std::vector<data_type>& types);
     friend abstract_type;
 };

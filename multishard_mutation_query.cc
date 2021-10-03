@@ -218,6 +218,7 @@ public:
             , _trace_state(std::move(trace_state))
             , _semaphores(smp::count, nullptr) {
         _readers.resize(smp::count);
+        _permit.set_max_result_size(get_max_result_size());
     }
 
     read_context(read_context&&) = delete;
@@ -232,6 +233,10 @@ public:
 
     reader_permit permit() const {
         return _permit;
+    }
+
+    query::max_result_size get_max_result_size() {
+        return _cmd.max_result_size ? *_cmd.max_result_size : _db.local().get_unlimited_query_max_result_size();
     }
 
     virtual flat_mutation_reader create_reader(
@@ -257,9 +262,12 @@ public:
         const auto shard = this_shard_id();
         auto& rm = _readers[shard];
         if (rm.state == reader_state::successful_lookup) {
-            return make_ready_future<reader_permit>(rm.rparts->permit);
+            rm.rparts->permit.set_max_result_size(get_max_result_size());
+            co_return rm.rparts->permit;
         }
-        return _db.local().obtain_reader_permit(std::move(schema), description, timeout);
+        auto permit = co_await _db.local().obtain_reader_permit(std::move(schema), description, timeout);
+        permit.set_max_result_size(get_max_result_size());
+        co_return permit;
     }
 
     future<> lookup_readers(db::timeout_clock::time_point timeout);
@@ -642,7 +650,17 @@ future<page_consume_result<ResultBuilder>> read_page(
     std::exception_ptr ex;
     try {
         auto [ckey, result] = co_await query::consume_page(reader, compaction_state, cmd.slice, std::move(result_builder), cmd.get_row_limit(),
-                cmd.partition_limit, cmd.timestamp, *cmd.max_result_size);
+                cmd.partition_limit, cmd.timestamp);
+        const auto& cstats = compaction_state->stats();
+        tracing::trace(trace_state, "Page stats: {} partition(s), {} static row(s) ({} live, {} dead), {} clustering row(s) ({} live, {} dead) and {} range tombstone(s)",
+                cstats.partitions,
+                cstats.static_rows.total(),
+                cstats.static_rows.live,
+                cstats.static_rows.dead,
+                cstats.clustering_rows.total(),
+                cstats.clustering_rows.live,
+                cstats.clustering_rows.dead,
+                cstats.range_tombstones);
         auto buffer = reader.detach_buffer();
         co_await reader.close();
         // page_consume_result cannot fail so there's no risk of double-closing reader.
@@ -787,24 +805,6 @@ future<std::tuple<foreign_ptr<lw_shared_ptr<reconcilable_result>>, cache_tempera
     });
 }
 
-namespace {
-
-future<std::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> query_data_on_all_shards_in_reverse(
-        distributed<database>& db,
-        schema_ptr s,
-        const query::read_command& cmd,
-        const dht::partition_range_vector& ranges,
-        query::result_options opts,
-        tracing::trace_state_ptr trace_state,
-        db::timeout_clock::time_point timeout) {
-    auto [res, ct] = co_await query_mutations_on_all_shards(db, s, cmd, ranges, std::move(trace_state), timeout);
-    co_return std::tuple(
-            make_foreign(make_lw_shared<query::result>(to_data_query_result(*res, s, cmd.slice, cmd.get_row_limit(), cmd.partition_limit, opts))),
-            ct);
-}
-
-} // anonymous namespace
-
 future<std::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>> query_data_on_all_shards(
         distributed<database>& db,
         schema_ptr s,
@@ -814,12 +814,7 @@ future<std::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>>
         tracing::trace_state_ptr trace_state,
         db::timeout_clock::time_point timeout) {
     if (cmd.slice.options.contains(query::partition_slice::option::reversed)) {
-        // FIXME: #1413
-        // It is not worth it to add support for the current inefficient way of
-        // doing reverse queries to the multishard reader, so just use the
-        // reconcilable result result format and reverse individual partitions
-        // when converting to the final query::result.
-        return query_data_on_all_shards_in_reverse(db, std::move(s), cmd, ranges, opts, std::move(trace_state), timeout);
+        s = s->make_reversed();
     }
     return do_query_on_all_shards<data_query_result_builder>(db, s, cmd, ranges, std::move(trace_state), timeout,
             [s, &cmd, opts] (query::result_memory_accounter&& accounter) {

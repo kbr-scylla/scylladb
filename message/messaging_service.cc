@@ -19,7 +19,6 @@
 #include "gms/gossip_digest_syn.hh"
 #include "gms/gossip_digest_ack.hh"
 #include "gms/gossip_digest_ack2.hh"
-#include "gms/gossiper.hh"
 #include "query-request.hh"
 #include "query-result.hh"
 #include <seastar/rpc/rpc.hh>
@@ -267,15 +266,6 @@ uint64_t messaging_service::get_dropped_messages(messaging_verb verb) const {
 
 const uint64_t* messaging_service::get_dropped_messages() const {
     return _dropped_messages;
-}
-
-messaging_service::drop_notifier_handler messaging_service::register_connection_drop_notifier(std::function<void(gms::inet_address ep)> cb) {
-    _connection_drop_notifiers.push_back(std::move(cb));
-    return _connection_drop_notifiers.end();
-}
-
-void messaging_service::unregister_connection_drop_notifier(messaging_service::drop_notifier_handler h) {
-    _connection_drop_notifiers.erase(h);
 }
 
 int32_t messaging_service::get_raw_version(const gms::inet_address& endpoint) const {
@@ -907,9 +897,7 @@ bool messaging_service::remove_rpc_client_one(clients_map& clients, msg_addr id,
 
 void messaging_service::remove_error_rpc_client(messaging_verb verb, msg_addr id) {
     if (remove_rpc_client_one(_clients[get_rpc_client_idx(verb)], id, true)) {
-        for (auto&& cb : _connection_drop_notifiers) {
-            cb(id.addr);
-        }
+        _connection_dropped(id.addr);
     }
 }
 
@@ -1170,14 +1158,14 @@ future<> messaging_service::send_gossip_echo(msg_addr id, int64_t generation_num
     return send_message_timeout<void>(this, messaging_verb::GOSSIP_ECHO, std::move(id), timeout, generation_number);
 }
 
-void messaging_service::register_gossip_shutdown(std::function<rpc::no_wait_type (inet_address from)>&& func) {
+void messaging_service::register_gossip_shutdown(std::function<rpc::no_wait_type (inet_address from, rpc::optional<int64_t> generation_number)>&& func) {
     register_handler(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(func));
 }
 future<> messaging_service::unregister_gossip_shutdown() {
     return unregister_handler(netw::messaging_verb::GOSSIP_SHUTDOWN);
 }
-future<> messaging_service::send_gossip_shutdown(msg_addr id, inet_address from) {
-    return send_message_oneway(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(id), std::move(from));
+future<> messaging_service::send_gossip_shutdown(msg_addr id, inet_address from, int64_t generation_number) {
+    return send_message_oneway(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(id), std::move(from), generation_number);
 }
 
 // gossip syn

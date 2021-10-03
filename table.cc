@@ -10,6 +10,7 @@
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/util/closeable.hh>
 
 #include "database.hh"
@@ -37,6 +38,7 @@
 #include "mutation_source_metadata.hh"
 #include "gms/gossiper.hh"
 #include "db/config.hh"
+#include "db/commitlog/commitlog.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 
@@ -323,6 +325,16 @@ inline void table::add_sstable_to_backlog_tracker(compaction_backlog_tracker& tr
 
 inline void table::remove_sstable_from_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable) {
     tracker.remove_sstable(std::move(sstable));
+}
+
+void table::backlog_tracker_adjust_charges(const std::vector<sstables::shared_sstable>& old_sstables, const std::vector<sstables::shared_sstable>& new_sstables) {
+    auto& tracker = _compaction_strategy.get_backlog_tracker();
+    for (auto& sst : new_sstables) {
+        tracker.add_sstable(sst);
+    }
+    for (auto& sst : old_sstables) {
+        tracker.remove_sstable(sst);
+    }
 }
 
 lw_shared_ptr<sstables::sstable_set>
@@ -741,7 +753,7 @@ table::sstable_list_builder::build_new_list(const sstables::sstable_set& current
         if (!s.contains(tab)) {
             new_sstable_list.insert(tab);
         }
-        co_await make_ready_future<>(); // yield if needed.
+        co_await coroutine::maybe_yield();
     }
     co_return make_lw_shared<sstables::sstable_set>(std::move(new_sstable_list));
 }
@@ -772,6 +784,8 @@ table::update_sstable_lists_on_off_strategy_completion(const std::vector<sstable
             _t._main_sstables = std::move(_new_main_list);
             _t._maintenance_sstables = std::move(_new_maintenance_list);
             _t.refresh_compound_sstable_set();
+            // Input sstables aren't not removed from backlog tracker because they come from the maintenance set.
+            _t.backlog_tracker_adjust_charges({}, _new_main);
         }
         static std::unique_ptr<row_cache::external_updater_impl> make(table& t, sstable_list_builder::permit_t permit, const sstables_t& old_maintenance, const sstables_t& new_main) {
             return std::make_unique<sstable_lists_updater>(t, std::move(permit), old_maintenance, new_main);
@@ -843,6 +857,7 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
         virtual void execute() override {
             _t._main_sstables = std::move(_new_sstables);
             _t.refresh_compound_sstable_set();
+            _t.backlog_tracker_adjust_charges(_desc.old_sstables, _desc.new_sstables);
         }
         static std::unique_ptr<row_cache::external_updater_impl> make(table& t, sstable_list_builder::permit_t permit, sstables::compaction_completion_desc& d) {
             return std::make_unique<sstable_list_updater>(t, std::move(permit), d);
@@ -1024,10 +1039,6 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
         add_sstable_to_backlog_tracker(new_cs.get_backlog_tracker(), s);
         new_sstables.insert(s);
     });
-
-    if (!move_read_charges) {
-        _compaction_manager.stop_tracking_ongoing_compactions(this);
-    }
 
     // now exception safe:
     _compaction_strategy = std::move(new_cs);
@@ -1990,7 +2001,7 @@ table::query(schema_ptr s,
 
         std::exception_ptr ex;
       try {
-        co_await q.consume_page(query_result_builder(*s, qs.builder), qs.remaining_rows(), qs.remaining_partitions(), qs.cmd.timestamp, permit.max_result_size());
+        co_await q.consume_page(query_result_builder(*s, qs.builder), qs.remaining_rows(), qs.remaining_partitions(), qs.cmd.timestamp, trace_state);
       } catch (...) {
         ex = std::current_exception();
       }
@@ -2043,7 +2054,7 @@ table::mutation_query(schema_ptr s,
     // legacy format.
     auto result_schema = cmd.slice.options.contains(query::partition_slice::option::reversed) ? s->make_reversed() : s;
     auto rrb = reconcilable_result_builder(*result_schema, cmd.slice, std::move(accounter));
-    auto r = co_await q.consume_page(std::move(rrb), cmd.get_row_limit(), cmd.partition_limit, cmd.timestamp, permit.max_result_size());
+    auto r = co_await q.consume_page(std::move(rrb), cmd.get_row_limit(), cmd.partition_limit, cmd.timestamp, trace_state);
 
     if (!saved_querier || (!q.are_limits_reached() && !r.is_short_read())) {
         co_await q.close();

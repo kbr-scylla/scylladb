@@ -187,37 +187,6 @@ bool storage_service::is_auto_bootstrap() const {
     return _db.local().get_config().auto_bootstrap();
 }
 
-std::unordered_set<token> storage_service::get_replace_tokens() {
-    std::unordered_set<token> ret;
-    std::unordered_set<sstring> tokens;
-    auto tokens_string = _db.local().get_config().replace_token();
-    try {
-        boost::split(tokens, tokens_string, boost::is_any_of(sstring(",")));
-    } catch (...) {
-        throw std::runtime_error(format("Unable to parse replace_token={}", tokens_string));
-    }
-    tokens.erase("");
-    for (auto token_string : tokens) {
-        auto token = dht::token::from_sstring(token_string);
-        ret.insert(token);
-    }
-    return ret;
-}
-
-std::optional<UUID> storage_service::get_replace_node() {
-    auto replace_node = _db.local().get_config().replace_node();
-    if (replace_node.empty()) {
-        return std::nullopt;
-    }
-    try {
-        return utils::UUID(replace_node);
-    } catch (...) {
-        auto msg = format("Unable to parse {} as host-id", replace_node);
-        slogger.error("{}", msg);
-        throw std::runtime_error(msg);
-    }
-}
-
 bool storage_service::is_first_node() {
     if (_db.local().is_replacing()) {
         return false;
@@ -260,8 +229,7 @@ future<> storage_service::snitch_reconfigured() {
 void storage_service::prepare_to_join(
         std::unordered_set<gms::inet_address> initial_contact_nodes,
         std::unordered_set<gms::inet_address> loaded_endpoints,
-        std::unordered_map<gms::inet_address, sstring> loaded_peer_features,
-        bind_messaging_port do_bind) {
+        std::unordered_map<gms::inet_address, sstring> loaded_peer_features) {
     std::map<gms::application_state, gms::versioned_value> app_states;
     if (db::system_keyspace::was_decommissioned()) {
         if (_db.local().get_config().override_decommission()) {
@@ -274,9 +242,7 @@ void storage_service::prepare_to_join(
             throw std::runtime_error(msg);
         }
     }
-    if (get_replace_tokens().size() > 0 || get_replace_node()) {
-         throw std::runtime_error("Replace method removed; use replace_address instead");
-    }
+
     bool replacing_a_node_with_same_ip = false;
     bool replacing_a_node_with_diff_ip = false;
     auto tmlock = std::make_unique<token_metadata_lock>(get_token_metadata_lock().get0());
@@ -285,7 +251,7 @@ void storage_service::prepare_to_join(
         if (db::system_keyspace::bootstrap_complete()) {
             throw std::runtime_error("Cannot replace address with a node that is already bootstrapped");
         }
-        _bootstrap_tokens = prepare_replacement_info(initial_contact_nodes, loaded_peer_features, do_bind).get0();
+        _bootstrap_tokens = prepare_replacement_info(initial_contact_nodes, loaded_peer_features).get0();
         auto replace_address = _db.local().get_replace_address();
         replacing_a_node_with_same_ip = replace_address && *replace_address == get_broadcast_address();
         replacing_a_node_with_diff_ip = replace_address && *replace_address != get_broadcast_address();
@@ -295,11 +261,11 @@ void storage_service::prepare_to_join(
             get_broadcast_address(), *replace_address);
         tmptr->update_normal_tokens(_bootstrap_tokens, *replace_address).get();
     } else if (should_bootstrap()) {
-        check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features, do_bind).get();
+        check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features).get();
     } else {
         auto local_features = _feature_service.known_feature_set();
         slogger.info("Checking remote features with gossip, initial_contact_nodes={}", initial_contact_nodes);
-        _gossiper.do_shadow_round(initial_contact_nodes, gms::bind_messaging_port(bool(do_bind))).get();
+        _gossiper.do_shadow_round(initial_contact_nodes).get();
         _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
         _gossiper.check_snitch_name_matches();
         _gossiper.reset_endpoint_state_map().get();
@@ -334,10 +300,7 @@ void storage_service::prepare_to_join(
     // for bootstrap to get the load info it needs.
     // (we won't be part of the storage ring though until we add a counterId to our state, below.)
     // Seed the host ID-to-endpoint map with our own ID.
-    auto local_host_id = db::system_keyspace::get_local_host_id().get0();
-    _db.invoke_on_all([local_host_id] (auto& db) {
-        db.set_local_id(local_host_id);
-    }).get();
+    auto local_host_id = db::system_keyspace::load_local_host_id().get0();
     auto features = _feature_service.supported_feature_set();
     if (!replacing_a_node_with_diff_ip) {
         // Replacing node with a different ip should own the host_id only after
@@ -378,24 +341,16 @@ void storage_service::prepare_to_join(
     }
     const auto& snitch_name = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_name();
     app_states.emplace(gms::application_state::SNITCH_NAME, versioned_value::snitch_name(snitch_name));
+    app_states.emplace(gms::application_state::SHARD_COUNT, versioned_value::shard_count(smp::count));
+    app_states.emplace(gms::application_state::IGNORE_MSB_BITS, versioned_value::ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()));
 
     slogger.info("Starting up server gossip");
 
     auto generation_number = db::system_keyspace::increment_and_get_generation().get0();
     auto advertise = gms::advertise_myself(!replacing_a_node_with_same_ip);
-    _gossiper.start_gossiping(generation_number, app_states, gms::bind_messaging_port(bool(do_bind)), advertise).get();
+    _gossiper.start_gossiping(generation_number, app_states, advertise).get();
 
     install_schema_version_change_listener();
-
-    // gossip local partitioner information (shard count and ignore_msb_bits)
-    gossip_sharder().get();
-
-    // gossip Schema.emptyVersion forcing immediate check for schema updates (see MigrationManager#maybeScheduleSchemaPull)
-
-    // Wait for gossip to settle so that the fetures will be enabled
-    if (do_bind) {
-        _gossiper.wait_for_gossip_to_settle().get();
-    }
 }
 
 void storage_service::maybe_start_sys_dist_ks() {
@@ -1357,7 +1312,7 @@ future<> storage_service::stop_transport() {
             shutdown_client_servers();
             slogger.info("Stop transport: shutdown rpc and cql server done");
 
-            gms::stop_gossiping(_gossiper.container()).get();
+            _gossiper.container().invoke_on_all(&gms::gossiper::shutdown).get();
             slogger.info("Stop transport: stop_gossiping done");
 
             do_stop_ms().get();
@@ -1393,10 +1348,10 @@ future<> storage_service::uninit_messaging_service_part() {
     return container().invoke_on_all(&service::storage_service::uninit_messaging_service);
 }
 
-future<> storage_service::init_server(bind_messaging_port do_bind) {
+future<> storage_service::init_server() {
     assert(this_shard_id() == 0);
 
-    return seastar::async([this, do_bind] {
+    return seastar::async([this] {
         _initialized = true;
 
         std::unordered_set<inet_address> loaded_endpoints;
@@ -1447,7 +1402,7 @@ future<> storage_service::init_server(bind_messaging_port do_bind) {
         for (auto& x : loaded_peer_features) {
             slogger.info("peer={}, supported_features={}", x.first, x.second);
         }
-        prepare_to_join(std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), do_bind);
+        prepare_to_join(std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features));
     });
 }
 
@@ -1494,13 +1449,6 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
     });
 }
 
-future<> storage_service::gossip_sharder() {
-    return _gossiper.add_local_application_state({
-        { gms::application_state::SHARD_COUNT, versioned_value::shard_count(smp::count) },
-        { gms::application_state::IGNORE_MSB_BITS, versioned_value::ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()) },
-    });
-}
-
 future<> storage_service::stop() {
     // make sure nobody uses the semaphore
     node_ops_singal_abort(std::nullopt);
@@ -1510,16 +1458,16 @@ future<> storage_service::stop() {
     });
 }
 
-future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features, bind_messaging_port do_bind) {
+future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
     slogger.debug("Starting shadow gossip round to check for endpoint collision");
 
-    return seastar::async([this, initial_contact_nodes, loaded_peer_features, do_bind] {
+    return seastar::async([this, initial_contact_nodes, loaded_peer_features] {
         auto t = gms::gossiper::clk::now();
         bool found_bootstrapping_node = false;
         auto local_features = _feature_service.known_feature_set();
         do {
             slogger.info("Checking remote features with gossip");
-            _gossiper.do_shadow_round(initial_contact_nodes, gms::bind_messaging_port(bool(do_bind))).get();
+            _gossiper.do_shadow_round(initial_contact_nodes).get();
             _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
             _gossiper.check_snitch_name_matches();
             auto addr = get_broadcast_address();
@@ -1574,7 +1522,7 @@ void storage_service::remove_endpoint(inet_address endpoint) {
 }
 
 future<storage_service::replacement_info>
-storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features, bind_messaging_port do_bind) {
+storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
     if (!_db.local().get_replace_address()) {
         throw std::runtime_error(format("replace_address is empty"));
     }
@@ -1590,7 +1538,7 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
 
     // make magic happen
     slogger.info("Checking remote features with gossip");
-    return _gossiper.do_shadow_round(initial_contact_nodes, gms::bind_messaging_port(bool(do_bind))).then([this, loaded_peer_features, replace_address] {
+    return _gossiper.do_shadow_round(initial_contact_nodes).then([this, loaded_peer_features, replace_address] {
         auto local_features = _feature_service.known_feature_set();
         _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
 
@@ -1639,7 +1587,7 @@ future<std::map<gms::inet_address, float>> storage_service::get_ownership() {
 }
 
 future<std::map<gms::inet_address, float>> storage_service::effective_ownership(sstring keyspace_name) {
-    return run_with_no_api_lock([keyspace_name] (storage_service& ss) mutable {
+    return run_with_no_api_lock([keyspace_name] (storage_service& ss) mutable -> future<std::map<gms::inet_address, float>> {
         if (keyspace_name != "") {
             //find throws no such keyspace if it is missing
             const keyspace& ks = ss._db.local().find_keyspace(keyspace_name);
@@ -1669,53 +1617,39 @@ future<std::map<gms::inet_address, float>> storage_service::effective_ownership(
         //
         // The call for get_range_for_endpoint is done once per endpoint
         const auto& tm = ss.get_token_metadata();
-        return do_with(dht::token::describe_ownership(tm.sorted_tokens()),
-                tm.get_topology().get_datacenter_endpoints(),
-                std::map<gms::inet_address, float>(),
-                std::move(keyspace_name),
-                [&ss](const std::map<token, float>& token_ownership, std::unordered_map<sstring,
-                        std::unordered_set<gms::inet_address>>& datacenter_endpoints,
-                        std::map<gms::inet_address, float>& final_ownership,
-                        sstring& keyspace_name) {
-            return do_for_each(datacenter_endpoints, [&ss, &keyspace_name, &final_ownership, &token_ownership](std::pair<sstring,std::unordered_set<inet_address>>&& endpoints) mutable {
-                return do_with(std::unordered_set<inet_address>(endpoints.second), [&ss, &keyspace_name, &final_ownership, &token_ownership](const std::unordered_set<inet_address>& endpoints_map) mutable {
-                    return do_for_each(endpoints_map, [&ss, &keyspace_name, &final_ownership, &token_ownership](const gms::inet_address& endpoint) mutable {
-                        // calculate the ownership with replication and add the endpoint to the final ownership map
-                        try {
-                            return do_with(float(0.0f), dht::token_range_vector(ss.get_ranges_for_endpoint(keyspace_name, endpoint)),
-                                    [&final_ownership, &token_ownership, &endpoint](float& ownership, const dht::token_range_vector& ranges) mutable {
-                                ownership = 0.0f;
-                                return do_for_each(ranges, [&token_ownership,&ownership](const dht::token_range& r) mutable {
-                                    // get_ranges_for_endpoint will unwrap the first range.
-                                    // With t0 t1 t2 t3, the first range (t3,t0] will be splitted
-                                    // as (min,t0] and (t3,max]. Skippping the range (t3,max]
-                                    // we will get the correct ownership number as if the first
-                                    // range were not splitted.
-                                    if (!r.end()) {
-                                        return make_ready_future<>();
-                                    }
-                                    auto end_token = r.end()->value();
-                                    auto loc = token_ownership.find(end_token);
-                                    if (loc != token_ownership.end()) {
-                                        ownership += loc->second;
-                                    }
-                                    return make_ready_future<>();
-                                }).then([&final_ownership, &ownership, &endpoint]() mutable {
-                                    final_ownership[endpoint] = ownership;
-                                });
-                            });
-                        }  catch (no_such_keyspace&) {
-                            // In case ss.get_ranges_for_endpoint(keyspace_name, endpoint) is not found, just mark it as zero and continue
-                            final_ownership[endpoint] = 0;
-                            return make_ready_future<>();
-                        }
+        const auto token_ownership = dht::token::describe_ownership(tm.sorted_tokens());
+        const auto datacenter_endpoints = tm.get_topology().get_datacenter_endpoints();
+        std::map<gms::inet_address, float> final_ownership;
 
-                    });
-                });
-            }).then([&final_ownership] {
-                return final_ownership;
-            });
-        });
+        for (const auto& [dc, endpoints_map] : datacenter_endpoints) {
+            for (auto endpoint : endpoints_map) {
+                // calculate the ownership with replication and add the endpoint to the final ownership map
+                try {
+                    float ownership = 0.0f;
+                    auto ranges = ss.get_ranges_for_endpoint(keyspace_name, endpoint);
+                    for (auto& r : ranges) {
+                        // get_ranges_for_endpoint will unwrap the first range.
+                        // With t0 t1 t2 t3, the first range (t3,t0] will be splitted
+                        // as (min,t0] and (t3,max]. Skippping the range (t3,max]
+                        // we will get the correct ownership number as if the first
+                        // range were not splitted.
+                        if (!r.end()) {
+                            continue;
+                        }
+                        auto end_token = r.end()->value();
+                        auto loc = token_ownership.find(end_token);
+                        if (loc != token_ownership.end()) {
+                            ownership += loc->second;
+                        }
+                    }
+                    final_ownership[endpoint] = ownership;
+                }  catch (no_such_keyspace&) {
+                    // In case ss.get_ranges_for_endpoint(keyspace_name, endpoint) is not found, just mark it as zero and continue
+                    final_ownership[endpoint] = 0;
+                }
+            }
+        }
+        co_return final_ownership;
     });
 }
 
@@ -1818,11 +1752,13 @@ future<bool> storage_service::is_gossip_running() {
     });
 }
 
-future<> storage_service::start_gossiping(bind_messaging_port do_bind) {
-    return run_with_api_lock(sstring("start_gossiping"), [do_bind] (storage_service& ss) {
-        return seastar::async([&ss, do_bind] {
+future<> storage_service::start_gossiping() {
+    return run_with_api_lock(sstring("start_gossiping"), [] (storage_service& ss) {
+        return seastar::async([&ss] {
             if (!ss._initialized) {
                 slogger.warn("Starting gossip by operator request");
+                ss._gossiper.container().invoke_on_all(&gms::gossiper::start).get();
+                auto undo = defer([&ss] { ss._gossiper.container().invoke_on_all(&gms::gossiper::stop).get(); });
                 auto cdc_gen_ts = db::system_keyspace::get_cdc_generation_id().get0();
                 if (!cdc_gen_ts) {
                     cdc_log.warn("CDC generation timestamp missing when starting gossip");
@@ -1831,9 +1767,10 @@ future<> storage_service::start_gossiping(bind_messaging_port do_bind) {
                         db::system_keyspace::get_local_tokens().get0(),
                         cdc_gen_ts);
                 ss._gossiper.force_newer_generation();
-                ss._gossiper.start_gossiping(utils::get_generation_number(), gms::bind_messaging_port(bool(do_bind))).then([&ss] {
+                ss._gossiper.start_gossiping(utils::get_generation_number()).then([&ss] {
                     ss._initialized = true;
                 }).get();
+                undo.cancel();
             }
         });
     });
@@ -1843,7 +1780,7 @@ future<> storage_service::stop_gossiping() {
     return run_with_api_lock(sstring("stop_gossiping"), [] (storage_service& ss) {
         if (ss._initialized) {
             slogger.warn("Stopping gossip by operator request");
-            return gms::stop_gossiping(ss._gossiper.container()).then([&ss] {
+            return ss._gossiper.container().invoke_on_all(&gms::gossiper::stop).then([&ss] {
                 ss._initialized = false;
             });
         }
@@ -2729,11 +2666,11 @@ future<> storage_service::do_drain(bool on_shutdown) {
 }
 
 future<> storage_service::rebuild(sstring source_dc) {
-    return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) {
+    return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) -> future<> {
         slogger.info("rebuild from dc: {}", source_dc == "" ? "(any dc)" : source_dc);
         auto tmptr = ss.get_token_metadata_ptr();
         if (ss.is_repair_based_node_ops_enabled(streaming::stream_reason::rebuild)) {
-            return ss._repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
+            co_await ss._repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
         } else {
             auto streamer = make_lw_shared<dht::range_streamer>(ss._db, tmptr, ss._abort_source,
                     ss.get_broadcast_address(), "Rebuild", streaming::stream_reason::rebuild);
@@ -2741,18 +2678,19 @@ future<> storage_service::rebuild(sstring source_dc) {
             if (source_dc != "") {
                 streamer->add_source_filter(std::make_unique<dht::range_streamer::single_datacenter_filter>(source_dc));
             }
-            auto keyspaces = make_lw_shared<std::vector<sstring>>(ss._db.local().get_non_system_keyspaces());
-            return do_for_each(*keyspaces, [keyspaces, streamer, &ss] (sstring& keyspace_name) {
-                return streamer->add_ranges(keyspace_name, ss.get_ranges_for_endpoint(keyspace_name, utils::fb_utilities::get_broadcast_address()));
-            }).then([streamer] {
-                return streamer->stream_async().then([streamer] {
-                    slogger.info("Streaming for rebuild successful");
-                }).handle_exception([] (auto ep) {
-                    // This is used exclusively through JMX, so log the full trace but only throw a simple RTE
-                    slogger.warn("Error while rebuilding node: {}", ep);
-                    return make_exception_future<>(std::move(ep));
-                });
-            });
+            auto keyspaces = ss._db.local().get_non_system_keyspaces();
+            for (auto& keyspace_name : keyspaces) {
+                co_await streamer->add_ranges(keyspace_name, ss.get_ranges_for_endpoint(keyspace_name, utils::fb_utilities::get_broadcast_address()));
+            }
+            try {
+                co_await streamer->stream_async();
+                slogger.info("Streaming for rebuild successful");
+            } catch (...) {
+                auto ep = std::current_exception();
+                // This is used exclusively through JMX, so log the full trace but only throw a simple RTE
+                slogger.warn("Error while rebuilding node: {}", ep);
+                std::rethrow_exception(std::move(ep));
+            }
         }
     });
 }

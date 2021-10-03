@@ -44,6 +44,7 @@ namespace cql3 {
 namespace service {
 
 class client_state;
+class migration_manager;
 
 }
 

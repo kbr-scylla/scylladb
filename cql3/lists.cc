@@ -60,7 +60,7 @@ lists::value::from_serialized(const raw_value_view& val, const list_type_impl& t
 
 cql3::raw_value
 lists::value::get(const query_options& options) {
-    return cql3::raw_value::make_value(get_with_protocol_version(options.get_cql_serialization_format()));
+    return cql3::raw_value::make_value(get_with_protocol_version(cql_serialization_format::internal()));
 }
 
 managed_bytes
@@ -147,6 +147,21 @@ lists::delayed_value::bind_ignore_null(const query_options& options) {
     return ::make_shared<value>(buffers, _my_type);
 }
 
+expr::expression lists::delayed_value::to_expression() {
+    std::vector<expr::expression> new_elements;
+    new_elements.reserve(_elements.size());
+
+    for (shared_ptr<term>& e : _elements) {
+        new_elements.emplace_back(expr::to_expression(e));
+    }
+
+    return expr::collection_constructor {
+        .style = expr::collection_constructor::style_type::list,
+        .elements = std::move(new_elements),
+        .type = _my_type
+    };
+}
+
 ::shared_ptr<terminal>
 lists::marker::bind(const query_options& options) {
     const auto& value = options.get_value_at(_bind_index);
@@ -164,6 +179,14 @@ lists::marker::bind(const query_options& options) {
                     format("Exception while binding column {:s}: {:s}", _receiver->name->to_cql_string(), e.what()));
         }
     }
+}
+
+expr::expression lists::marker::to_expression() {
+    return expr::bind_variable {
+        .shape = expr::bind_variable::shape_type::scalar,
+        .bind_index = _bind_index,
+        .value_type = _receiver->type
+    };
 }
 
 void

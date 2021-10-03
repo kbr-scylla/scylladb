@@ -35,6 +35,7 @@ private:
 public:
     view_update_generator(database& db) : _db(db) {
         setup_metrics();
+        discover_staging_sstables();
     }
 
     future<> start();
@@ -45,6 +46,7 @@ public:
 private:
     bool should_throttle() const;
     void setup_metrics();
+    void discover_staging_sstables();
 };
 
 }

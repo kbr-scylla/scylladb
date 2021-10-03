@@ -58,6 +58,7 @@ public:
         virtual cql3::raw_value get(const query_options& options) override;
         virtual managed_bytes get_with_protocol_version(cql_serialization_format sf) override;
         bool equals(const list_type_impl& lt, const value& v);
+        const utils::chunked_vector<managed_bytes_opt>& get_elements() const;
         virtual sstring to_string() const override;
         friend class lists;
     };
@@ -86,6 +87,8 @@ public:
         const std::vector<shared_ptr<term>>& get_elements() const {
             return _elements;
         }
+
+        virtual expr::expression to_expression() override;
     };
 
     /**
@@ -97,6 +100,8 @@ public:
             : abstract_marker{bind_index, std::move(receiver)}
         { }
         virtual ::shared_ptr<terminal> bind(const query_options& options) override;
+
+        virtual expr::expression to_expression() override;
     };
 
 public:

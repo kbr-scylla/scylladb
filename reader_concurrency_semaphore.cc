@@ -13,6 +13,7 @@
 #include <seastar/util/lazy.hh>
 #include <seastar/util/log.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 
 #include "reader_concurrency_semaphore.hh"
 #include "utils/exceptions.hh"
@@ -607,7 +608,7 @@ future<> reader_concurrency_semaphore::execution_loop() noexcept {
             }
 
             if (need_preempt()) {
-                co_await make_ready_future<>();
+                co_await coroutine::maybe_yield();
             }
         }
     }
@@ -740,6 +741,7 @@ std::runtime_error reader_concurrency_semaphore::stopped_exception() {
 future<> reader_concurrency_semaphore::stop() noexcept {
     assert(!_stopped);
     _stopped = true;
+    co_await stop_ext_pre();
     clear_inactive_reads();
     co_await _close_readers_gate.close();
     co_await _permit_gate.close();
@@ -750,6 +752,7 @@ future<> reader_concurrency_semaphore::stop() noexcept {
         co_await std::move(*_execution_loop_future);
     }
     broken(std::make_exception_ptr(stopped_exception()));
+    co_await stop_ext_post();
     co_return;
 }
 
