@@ -66,9 +66,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
         auto compact = [&, s] (std::vector<shared_sstable> all, auto replacer) -> std::vector<shared_sstable> {
             auto desc = sstables::compaction_descriptor(std::move(all), cf->get_sstable_set(), service::get_local_compaction_priority(), 1, 0);
-            desc.replacer = replacer;
-            desc.creator = [sst_gen] (shard_id ignore) mutable { return sst_gen(); };
-            return sstables::compact_sstables(std::move(desc), *cf).get0().new_sstables;
+            return compact_sstables(std::move(desc), *cf, sst_gen, replacer).get0().new_sstables;
         };
         auto make_insert = [&] (auto p) {
             auto key = partition_key::from_exploded(*s, {to_bytes(p.first)});
@@ -150,6 +148,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             };
 
             auto result = compact(std::move(desc.sstables), replacer);
+
             BOOST_REQUIRE_EQUAL(expected_output, result.size());
             BOOST_REQUIRE(expected_sst == sstable_run.end());
             return result;

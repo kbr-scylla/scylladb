@@ -52,7 +52,6 @@
 #include "mutation_fragment_stream_validator.hh"
 
 #include <seastar/util/optimized_optional.hh>
-#include <boost/intrusive/list.hpp>
 
 class sstable_assertions;
 class flat_mutation_reader;
@@ -62,6 +61,10 @@ namespace sstables {
 
 namespace mc {
 class writer;
+}
+
+namespace mx {
+class partition_reversing_data_source_impl;
 }
 
 namespace fs = std::filesystem;
@@ -113,15 +116,11 @@ private:
     friend class sstables_manager;
 };
 
-class sstable_tracker;
-
 class sstable : public enable_lw_shared_from_this<sstable> {
     friend ::sstable_assertions;
-    friend sstable_tracker;
 public:
     using version_types = sstable_version_types;
     using format_types = sstable_format_types;
-    using tracker_link_type = bi::list_member_hook<bi::link_mode<bi::auto_unlink>>;
     using manager_link_type = bi::list_member_hook<bi::link_mode<bi::auto_unlink>>;
 public:
     sstable(schema_ptr schema,
@@ -192,7 +191,11 @@ public:
         return _generation;
     }
 
-    // Returns a mutation_reader for given range of partitions
+    // Returns a mutation_reader for given range of partitions.
+    //
+    // Precondition: if the slice is reversed, the schema must be reversed as well.
+    // Reversed slices must be provided in the 'half-reversed' format (the order of ranges
+    // being reversed, but the ranges themselves are not).
     flat_mutation_reader_v2 make_reader(
             schema_ptr schema,
             reader_permit permit,
@@ -204,6 +207,9 @@ public:
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
             read_monitor& monitor = default_read_monitor());
 
+    // Precondition: if the slice is reversed, the schema must be reversed as well.
+    // Reversed slices must be provided in the 'half-reversed' format (the order of ranges
+    // being reversed, but the ranges themselves are not).
     flat_mutation_reader make_reader_v1(
             schema_ptr schema,
             reader_permit permit,
@@ -524,7 +530,6 @@ private:
     sstables_manager& _manager;
 
     sstables_stats _stats;
-    tracker_link_type _tracker_link;
     manager_link_type _manager_link;
 
     // The _large_data_stats map stores e.g. largest partitions, rows, cells sizes,
@@ -848,6 +853,7 @@ public:
     friend class promoted_index;
     friend class compaction;
     friend class sstables_manager;
+    friend class mx::partition_reversing_data_source_impl;
     template <typename DataConsumeRowsContext>
     friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range, uint64_t);

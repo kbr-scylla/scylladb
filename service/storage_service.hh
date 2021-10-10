@@ -182,15 +182,6 @@ private:
     std::vector<std::any> _listeners;
     gms::feature::listener_registration _workload_prioritization_registration;
 
-    /* For unit tests only.
-     *
-     * Currently used when choosing the timestamp of the first CDC stream generation:
-     * normally we choose a timestamp in the future so other nodes have a chance to learn about it
-     * before it starts operating, but in the single-node-cluster case this is not necessary
-     * and would only slow down tests (by having them wait).
-     */
-    bool _for_testing;
-
     std::unordered_map<utils::UUID, node_ops_meta_data> _node_ops;
     std::list<std::optional<utils::UUID>> _node_ops_abort_queue;
     seastar::condition_variable _node_ops_abort_cond;
@@ -215,8 +206,7 @@ public:
         sharded<repair_service>& repair,
         raft_group_registry& raft_gr,
         endpoint_lifecycle_notifier& elc_notif,
-        sharded<qos::service_level_controller>&,
-        /* only for tests */ bool for_testing = false);
+        sharded<qos::service_level_controller>&);
 
     // Needed by distributed<>
     future<> stop();
@@ -258,14 +248,6 @@ public:
 
     const locator::token_metadata& get_token_metadata() const noexcept {
         return *_shared_token_metadata.get();
-    }
-
-    cdc::generation_service& get_cdc_generation_service() {
-        if (!_cdc_gen_service.local_is_initialized()) {
-            throw std::runtime_error("get_cdc_generation_service: not initialized yet");
-        }
-
-        return _cdc_gen_service.local();
     }
 
 private:
