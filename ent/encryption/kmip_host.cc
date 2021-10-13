@@ -198,7 +198,7 @@ private:
         return _options.max_pooled_connections_per_host.value_or(def_max_pooled_connections_per_host);
     }
     bool is_current_host(const sstring& host) {
-        return host == _options.hosts.at(_index);
+        return host == _options.hosts.at(_index % _options.hosts.size());
     }
 
     encryption_context& _ctxt;
