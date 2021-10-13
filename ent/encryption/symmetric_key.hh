@@ -41,6 +41,9 @@ struct key_info_hash {
 
 std::tuple<sstring, sstring, sstring> parse_key_spec(const sstring&);
 
+// shared between key & kmip
+std::tuple<sstring, sstring, sstring> parse_key_spec_and_validate_defaults(const sstring&);
+
 class symmetric_key {
     std::unique_ptr<evp_cipher_ctx_st, void (*)(evp_cipher_ctx_st*)> _ctxt;
     key_info _info;

@@ -690,7 +690,7 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
     }
 
     sstring type, mode, padd;
-    std::tie(type, mode, padd) = parse_key_spec(info.info.alg);
+    std::tie(type, mode, padd) = parse_key_spec_and_validate_defaults(info.info.alg);
 
     auto crypt_alg = from_str(&KMIP_string_to_CRYPTOGRAPHIC_ALGORITHM, type);
 

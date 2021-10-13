@@ -72,33 +72,14 @@ encryption::parse_key_spec(const sstring& alg) {
     return std::make_tuple<sstring, sstring, sstring>(type, mode, padd);
 }
 
-encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
-    : _ctxt(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free)
-    , _info(info)
-    , _key(key)
-{
-    if (!_ctxt) {
-        throw std::bad_alloc();
-    }
+std::tuple<sstring, sstring, sstring> encryption::parse_key_spec_and_validate_defaults(const sstring& alg) {
+    auto [type, mode, padd] = parse_key_spec(alg);
 
-    sstring type, mode, padd;
-    std::tie(type, mode, padd) = parse_key_spec(info.alg);
-
-    // Note: we are using some types here that are explicitly marked as "unsupported - placeholder"
-    // in gnutls.
-
-    // openssl does not allow missing block mode. so default one.
+    // openssl AND kmip server(s?) does not allow missing block mode. so default one.
     if (mode.empty()) {
         mode = "cbc";
     }
-    // camel case vs. dash
-    if (type == "desede") {
-        type = "des-ede";
-        // and 168-bits desede is ede3 in openssl...
-        if (info.len > 16*8) {
-            type = "des-ede3";
-        }
-    }
+
     // OpenSSL only supports one form of padding. We used to just allow
     // non-empty string -> pkcs5/pcks7. Better to verify
     // (note: pcks5 is sortof a misnomeanor here, as in the Sun world, it
@@ -109,6 +90,33 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
     }
     if (!padd.empty() && padd != "pkcs5" && padd != "pkcs" && padd != "pkcs7") {
         throw std::invalid_argument("non-supported padding option: " + padd);
+    }
+
+    return { type, mode, padd };
+}
+
+encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
+    : _ctxt(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free)
+    , _info(info)
+    , _key(key)
+{
+    if (!_ctxt) {
+        throw std::bad_alloc();
+    }
+
+    sstring type, mode, padd;
+    std::tie(type, mode, padd) = parse_key_spec_and_validate_defaults(info.alg);
+
+    // Note: we are using some types here that are explicitly marked as "unsupported - placeholder"
+    // in gnutls.
+
+    // camel case vs. dash
+    if (type == "desede") {
+        type = "des-ede";
+        // and 168-bits desede is ede3 in openssl...
+        if (info.len > 16*8) {
+            type = "des-ede3";
+        }
     }
 
     auto str = sprint("%s-%d-%s", type, info.len, mode);
