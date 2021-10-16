@@ -82,6 +82,8 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
 
+    compaction_descriptor find_garbage_collection_job(const table& t, std::vector<size_bucket_t>& buckets);
+
     static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
     static std::vector<sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
 public:

@@ -132,6 +132,58 @@ incremental_compaction_strategy::most_interesting_bucket(std::vector<std::vector
 }
 
 compaction_descriptor
+incremental_compaction_strategy::find_garbage_collection_job(const table& t, std::vector<size_bucket_t>& buckets) {
+    auto worth_dropping_tombstones = [this, now = db_clock::now()] (const sstable_run& run, gc_clock::time_point gc_before) {
+        // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
+        // will be enough as the difference in write time is acceptable.
+        if (run.all().empty() || (now-_tombstone_compaction_interval < (*run.all().begin())->data_file_write_time())) {
+            return false;
+        }
+        return run.estimate_droppable_tombstone_ratio(gc_before) >= _tombstone_threshold;
+    };
+    auto gc_before = gc_clock::now() - t.schema()->gc_grace_seconds();
+    auto can_garbage_collect = [&] (const size_bucket_t& bucket) {
+        return boost::algorithm::any_of(bucket, [&] (const sstable_run& r) {
+            return worth_dropping_tombstones(r, gc_before);
+        });
+    };
+
+    // To make sure that expired tombstones are persisted in a timely manner, ICS will cross-tier compact
+    // two closest-in-size buckets such that tombstones will eventually reach the top of the LSM tree,
+    // making it possible to purge them.
+
+    // Start from the largest tier as it's more likely to satisfy conditions for tombstones to be purged.
+    auto it = buckets.rbegin();
+    for (; it != buckets.rend(); it++) {
+        if (can_garbage_collect(*it)) {
+            break;
+        }
+    }
+    if (it == buckets.rend()) {
+        clogger.debug("ICS: nothing to garbage collect in {} buckets for {}.{}", buckets.size(), t.schema()->ks_name(), t.schema()->cf_name());
+        return compaction_descriptor();
+    }
+
+    size_bucket_t& first_bucket = *it;
+    std::vector<sstables::sstable_run> input = std::move(first_bucket);
+
+    if (buckets.size() >= 2) {
+        // If the largest tier needs GC, then compact it with the second largest.
+        // Any smaller tier needing GC will be compacted with the larger and closest-in-size one.
+        // It's done this way to reduce write amplification and satisfy conditions for purging tombstones.
+        it = it == buckets.rbegin() ? std::next(it) : std::prev(it);
+
+        size_bucket_t& second_bucket = *it;
+
+        input.reserve(input.size() + second_bucket.size());
+        std::move(second_bucket.begin(), second_bucket.end(), std::back_inserter(input));
+    }
+    clogger.debug("ICS: starting garbage collection on {} runs for {}.{}", input.size(), t.schema()->ks_name(), t.schema()->cf_name());
+
+    return compaction_descriptor(runs_to_sstables(std::move(input)), t.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
+}
+
+compaction_descriptor
 incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
     // make local copies so they can't be changed out from under us mid-method
     size_t min_threshold = cf.min_compaction_threshold();
@@ -149,8 +201,17 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
         return sstables::compaction_descriptor(runs_to_sstables(std::move(most_interesting)), cf.get_sstable_set(), service::get_local_compaction_priority(), 0, _fragment_size);
     }
 
-    // The SAG behavior is only triggered once we're done with all the pending same-tier compaction to
+    // The cross-tier behavior is only triggered once we're done with all the pending same-tier compaction to
     // increase overall efficiency.
+    if (cf.get_compaction_manager().has_table_ongoing_compaction(&cf)) {
+        return sstables::compaction_descriptor();
+    }
+
+    auto desc = find_garbage_collection_job(cf, buckets);
+    if (!desc.sstables.empty()) {
+        return desc;
+    }
+
     if (_space_amplification_goal) {
         if (buckets.size() < 2) {
             return sstables::compaction_descriptor();
@@ -161,9 +222,6 @@ incremental_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
 
         // Don't try SAG if there's an ongoing compaction, because if largest tier is being compacted,
         // SA would be calculated incorrectly, which may result in an unneeded cross-tier compaction.
-        if (cf.get_compaction_manager().has_table_ongoing_compaction(&cf)) {
-            return sstables::compaction_descriptor();
-        }
 
         auto find_two_largest_tiers = [this] (std::vector<size_bucket_t>&& buckets) -> std::tuple<size_bucket_t, size_bucket_t> {
             std::partial_sort(buckets.begin(), buckets.begin()+2, buckets.end(), [this] (size_bucket_t& i, size_bucket_t& j) {

@@ -23,6 +23,7 @@
 #include "compaction/compaction_manager.hh"
 #include "mutation_reader.hh"
 #include "sstable_test.hh"
+#include "sstables/metadata_collector.hh"
 #include "test/lib/tmpdir.hh"
 #include "cell_locking.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
@@ -269,4 +270,95 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
     with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1.75));
     with_sag_test(SAG(1.01), TABLE_INITIAL_SA(1.5));
     with_sag_test(SAG(1.5), TABLE_INITIAL_SA(1));
+}
+
+SEASTAR_TEST_CASE(basic_garbage_collection_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto tmp = tmpdir();
+        auto s = make_shared_schema({}, "ks", "cf",
+                                    {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
+
+        static constexpr float expired = 0.33;
+        // we want number of expired keys to be ~ 1.5*sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE so as to
+        // test ability of histogram to return a good estimation after merging keys.
+        static int total_keys = std::ceil(sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE/expired)*1.5;
+
+        auto make_insert = [&] (bytes k, uint32_t ttl, uint32_t expiration_time) {
+            auto key = partition_key::from_exploded(*s, {k});
+            mutation m(s, key);
+            auto c_key = clustering_key::from_exploded(*s, {to_bytes("c1")});
+            auto live_cell = atomic_cell::make_live(*utf8_type, 0, bytes("a"), gc_clock::time_point(gc_clock::duration(expiration_time)), gc_clock::duration(ttl));
+            m.set_clustered_cell(c_key, *s->get_column_definition("r1"), std::move(live_cell));
+            return m;
+        };
+        std::vector<mutation> mutations;
+        mutations.reserve(total_keys);
+
+        auto expired_keys = total_keys*expired;
+        auto now = gc_clock::now();
+        for (auto i = 0; i < expired_keys; i++) {
+            // generate expiration time at different time points or only a few entries would be created in histogram
+            auto expiration_time = (now - gc_clock::duration(DEFAULT_GC_GRACE_SECONDS*2+i)).time_since_epoch().count();
+            mutations.push_back(make_insert(to_bytes("expired_key" + to_sstring(i)), 1, expiration_time));
+        }
+        auto remaining = total_keys-expired_keys;
+        auto expiration_time = (now + gc_clock::duration(3600)).time_since_epoch().count();
+        for (auto i = 0; i < remaining; i++) {
+            mutations.push_back(make_insert(to_bytes("key" + to_sstring(i)), 3600, expiration_time));
+        }
+
+        column_family_for_tests cf(env.manager(), s);
+        auto close_cf = deferred_stop(cf);
+
+        auto creator = [&, gen = make_lw_shared<unsigned>(1)] {
+            auto sst = env.make_sstable(s, tmp.path().string(), (*gen)++, sstables::get_highest_sstable_version(), big);
+            return sst;
+        };
+        auto sst = make_sstable_containing(creator, std::move(mutations));
+        column_family_test(cf).add_sstable(sst);
+
+        const auto& stats = sst->get_stats_metadata();
+        BOOST_REQUIRE(stats.estimated_tombstone_drop_time.bin.size() == sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE);
+        auto gc_before = gc_clock::now() - s->gc_grace_seconds();
+        // Asserts that two keys are equal to within a positive delta
+        sstable_run run;
+        run.insert(sst);
+        BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
+
+        auto info = compact_sstables(sstables::compaction_descriptor({ sst }, cf->get_sstable_set(), default_priority_class()), *cf, creator).get0();
+        auto uncompacted_size = sst->data_size();
+        BOOST_REQUIRE(info.new_sstables.size() == 1);
+        BOOST_REQUIRE(info.new_sstables.front()->estimate_droppable_tombstone_ratio(gc_before) == 0.0f);
+        BOOST_REQUIRE_CLOSE(info.new_sstables.front()->data_size(), uncompacted_size*(1-expired), 5);
+
+        // sstable satisfying conditions will be included
+        {
+            std::map<sstring, sstring> options;
+            options.emplace("tombstone_threshold", "0.3f");
+            // that's needed because sstable with droppable data should be old enough.
+            options.emplace("tombstone_compaction_interval", "0");
+            auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
+            auto descriptor = cs.get_sstables_for_compaction(*cf, {sst});
+            BOOST_REQUIRE(descriptor.sstables.size() == 1);
+            BOOST_REQUIRE(descriptor.sstables.front() == sst);
+        }
+
+        // sstable with droppable ratio of 0.3 won't be included due to threshold
+        {
+            std::map<sstring, sstring> options;
+            options.emplace("tombstone_threshold", "0.5f");
+            auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
+            auto descriptor = cs.get_sstables_for_compaction(*cf, { sst });
+            BOOST_REQUIRE(descriptor.sstables.size() == 0);
+        }
+        // sstable which was recently created won't be included due to min interval
+        {
+            std::map<sstring, sstring> options;
+            options.emplace("tombstone_compaction_interval", "3600");
+            auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
+            sstables::test(sst).set_data_file_write_time(db_clock::now());
+            auto descriptor = cs.get_sstables_for_compaction(*cf, { sst });
+            BOOST_REQUIRE(descriptor.sstables.size() == 0);
+        }
+    });
 }
