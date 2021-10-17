@@ -80,6 +80,8 @@ public:
 ///
 class authorizer {
 public:
+    using ptr_type = std::unique_ptr<authorizer>;
+
     virtual ~authorizer() = default;
 
     virtual future<> start() = 0;

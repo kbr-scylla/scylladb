@@ -2008,7 +2008,8 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
         return test_env::do_with_async([&db = e.local_db()] (test_env& env) {
             cell_locker_stats cl_stats;
 
-            auto s = schema_builder("ks" /* single_node_cql_env::ks_name */, "correcness_test")
+            auto ks_name = "ks";    // single_node_cql_env::ks_name
+            auto s = schema_builder(ks_name, "correcness_test")
                     .with_column("id", utf8_type, column_kind::partition_key)
                     .with_column("value", int32_type).build();
 
@@ -2037,13 +2038,14 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
             cf->mark_ready_for_writes();
             cf->start();
 
+            dht::token_range_vector local_ranges = db.get_keyspace_local_ranges(ks_name);
             auto descriptor = sstables::compaction_descriptor({std::move(sst)}, cf->get_sstable_set(), default_priority_class(), compaction_descriptor::default_level,
-                compaction_descriptor::default_max_sstable_bytes, run_identifier, compaction_type_options::make_cleanup(db));
+                compaction_descriptor::default_max_sstable_bytes, run_identifier, compaction_type_options::make_cleanup(std::move(local_ranges)));
             auto ret = compact_sstables(std::move(descriptor), *cf, sst_gen).get0();
 
             BOOST_REQUIRE(ret.new_sstables.size() == 1);
             BOOST_REQUIRE(ret.new_sstables.front()->get_estimated_key_count() >= total_partitions);
-            BOOST_REQUIRE((ret.new_sstables.front()->get_estimated_key_count() - total_partitions) <= s->min_index_interval());
+            BOOST_REQUIRE((ret.new_sstables.front()->get_estimated_key_count() - total_partitions) <= uint64_t(s->min_index_interval()));
             BOOST_REQUIRE(ret.new_sstables.front()->run_identifier() == run_identifier);
         });
     });
@@ -3751,7 +3753,7 @@ SEASTAR_TEST_CASE(lcs_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == s->max_compaction_threshold());
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
         // single sstable
         {
@@ -3812,8 +3814,8 @@ SEASTAR_TEST_CASE(test_twcs_interposer_on_memtable_flush) {
         constexpr size_t rows_per_window = 10;
 
         auto mt = make_lw_shared<memtable>(s);
-        for (auto i = 1; i <= target_windows_span; i++) {
-            for (auto j = 0; j < rows_per_window; j++) {
+        for (unsigned i = 1; i <= target_windows_span; i++) {
+            for (unsigned j = 0; j < rows_per_window; j++) {
                 mt->apply(make_row(std::chrono::hours(i)));
             }
         }
@@ -3918,7 +3920,7 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(i, std::chrono::hours(1))});
                 sstables.push_back(std::move(sst));
             }
@@ -3931,12 +3933,12 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(0, std::chrono::hours(1))});
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == s->max_compaction_threshold());
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
     });
 }
@@ -3980,7 +3982,7 @@ SEASTAR_TEST_CASE(stcs_reshape_overlapping_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(i)});
                 sstables.push_back(std::move(sst));
             }
@@ -3993,12 +3995,12 @@ SEASTAR_TEST_CASE(stcs_reshape_overlapping_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(0)});
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == s->max_compaction_threshold());
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
     });
 }

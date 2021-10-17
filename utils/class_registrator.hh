@@ -30,8 +30,14 @@ inline bool is_class_name_qualified(std::string_view class_name) {
 // Args... are parameters for object's constructor
 template<typename BaseType, typename... Args>
 class nonstatic_class_registry {
+    template<typename T, typename ResultType = typename T::ptr_type>
+    requires requires (typename T::ptr_type ptr) {
+        { ptr.get() } -> std::same_as<T*>;
+    }
+    struct result_for;
+
     template<typename T>
-    struct result_for {
+    struct result_for<T, std::unique_ptr<T>> {
         typedef std::unique_ptr<T> type;
         template<typename Impl>
         static inline type make(Args&& ...args) {
@@ -39,7 +45,7 @@ class nonstatic_class_registry {
         }
     };
     template<typename T>
-    struct result_for<seastar::shared_ptr<T>> {
+    struct result_for<T, seastar::shared_ptr<T>> {
         typedef seastar::shared_ptr<T> type;
         template<typename Impl>
         static inline type make(Args&& ...args) {
@@ -47,14 +53,14 @@ class nonstatic_class_registry {
         }
     };
     template<typename T>
-    struct result_for<seastar::lw_shared_ptr<T>> {
+    struct result_for<T, seastar::lw_shared_ptr<T>> {
         typedef seastar::lw_shared_ptr<T> type;
         // lw_shared is not (yet?) polymorph, thus having automatic
         // instantiation of it makes no sense. This way we get a nice
         // compilation error if someone messes up.
     };
     template<typename T>
-    struct result_for<std::shared_ptr<T>> {
+    struct result_for<T, std::shared_ptr<T>> {
         typedef std::shared_ptr<T> type;
         template<typename Impl>
         static inline type make(Args&& ...args) {
@@ -62,7 +68,7 @@ class nonstatic_class_registry {
         }
    };
     template<typename T, typename D>
-    struct result_for<std::unique_ptr<T, D>> {
+    struct result_for<T, std::unique_ptr<T, D>> {
         typedef std::unique_ptr<T, D> type;
         template<typename Impl>
         static inline type make(Args&& ...args) {
@@ -70,7 +76,7 @@ class nonstatic_class_registry {
         }
     };
 public:
-    using result_type = typename result_for<BaseType>::type;
+    using result_type = typename BaseType::ptr_type;
     using creator_type = std::function<result_type(Args...)>;
 private:
     std::unordered_map<sstring, creator_type> _classes;

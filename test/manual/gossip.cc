@@ -25,6 +25,7 @@
 #include <seastar/core/thread.hh>
 #include <chrono>
 #include "db/config.hh"
+#include "db/schema_tables.hh"
 
 
 namespace bpo = boost::program_options;
@@ -72,7 +73,7 @@ int main(int ac, char ** av) {
 
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
-            token_metadata.start().get();
+            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
             auto stop_token_mgr = defer([&] { token_metadata.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();

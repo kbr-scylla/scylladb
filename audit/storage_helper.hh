@@ -16,6 +16,7 @@ namespace audit {
 
 class storage_helper {
 public:
+    using ptr_type = std::unique_ptr<storage_helper>;
     storage_helper() {}
     virtual ~storage_helper() {}
     virtual future<> start(const db::config& cfg) = 0;

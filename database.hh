@@ -8,10 +8,9 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#ifndef DATABASE_HH_
-#define DATABASE_HH_
+#pragma once
 
-#include "locator/token_metadata.hh"
+#include "locator/abstract_replication_strategy.hh"
 #include "index/secondary_index_manager.hh"
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/sstring.hh>
@@ -113,12 +112,6 @@ class large_data_handler;
 future<> system_keyspace_make(database& db, service::storage_service& ss);
 
 }
-
-namespace locator {
-
-class abstract_replication_strategy;
-
-} // namespace locator
 
 namespace wasm {
 class engine;
@@ -1066,36 +1059,36 @@ class user_types_metadata;
 class keyspace_metadata final {
     sstring _name;
     sstring _strategy_name;
-    std::map<sstring, sstring> _strategy_options;
+    locator::replication_strategy_config_options _strategy_options;
     std::unordered_map<sstring, schema_ptr> _cf_meta_data;
     bool _durable_writes;
     user_types_metadata _user_types;
 public:
     keyspace_metadata(std::string_view name,
                  std::string_view strategy_name,
-                 std::map<sstring, sstring> strategy_options,
+                 locator::replication_strategy_config_options strategy_options,
                  bool durable_writes,
                  std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
     keyspace_metadata(std::string_view name,
                  std::string_view strategy_name,
-                 std::map<sstring, sstring> strategy_options,
+                 locator::replication_strategy_config_options strategy_options,
                  bool durable_writes,
                  std::vector<schema_ptr> cf_defs,
                  user_types_metadata user_types);
     static lw_shared_ptr<keyspace_metadata>
     new_keyspace(std::string_view name,
                  std::string_view strategy_name,
-                 std::map<sstring, sstring> options,
+                 locator::replication_strategy_config_options options,
                  bool durables_writes,
                  std::vector<schema_ptr> cf_defs = std::vector<schema_ptr>{});
-    void validate(const locator::shared_token_metadata& stm) const;
+    void validate(const locator::topology&) const;
     const sstring& name() const {
         return _name;
     }
     const sstring& strategy_name() const {
         return _strategy_name;
     }
-    const std::map<sstring, sstring>& strategy_options() const {
+    const locator::replication_strategy_config_options& strategy_options() const {
         return _strategy_options;
     }
     const std::unordered_map<sstring, schema_ptr>& cf_meta_data() const {
@@ -1150,21 +1143,24 @@ public:
         size_t view_update_concurrency_semaphore_limit;
     };
 private:
-    std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
+    locator::abstract_replication_strategy::ptr_type _replication_strategy;
+    locator::mutable_effective_replication_map_ptr _effective_replication_map;
     lw_shared_ptr<keyspace_metadata> _metadata;
     shared_promise<> _populated;
     config _config;
 public:
     explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg);
 
-    void update_from(const locator::shared_token_metadata& stm, lw_shared_ptr<keyspace_metadata>);
+    future<> update_from(const locator::shared_token_metadata& stm, lw_shared_ptr<keyspace_metadata>);
 
     /** Note: return by shared pointer value, since the meta data is
      * semi-volatile. I.e. we could do alter keyspace at any time, and
      * boom, it is replaced.
      */
     lw_shared_ptr<keyspace_metadata> metadata() const;
-    void create_replication_strategy(const locator::shared_token_metadata& stm, const std::map<sstring, sstring>& options);
+    future<> create_replication_strategy(const locator::shared_token_metadata& stm, const locator::replication_strategy_config_options& options);
+    void update_effective_replication_map(locator::mutable_effective_replication_map_ptr erm);
+
     /**
      * This should not really be return by reference, since replication
      * strategy is also volatile in that it could be replaced at "any" time.
@@ -1174,6 +1170,14 @@ public:
      */
     locator::abstract_replication_strategy& get_replication_strategy();
     const locator::abstract_replication_strategy& get_replication_strategy() const;
+    locator::abstract_replication_strategy::ptr_type get_replication_strategy_ptr() const {
+        return _replication_strategy;
+    }
+
+    locator::effective_replication_map_ptr get_effective_replication_map() const {
+        return _effective_replication_map;
+    }
+
     column_family::config make_column_family_config(const schema& s, const database& db) const;
     future<> make_directory_for_column_family(const sstring& name, utils::UUID uuid);
     void add_or_update_column_family(const schema_ptr& s);
@@ -1314,6 +1318,7 @@ private:
     seastar::metrics::metric_groups _metrics;
     bool _enable_incremental_backups = false;
     bool _shutdown = false;
+    bool _enable_autocompaction_toggle = false;
     query::querier_cache _querier_cache;
 
     std::unique_ptr<db::large_data_handler> _large_data_handler;
@@ -1351,7 +1356,7 @@ public:
 
 private:
     using system_keyspace = bool_class<struct system_keyspace_tag>;
-    void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, system_keyspace system);
+    future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, system_keyspace system);
     friend future<> db::system_keyspace_make(database& db, service::storage_service& ss);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
@@ -1376,6 +1381,25 @@ public:
     }
 
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
+
+    void enable_autocompaction_toggle() noexcept { _enable_autocompaction_toggle = true; }
+    class autocompaction_toggle_guard {
+        database& _db;
+    public:
+        autocompaction_toggle_guard(database& db) : _db(db) {
+            assert(this_shard_id() == 0);
+            if (!_db._enable_autocompaction_toggle) {
+                throw std::runtime_error("Autocompaction toggle is busy");
+            }
+            _db._enable_autocompaction_toggle = false;
+        }
+        autocompaction_toggle_guard(const autocompaction_toggle_guard&) = delete;
+        autocompaction_toggle_guard(autocompaction_toggle_guard&&) = default;
+        ~autocompaction_toggle_guard() {
+            assert(this_shard_id() == 0);
+            _db._enable_autocompaction_toggle = true;
+        }
+    };
 
     future<> parse_system_tables(distributed<service::storage_proxy>&);
     database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
@@ -1611,5 +1635,3 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 bool is_internal_keyspace(std::string_view name);
-
-#endif /* DATABASE_HH_ */

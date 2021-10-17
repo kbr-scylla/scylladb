@@ -1011,6 +1011,7 @@ scylla_core = (['database.cc',
                 'multishard_mutation_query.cc',
                 'reader_concurrency_semaphore.cc',
                 'distributed_loader.cc',
+                'sstables_loader.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
@@ -1326,6 +1327,10 @@ warnings = [
     '-Wno-uninitialized-const-reference',
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=77728
     '-Wno-psabi',
+    '-Wno-narrowing',
+    '-Wno-array-bounds',
+    '-Wno-nonnull',
+    '-Wno-catch-value',
 ]
 
 warnings = [w

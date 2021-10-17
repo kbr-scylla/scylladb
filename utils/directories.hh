@@ -43,6 +43,7 @@ public:
 
     directories(bool developer_mode);
     future<> create_and_verify(set dir_set);
+    static future<> verify_owner_and_mode(std::filesystem::path path);
 private:
     bool _developer_mode;
     std::vector<file_lock> _locks;

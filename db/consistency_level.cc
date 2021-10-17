@@ -50,7 +50,7 @@ namespace db {
 logging::logger cl_logger("consistency");
 
 size_t quorum_for(const keyspace& ks) {
-    size_t replication_factor = ks.get_replication_strategy().get_replication_factor();
+    size_t replication_factor = ks.get_effective_replication_map()->get_replication_factor();
     return replication_factor ? (replication_factor / 2) + 1 : 0;
 }
 
@@ -119,7 +119,7 @@ size_t block_for(keyspace& ks, consistency_level cl) {
     case consistency_level::SERIAL:
         return quorum_for(ks);
     case consistency_level::ALL:
-        return ks.get_replication_strategy().get_replication_factor();
+        return ks.get_effective_replication_map()->get_replication_factor();
     case consistency_level::LOCAL_QUORUM:
     case consistency_level::LOCAL_SERIAL:
         return block_for_local_serial(ks);

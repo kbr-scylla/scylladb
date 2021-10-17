@@ -1317,6 +1317,11 @@ endpoints_to_replica_ids(const locator::token_metadata& tm, const inet_address_v
 
 query::max_result_size storage_proxy::get_max_result_size(const query::partition_slice& slice) const {
     // Unpaged and reverse queries.
+    // FIXME: some reversed queries are no longer unlimited.
+    // To filter these out we need to know if it's a single partition query.
+    // Take the partition key range as a parameter? This would require changing many call sites
+    // where the partition key range is not immediately available.
+    // For now we ignore the issue, return the 'wrong' limit for some reversed queries, and wait until all reversed queries are fixed.
     if (!slice.options.contains<query::partition_slice::option::allow_short_read>() || slice.options.contains<query::partition_slice::option::reversed>()) {
         return _db.local().get_unlimited_query_max_result_size();
     } else {
@@ -1917,9 +1922,9 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
         db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit) {
     auto keyspace_name = s->ks_name();
     keyspace& ks = _db.local().find_keyspace(keyspace_name);
-    auto& rs = ks.get_replication_strategy();
-    inet_address_vector_replica_set natural_endpoints = rs.get_natural_endpoints_without_node_being_replaced(token);
-    inet_address_vector_topology_change pending_endpoints = get_token_metadata_ptr()->pending_endpoints_for(token, keyspace_name);
+    auto erm = ks.get_effective_replication_map();
+    inet_address_vector_replica_set natural_endpoints = erm->get_natural_endpoints_without_node_being_replaced(token);
+    inet_address_vector_topology_change pending_endpoints = erm->get_token_metadata_ptr()->pending_endpoints_for(token, keyspace_name);
 
     slogger.trace("creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints, pending_endpoints);
     tracing::trace(tr_state, "Creating write handler for token: {} natural: {} pending: {}", token, natural_endpoints ,pending_endpoints);
@@ -2242,9 +2247,9 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
 storage_proxy::paxos_participants
 storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &token, db::consistency_level cl_for_paxos) {
     keyspace& ks = _db.local().find_keyspace(ks_name);
-    auto& rs = ks.get_replication_strategy();
-    inet_address_vector_replica_set natural_endpoints = rs.get_natural_endpoints_without_node_being_replaced(token);
-    inet_address_vector_topology_change pending_endpoints = get_token_metadata_ptr()->pending_endpoints_for(token, ks_name);
+    auto erm = ks.get_effective_replication_map();
+    inet_address_vector_replica_set natural_endpoints = erm->get_natural_endpoints_without_node_being_replaced(token);
+    inet_address_vector_topology_change pending_endpoints = erm->get_token_metadata_ptr()->pending_endpoints_for(token, ks_name);
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
         auto itend = boost::range::remove_if(natural_endpoints, std::not_fn(std::cref(db::is_local)));
@@ -4658,8 +4663,8 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
 }
 
 inet_address_vector_replica_set storage_proxy::get_live_endpoints(keyspace& ks, const dht::token& token) const {
-    auto& rs = ks.get_replication_strategy();
-    inet_address_vector_replica_set eps = rs.get_natural_endpoints_without_node_being_replaced(token);
+    auto erm = ks.get_effective_replication_map();
+    inet_address_vector_replica_set eps = erm->get_natural_endpoints_without_node_being_replaced(token);
     auto itend = boost::range::remove_if(eps, std::not1(std::bind1st(std::mem_fn(&gms::gossiper::is_alive), &_gossiper)));
     eps.erase(itend, eps.end());
     return eps;

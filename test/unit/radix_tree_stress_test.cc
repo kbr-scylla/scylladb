@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
                             }
                             vld = validate::iterator;
                         } else if (vld == validate::iterator) {
-                            int nr = 0;
+                            unsigned nr = 0;
                             auto ti = t->begin();
                             while (ti != t->end()) {
                                 assert(ti->value() == ti.key());
@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
                             assert(nr == col_size);
                             vld = validate::walk;
                         } else if (vld == validate::walk) {
-                            int nr = 0;
+                            unsigned nr = 0;
                             t->walk([&nr, col_size] (unsigned idx, test_data& td) {
                                 assert(idx == td.value());
                                 nr++;
@@ -126,7 +126,7 @@ int main(int argc, char **argv) {
                             assert(nr == col_size);
                             vld = validate::lower_bound;
                         } else if (vld == validate::lower_bound) {
-                            int nr = 0;
+                            unsigned nr = 0;
                             unsigned idx = 0;
                             while (true) {
                                 test_data* td = t->lower_bound(idx);

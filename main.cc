@@ -8,6 +8,8 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <functional>
+
 #include <seastar/util/closeable.hh>
 #include "utils/build_id.hh"
 #include "supervisor.hh"
@@ -66,12 +68,14 @@
 #include "utils/memory.hh"
 #include "gms/feature_service.hh"
 #include "distributed_loader.hh"
+#include "sstables_loader.hh"
 #include "cql3/cql_config.hh"
 #include "connection_notifier.hh"
 #include "transport/controller.hh"
 #include "thrift/controller.hh"
 #include "service/memory_limiter.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
+#include "db/schema_tables.hh"
 
 #include "redis/service.hh"
 #include "cdc/log.hh"
@@ -481,6 +485,7 @@ int main(int ac, char** av) {
     sharded<service::raft_group_registry> raft_gr;
     sharded<service::memory_limiter> service_memory_limiter;
     sharded<repair_service> repair;
+    sharded<sstables_loader> sst_loader;
 
     return app.run(ac, av, [&] () -> future<int> {
 
@@ -510,7 +515,7 @@ int main(int ac, char** av) {
         return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
                 &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair, &ss, &lifecycle_notifier] {
+                &repair, &sst_loader, &ss, &lifecycle_notifier] {
           try {
             // disable reactor stall detection during startup
             auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
@@ -683,7 +688,7 @@ int main(int ac, char** av) {
             set_abort_on_internal_error(cfg->abort_on_internal_error());
 
             supervisor::notify("starting tokens manager");
-            token_metadata.start().get();
+            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
             // storage_proxy holds a reference on it and is not yet stopped.
             // what's worse is that the calltrace
             //   storage_proxy::do_query 
@@ -847,7 +852,7 @@ int main(int ac, char** av) {
             sscfg.available_memory = memory::stats().total_memory();
             debug::the_storage_service = &ss;
             ss.start(std::ref(stop_signal.as_sharded_abort_source()),
-                std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(view_update_generator),
+                std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks),
                 std::ref(feature_service), sscfg, std::ref(mm), std::ref(token_metadata),
                 std::ref(messaging), std::ref(cdc_generation_service), std::ref(repair),
                 std::ref(raft_gr), std::ref(lifecycle_notifier), std::ref(sl_controller)).get();
@@ -1141,6 +1146,17 @@ int main(int ac, char** av) {
                 api::unset_server_repair(ctx).get();
             });
 
+            supervisor::notify("starting sstables loader");
+            sst_loader.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging)).get();
+            auto stop_sst_loader = defer_verbose_shutdown("sstables loader", [&sst_loader] {
+                sst_loader.stop().get();
+            });
+            api::set_server_sstables_loader(ctx, sst_loader).get();
+            auto stop_sstl_api = defer_verbose_shutdown("sstables loader API", [&ctx] {
+                api::unset_server_sstables_loader(ctx).get();
+            });
+
+
             gossiper.local().register_(ss.local().shared_from_this());
             auto stop_listening = defer_verbose_shutdown("storage service notifications", [&gossiper, &ss] {
                 gossiper.local().unregister_(ss.local().shared_from_this()).get();
@@ -1157,6 +1173,15 @@ int main(int ac, char** av) {
             auto stop_mm_listener = defer_verbose_shutdown("storage service notifications", [&mm_notifier, &ss] {
                 mm_notifier.local().unregister_listener(&ss.local()).get();
             });
+
+            /*
+             * FIXME. In bb07678346 commit the API toggle for autocompaction was
+             * (partially) delayed until system prepared to join the ring. Probably
+             * it was an overkill and it can be enabled earlier, even as early as
+             * 'by default'. E.g. the per-table toggle was 'enabled' right after
+             * the system keyspace started and nobody seemed to have any troubles.
+             */
+            db.local().enable_autocompaction_toggle();
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return messaging.invoke_on_all(&netw::messaging_service::start_listen);
@@ -1289,6 +1314,11 @@ int main(int ac, char** av) {
                 if (cfg->view_building()) {
                     view_builder.stop().get();
                 }
+            });
+
+            api::set_server_view_builder(ctx, view_builder).get();
+            auto stop_vb_api = defer_verbose_shutdown("view builder API", [&ctx] {
+                api::unset_server_view_builder(ctx).get();
             });
 
             // Truncate `clients' CF - this table should not persist between server restarts.

@@ -63,6 +63,8 @@ private:
     static future<> init_snitch_obj(
         distributed<snitch_ptr>& snitch_obj, const sstring& snitch_name, A&&... a);
 public:
+    using ptr_type = std::unique_ptr<i_endpoint_snitch>;
+
     template <typename... A>
     static future<> create_snitch(const sstring& snitch_name, A&&... a);
 
@@ -218,7 +220,7 @@ protected:
 };
 
 struct snitch_ptr {
-    typedef std::unique_ptr<i_endpoint_snitch> ptr_type;
+    using ptr_type = i_endpoint_snitch::ptr_type;
     future<> stop() {
         if (_ptr) {
             return _ptr->stop();
