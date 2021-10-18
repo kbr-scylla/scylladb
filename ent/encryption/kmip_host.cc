@@ -700,6 +700,10 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
     KMIP_CRYPTOGRAPHIC_PARAMETERS_set_cryptographic_algorithm(&params, crypt_alg);
     KMIP_CRYPTOGRAPHIC_PARAMETERS_set_block_cipher_mode(&params, from_str(&KMIP_string_to_BLOCK_CIPHER_MODE, mode));
     if (!padd.empty()) {
+        // kmip docs only recognize the "pkcs5" nomenclature.
+        if (padd == "pkcs" || padd == "pkcs7") {
+            padd = "pkcs5";
+        }
         KMIP_CRYPTOGRAPHIC_PARAMETERS_set_padding_method(&params, from_str(&KMIP_string_to_PADDING_METHOD, padd));
     }
 
