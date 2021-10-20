@@ -664,11 +664,11 @@ future<> kmip_host::impl::connect() {
     });
 }
 
-static unsigned from_str(unsigned (*f)(char*, int, int*), const sstring& s) {
+static unsigned from_str(unsigned (*f)(char*, int, int*), const sstring& s, const sstring& what) {
     int found = 0;
     auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
     if (!found) {
-        throw std::invalid_argument(s);
+        throw std::invalid_argument(format("Unsupported {}: {}", what, s));
     }
     return res;
 }
@@ -692,20 +692,27 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
     sstring type, mode, padd;
     std::tie(type, mode, padd) = parse_key_spec_and_validate_defaults(info.info.alg);
 
-    auto crypt_alg = from_str(&KMIP_string_to_CRYPTOGRAPHIC_ALGORITHM, type);
+    try {
+        auto crypt_alg = from_str(&KMIP_string_to_CRYPTOGRAPHIC_ALGORITHM, type, "cryptographic algorithm");
 
-    KMIP_CRYPTOGRAPHIC_PARAMETERS params;
-    kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_clear(&params));
+        KMIP_CRYPTOGRAPHIC_PARAMETERS params;
+        kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_clear(&params));
 
-    KMIP_CRYPTOGRAPHIC_PARAMETERS_set_cryptographic_algorithm(&params, crypt_alg);
-    KMIP_CRYPTOGRAPHIC_PARAMETERS_set_block_cipher_mode(&params, from_str(&KMIP_string_to_BLOCK_CIPHER_MODE, mode));
-    if (!padd.empty()) {
-        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_padding_method(&params, from_str(&KMIP_string_to_PADDING_METHOD, padd));
+        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_cryptographic_algorithm(&params, crypt_alg);
+        KMIP_CRYPTOGRAPHIC_PARAMETERS_set_block_cipher_mode(&params, from_str(&KMIP_string_to_BLOCK_CIPHER_MODE, mode, "block cipher mode"));
+        if (!padd.empty()) {
+            // kmip docs only recognize the "pkcs5" nomenclature.
+            if (padd == "pkcs" || padd == "pkcs7") {
+                padd = "pkcs5";
+            }
+            KMIP_CRYPTOGRAPHIC_PARAMETERS_set_padding_method(&params, from_str(&KMIP_string_to_PADDING_METHOD, padd, "padding method"));
+        }
+
+        kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_to_kdl(&params, kdl_attrs));
+        return std::make_tuple(std::move(kdl_attrs), crypt_alg);
+    } catch (std::invalid_argument& e) {
+        std::throw_with_nested(std::invalid_argument("Invalid algorithm: " + info.info.alg));
     }
-
-    kmip_chk(KMIP_CRYPTOGRAPHIC_PARAMETERS_to_kdl(&params, kdl_attrs));
-
-    return std::make_tuple(std::move(kdl_attrs), crypt_alg);
 }
 
 future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_key_info& info) {
