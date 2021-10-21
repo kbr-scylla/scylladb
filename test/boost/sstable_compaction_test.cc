@@ -1831,6 +1831,9 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         auto uncompacted_size = sst->data_size();
         // Asserts that two keys are equal to within a positive delta
         BOOST_REQUIRE(std::fabs(sst->estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
+        sstable_run run;
+        run.insert(sst);
+        BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
         column_family_for_tests cf(env.manager(), s);
         auto close_cf = deferred_stop(cf);
@@ -3922,6 +3925,19 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
             sstables.reserve(disjoint_sstable_count);
             for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(i, std::chrono::hours(1))});
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == disjoint_sstable_count);
+        }
+
+        {
+            // create set of 256 disjoint ssts that belong to different windows and expect that twcs reshape allows them all to be compacted at once
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (auto i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(i, std::chrono::hours(i + 1)), make_row(i, std::chrono::hours(i + 2))});
                 sstables.push_back(std::move(sst));
             }
 

@@ -227,6 +227,26 @@ static db::tri_mode_restriction_t::mode strict_allow_filtering_default() {
     return db::tri_mode_restriction_t::mode::WARN; // TODO: make it TRUE after Scylla 4.6.
 }
 
+static std::vector<sstring> experimental_feature_names() {
+    std::vector<sstring> ret;
+    for (const auto& f : db::experimental_features_t::map()) {
+        if (f.second != db::experimental_features_t::UNUSED) {
+            ret.push_back(f.first);
+        }
+    }
+    return ret;
+}
+
+// Inconveniently, help strings MUST be a string_view, so they cannot be
+// created on-the-fly below with format(). Instead, we need to save the
+// help string to a static object, and return a string_view to it:
+static std::string_view experimental_features_help_string() {
+    static sstring s = format("Unlock experimental features provided as the "
+        "option arguments (possible values: {}). Can be repeated.",
+        experimental_feature_names());
+    return s;
+}
+
 db::config::config(std::shared_ptr<db::extensions> exts)
     : utils::config_file()
 
@@ -748,7 +768,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , skip_wait_for_gossip_to_settle(this, "skip_wait_for_gossip_to_settle", value_status::Used, -1, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.")
     , force_gossip_generation(this, "force_gossip_generation", liveness::LiveUpdate, value_status::Used, -1 , "Force gossip to use the generation number provided by user")
     , experimental(this, "experimental", value_status::Used, false, "[Deprecated] Set to true to unlock all experimental features (except 'raft' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
-    , experimental_features(this, "experimental_features", value_status::Used, {}, "Unlock experimental features provided as the option arguments (possible values: 'lwt', 'cdc', 'udf', 'alternator-streams', 'raft'). Can be repeated.")
+    , experimental_features(this, "experimental_features", value_status::Used, {}, experimental_features_help_string())
     , lsa_reclamation_step(this, "lsa_reclamation_step", value_status::Used, 1, "Minimum number of segments to reclaim in a single step")
     , prometheus_port(this, "prometheus_port", value_status::Used, 9180, "Prometheus port, set to zero to disable")
     , prometheus_address(this, "prometheus_address", value_status::Used, "0.0.0.0", "Prometheus listening address")
@@ -951,7 +971,6 @@ db::fs::path db::config::get_conf_sub(db::fs::path sub) {
 bool db::config::check_experimental(experimental_features_t::feature f) const {
     if (experimental()
         && f != experimental_features_t::UNUSED
-        && f != experimental_features_t::UNUSED_CDC
         && f != experimental_features_t::RAFT) {
             return true;
     }
@@ -1004,15 +1023,15 @@ const db::extensions& db::config::extensions() const {
 std::unordered_map<sstring, db::experimental_features_t::feature> db::experimental_features_t::map() {
     // We decided against using the construct-on-first-use idiom here:
     // https://github.com/scylladb/scylla/pull/5369#discussion_r353614807
-    // Lightweight transactions are no longer experimental. Map them
-    // to UNUSED switch for a while, then remove altogether.
-    // Change Data Capture is no longer experimental. Map it
-    // to UNUSED_CDC switch for a while, then remove altogether.
+    // Features which are no longer experimental are mapped
+    // to UNUSED switch for a while, and can be eventually
+    // removed altogether.
     return {
         {"lwt", UNUSED},
         {"udf", UDF},
-        {"cdc", UNUSED_CDC},
+        {"cdc", UNUSED},
         {"alternator-streams", ALTERNATOR_STREAMS},
+        {"alternator-ttl", ALTERNATOR_TTL},
         {"raft", RAFT}
     };
 }

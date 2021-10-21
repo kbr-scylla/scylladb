@@ -1320,7 +1320,6 @@ warnings = [
     '-Wno-unsupported-friend',
     '-Wno-unused-variable',
     '-Wno-delete-non-abstract-non-virtual-dtor',
-    '-Wno-unknown-attributes',
     '-Wno-braced-scalar-init',
     '-Wno-implicit-int-float-conversion',
     '-Wno-delete-abstract-non-virtual-dtor',

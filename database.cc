@@ -986,6 +986,15 @@ std::vector<sstring>  database::get_non_system_keyspaces() const {
     return res;
 }
 
+std::vector<sstring> database::get_all_keyspaces() const {
+    std::vector<sstring> res;
+    res.reserve(_keyspaces.size());
+    for (auto const& i : _keyspaces) {
+        res.push_back(i.first);
+    }
+    return res;
+}
+
 std::vector<lw_shared_ptr<column_family>> database::get_non_system_column_families() const {
     return boost::copy_range<std::vector<lw_shared_ptr<column_family>>>(
         get_column_families()
@@ -1177,11 +1186,6 @@ const column_family& database::find_column_family(const schema_ptr& schema) cons
     return find_column_family(schema->id());
 }
 
-using strategy_class_registry = class_registry<
-    locator::abstract_replication_strategy,
-    locator::snitch_ptr&,
-    const locator::replication_strategy_config_options&>;
-
 keyspace_metadata::keyspace_metadata(std::string_view name,
              std::string_view strategy_name,
              locator::replication_strategy_config_options strategy_options,
@@ -1201,7 +1205,7 @@ keyspace_metadata::keyspace_metadata(std::string_view name,
              std::vector<schema_ptr> cf_defs,
              user_types_metadata user_types)
     : _name{name}
-    , _strategy_name{strategy_class_registry::to_qualified_class_name(strategy_name.empty() ? "NetworkTopologyStrategy" : strategy_name)}
+    , _strategy_name{locator::abstract_replication_strategy::to_qualified_class_name(strategy_name.empty() ? "NetworkTopologyStrategy" : strategy_name)}
     , _strategy_options{std::move(strategy_options)}
     , _durable_writes{durable_writes}
     , _user_types{std::move(user_types)}
@@ -1374,7 +1378,7 @@ compare_atomic_cell_for_merge(atomic_cell_view left, atomic_cell_view right) {
 future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
-    const auto reversed = cmd.slice.options.contains(query::partition_slice::option::reversed);
+    const auto reversed = cmd.slice.is_reversed();
     if (reversed) {
         s = s->make_reversed();
     }

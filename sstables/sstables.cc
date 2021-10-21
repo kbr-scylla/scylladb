@@ -1345,7 +1345,6 @@ future<> sstable::create_data() noexcept {
     opt.sloppy_size = true;
     return open_or_create_data(oflags, std::move(opt)).then([this, oflags] {
         _open_mode.emplace(oflags);
-        _stats.on_open_for_writing();
     });
 }
 
@@ -2098,7 +2097,7 @@ sstable::make_reader(
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr,
         read_monitor& mon) {
-    const auto reversed = slice.options.contains(query::partition_slice::option::reversed);
+    const auto reversed = slice.is_reversed();
     if (_version >= version_types::mc && (!reversed || (range.is_singular() && !fwd))) {
         return mx::make_reader(shared_from_this(), std::move(schema), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon);
     }
@@ -2458,8 +2457,6 @@ future<> sstable::close_files() {
         if (_open_mode) {
             if (_open_mode.value() == open_flags::ro) {
                 _stats.on_close_for_reading();
-            } else {
-                _stats.on_close_for_writing();
             }
         }
         _open_mode.reset();

@@ -38,6 +38,11 @@ uint64_t sstable_run::data_size() const {
     return boost::accumulate(_all | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
 }
 
+double sstable_run::estimate_droppable_tombstone_ratio(gc_clock::time_point gc_before) const {
+    auto estimate_sum = boost::accumulate(_all | boost::adaptors::transformed(std::bind(&sstable::estimate_droppable_tombstone_ratio, std::placeholders::_1, gc_before)), double(0));
+    return _all.size() ? estimate_sum / _all.size() : double(0);
+}
+
 std::ostream& operator<<(std::ostream& os, const sstables::sstable_run& run) {
     os << "Run = {\n";
     if (run.all().empty()) {
@@ -864,7 +869,7 @@ time_series_sstable_set::create_single_key_sstable_reader(
             return false;
     };
 
-    auto reversed = slice.options.contains(query::partition_slice::option::reversed);
+    auto reversed = slice.is_reversed();
     // Note that `sstable_position_reader_queue` always includes a reader which emits a `partition_start` fragment,
     // guaranteeing that the reader we return emits it as well; this helps us avoid the problem from #3552.
     return make_clustering_combined_reader(
