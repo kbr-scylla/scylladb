@@ -17,6 +17,7 @@
 #include <seastar/core/sstring.hh>
 #include <seastar/net/dns.hh>
 #include <seastar/util/log.hh>
+#include <seastar/core/coroutine.hh>
 #include <vector>
 
 #include "common.hh"
@@ -122,48 +123,41 @@ using conn_ptr = lw_shared_ptr<ldap_connection>;
 future<conn_ptr> ldap_role_manager::connect() {
     const auto desc = parse_url(get_url("dummy-user")); // Just need host and port -- any user should do.
     if (!desc) {
-        return make_exception_future<conn_ptr>(
-                std::runtime_error("connect attempted before a successful start"));
+        co_return coroutine::make_exception(std::runtime_error("connect attempted before a successful start"));
     }
-    return net::dns::resolve_name(desc->lud_host).then([this, port = desc->lud_port] (net::inet_address host) {
-        const socket_address addr(host, uint16_t(port));
-        return seastar::connect(addr).then([this] (connected_socket sock) {
-            auto conn = make_lw_shared<ldap_connection>(std::move(sock));
-            return conn->simple_bind(_bind_name.c_str(), _bind_password.c_str()).then(
-                    [this, conn = std::move(conn)] (ldap_msg_ptr response) {
-                        if (!response || ldap_msgtype(response.get()) != LDAP_RES_BIND) {
-                            throw std::runtime_error(format("simple_bind error: {}", conn->get_error()));
-                        }
-                        return make_ready_future<conn_ptr>(std::move(conn));
-                    });
-        });
-    });
+    net::inet_address host = co_await net::dns::resolve_name(desc->lud_host);
+    const socket_address addr(host, uint16_t(desc->lud_port));
+    connected_socket sock = co_await seastar::connect(addr);
+    auto conn = make_lw_shared<ldap_connection>(std::move(sock));
+    ldap_msg_ptr response = co_await conn->simple_bind(_bind_name.c_str(), _bind_password.c_str());
+    if (!response || ldap_msgtype(response.get()) != LDAP_RES_BIND) {
+        co_return coroutine::make_exception(std::runtime_error(format("simple_bind error: {}", conn->get_error())));
+    }
+    co_return std::move(conn);
 }
 
 future<conn_ptr> ldap_role_manager::reconnect() {
-    using std::optional;
-    return do_with(5u, [this] (unsigned& retries_left) {
-        using namespace std::literals::chrono_literals;
-        return exponential_backoff_retry::do_until_value(1s, 32s, _reconnect_aborter, [this, &retries_left] {
-            if (!retries_left) {
-                return make_ready_future<optional<conn_ptr>>(conn_ptr{});
-            }
-            mylog.trace("reconnect() retrying ({} attempts left)", retries_left);
-            --retries_left;
-            return connect().then([this] (conn_ptr conn) {
-                mylog.trace("reconnect() success");
-                return optional<conn_ptr>(std::move(conn));
-            }).handle_exception([this] (std::exception_ptr ex) {
-                mylog.error("error in reconnect: {}", ex);
-                return optional<conn_ptr>{};
-            });
-        }).then([this] (conn_ptr conn) {
-            mylog.trace("reconnect() finished backoff, conn={}", reinterpret_cast<void*>(conn.get()));
-            return conn ? make_ready_future<conn_ptr>(std::move(conn)) :
-                    make_exception_future<conn_ptr>(
-                            std::runtime_error("reconnect failed after 5 attempts"));
-        });
+    unsigned retries_left = 5;
+    using namespace std::literals::chrono_literals;
+    conn_ptr conn = co_await exponential_backoff_retry::do_until_value(1s, 32s, _reconnect_aborter, [this, &retries_left] () -> future<std::optional<conn_ptr>> {
+        if (!retries_left) {
+            co_return conn_ptr{};
+        }
+        mylog.trace("reconnect() retrying ({} attempts left)", retries_left);
+        --retries_left;
+        try {
+            co_return co_await connect();
+        } catch (...) {
+            mylog.error("error in reconnect: {}", std::current_exception());
+        }
+        co_return std::nullopt;
     });
+
+    mylog.trace("reconnect() finished backoff, conn={}", reinterpret_cast<void*>(conn.get()));
+    if (conn) {
+        co_return std::move(conn);
+    }
+    co_return coroutine::make_exception(std::runtime_error("reconnect failed after 5 attempts"));
 }
 
 future<> ldap_role_manager::stop() {
@@ -184,11 +178,11 @@ future<> ldap_role_manager::alter(std::string_view name, const role_config_updat
 }
 
 future<> ldap_role_manager::grant(std::string_view, std::string_view) {
-    throw exceptions::invalid_request_exception("Cannot grant roles with LDAPRoleManager.");
+    return make_exception_future<>(exceptions::invalid_request_exception("Cannot grant roles with LDAPRoleManager."));
 }
 
 future<> ldap_role_manager::revoke(std::string_view, std::string_view) {
-    throw exceptions::invalid_request_exception("Cannot revoke roles with LDAPRoleManager.");
+    return make_exception_future<>(exceptions::invalid_request_exception("Cannot revoke roles with LDAPRoleManager."));
 }
 
 future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name, recursive_role_query) {
@@ -197,36 +191,33 @@ future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name,
     if (!desc) {
         return make_exception_future<role_set>(std::runtime_error(format("Error parsing URL {}", url)));
     }
-    return _connection_factory.with_connection([this, desc = move(desc), grantee_name = sstring(grantee_name)]
-                                               (ldap_connection& conn) {
-        return conn.search(desc->lud_dn, desc->lud_scope, desc->lud_filter, desc->lud_attrs,
+    return _connection_factory.with_connection([this, desc = move(desc), grantee_name_ = sstring(grantee_name)]
+                                               (ldap_connection& conn) -> future<role_set> {
+        sstring grantee_name = std::move(grantee_name_);
+        ldap_msg_ptr res = co_await conn.search(desc->lud_dn, desc->lud_scope, desc->lud_filter, desc->lud_attrs,
                            /*attrsonly=*/0, /*serverctrls=*/nullptr, /*clientctrls=*/nullptr,
-                           /*timeout=*/nullptr, /*sizelimit=*/0)
-                .then([this, &conn, grantee_name = std::move(grantee_name)] (ldap_msg_ptr res) {
-                    mylog.trace("query_granted: got search results");
-                    const auto mtype = ldap_msgtype(res.get());
-                    if (mtype != LDAP_RES_SEARCH_ENTRY && mtype != LDAP_RES_SEARCH_RESULT && mtype != LDAP_RES_SEARCH_REFERENCE) {
-                        mylog.error("ldap search yielded result {} of type {}", static_cast<const void*>(res.get()), mtype);
-                        throw std::runtime_error("ldap_role_manager: search result has wrong type");
-                    }
-                    return do_with(
-                            get_attr_values(conn.get_ldap(), res.get(), _target_attr.c_str()),
-                            auth::role_set{grantee_name},
-                            [this] (const std::vector<sstring>& values, auth::role_set& valid_roles) {
-                                // Each value is a role to be granted.
-                                return parallel_for_each(values, [this, &valid_roles] (const sstring& ldap_role) {
-                                    return _std_mgr.exists(ldap_role).then([&valid_roles, &ldap_role] (bool exists) {
-                                        if (exists) {
-                                            valid_roles.insert(ldap_role);
-                                        } else {
-                                            mylog.error("unrecognized role received from LDAP: {}", ldap_role);
-                                        }
-                                    });
-                                }).then([&valid_roles] {
-                                    return make_ready_future<role_set>(valid_roles);
-                                });
-                            });
-                });
+                           /*timeout=*/nullptr, /*sizelimit=*/0);
+        mylog.trace("query_granted: got search results");
+        const auto mtype = ldap_msgtype(res.get());
+        if (mtype != LDAP_RES_SEARCH_ENTRY && mtype != LDAP_RES_SEARCH_RESULT && mtype != LDAP_RES_SEARCH_REFERENCE) {
+            mylog.error("ldap search yielded result {} of type {}", static_cast<const void*>(res.get()), mtype);
+            co_return coroutine::make_exception(std::runtime_error("ldap_role_manager: search result has wrong type"));
+        }
+        std::vector<sstring> values = get_attr_values(conn.get_ldap(), res.get(), _target_attr.c_str());
+        auth::role_set valid_roles{grantee_name};
+
+        // Each value is a role to be granted.
+        co_await parallel_for_each(values, [this, &valid_roles] (const sstring& ldap_role) {
+            return _std_mgr.exists(ldap_role).then([&valid_roles, &ldap_role] (bool exists) {
+                if (exists) {
+                    valid_roles.insert(ldap_role);
+                } else {
+                    mylog.error("unrecognized role received from LDAP: {}", ldap_role);
+                }
+            });
+        });
+
+        co_return std::move(valid_roles);
     });
 }
 
@@ -235,35 +226,31 @@ future<role_set> ldap_role_manager::query_all() {
 }
 
 future<bool> ldap_role_manager::exists(std::string_view role_name) {
-    return _std_mgr.exists(role_name).then([this, role_name] (bool exists) {
-        if (exists) {
-            return make_ready_future<bool>(true);
+    bool exists = co_await _std_mgr.exists(role_name);
+    if (exists) {
+        co_return true;
+    }
+    role_set roles = co_await query_granted(role_name, recursive_role_query::yes);
+    // A role will get auto-created if it's already assigned any permissions.
+    // The role set will always contains at least a single entry (the role itself),
+    // so auto-creation is only triggered if at least one more external role is assigned.
+    if (roles.size() > 1) {
+        mylog.info("Auto-creating user {}", role_name);
+        role_config cfg;
+        cfg.can_login = true;
+        try {
+            co_await create(role_name, cfg);
+            exists = true;
+        } catch (const role_already_exists&) {
+            exists = true;
+        } catch (...) {
+            mylog.error("Failed to auto-create role {}: {}", role_name, std::current_exception());
+            exists = false;
         }
-        return query_granted(role_name, recursive_role_query::yes).then([this, role_name] (role_set roles) {
-            // A role will get auto-created if it's already assigned any permissions.
-            // The role set will always contains at least a single entry (the role itself),
-            // so auto-creation is only triggered if at least one more external role is assigned.
-            if (roles.size() > 1) {
-                mylog.info("Auto-creating user {}", role_name);
-                return do_with(role_config{}, [this, role_name] (role_config& cfg) {
-                    cfg.can_login = true;
-                    return create(role_name, cfg).then_wrapped([role_name] (future<> f) {
-                        try {
-                            f.get();
-                        } catch (const role_already_exists&) {
-                            // pass, the role must have been created by another session
-                        } catch (...) {
-                            mylog.error("Failed to auto-create role {}: {}", role_name, f.get_exception());
-                            return make_ready_future<bool>(false);
-                        }
-                        return make_ready_future<bool>(true);
-                    });
-                });
-            }
-            mylog.debug("Role {} will not be auto-created", role_name);
-            return make_ready_future<bool>(false);
-        });
-    });
+        co_return exists;
+    }
+    mylog.debug("Role {} will not be auto-created", role_name);
+    co_return false;
 }
 
 future<bool> ldap_role_manager::is_superuser(std::string_view role_name) {
