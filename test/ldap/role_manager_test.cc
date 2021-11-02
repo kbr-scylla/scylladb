@@ -411,6 +411,31 @@ SEASTAR_TEST_CASE(ldap_forbids_revoke) {
     });
 }
 
+SEASTAR_TEST_CASE(ldap_autocreate_user) {
+    return do_with_cql_env_thread([](cql_test_env& env) {
+        auto m = make_ldap_manager(env);
+        m->start().get0();
+        bool jsmith_exists = m->exists("jsmith").get0();
+        // JSmith cannot be auto-created - he's not assigned any existing roles in the system.
+        // He does belong to role1, but role1 was not explicitly created in Scylla yet.
+        BOOST_REQUIRE(!jsmith_exists);
+        m->create("role1", auth::role_config()).get();
+        // JSmith is now assigned an existing role - role1 - so he can be auto-created.
+        jsmith_exists = m->exists("jsmith").get0();
+        BOOST_REQUIRE(jsmith_exists);
+        m->drop("jsmith").get();
+        m->drop("role1").get();
+        // JSmith was revoked role1 (simulated by dropping it from Scylla, which is easier),
+        // and his account was deleted. No auto-creation for you, Joe, move on.
+        jsmith_exists = m->exists("jsmith").get0();
+        BOOST_REQUIRE(!jsmith_exists);
+        // JDeer does not exist at all and is not assigned any roles, even in LDAP,
+        // which translates to no auto-creation.
+        bool jdeer_exists = m->exists("jdeer").get0();
+        BOOST_REQUIRE(!jdeer_exists);
+    });
+}
+
 namespace {
 
 shared_ptr<db::config> make_ldap_config() {

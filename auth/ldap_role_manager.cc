@@ -235,7 +235,35 @@ future<role_set> ldap_role_manager::query_all() {
 }
 
 future<bool> ldap_role_manager::exists(std::string_view role_name) {
-    return _std_mgr.exists(role_name);
+    return _std_mgr.exists(role_name).then([this, role_name] (bool exists) {
+        if (exists) {
+            return make_ready_future<bool>(true);
+        }
+        return query_granted(role_name, recursive_role_query::yes).then([this, role_name] (role_set roles) {
+            // A role will get auto-created if it's already assigned any permissions.
+            // The role set will always contains at least a single entry (the role itself),
+            // so auto-creation is only triggered if at least one more external role is assigned.
+            if (roles.size() > 1) {
+                mylog.info("Auto-creating user {}", role_name);
+                return do_with(role_config{}, [this, role_name] (role_config& cfg) {
+                    cfg.can_login = true;
+                    return create(role_name, cfg).then_wrapped([role_name] (future<> f) {
+                        try {
+                            f.get();
+                        } catch (const role_already_exists&) {
+                            // pass, the role must have been created by another session
+                        } catch (...) {
+                            mylog.error("Failed to auto-create role {}: {}", role_name, f.get_exception());
+                            return make_ready_future<bool>(false);
+                        }
+                        return make_ready_future<bool>(true);
+                    });
+                });
+            }
+            mylog.debug("Role {} will not be auto-created", role_name);
+            return make_ready_future<bool>(false);
+        });
+    });
 }
 
 future<bool> ldap_role_manager::is_superuser(std::string_view role_name) {
