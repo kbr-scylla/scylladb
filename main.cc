@@ -1385,7 +1385,7 @@ int main(int ac, char** av) {
                 api::unset_rpc_controller(ctx).get();
             });
 
-            alternator::controller alternator_ctl(gossiper, proxy, mm, sys_dist_ks, cdc_generation_service, qp, service_memory_limiter, *cfg);
+            alternator::controller alternator_ctl(gossiper, proxy, mm, sys_dist_ks, cdc_generation_service, service_memory_limiter, *cfg);
 
             if (cfg->alternator_port() || cfg->alternator_https_port()) {
                 with_scheduling_group(dbcfg.statement_scheduling_group, [&alternator_ctl] () mutable {
@@ -1460,7 +1460,7 @@ int main(int ac, char** av) {
     });
   } catch (...) {
       // reactor may not have been initialized, so can't use logger
-      fprint(std::cerr, "FATAL: Exception during startup, aborting: %s\n", std::current_exception());
+      fmt::print(std::cerr, "FATAL: Exception during startup, aborting: {}\n", std::current_exception());
       return 7; // 1 has a special meaning for upstart
   }
 }

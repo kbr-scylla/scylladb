@@ -204,8 +204,8 @@ static std::vector<gms::inet_address> get_neighbors(database& db,
                 for (const auto& e : dc_endpoints_map) {
                     dcs.push_back(e.first);
                 }
-                throw std::runtime_error(sprint("Unknown data center '%s'. "
-                        "Known data centers: %s", dc, dcs));
+                throw std::runtime_error(fmt::format("Unknown data center '{}'. "
+                        "Known data centers: {}", dc, dcs));
             }
             for (const auto& endpoint : it->second) {
                 dc_endpoints.insert(endpoint);
@@ -260,12 +260,12 @@ static std::vector<gms::inet_address> get_neighbors(database& db,
             auto me = utils::fb_utilities::get_broadcast_address();
             auto others = erm->get_natural_endpoints(tok);
             remove_item(others, me);
-            throw std::runtime_error(sprint("Repair requires at least two "
+            throw std::runtime_error(fmt::format("Repair requires at least two "
                     "endpoints that are neighbors before it can continue, "
-                    "the endpoint used for this repair is %s, other "
-                    "available neighbors are %s but these neighbors were not "
+                    "the endpoint used for this repair is {}, other "
+                    "available neighbors are {} but these neighbors were not "
                     "part of the supplied list of hosts to use during the "
-                    "repair (%s).", me, others, hosts));
+                    "repair ({}).", me, others, hosts));
         }
     } else if (!ignore_nodes.empty()) {
         auto it = std::remove_if(ret.begin(), ret.end(), [&ignore_nodes] (const gms::inet_address& node) {
@@ -1067,26 +1067,31 @@ int repair_service::do_repair_start(sstring keyspace, std::unordered_map<sstring
     if (!options.start_token.empty() || !options.end_token.empty()) {
         // Intersect the list of local ranges with the given token range,
         // dropping ranges with no intersection.
-        // We don't have a range::intersect() method, but we can use
-        // range::subtract() and subtract the complement range.
         std::optional<::range<dht::token>::bound> tok_start;
         std::optional<::range<dht::token>::bound> tok_end;
         if (!options.start_token.empty()) {
             tok_start = ::range<dht::token>::bound(
                 dht::token::from_sstring(options.start_token),
-                true);
+                false);
         }
         if (!options.end_token.empty()) {
             tok_end = ::range<dht::token>::bound(
                 dht::token::from_sstring(options.end_token),
-                false);
+                true);
         }
-        dht::token_range given_range_complement(tok_end, tok_start);
+        auto wrange = wrapping_range<dht::token>(tok_start, tok_end);
+        dht::token_range_vector given_ranges;
+        ::compat::unwrap_into(std::move(wrange), dht::token_comparator(), [&] (dht::token_range&& x) {
+            given_ranges.push_back(std::move(x));
+        });
         dht::token_range_vector intersections;
         for (const auto& range : ranges) {
-            auto rs = range.subtract(given_range_complement,
-                    dht::token_comparator());
-            intersections.insert(intersections.end(), rs.begin(), rs.end());
+            for (const auto& given_range : given_ranges) {
+                auto intersection_opt = range.intersection(given_range, dht::token_comparator());
+                if (intersection_opt) {
+                    intersections.push_back(*intersection_opt);
+                }
+            }
         }
         ranges = std::move(intersections);
     }

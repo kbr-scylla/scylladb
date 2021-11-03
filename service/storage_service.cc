@@ -77,6 +77,7 @@
 #include "service/priority_manager.hh"
 #include "utils/generation-number.hh"
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/maybe_yield.hh>
 #include "utils/stall_free.hh"
 #include "audit/audit.hh"
 #include "service/qos/service_level_controller.hh"
@@ -684,7 +685,7 @@ void storage_service::bootstrap() {
      }
     } else {
         // Wait until we know tokens of existing node before announcing replacing status.
-        set_mode(mode::JOINING, sprint("Wait until local node knows tokens of peer nodes"), true);
+        set_mode(mode::JOINING, fmt::format("Wait until local node knows tokens of peer nodes"), true);
         _gossiper.wait_for_range_setup().get();
         auto replace_addr = _db.local().get_replace_address();
         if (replace_addr) {
@@ -1505,7 +1506,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
             _gossiper.check_snitch_name_matches();
             auto addr = get_broadcast_address();
             if (!_gossiper.is_safe_for_bootstrap(addr)) {
-                throw std::runtime_error(sprint("A node with address %s already exists, cancelling join. "
+                throw std::runtime_error(fmt::format("A node with address {} already exists, cancelling join. "
                     "Use replace_address if you want to replace this node.", addr));
             }
             if (_db.local().get_config().consistent_rangemovement()) {
@@ -3153,7 +3154,7 @@ future<> storage_service::move(token new_token) {
     });
 }
 
-std::vector<storage_service::token_range_endpoints>
+future<std::vector<storage_service::token_range_endpoints>>
 storage_service::describe_ring(const sstring& keyspace, bool include_only_local_dc) const {
     std::vector<token_range_endpoints> ranges;
     //Token.TokenFactory tf = getPartitioner().getTokenFactory();
@@ -3182,6 +3183,7 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
             tr._endpoint_details.push_back(details);
         }
         ranges.push_back(tr);
+        co_await coroutine::maybe_yield();
     }
     // Convert to wrapping ranges
     auto left_inf = boost::find_if(ranges, [] (const token_range_endpoints& tr) {
@@ -3199,7 +3201,7 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
         left_inf->_start_token = std::move(right_inf->_start_token);
         ranges.erase(right_inf);
     }
-    return ranges;
+    co_return ranges;
 }
 
 std::unordered_map<dht::token_range, inet_address_vector_replica_set>

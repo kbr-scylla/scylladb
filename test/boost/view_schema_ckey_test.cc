@@ -61,9 +61,9 @@ SEASTAR_TEST_CASE(test_clustering_key_eq_restrictions) {
     return do_with_cql_env_thread([] (auto& e) {
         for (auto&& pk : {"((a, b), c)", "((b, a), c)", "(a, b, c)", "(c, b, a)", "((c, a), b)"}) {
             e.execute_cql("create table cf (a int, b int, c int, d int, primary key (a, b, c))").get();
-            e.execute_cql(sprint("create materialized view vcf as select * from cf "
+            e.execute_cql(fmt::format("create materialized view vcf as select * from cf "
                                  "where a is not null and b = 1 and c is not null "
-                                 "primary key %s", pk)).get();
+                                 "primary key {}", pk)).get();
 
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 0, 0)").get();
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 1, 0)").get();
@@ -138,9 +138,9 @@ SEASTAR_TEST_CASE(test_clustering_key_slice_restrictions) {
     return do_with_cql_env_thread([] (auto& e) {
         for (auto&& pk : {"((a, b), c)", "((b, a), c)", "(a, b, c)", "(c, b, a)", "((c, a), b)"}) {
             e.execute_cql("create table cf (a int, b int, c int, d int, primary key (a, b, c))").get();
-            e.execute_cql(sprint("create materialized view vcf as select * from cf "
+            e.execute_cql(fmt::format("create materialized view vcf as select * from cf "
                                  "where a is not null and b >= 1 and c is not null "
-                                 "primary key %s", pk)).get();
+                                 "primary key {}", pk)).get();
 
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 0, 0)").get();
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 1, 0)").get();
@@ -216,9 +216,9 @@ SEASTAR_TEST_CASE(test_clustering_key_in_restrictions) {
     return do_with_cql_env_thread([] (auto& e) {
         for (auto&& pk : {"((a, b), c)", "((b, a), c)", "(a, b, c)", "(c, b, a)", "((c, a), b)"}) {
             e.execute_cql("create table cf (a int, b int, c int, d int, primary key (a, b, c))").get();
-            e.execute_cql(sprint("create materialized view vcf as select * from cf "
+            e.execute_cql(fmt::format("create materialized view vcf as select * from cf "
                                  "where a is not null and b IN (1, 2) and c is not null "
-                                 "primary key %s", pk)).get();
+                                 "primary key {}", pk)).get();
 
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 0, 0)").get();
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 1, 0)").get();
@@ -293,9 +293,9 @@ SEASTAR_TEST_CASE(test_clustering_key_multi_column_restrictions) {
     return do_with_cql_env_thread([] (auto& e) {
         for (auto&& pk : {"((a, b), c)", "((b, a), c)", "(a, b, c)", "(c, b, a)", "((c, a), b)"}) {
             e.execute_cql("create table cf (a int, b int, c int, d int, primary key (a, b, c))").get();
-            e.execute_cql(sprint("create materialized view vcf as select * from cf "
+            e.execute_cql(fmt::format("create materialized view vcf as select * from cf "
                                  "where a is not null and (b, c) >= (1, 0) "
-                                 "primary key %s", pk)).get();
+                                 "primary key {}", pk)).get();
 
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 0, 0)").get();
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 1, 0)").get();
@@ -371,9 +371,9 @@ SEASTAR_TEST_CASE(test_clustering_key_filtering_restrictions) {
     return do_with_cql_env_thread([] (auto& e) {
         for (auto&& pk : {"((a, b), c)", "((b, a), c)", "(a, b, c)", "(c, b, a)", "((c, a), b)"}) {
             e.execute_cql("create table cf (a int, b int, c int, d int, primary key (a, b, c))").get();
-            e.execute_cql(sprint("create materialized view vcf as select * from cf "
+            e.execute_cql(fmt::format("create materialized view vcf as select * from cf "
                                  "where a is not null and b is not null and c = 1 "
-                                 "primary key %s", pk)).get();
+                                 "primary key {}", pk)).get();
 
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 0, 0)").get();
             e.execute_cql("insert into cf (a, b, c, d) values (0, 0, 1, 0)").get();

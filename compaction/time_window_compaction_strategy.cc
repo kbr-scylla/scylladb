@@ -21,6 +21,8 @@
 
 namespace sstables {
 
+extern logging::logger clogger;
+
 time_window_compaction_strategy_options::time_window_compaction_strategy_options(const std::map<sstring, sstring>& options) {
     std::chrono::seconds window_unit = DEFAULT_COMPACTION_WINDOW_UNIT;
     int window_size = DEFAULT_COMPACTION_WINDOW_SIZE;
@@ -135,18 +137,11 @@ time_window_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         offstrategy_threshold = max_sstables;
     }
 
-    if (mode == reshape_mode::strict) {
-        std::sort(input.begin(), input.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
-            return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
-        });
-        // All sstables can be compacted at once if they're disjoint, given that partitioned set
-        // will incrementally open sstables which translates into bounded memory usage.
-        if (sstable_set_overlapping_count(schema, input) == 0) {
-            compaction_descriptor desc(std::move(input), std::optional<sstables::sstable_set>(), iop);
-            desc.options = compaction_type_options::make_reshape();
-            return desc;
-        }
-    }
+    // Sort input sstables by first_key order
+    // to allow efficient reshaping of disjoint sstables.
+    std::sort(input.begin(), input.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
+        return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
+    });
 
     for (auto& sst : input) {
         auto min = sst->get_stats_metadata().min_timestamp;
@@ -158,9 +153,20 @@ time_window_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         }
     }
 
+    clogger.debug("time_window_compaction_strategy::get_reshaping_job: offstrategy_threshold={} max_sstables={} multi_window={} disjoint={} single_window={} disjoint={}",
+            offstrategy_threshold, max_sstables,
+            multi_window.size(), !multi_window.empty() && sstable_set_overlapping_count(schema, multi_window) == 0,
+            single_window.size(), !single_window.empty() && sstable_set_overlapping_count(schema, single_window) == 0);
+
+    auto need_trimming = [max_sstables, schema] (const std::vector<shared_sstable>& ssts) {
+        // All sstables can be compacted at once if they're disjoint, given that partitioned set
+        // will incrementally open sstables which translates into bounded memory usage.
+        return ssts.size() > max_sstables && sstable_set_overlapping_count(schema, ssts) != 0;
+    };
+
     if (!multi_window.empty()) {
         // Everything that spans multiple windows will need reshaping
-        if (multi_window.size() > max_sstables) {
+        if (need_trimming(multi_window)) {
             // When trimming, let's keep sstables with overlapping time window, so as to reduce write amplification.
             // For example, if there are N sstables spanning window W, where N <= 32, then we can produce all data for W
             // in a single compaction round, removing the need to later compact W to reduce its number of files.
@@ -175,15 +181,29 @@ time_window_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
     }
 
     // For things that don't span multiple windows, we compact windows that are individually too big
+    auto all_disjoint = !single_window.empty() && !sstable_set_overlapping_count(schema, single_window);
     auto all_buckets = get_buckets(single_window, _options);
+    single_window.clear();
     for (auto& pair : all_buckets.first) {
         auto ssts = std::move(pair.second);
         if (ssts.size() >= offstrategy_threshold) {
-            ssts.resize(std::min(ssts.size(), max_sstables));
-            compaction_descriptor desc(std::move(ssts), std::optional<sstables::sstable_set>(), iop);
-            desc.options = compaction_type_options::make_reshape();
-            return desc;
+            clogger.debug("time_window_compaction_strategy::get_reshaping_job: bucket={} bucket_size={}", pair.first, ssts.size());
+            if (all_disjoint) {
+                std::copy(ssts.begin(), ssts.end(), std::back_inserter(single_window));
+                continue;
+            }
+            auto end_it = ssts.end();
+            if (need_trimming(ssts)) {
+                end_it = ssts.begin() + max_sstables;
+            }
+            std::copy(ssts.begin(), end_it, std::back_inserter(single_window));
+            break;
         }
+    }
+    if (!single_window.empty()) {
+        compaction_descriptor desc(std::move(single_window), std::optional<sstables::sstable_set>(), iop);
+        desc.options = compaction_type_options::make_reshape();
+        return desc;
     }
 
     return compaction_descriptor();
@@ -209,14 +229,11 @@ time_window_compaction_strategy::get_sstables_for_compaction(column_family& cf, 
     }
 
     if (!expired.empty()) {
-        auto is_expired = [&] (const shared_sstable& s) { return expired.contains(s); };
-        candidates.erase(boost::remove_if(candidates, is_expired), candidates.end());
+        clogger.debug("Going to compact {} expired sstables", expired.size());
+        return compaction_descriptor(has_only_fully_expired::yes, std::vector<shared_sstable>(expired.begin(), expired.end()), cf.get_sstable_set(), service::get_local_compaction_priority());
     }
 
     auto compaction_candidates = get_next_non_expired_sstables(cf, std::move(candidates), gc_before);
-    if (!expired.empty()) {
-        compaction_candidates.insert(compaction_candidates.end(), expired.begin(), expired.end());
-    }
     return compaction_descriptor(std::move(compaction_candidates), cf.get_sstable_set(), service::get_local_compaction_priority());
 }
 

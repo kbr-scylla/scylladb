@@ -18,7 +18,7 @@ template <typename Ex, typename... Args>
 Ex
 make_exception(const char* fmt, Args&&... args) {
     Ex ex;
-    ex.why = sprint(fmt, std::forward<Args>(args)...);
+    ex.why = fmt::format(fmt, std::forward<Args>(args)...);
     return ex;
 }
 
