@@ -1016,6 +1016,7 @@ scylla_core = (['database.cc',
                 'utils/ascii.cc',
                 'utils/like_matcher.cc',
                 'utils/error_injection.cc',
+                'utils/build_id.cc',
                 'mutation_writer/timestamp_based_splitting_writer.cc',
                 'mutation_writer/shard_based_splitting_writer.cc',
                 'mutation_writer/partition_based_splitting_writer.cc',
@@ -1025,6 +1026,7 @@ scylla_core = (['database.cc',
                 'service/raft/schema_raft_state_machine.cc',
                 'service/raft/raft_sys_table_storage.cc',
                 'serializer.cc',
+                'release.cc',
                 'service/raft/raft_rpc.cc',
                 'service/raft/raft_gossip_failure_detector.cc',
                 'service/raft/raft_group_registry.cc',
@@ -1154,7 +1156,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc']
 
 deps = {
-    'scylla': idls + ['main.cc', 'release.cc', 'utils/build_id.cc'] + scylla_core + api + alternator + redis,
+    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis,
     'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
     #FIXME: we don't need all of scylla_core here, only the types module, need to modularize scylla_core.
     'tools/scylla-types': idls + ['tools/scylla-types.cc'] + scylla_core,
@@ -1262,8 +1264,8 @@ deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_t
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
 deps['test/boost/anchorless_list_test'] = ['test/boost/anchorless_list_test.cc']
-deps['test/perf/perf_fast_forward'] += ['release.cc', 'test/perf/linux-perf-event.cc']
-deps['test/perf/perf_simple_query'] += ['release.cc', 'test/perf/perf.cc', 'test/perf/linux-perf-event.cc', 'test/lib/alternator_test_env.cc'] + alternator
+deps['test/perf/perf_fast_forward'] += ['test/perf/linux-perf-event.cc']
+deps['test/perf/perf_simple_query'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc', 'test/lib/alternator_test_env.cc'] + alternator
 deps['test/perf/perf_row_cache_reads'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
 deps['test/perf/perf_row_cache_update'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
 deps['test/boost/reusable_buffer_test'] = [
@@ -1584,6 +1586,7 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DSeastar_CXX_DIALECT=gnu++20',
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
+        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
     ] + distro_extra_cmake_args
 
     if args.stack_guards is not None:
@@ -1650,6 +1653,7 @@ def configure_abseil(build_dir, mode, mode_config):
         '-DCMAKE_C_COMPILER={}'.format(args.cc),
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_CXX_FLAGS_{}={}'.format(cmake_mode.upper(), abseil_cflags),
+        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
     ] + distro_extra_cmake_args
 
     abseil_cmd = ['cmake', '-G', 'Ninja', real_relpath('abseil', abseil_build_dir)] + abseil_cmake_args
@@ -2215,7 +2219,7 @@ with open(buildfile_tmp, 'w') as f:
             command = ./dist/debian/debian_files_gen.py
         build $builddir/debian/debian: debian_files_gen | always
         rule extract_node_exporter
-            command = tar -C build -xvpf {node_exporter_filename} && rm -rfv build/node_exporter && mv -v build/{node_exporter_dirname} build/node_exporter
+            command = tar -C build -xvpf {node_exporter_filename} --no-same-owner && rm -rfv build/node_exporter && mv -v build/{node_exporter_dirname} build/node_exporter
         build $builddir/node_exporter: extract_node_exporter | always
         rule print_help
              command = ./scripts/build-help.sh
@@ -2223,3 +2227,23 @@ with open(buildfile_tmp, 'w') as f:
         ''').format(**globals()))
 
 os.rename(buildfile_tmp, buildfile)
+
+# create compdbs
+compdb = 'compile_commands.json'
+for mode in selected_modes:
+    mode_out = outdir + '/' + mode
+    submodule_compdbs = [mode_out + '/' + sm + '/' + compdb
+                         for sm in ['abseil', 'seastar']]
+    subprocess.run(['/bin/sh', '-c',
+                    ninja + ' -t compdb ' +
+                    '| ./scripts/merge-compdb.py build/' + mode + ' - ' +
+                    ' '.join(submodule_compdbs) +
+                    '> ' + mode_out + '/' + compdb])
+# make sure there is a valid compile_commands.json link in the source root
+if not os.path.exists(compdb):
+    # sort modes by supposed indexing speed
+    for mode in ['dev', 'debug', 'release', 'sanitize']:
+        compdb_target = outdir + '/' + mode + '/' + compdb
+        if os.path.exists(compdb_target):
+            os.symlink(compdb_target, compdb)
+            break

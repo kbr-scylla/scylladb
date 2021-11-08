@@ -567,8 +567,8 @@ future<> distributed_loader::init_system_keyspace(distributed<database>& db, dis
     population_started = true;
 
     return seastar::async([&db, &ss] {
-        db.invoke_on_all([&ss] (database& db) {
-            return db::system_keyspace::make(db, ss.local());
+        db.invoke_on_all([&db, &ss] (database&) {
+            return db::system_keyspace::make(db, ss);
         }).get();
 
         const auto& cfg = db.local().get_config();

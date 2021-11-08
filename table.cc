@@ -596,8 +596,9 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
         auto metadata = mutation_source_metadata{};
         metadata.min_timestamp = old->get_min_timestamp();
         metadata.max_timestamp = old->get_max_timestamp();
+        auto estimated_partitions = _compaction_strategy.adjust_partition_estimate(metadata, old->partition_count());
 
-        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs] (flat_mutation_reader reader) mutable {
+        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader reader) mutable {
             auto&& priority = service::get_local_memtable_flush_priority();
             sstables::sstable_writer_config cfg = get_sstables_manager().configure_writer("memtable");
             cfg.backup = incremental_backups_enabled();
@@ -609,10 +610,8 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             auto monitor = database_sstable_write_monitor(permit, newtab, _compaction_strategy,
                 old->get_max_timestamp());
 
-            return do_with(std::move(monitor), [newtab, cfg = std::move(cfg), old, reader = std::move(reader), &priority] (auto& monitor) mutable {
-                // FIXME: certain writers may receive only a small subset of the partitions, so bloom filters will be
-                // bigger than needed, due to overestimation. That's eventually adjusted through compaction, though.
-                return write_memtable_to_sstable(std::move(reader), *old, newtab, monitor, cfg, priority);
+            return do_with(std::move(monitor), [newtab, cfg = std::move(cfg), old, reader = std::move(reader), &priority, estimated_partitions] (auto& monitor) mutable {
+                return write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg, priority);
             });
         });
 
@@ -906,15 +905,15 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
 }
 
 future<>
-table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& info) {
+table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata) {
     if (!descriptor.sstables.size()) {
         // if there is nothing to compact, just return.
         return make_ready_future<>();
     }
 
     descriptor.creator = [this] (shard_id dummy) {
-            auto sst = make_sstable();
-            return sst;
+        auto sst = make_sstable();
+        return sst;
     };
     descriptor.replacer = [this, release_exhausted = descriptor.release_exhausted] (sstables::compaction_completion_desc desc) {
         _compaction_strategy.notify_completion(desc.old_sstables, desc.new_sstables);
@@ -927,7 +926,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::co
     auto compaction_type = descriptor.options.type();
     auto start_size = boost::accumulate(descriptor.sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
 
-    return sstables::compact_sstables(std::move(descriptor), info, *this).then([this, &info, compaction_type, start_size] (sstables::compaction_result res) {
+    return sstables::compact_sstables(std::move(descriptor), cdata, *this).then([this, &cdata, compaction_type, start_size] (sstables::compaction_result res) {
         if (compaction_type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
         }
@@ -941,7 +940,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::co
         // shows how many sstables each row is merged from. This information
         // cannot be accessed until we make combined_reader more generic,
         // for example, by adding a reducer method.
-        return db::system_keyspace::update_compaction_history(info.compaction_uuid, _schema->ks_name(), _schema->cf_name(), ended_at,
+        return db::system_keyspace::update_compaction_history(cdata.compaction_uuid, _schema->ks_name(), _schema->cf_name(), ended_at,
             start_size, res.end_size, std::unordered_map<int32_t, int64_t>{});
     });
 }
@@ -949,7 +948,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::co
 // Note: We assume that the column_family does not get destroyed during compaction.
 future<>
 table::compact_all_sstables() {
-    return _compaction_manager.submit_major_compaction(this);
+    return _compaction_manager.perform_major_compaction(this);
 }
 
 void table::start_compaction() {
@@ -1906,6 +1905,7 @@ table::apply(const frozen_mutation& m, const schema_ptr& m_schema, db::rp_handle
 future<>
 write_memtable_to_sstable(flat_mutation_reader reader,
                           memtable& mt, sstables::shared_sstable sst,
+                          size_t estimated_partitions,
                           sstables::write_monitor& monitor,
                           sstables::sstable_writer_config& cfg,
                           const io_priority_class& pc) {
@@ -1913,7 +1913,7 @@ write_memtable_to_sstable(flat_mutation_reader reader,
     cfg.monitor = &monitor;
     cfg.origin = "memtable";
     schema_ptr s = reader.schema();
-    return sst->write_components(std::move(reader), mt.partition_count(), s, cfg, mt.get_encoding_stats(), pc);
+    return sst->write_components(std::move(reader), estimated_partitions, s, cfg, mt.get_encoding_stats(), pc);
 }
 
 future<>
@@ -1921,7 +1921,7 @@ write_memtable_to_sstable(reader_permit permit, memtable& mt, sstables::shared_s
                           sstables::write_monitor& monitor,
                           sstables::sstable_writer_config& cfg,
                           const io_priority_class& pc) {
-    return write_memtable_to_sstable(mt.make_flush_reader(mt.schema(), std::move(permit), pc), mt, std::move(sst), monitor, cfg, pc);
+    return write_memtable_to_sstable(mt.make_flush_reader(mt.schema(), std::move(permit), pc), mt, std::move(sst), mt.partition_count(), monitor, cfg, pc);
 }
 
 future<>

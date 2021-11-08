@@ -63,7 +63,7 @@ private:
         sstables::compaction_type type = sstables::compaction_type::Compaction;
         bool compaction_running = false;
         utils::UUID output_run_identifier;
-        lw_shared_ptr<sstables::compaction_data> compaction_data = make_lw_shared<sstables::compaction_data>();
+        sstables::compaction_data compaction_data;
 
         explicit task(column_family* cf, sstables::compaction_type type) : compacting_cf(cf), type(type) {}
 
@@ -124,8 +124,11 @@ private:
 private:
     future<> task_stop(lw_shared_ptr<task> task, sstring reason);
 
-    // Return true if weight is not registered.
-    bool can_register_weight(column_family* cf, int weight) const;
+    // Return the largest fan-in of currently running compactions
+    unsigned current_compaction_fan_in_threshold() const;
+
+    // Return true if compaction can be initiated
+    bool can_register_compaction(column_family* cf, int weight, unsigned fan_in) const;
     // Register weight for a column family. Do that only if can_register_weight()
     // returned true.
     void register_weight(int weight);
@@ -219,7 +222,7 @@ public:
     future<> perform_sstable_scrub(column_family* cf, sstables::compaction_type_options::scrub::mode scrub_mode);
 
     // Submit a column family for major compaction.
-    future<> submit_major_compaction(column_family* cf);
+    future<> perform_major_compaction(column_family* cf);
 
 
     // Run a custom job for a given column family, defined by a function
@@ -262,7 +265,7 @@ public:
     // Propagate replacement of sstables to all ongoing compaction of a given column family
     void propagate_replacement(column_family*cf, const std::vector<sstables::shared_sstable>& removed, const std::vector<sstables::shared_sstable>& added);
 
-    static lw_shared_ptr<sstables::compaction_data> create_compaction_data(column_family& cf, sstables::compaction_type type);
+    static sstables::compaction_data create_compaction_data();
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;

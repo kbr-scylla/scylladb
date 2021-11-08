@@ -315,7 +315,7 @@ schema::raw_schema::raw_schema(utils::UUID id)
     , _sharder(::get_sharder(smp::count, default_partitioner_ignore_msb))
 { }
 
-schema::schema(const raw_schema& raw, std::optional<raw_view_info> raw_view_info)
+schema::schema(private_tag, const raw_schema& raw, std::optional<raw_view_info> raw_view_info)
     : _raw(raw)
     , _offsets([this] {
         if (_raw._columns.size() > std::numeric_limits<column_count_type>::max()) {
@@ -963,6 +963,32 @@ schema_builder::schema_builder(const schema::raw_schema& raw)
     }
 }
 
+schema_builder::schema_builder(
+        std::optional<utils::UUID> id,
+        std::string_view ks_name,
+        std::string_view cf_name,
+        std::vector<schema::column> partition_key,
+        std::vector<schema::column> clustering_key,
+        std::vector<schema::column> regular_columns,
+        std::vector<schema::column> static_columns,
+        data_type regular_column_name_type,
+        sstring comment)
+    : schema_builder(ks_name, cf_name, std::move(id), std::move(regular_column_name_type)) {
+    for (auto&& column : partition_key) {
+        with_column(std::move(column.name), std::move(column.type), column_kind::partition_key);
+    }
+    for (auto&& column : clustering_key) {
+        with_column(std::move(column.name), std::move(column.type), column_kind::clustering_key);
+    }
+    for (auto&& column : regular_columns) {
+        with_column(std::move(column.name), std::move(column.type));
+    }
+    for (auto&& column : static_columns) {
+        with_column(std::move(column.name), std::move(column.type), column_kind::static_column);
+    }
+    set_comment(comment);
+}
+
 column_definition& schema_builder::find_column(const cql3::column_identifier& c) {
     auto i = std::find_if(_raw._columns.begin(), _raw._columns.end(), [c](auto& p) {
         return p.name() == c.name();
@@ -1011,7 +1037,8 @@ schema_builder& schema_builder::remove_column(bytes name)
     if(it == _raw._columns.end()) {
         throw std::out_of_range(format("Cannot remove: column {} not found.", name));
     }
-    without_column(it->name_as_text(), it->type, api::new_timestamp());
+    auto name_as_text = it->column_specification ? it->name_as_text() : schema::column_name_type(*it, _raw._regular_column_name_type)->get_string(it->name());
+    without_column(name_as_text, it->type, api::new_timestamp());
     _raw._columns.erase(it);
     return *this;
 }
@@ -1218,7 +1245,7 @@ schema_ptr schema_builder::build() {
             dynamic_pointer_cast<db::paxos_grace_seconds_extension>(it->second)->get_paxos_grace_seconds();
     }
 
-    return make_lw_shared<schema>(schema(new_raw, _view_info));
+    return make_lw_shared<schema>(schema::private_tag{}, new_raw, _view_info);
 }
 
 const cdc::options& schema::cdc_options() const {
@@ -1414,11 +1441,16 @@ schema::static_upper_bound(const bytes& name) const {
     return boost::upper_bound(static_columns(), name, column_less_comparator());
 }
 data_type
-schema::column_name_type(const column_definition& def) const {
+schema::column_name_type(const column_definition& def, const data_type& regular_column_name_type) {
     if (def.kind == column_kind::regular_column) {
-        return _raw._regular_column_name_type;
+        return regular_column_name_type;
     }
     return utf8_type;
+}
+
+data_type
+schema::column_name_type(const column_definition& def) const {
+    return column_name_type(def, _raw._regular_column_name_type);
 }
 
 const column_definition&
@@ -1619,7 +1651,7 @@ column_computation_ptr column_computation::deserialize(bytes_view raw) {
 
 bytes legacy_token_column_computation::serialize() const {
     rjson::value serialized = rjson::empty_object();
-    rjson::set(serialized, "type", rjson::from_string("token"));
+    rjson::add(serialized, "type", rjson::from_string("token"));
     return to_bytes(rjson::print(serialized));
 }
 
@@ -1629,7 +1661,7 @@ bytes_opt legacy_token_column_computation::compute_value(const schema& schema, c
 
 bytes token_column_computation::serialize() const {
     rjson::value serialized = rjson::empty_object();
-    rjson::set(serialized, "type", rjson::from_string("token_v2"));
+    rjson::add(serialized, "type", rjson::from_string("token_v2"));
     return to_bytes(rjson::print(serialized));
 }
 

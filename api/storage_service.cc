@@ -155,19 +155,25 @@ future<json::json_return_type> set_tables_autocompaction(http_context& ctx, serv
 
 void set_transport_controller(http_context& ctx, routes& r, cql_transport::controller& ctl) {
     ss::start_native_transport.set(r, [&ctl](std::unique_ptr<request> req) {
-        return ctl.start_server().then([] {
+        return smp::submit_to(0, [&] {
+            return ctl.start_server();
+        }).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
 
     ss::stop_native_transport.set(r, [&ctl](std::unique_ptr<request> req) {
-        return ctl.stop_server().then([] {
+        return smp::submit_to(0, [&] {
+            return ctl.request_stop_server();
+        }).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
 
     ss::is_native_transport_running.set(r, [&ctl] (std::unique_ptr<request> req) {
-        return ctl.is_server_running().then([] (bool running) {
+        return smp::submit_to(0, [&] {
+            return !ctl.listen_addresses().empty();
+        }).then([] (bool running) {
             return make_ready_future<json::json_return_type>(running);
         });
     });
@@ -181,19 +187,25 @@ void unset_transport_controller(http_context& ctx, routes& r) {
 
 void set_rpc_controller(http_context& ctx, routes& r, thrift_controller& ctl) {
     ss::stop_rpc_server.set(r, [&ctl](std::unique_ptr<request> req) {
-        return ctl.stop_server().then([] {
+        return smp::submit_to(0, [&] {
+            return ctl.request_stop_server();
+        }).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
 
     ss::start_rpc_server.set(r, [&ctl](std::unique_ptr<request> req) {
-        return ctl.start_server().then([] {
+        return smp::submit_to(0, [&] {
+            return ctl.start_server();
+        }).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });
 
     ss::is_rpc_server_running.set(r, [&ctl] (std::unique_ptr<request> req) {
-        return ctl.is_server_running().then([] (bool running) {
+        return smp::submit_to(0, [&] {
+            return !ctl.listen_addresses().empty();
+        }).then([] (bool running) {
             return make_ready_future<json::json_return_type>(running);
         });
     });
@@ -274,7 +286,7 @@ void set_repair(http_context& ctx, routes& r, sharded<repair_service>& repair) {
             try {
                 res = fut.get0();
             } catch (std::exception& e) {
-                return make_exception_future<json::json_return_type>(httpd::server_error_exception(e.what()));
+                return make_exception_future<json::json_return_type>(httpd::bad_param_exception(e.what()));
             }
             return make_ready_future<json::json_return_type>(json::json_return_type(res));
         });

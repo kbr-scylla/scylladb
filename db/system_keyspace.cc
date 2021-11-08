@@ -34,6 +34,7 @@
 #include <boost/range/adaptor/map.hpp>
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/reactor.hh>
 #include "system_keyspace.hh"
 #include "types.hh"
 #include "service/storage_proxy.hh"
@@ -75,6 +76,7 @@
 #include "service/storage_service.hh"
 #include "gms/gossiper.hh"
 #include "service/paxos/paxos_state.hh"
+#include "utils/build_id.hh"
 
 #include "idl/frozen_mutation.dist.hh"
 #include "serializer_impl.hh"
@@ -122,7 +124,7 @@ table_schema_version system_keyspace::generate_schema_version(utils::UUID table_
 
 schema_ptr system_keyspace::hints() {
     static thread_local auto hints = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, HINTS), NAME, HINTS,
+        schema_builder builder(generate_legacy_id(NAME, HINTS), NAME, HINTS,
         // partition key
         {{"target_id", uuid_type}},
         // clustering key
@@ -135,7 +137,7 @@ schema_ptr system_keyspace::hints() {
         utf8_type,
         // comment
         "hints awaiting delivery"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.set_compaction_strategy_options({{ "enabled", "false" }});
        builder.with_version(generate_schema_version(builder.uuid()));
@@ -146,7 +148,7 @@ schema_ptr system_keyspace::hints() {
 
 schema_ptr system_keyspace::batchlog() {
     static thread_local auto batchlog = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, BATCHLOG), NAME, BATCHLOG,
+        schema_builder builder(generate_legacy_id(NAME, BATCHLOG), NAME, BATCHLOG,
         // partition key
         {{"id", uuid_type}},
         // clustering key
@@ -162,7 +164,7 @@ schema_ptr system_keyspace::batchlog() {
         // FIXME: the original Java code also had:
         // operations on resulting CFMetaData:
         //    .compactionStrategyOptions(Collections.singletonMap("min_threshold", "2"))
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -173,7 +175,7 @@ schema_ptr system_keyspace::batchlog() {
 /*static*/ schema_ptr system_keyspace::paxos() {
     static thread_local auto paxos = [] {
         // FIXME: switch to the new schema_builder interface (with_column(...), etc)
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, PAXOS), NAME, PAXOS,
+        schema_builder builder(generate_legacy_id(NAME, PAXOS), NAME, PAXOS,
         // partition key
         {{"row_key", bytes_type}}, // byte representation of a row key that hashes to the same token as original
         // clustering key
@@ -195,7 +197,7 @@ schema_ptr system_keyspace::batchlog() {
         // FIXME: the original Java code also had:
         // operations on resulting CFMetaData:
         //    .compactionStrategyClass(LeveledCompactionStrategy.class);
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        builder.set_wait_for_sync_to_commitlog(true);
@@ -276,7 +278,7 @@ schema_ptr system_keyspace::raft_config() {
 
 schema_ptr system_keyspace::built_indexes() {
     static thread_local auto built_indexes = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, BUILT_INDEXES), NAME, BUILT_INDEXES,
+        schema_builder builder(generate_legacy_id(NAME, BUILT_INDEXES), NAME, BUILT_INDEXES,
         // partition key
         {{"table_name", utf8_type}}, // table_name here is the name of the keyspace - don't be fooled
         // clustering key
@@ -289,7 +291,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "built column indexes"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::yes);
@@ -299,7 +301,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::local() {
     static thread_local auto local = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, LOCAL), NAME, LOCAL,
+        schema_builder builder(generate_legacy_id(NAME, LOCAL), NAME, LOCAL,
         // partition key
         {{"key", utf8_type}},
         // clustering key
@@ -336,7 +338,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "information about the local node"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        builder.remove_column("scylla_cpu_sharding_algorithm");
@@ -349,7 +351,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::peers() {
     static thread_local auto peers = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, PEERS), NAME, PEERS,
+        schema_builder builder(generate_legacy_id(NAME, PEERS), NAME, PEERS,
         // partition key
         {{"peer", inet_addr_type}},
         // clustering key
@@ -372,7 +374,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "information about known peers in the cluster"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -382,7 +384,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::peer_events() {
     static thread_local auto peer_events = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, PEER_EVENTS), NAME, PEER_EVENTS,
+        schema_builder builder(generate_legacy_id(NAME, PEER_EVENTS), NAME, PEER_EVENTS,
         // partition key
         {{"peer", inet_addr_type}},
         // clustering key
@@ -397,7 +399,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "events related to peers"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -407,7 +409,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::range_xfers() {
     static thread_local auto range_xfers = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, RANGE_XFERS), NAME, RANGE_XFERS,
+        schema_builder builder(generate_legacy_id(NAME, RANGE_XFERS), NAME, RANGE_XFERS,
         // partition key
         {{"token_bytes", bytes_type}},
         // clustering key
@@ -420,7 +422,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "ranges requested for transfer"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -430,7 +432,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::compactions_in_progress() {
     static thread_local auto compactions_in_progress = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, COMPACTIONS_IN_PROGRESS), NAME, COMPACTIONS_IN_PROGRESS,
+        schema_builder builder(generate_legacy_id(NAME, COMPACTIONS_IN_PROGRESS), NAME, COMPACTIONS_IN_PROGRESS,
         // partition key
         {{"id", uuid_type}},
         // clustering key
@@ -447,7 +449,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "unfinished compactions"
-        ));
+        );
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -456,7 +458,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::compaction_history() {
     static thread_local auto compaction_history = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, COMPACTION_HISTORY), NAME, COMPACTION_HISTORY,
+        schema_builder builder(generate_legacy_id(NAME, COMPACTION_HISTORY), NAME, COMPACTION_HISTORY,
         // partition key
         {{"id", uuid_type}},
         // clustering key
@@ -476,7 +478,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "week-long compaction history"
-        ));
+        );
         builder.set_default_time_to_live(std::chrono::duration_cast<std::chrono::seconds>(days(7)));
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build(schema_builder::compact_storage::no);
@@ -486,7 +488,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 /*static*/ schema_ptr system_keyspace::sstable_activity() {
     static thread_local auto sstable_activity = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, SSTABLE_ACTIVITY), NAME, SSTABLE_ACTIVITY,
+        schema_builder builder(generate_legacy_id(NAME, SSTABLE_ACTIVITY), NAME, SSTABLE_ACTIVITY,
         // partition key
         {
             {"keyspace_name", utf8_type},
@@ -506,7 +508,7 @@ schema_ptr system_keyspace::built_indexes() {
         utf8_type,
         // comment
         "historic sstable read rates"
-       ));
+       );
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -515,7 +517,7 @@ schema_ptr system_keyspace::built_indexes() {
 
 schema_ptr system_keyspace::size_estimates() {
     static thread_local auto size_estimates = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, SIZE_ESTIMATES), NAME, SIZE_ESTIMATES,
+        schema_builder builder(generate_legacy_id(NAME, SIZE_ESTIMATES), NAME, SIZE_ESTIMATES,
             // partition key
             {{"keyspace_name", utf8_type}},
             // clustering key
@@ -531,7 +533,7 @@ schema_ptr system_keyspace::size_estimates() {
             utf8_type,
             // comment
             "per-table primary range size estimates"
-            ));
+            );
         builder.set_gc_grace_seconds(0);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build(schema_builder::compact_storage::no);
@@ -541,7 +543,7 @@ schema_ptr system_keyspace::size_estimates() {
 
 /*static*/ schema_ptr system_keyspace::large_partitions() {
     static thread_local auto large_partitions = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, LARGE_PARTITIONS), NAME, LARGE_PARTITIONS,
+        schema_builder builder(generate_legacy_id(NAME, LARGE_PARTITIONS), NAME, LARGE_PARTITIONS,
         // partition key
         {{"keyspace_name", utf8_type}, {"table_name", utf8_type}},
         // clustering key
@@ -558,7 +560,7 @@ schema_ptr system_keyspace::size_estimates() {
         utf8_type,
         // comment
         "partitions larger than specified threshold"
-        ));
+        );
         builder.set_gc_grace_seconds(0);
         builder.with_version(generate_schema_version(builder.uuid()));
         // FIXME re-enable caching for this and the other two
@@ -615,7 +617,7 @@ schema_ptr system_keyspace::large_cells() {
 
 /*static*/ schema_ptr system_keyspace::scylla_local() {
     static thread_local auto scylla_local = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, SCYLLA_LOCAL), NAME, SCYLLA_LOCAL,
+        schema_builder builder(generate_legacy_id(NAME, SCYLLA_LOCAL), NAME, SCYLLA_LOCAL,
         // partition key
         {{"key", utf8_type}},
         // clustering key
@@ -630,7 +632,7 @@ schema_ptr system_keyspace::large_cells() {
         utf8_type,
         // comment
         "Scylla specific information about the local node"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -642,7 +644,7 @@ schema_ptr system_keyspace::large_cells() {
   * but without `request_count'. Also CK is different: C* has only (`port'). */
 schema_ptr system_keyspace::clients() {
     thread_local auto clients = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, CLIENTS), NAME, CLIENTS,
+        schema_builder builder(generate_legacy_id(NAME, CLIENTS), NAME, CLIENTS,
             // partition key
             {{"address", inet_addr_type}},
             // clustering key
@@ -666,7 +668,7 @@ schema_ptr system_keyspace::clients() {
             utf8_type,
             // comment
             "list of connected clients"
-            ));
+            );
         builder.set_gc_grace_seconds(0);
         builder.with_version(generate_schema_version(builder.uuid()));
         return builder.build(schema_builder::compact_storage::no);
@@ -678,7 +680,7 @@ const char *const system_keyspace::CLIENTS = "clients";
 
 schema_ptr system_keyspace::v3::batches() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, BATCHES), NAME, BATCHES,
+        schema_builder builder(generate_legacy_id(NAME, BATCHES), NAME, BATCHES,
         // partition key
         {{"id", timeuuid_type}},
         // clustering key
@@ -691,7 +693,7 @@ schema_ptr system_keyspace::v3::batches() {
         utf8_type,
         // comment
         "batches awaiting replay"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        // FIXME: the original Java code also had:
        //.copy(new LocalPartitioner(TimeUUIDType.instance))
@@ -711,7 +713,7 @@ schema_ptr system_keyspace::v3::built_indexes() {
 
 schema_ptr system_keyspace::v3::local() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, LOCAL), NAME, LOCAL,
+        schema_builder builder(generate_legacy_id(NAME, LOCAL), NAME, LOCAL,
         // partition key
         {{"key", utf8_type}},
         // clustering key
@@ -742,7 +744,7 @@ schema_ptr system_keyspace::v3::local() {
         utf8_type,
         // comment
         "information about the local node"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -752,7 +754,7 @@ schema_ptr system_keyspace::v3::local() {
 
 schema_ptr system_keyspace::v3::truncated() {
     static thread_local auto local = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, TRUNCATED), NAME, TRUNCATED,
+        schema_builder builder(generate_legacy_id(NAME, TRUNCATED), NAME, TRUNCATED,
         // partition key
         {{"table_uuid", uuid_type}},
         // clustering key
@@ -770,7 +772,7 @@ schema_ptr system_keyspace::v3::truncated() {
         utf8_type,
         // comment
         "information about table truncation"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -820,7 +822,7 @@ schema_ptr system_keyspace::v3::scylla_local() {
 
 schema_ptr system_keyspace::v3::available_ranges() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, AVAILABLE_RANGES), NAME, AVAILABLE_RANGES,
+        schema_builder builder(generate_legacy_id(NAME, AVAILABLE_RANGES), NAME, AVAILABLE_RANGES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -833,7 +835,7 @@ schema_ptr system_keyspace::v3::available_ranges() {
         utf8_type,
         // comment
         "available keyspace/ranges during bootstrap/replace that are ready to be served"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
@@ -843,7 +845,7 @@ schema_ptr system_keyspace::v3::available_ranges() {
 
 schema_ptr system_keyspace::v3::views_builds_in_progress() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, VIEWS_BUILDS_IN_PROGRESS), NAME, VIEWS_BUILDS_IN_PROGRESS,
+        schema_builder builder(generate_legacy_id(NAME, VIEWS_BUILDS_IN_PROGRESS), NAME, VIEWS_BUILDS_IN_PROGRESS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -856,7 +858,7 @@ schema_ptr system_keyspace::v3::views_builds_in_progress() {
         utf8_type,
         // comment
         "views builds current progress"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
@@ -866,7 +868,7 @@ schema_ptr system_keyspace::v3::views_builds_in_progress() {
 
 schema_ptr system_keyspace::v3::built_views() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, BUILT_VIEWS), NAME, BUILT_VIEWS,
+        schema_builder builder(generate_legacy_id(NAME, BUILT_VIEWS), NAME, BUILT_VIEWS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -879,7 +881,7 @@ schema_ptr system_keyspace::v3::built_views() {
         utf8_type,
         // comment
         "built views"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build();
@@ -905,7 +907,7 @@ schema_ptr system_keyspace::v3::scylla_views_builds_in_progress() {
 
 /*static*/ schema_ptr system_keyspace::v3::cdc_local() {
     static thread_local auto cdc_local = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, CDC_LOCAL), NAME, CDC_LOCAL,
+        schema_builder builder(generate_legacy_id(NAME, CDC_LOCAL), NAME, CDC_LOCAL,
         // partition key
         {{"key", utf8_type}},
         // clustering key
@@ -931,7 +933,7 @@ schema_ptr system_keyspace::v3::scylla_views_builds_in_progress() {
         utf8_type,
         // comment
         "CDC-specific information that the local node stores"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
@@ -941,7 +943,7 @@ schema_ptr system_keyspace::v3::scylla_views_builds_in_progress() {
 
 schema_ptr system_keyspace::legacy::hints() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, HINTS), NAME, HINTS,
+        schema_builder builder(generate_legacy_id(NAME, HINTS), NAME, HINTS,
         // partition key
         {{"target_id", uuid_type}},
         // clustering key
@@ -954,7 +956,7 @@ schema_ptr system_keyspace::legacy::hints() {
         utf8_type,
         // comment
         "*DEPRECATED* hints awaiting delivery"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"enabled", "false"}});
@@ -967,7 +969,7 @@ schema_ptr system_keyspace::legacy::hints() {
 
 schema_ptr system_keyspace::legacy::batchlog() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, BATCHLOG), NAME, BATCHLOG,
+        schema_builder builder(generate_legacy_id(NAME, BATCHLOG), NAME, BATCHLOG,
         // partition key
         {{"id", uuid_type}},
         // clustering key
@@ -980,7 +982,7 @@ schema_ptr system_keyspace::legacy::batchlog() {
         utf8_type,
         // comment
         "*DEPRECATED* batchlog entries"
-       ));
+       );
        builder.set_gc_grace_seconds(0);
        builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
        builder.set_compaction_strategy_options({{"min_threshold", "2"}});
@@ -995,7 +997,7 @@ static constexpr auto schema_gc_grace = std::chrono::duration_cast<std::chrono::
 
 schema_ptr system_keyspace::legacy::keyspaces() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, KEYSPACES), NAME, KEYSPACES,
+        schema_builder builder(generate_legacy_id(NAME, KEYSPACES), NAME, KEYSPACES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1012,7 +1014,7 @@ schema_ptr system_keyspace::legacy::keyspaces() {
         utf8_type,
         // comment
         "*DEPRECATED* keyspace definitions"
-       ));
+       );
        builder.set_gc_grace_seconds(schema_gc_grace);
        builder.with(schema_builder::compact_storage::yes);
        builder.with_version(generate_schema_version(builder.uuid()));
@@ -1023,7 +1025,7 @@ schema_ptr system_keyspace::legacy::keyspaces() {
 
 schema_ptr system_keyspace::legacy::column_families() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, COLUMNFAMILIES), NAME, COLUMNFAMILIES,
+        schema_builder builder(generate_legacy_id(NAME, COLUMNFAMILIES), NAME, COLUMNFAMILIES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1065,7 +1067,7 @@ schema_ptr system_keyspace::legacy::column_families() {
         utf8_type,
         // comment
         "*DEPRECATED* table definitions"
-       ));
+       );
        builder.set_gc_grace_seconds(schema_gc_grace);
        builder.with(schema_builder::compact_storage::no);
        builder.with_version(generate_schema_version(builder.uuid()));
@@ -1076,7 +1078,7 @@ schema_ptr system_keyspace::legacy::column_families() {
 
 schema_ptr system_keyspace::legacy::columns() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, COLUMNS), NAME, COLUMNS,
+        schema_builder builder(generate_legacy_id(NAME, COLUMNS), NAME, COLUMNS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1096,7 +1098,7 @@ schema_ptr system_keyspace::legacy::columns() {
         utf8_type,
         // comment
         "column definitions"
-        ));
+        );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with(schema_builder::compact_storage::no);
         builder.with_version(generate_schema_version(builder.uuid()));
@@ -1107,7 +1109,7 @@ schema_ptr system_keyspace::legacy::columns() {
 
 schema_ptr system_keyspace::legacy::triggers() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, TRIGGERS), NAME, TRIGGERS,
+        schema_builder builder(generate_legacy_id(NAME, TRIGGERS), NAME, TRIGGERS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1122,7 +1124,7 @@ schema_ptr system_keyspace::legacy::triggers() {
         utf8_type,
         // comment
         "trigger definitions"
-        ));
+        );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with(schema_builder::compact_storage::no);
         builder.with_version(generate_schema_version(builder.uuid()));
@@ -1133,7 +1135,7 @@ schema_ptr system_keyspace::legacy::triggers() {
 
 schema_ptr system_keyspace::legacy::usertypes() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, USERTYPES), NAME, USERTYPES,
+        schema_builder builder(generate_legacy_id(NAME, USERTYPES), NAME, USERTYPES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1149,7 +1151,7 @@ schema_ptr system_keyspace::legacy::usertypes() {
         utf8_type,
         // comment
         "user defined type definitions"
-        ));
+        );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with(schema_builder::compact_storage::no);
         builder.with_version(generate_schema_version(builder.uuid()));
@@ -1166,7 +1168,7 @@ schema_ptr system_keyspace::legacy::functions() {
      * installations of that to migrate, rather than our own (if we dont use the table).
      */
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, FUNCTIONS), NAME, FUNCTIONS,
+        schema_builder builder(generate_legacy_id(NAME, FUNCTIONS), NAME, FUNCTIONS,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1186,7 +1188,7 @@ schema_ptr system_keyspace::legacy::functions() {
         utf8_type,
         // comment
         "*DEPRECATED* user defined type definitions"
-        ));
+        );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with(schema_builder::compact_storage::no);
         builder.with_version(generate_schema_version(builder.uuid()));
@@ -1197,7 +1199,7 @@ schema_ptr system_keyspace::legacy::functions() {
 
 schema_ptr system_keyspace::legacy::aggregates() {
     static thread_local auto schema = [] {
-        schema_builder builder(make_shared_schema(generate_legacy_id(NAME, AGGREGATES), NAME, AGGREGATES,
+        schema_builder builder(generate_legacy_id(NAME, AGGREGATES), NAME, AGGREGATES,
         // partition key
         {{"keyspace_name", utf8_type}},
         // clustering key
@@ -1217,7 +1219,7 @@ schema_ptr system_keyspace::legacy::aggregates() {
         utf8_type,
         // comment
         "*DEPRECATED* user defined aggregate definition"
-        ));
+        );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with(schema_builder::compact_storage::no);
         builder.with_version(generate_schema_version(builder.uuid()));
@@ -1846,10 +1848,12 @@ public:
 
 class token_ring_table : public streaming_virtual_table {
 private:
+    database& _db;
     service::storage_service& _ss;
 public:
-    token_ring_table(service::storage_service& ss)
+    token_ring_table(database& db, service::storage_service& ss)
             : streaming_virtual_table(build_schema())
+            , _db(db)
             , _ss(ss)
     {
         _shard_aware = true;
@@ -1894,7 +1898,7 @@ public:
         };
 
         auto keyspace_names = boost::copy_range<std::vector<decorated_keyspace_name>>(
-                _db->get_keyspaces() | boost::adaptors::transformed([this] (auto&& e) {
+                _db.get_keyspaces() | boost::adaptors::transformed([this] (auto&& e) {
                     return decorated_keyspace_name{e.first, make_partition_key(e.first)};
         }));
 
@@ -1905,7 +1909,7 @@ public:
 
         for (const decorated_keyspace_name& e : keyspace_names) {
             auto&& dk = e.key;
-            if (!this_shard_owns(dk) || !contains_key(qr.partition_range(), dk) || !_db->has_keyspace(e.name)) {
+            if (!this_shard_owns(dk) || !contains_key(qr.partition_range(), dk) || !_db.has_keyspace(e.name)) {
                 continue;
             }
 
@@ -1933,17 +1937,439 @@ public:
     }
 };
 
+class snapshots_table : public streaming_virtual_table {
+    distributed<database>& _db;
+public:
+    explicit snapshots_table(distributed<database>& db)
+            : streaming_virtual_table(build_schema())
+            , _db(db)
+    {
+        _shard_aware = true;
+    }
+
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "snapshots");
+        return schema_builder(system_keyspace::NAME, "snapshots", std::make_optional(id))
+            .with_column("keyspace_name", utf8_type, column_kind::partition_key)
+            .with_column("table_name", utf8_type, column_kind::clustering_key)
+            .with_column("snapshot_name", utf8_type, column_kind::clustering_key)
+            .with_column("live", long_type)
+            .with_column("total", long_type)
+            .set_comment("Lists all the snapshots along with their size, dropped tables are not part of the listing.")
+            .with_version(system_keyspace::generate_schema_version(id))
+            .build();
+    }
+
+    dht::decorated_key make_partition_key(const sstring& name) {
+        return dht::decorate_key(*_s, partition_key::from_single_value(*_s, data_value(name).serialize_nonnull()));
+    }
+
+    clustering_key make_clustering_key(sstring table_name, sstring snapshot_name) {
+        return clustering_key::from_exploded(*_s, {
+            data_value(std::move(table_name)).serialize_nonnull(),
+            data_value(std::move(snapshot_name)).serialize_nonnull()
+        });
+    }
+
+    future<> execute(reader_permit permit, result_collector& result, const query_restrictions& qr) override {
+        struct decorated_keyspace_name {
+            sstring name;
+            dht::decorated_key key;
+        };
+        std::vector<decorated_keyspace_name> keyspace_names;
+
+        for (const auto& [name, _] : _db.local().get_keyspaces()) {
+            auto dk = make_partition_key(name);
+            if (!this_shard_owns(dk) || !contains_key(qr.partition_range(), dk)) {
+                continue;
+            }
+            keyspace_names.push_back({std::move(name), std::move(dk)});
+        }
+
+        boost::sort(keyspace_names, [less = dht::ring_position_less_comparator(*_s)]
+                (const decorated_keyspace_name& l, const decorated_keyspace_name& r) {
+            return less(l.key, r.key);
+        });
+
+        using snapshots_by_tables_map = std::map<sstring, std::map<sstring, table::snapshot_details>>;
+
+        class snapshot_reducer {
+        private:
+            snapshots_by_tables_map _result;
+        public:
+            future<> operator()(const snapshots_by_tables_map& value) {
+                for (auto& [table_name, snapshots] : value) {
+                    if (auto [_, added] = _result.try_emplace(table_name, std::move(snapshots)); added) {
+                        continue;
+                    }
+                    auto& rp = _result.at(table_name);
+                    for (auto&& [snapshot_name, snapshot_detail]: snapshots) {
+                        if (auto [_, added] = rp.try_emplace(snapshot_name, std::move(snapshot_detail)); added) {
+                            continue;
+                        }
+                        auto& detail = rp.at(snapshot_name);
+                        detail.live += snapshot_detail.live;
+                        detail.total += snapshot_detail.total;
+                    }
+                }
+                return make_ready_future<>();
+            }
+            snapshots_by_tables_map get() && {
+                return std::move(_result);
+            }
+        };
+
+        for (auto& ks_data : keyspace_names) {
+            co_await result.emit_partition_start(ks_data.key);
+
+            const auto snapshots_by_tables = co_await _db.map_reduce(snapshot_reducer(), [ks_name = ks_data.name] (database& db) -> future<snapshots_by_tables_map> {
+                snapshots_by_tables_map snapshots_by_tables;
+                for (auto& [_, table] : db.get_column_families()) {
+                    if (table->schema()->ks_name() != ks_name) {
+                        continue;
+                    }
+                    const auto unordered_snapshots = co_await table->get_snapshot_details();
+                    snapshots_by_tables.emplace(table->schema()->cf_name(), std::map<sstring, table::snapshot_details>(unordered_snapshots.begin(), unordered_snapshots.end()));
+                }
+                co_return snapshots_by_tables;
+            });
+
+            for (const auto& [table_name, snapshots] : snapshots_by_tables) {
+                for (auto& [snapshot_name, details] : snapshots) {
+                    clustering_row cr(make_clustering_key(table_name, snapshot_name));
+                    set_cell(cr.cells(), "live", details.live);
+                    set_cell(cr.cells(), "total", details.total);
+                    co_await result.emit_row(std::move(cr));
+                }
+
+            }
+
+            co_await result.emit_partition_end();
+        }
+    }
+};
+
+class protocol_servers_table : public memtable_filling_virtual_table {
+private:
+    service::storage_service& _ss;
+
+    struct protocol_server_info {
+        sstring name;
+        sstring protocol;
+        sstring protocol_version;
+        std::vector<sstring> listen_addresses;
+
+        explicit protocol_server_info(protocol_server& s)
+            : name(s.name())
+            , protocol(s.protocol())
+            , protocol_version(s.protocol_version()) {
+            for (const auto& addr : s.listen_addresses()) {
+                listen_addresses.push_back(format("{}:{}", addr.addr(), addr.port()));
+            }
+        }
+    };
+public:
+    explicit protocol_servers_table(service::storage_service& ss)
+        : memtable_filling_virtual_table(build_schema())
+        , _ss(ss) {
+        _shard_aware = true;
+    }
+
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "protocol_servers");
+        return schema_builder(system_keyspace::NAME, "protocol_servers", std::make_optional(id))
+            .with_column("name", utf8_type, column_kind::partition_key)
+            .with_column("protocol", utf8_type)
+            .with_column("protocol_version", utf8_type)
+            .with_column("listen_addresses", list_type_impl::get_instance(utf8_type, false))
+            .set_comment("Lists all client protocol servers and their status.")
+            .with_version(system_keyspace::generate_schema_version(id))
+            .build();
+    }
+
+    future<> execute(std::function<void(mutation)> mutation_sink) override {
+        // Servers are registered on shard 0 only
+        const auto server_infos = co_await smp::submit_to(0ul, [&ss = _ss.container()] {
+            return boost::copy_range<std::vector<protocol_server_info>>(ss.local().protocol_servers()
+                    | boost::adaptors::transformed([] (protocol_server* s) { return protocol_server_info(*s); }));
+        });
+        for (auto server : server_infos) {
+            auto dk = dht::decorate_key(*_s, partition_key::from_single_value(*schema(), data_value(server.name).serialize_nonnull()));
+            if (!this_shard_owns(dk)) {
+                continue;
+            }
+            mutation m(schema(), std::move(dk));
+            row& cr = m.partition().clustered_row(*schema(), clustering_key::make_empty()).cells();
+            set_cell(cr, "protocol", server.protocol);
+            set_cell(cr, "protocol_version", server.protocol_version);
+            std::vector<data_value> addresses(server.listen_addresses.begin(), server.listen_addresses.end());
+            set_cell(cr, "listen_addresses", make_list_value(schema()->get_column_definition("listen_addresses")->type, std::move(addresses)));
+            mutation_sink(std::move(m));
+        }
+    }
+};
+
+class runtime_info_table : public memtable_filling_virtual_table {
+private:
+    distributed<database>& _db;
+    service::storage_service& _ss;
+    std::optional<dht::decorated_key> _generic_key;
+
+private:
+    std::optional<dht::decorated_key> maybe_make_key(sstring key) {
+        auto dk = dht::decorate_key(*_s, partition_key::from_single_value(*schema(), data_value(std::move(key)).serialize_nonnull()));
+        if (this_shard_owns(dk)) {
+            return dk;
+        }
+        return std::nullopt;
+    }
+
+    void do_add_partition(std::function<void(mutation)>& mutation_sink, dht::decorated_key key, std::vector<std::pair<sstring, sstring>> rows) {
+        mutation m(schema(), std::move(key));
+        for (auto&& [ckey, cvalue] : rows) {
+            row& cr = m.partition().clustered_row(*schema(), clustering_key::from_single_value(*schema(), data_value(std::move(ckey)).serialize_nonnull())).cells();
+            set_cell(cr, "value", std::move(cvalue));
+        }
+        mutation_sink(std::move(m));
+    }
+
+    void add_partition(std::function<void(mutation)>& mutation_sink, sstring key, sstring value) {
+        if (_generic_key) {
+            do_add_partition(mutation_sink, *_generic_key, {{key, std::move(value)}});
+        }
+    }
+
+    void add_partition(std::function<void(mutation)>& mutation_sink, sstring key, std::initializer_list<std::pair<sstring, sstring>> rows) {
+        auto dk = maybe_make_key(std::move(key));
+        if (dk) {
+            do_add_partition(mutation_sink, std::move(*dk), std::move(rows));
+        }
+    }
+
+    future<> add_partition(std::function<void(mutation)>& mutation_sink, sstring key, std::function<future<sstring>()> value_producer) {
+        if (_generic_key) {
+            do_add_partition(mutation_sink, *_generic_key, {{key, co_await value_producer()}});
+        }
+    }
+
+    future<> add_partition(std::function<void(mutation)>& mutation_sink, sstring key, std::function<future<std::vector<std::pair<sstring, sstring>>>()> value_producer) {
+        auto dk = maybe_make_key(std::move(key));
+        if (dk) {
+            do_add_partition(mutation_sink, std::move(*dk), co_await value_producer());
+        }
+    }
+
+    template <typename T>
+    future<T> map_reduce_tables(std::function<T(table&)> map, std::function<T(T, T)> reduce = std::plus<T>{}) {
+        class shard_reducer {
+            T _v{};
+            std::function<T(T, T)> _reduce;
+        public:
+            shard_reducer(std::function<T(T, T)> reduce) : _reduce(std::move(reduce)) { }
+            future<> operator()(T v) {
+                v = _reduce(_v, v);
+                return make_ready_future<>();
+            }
+            T get() && { return std::move(_v); }
+        };
+        co_return co_await _db.map_reduce(shard_reducer(reduce), [map, reduce] (database& db) {
+            T val = {};
+            for (auto& [_, table] : db.get_column_families()) {
+               val = reduce(val, map(*table));
+            }
+            return val;
+        });
+    }
+    template <typename T>
+    future<T> map_reduce_shards(std::function<T()> map, std::function<T(T, T)> reduce = std::plus<T>{}, T initial = {}) {
+        co_return co_await map_reduce(
+                boost::irange(0u, smp::count),
+                [map] (shard_id shard) {
+                    return smp::submit_to(shard, [map] {
+                        return map();
+                    });
+                },
+                initial,
+                reduce);
+    }
+
+public:
+    explicit runtime_info_table(distributed<database>& db, service::storage_service& ss)
+        : memtable_filling_virtual_table(build_schema())
+        , _db(db)
+        , _ss(ss) {
+        _shard_aware = true;
+        _generic_key = maybe_make_key("generic");
+    }
+
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "runtime_info");
+        return schema_builder(system_keyspace::NAME, "runtime_info", std::make_optional(id))
+            .with_column("group", utf8_type, column_kind::partition_key)
+            .with_column("item", utf8_type, column_kind::clustering_key)
+            .with_column("value", utf8_type)
+            .set_comment("Runtime system information.")
+            .with_version(system_keyspace::generate_schema_version(id))
+            .build();
+    }
+
+    future<> execute(std::function<void(mutation)> mutation_sink) override {
+        co_await add_partition(mutation_sink, "gossip_active", [this] () -> future<sstring> {
+            return _ss.is_gossip_running().then([] (bool running){
+                return format("{}", running);
+            });
+        });
+        co_await add_partition(mutation_sink, "load", [this] () -> future<sstring> {
+            return map_reduce_tables<int64_t>([] (table& tbl) {
+                return tbl.get_stats().live_disk_space_used;
+            }).then([] (int64_t load) {
+                return format("{}", load);
+            });
+        });
+        add_partition(mutation_sink, "uptime", format("{} seconds", std::chrono::duration_cast<std::chrono::seconds>(engine().uptime()).count()));
+        add_partition(mutation_sink, "trace_probability", format("{:.2}", tracing::tracing::get_local_tracing_instance().get_trace_probability()));
+        co_await add_partition(mutation_sink, "memory", [this] () {
+            struct stats {
+                uint64_t total = 0;
+                uint64_t free = 0;
+                static stats reduce(stats a, stats b) { return stats{a.total + b.total, a.free + b.free}; }
+            };
+            return map_reduce_shards<stats>([] () {
+                const auto& s = memory::stats();
+                return stats{s.total_memory(), s.free_memory()};
+            }, stats::reduce, stats{}).then([] (stats s) {
+                return std::vector<std::pair<sstring, sstring>>{
+                        {"total", format("{}", s.total)},
+                        {"used", format("{}", s.total - s.free)},
+                        {"free", format("{}", s.free)}};
+            });
+        });
+        co_await add_partition(mutation_sink, "memtable", [this] () {
+            struct stats {
+                uint64_t total = 0;
+                uint64_t free = 0;
+                uint64_t entries = 0;
+                static stats reduce(stats a, stats b) { return stats{a.total + b.total, a.free + b.free, a.entries + b.entries}; }
+            };
+            return map_reduce_tables<stats>([] (table& t) {
+                const auto s = t.active_memtable().region().occupancy();
+                return stats{s.total_space(), s.free_space(), t.active_memtable().partition_count()};
+            }, stats::reduce).then([] (stats s) {
+                return std::vector<std::pair<sstring, sstring>>{
+                        {"memory_total", format("{}", s.total)},
+                        {"memory_used", format("{}", s.total - s.free)},
+                        {"memory_free", format("{}", s.free)},
+                        {"entries", format("{}", s.entries)}};
+            });
+        });
+        co_await add_partition(mutation_sink, "cache", [this] () {
+            struct stats {
+                uint64_t total = 0;
+                uint64_t free = 0;
+                uint64_t entries = 0;
+                uint64_t hits = 0;
+                uint64_t misses = 0;
+                utils::rate_moving_average hits_moving_average;
+                utils::rate_moving_average requests_moving_average;
+                static stats reduce(stats a, stats b) {
+                    return stats{
+                        a.total + b.total,
+                        a.free + b.free,
+                        a.entries + b.entries,
+                        a.hits + b.hits,
+                        a.misses + b.misses,
+                        a.hits_moving_average + b.hits_moving_average,
+                        a.requests_moving_average + b.requests_moving_average};
+                }
+            };
+            return _db.map_reduce0([] (database& db) {
+                stats res{};
+                auto occupancy = db.row_cache_tracker().region().occupancy();
+                res.total = occupancy.total_space();
+                res.free = occupancy.free_space();
+                res.entries = db.row_cache_tracker().partitions();
+                for (const auto& [_, t] : db.get_column_families()) {
+                    auto& cache_stats = t->get_row_cache().stats();
+                    res.hits += cache_stats.hits.count();
+                    res.misses += cache_stats.misses.count();
+                    res.hits_moving_average += cache_stats.hits.rate();
+                    res.requests_moving_average += (cache_stats.hits.rate() + cache_stats.misses.rate());
+                }
+                return res;
+            }, stats{}, stats::reduce).then([] (stats s) {
+                return std::vector<std::pair<sstring, sstring>>{
+                        {"memory_total", format("{}", s.total)},
+                        {"memory_used", format("{}", s.total - s.free)},
+                        {"memory_free", format("{}", s.free)},
+                        {"entries", format("{}", s.entries)},
+                        {"hits", format("{}", s.hits)},
+                        {"misses", format("{}", s.misses)},
+                        {"hit_rate_total", format("{:.2}", static_cast<double>(s.hits) / static_cast<double>(s.hits + s.misses))},
+                        {"hit_rate_recent", format("{:.2}", s.hits_moving_average.mean_rate)},
+                        {"requests_total", format("{}", s.hits + s.misses)},
+                        {"requests_recent", format("{}", static_cast<uint64_t>(s.requests_moving_average.mean_rate))}};
+            });
+        });
+        co_await add_partition(mutation_sink, "incremental_backup_enabled", [this] () {
+            return _db.map_reduce0([] (database& db) {
+                return boost::algorithm::any_of(db.get_keyspaces(), [] (const auto& id_and_ks) {
+                    return id_and_ks.second.incremental_backups_enabled();
+                });
+            }, false, std::logical_or{}).then([] (bool res) -> sstring {
+                return res ? "true" : "false";
+            });
+        });
+    }
+};
+
+class versions_table : public memtable_filling_virtual_table {
+public:
+    explicit versions_table()
+        : memtable_filling_virtual_table(build_schema()) {
+        _shard_aware = false;
+    }
+
+    static schema_ptr build_schema() {
+        auto id = generate_legacy_id(system_keyspace::NAME, "versions");
+        return schema_builder(system_keyspace::NAME, "versions", std::make_optional(id))
+            .with_column("key", utf8_type, column_kind::partition_key)
+            .with_column("version", utf8_type)
+            .with_column("build_mode", utf8_type)
+            .with_column("build_id", utf8_type)
+            .set_comment("Version information.")
+            .with_version(system_keyspace::generate_schema_version(id))
+            .build();
+    }
+
+    future<> execute(std::function<void(mutation)> mutation_sink) override {
+        mutation m(schema(), partition_key::from_single_value(*schema(), data_value("local").serialize_nonnull()));
+        row& cr = m.partition().clustered_row(*schema(), clustering_key::make_empty()).cells();
+        set_cell(cr, "version", scylla_version());
+        set_cell(cr, "build_mode", scylla_build_mode());
+        set_cell(cr, "build_id", get_build_id());
+        mutation_sink(std::move(m));
+        return make_ready_future<>();
+    }
+};
+
 // Map from table's schema ID to table itself. Helps avoiding accidental duplication.
 static thread_local std::map<utils::UUID, std::unique_ptr<virtual_table>> virtual_tables;
 
-void register_virtual_tables(service::storage_service& ss) {
+void register_virtual_tables(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss) {
     auto add_table = [] (std::unique_ptr<virtual_table>&& tbl) {
         virtual_tables[tbl->schema()->id()] = std::move(tbl);
     };
 
+    auto& db = dist_db.local();
+    auto& ss = dist_ss.local();
+
     // Add built-in virtual tables here.
     add_table(std::make_unique<cluster_status_table>(ss));
-    add_table(std::make_unique<token_ring_table>(ss));
+    add_table(std::make_unique<token_ring_table>(db, ss));
+    add_table(std::make_unique<snapshots_table>(dist_db));
+    add_table(std::make_unique<protocol_servers_table>(ss));
+    add_table(std::make_unique<runtime_info_table>(dist_db, ss));
+    add_table(std::make_unique<versions_table>());
 }
 
 std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
@@ -1986,7 +2412,6 @@ static void install_virtual_readers(database& db) {
     for (auto&& [id, vt] : virtual_tables) {
         auto&& cf = db.find_column_family(vt->schema());
         cf.set_virtual_reader(vt->as_mutation_source());
-        vt->set_database(db);
     }
 }
 
@@ -1995,9 +2420,10 @@ static bool maybe_write_in_user_memory(schema_ptr s, database& db) {
             || s == system_keyspace::v3::scylla_views_builds_in_progress();
 }
 
-future<> system_keyspace_make(database& db, service::storage_service& ss) {
-    register_virtual_tables(ss);
+future<> system_keyspace_make(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss) {
+    register_virtual_tables(dist_db, dist_ss);
 
+    auto& db = dist_db.local();
     auto& db_config = db.get_config();
     auto enable_cache = db_config.enable_cache();
     bool durable = db_config.data_file_directories().size() > 0;
@@ -2025,7 +2451,7 @@ future<> system_keyspace_make(database& db, service::storage_service& ss) {
     install_virtual_readers(db);
 }
 
-future<> system_keyspace::make(database& db, service::storage_service& ss) {
+future<> system_keyspace::make(distributed<database>& db, distributed<service::storage_service>& ss) {
     return system_keyspace_make(db, ss);
 }
 

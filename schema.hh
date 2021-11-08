@@ -631,8 +631,7 @@ private:
         int32_t _max_index_interval = 2048;
         int32_t _memtable_flush_period = 0;
         speculative_retry _speculative_retry = ::speculative_retry(speculative_retry::type::PERCENTILE, 0.99);
-        // FIXME: SizeTiered doesn't really work yet. Being it marked here only means that this is the strategy
-        // we will use by default - when we have the choice.
+        // This is the compaction strategy that will be used by default on tables which don't have one explicitly specified.
         sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::incremental;
         std::map<sstring, sstring> _compaction_strategy_options;
         bool _compaction_enabled = true;
@@ -698,9 +697,10 @@ private:
 
     lw_shared_ptr<cql3::column_specification> make_column_specification(const column_definition& def);
     void rebuild();
-    schema(const raw_schema&, std::optional<raw_view_info>);
     schema(const schema&, const std::function<void(schema&)>&);
+    class private_tag{};
 public:
+    schema(private_tag, const raw_schema&, std::optional<raw_view_info>);
     schema(const schema&);
     // See \ref make_reversed().
     schema(reversed_tag, const schema&);
@@ -845,6 +845,7 @@ public:
     const_iterator static_end() const;
     const_iterator static_lower_bound(const bytes& name) const;
     const_iterator static_upper_bound(const bytes& name) const;
+    static data_type column_name_type(const column_definition& def, const data_type& regular_column_name_type);
     data_type column_name_type(const column_definition& def) const;
     const column_definition& clustering_column_at(column_id id) const;
     const column_definition& regular_column_at(column_id id) const;
