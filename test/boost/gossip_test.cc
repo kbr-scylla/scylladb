@@ -66,7 +66,7 @@ SEASTAR_TEST_CASE(test_boot_shutdown){
 
         feature_service.start(gms::feature_config_from_db_config(*cfg)).get();
         sharded<qos::service_level_controller> sl_controller;
-        sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
+        sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group()).get();
         auto stop_sl_controller = defer([&] { sl_controller.stop().get(); });
 
         auto stop_feature_service = defer([&] { feature_service.stop().get(); });

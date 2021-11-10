@@ -24,7 +24,7 @@ sstring service_level_controller::default_service_level_name = "default";
 
 
 
-service_level_controller::service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config)
+service_level_controller::service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config, scheduling_group default_scheduling_group, bool destroy_default_sg_on_drain)
         : _sl_data_accessor(nullptr)
         , _auth_service(auth_service)
         , _last_successful_config_update(seastar::lowres_clock::now())
@@ -33,6 +33,11 @@ service_level_controller::service_level_controller(sharded<auth::service>& auth_
     if (this_shard_id() == global_controller) {
         _global_controller_db = std::make_unique<global_controller_data>();
         _global_controller_db->default_service_level_config = default_service_level_config;
+        _global_controller_db->default_sg = default_scheduling_group;
+        _global_controller_db->destroy_default_sg = destroy_default_sg_on_drain;
+        // since the first thing that is being done is adding the default service level, we only
+        // need to throw the given group to the pool of scheduling groups for reuse.
+        _global_controller_db->deleted_scheduling_groups.emplace_back(default_scheduling_group);
     }
 }
 
@@ -93,8 +98,8 @@ future<> service_level_controller::drain() {
     return std::exchange(_global_controller_db->distributed_data_update, make_ready_future<>()).then([this] {
         // delete all sg's in _service_levels_db, leaving it empty.
         for (auto it = _service_levels_db.begin(); it != _service_levels_db.end(); ) {
-            _global_controller_db->deleted_scheduling_groups.emplace(it->second.sg);
-            _global_controller_db->deleted_priority_classes.emplace(it->second.pc);
+            _global_controller_db->deleted_scheduling_groups.emplace_back(it->second.sg);
+            _global_controller_db->deleted_priority_classes.emplace_back(it->second.pc);
             it = _service_levels_db.erase(it);
         }
     }).then_wrapped([] (future<> f) {
@@ -116,18 +121,28 @@ future<> service_level_controller::stop() {
             return make_ready_future<>();
         }
 
+        // exclude scheduling groups we shouldn't destroy
+        std::erase_if(_global_controller_db->deleted_scheduling_groups, [this] (scheduling_group& sg) {
+            if (sg == default_scheduling_group()) {
+                return true;
+            } else if (!_global_controller_db->destroy_default_sg && _global_controller_db->default_sg == sg) {
+                return true;
+            } else {
+                return false;
+            }
+        });
         // destroy all sg's in _global_controller_db->deleted_scheduling_groups, leaving it empty
         // if any destroy_scheduling_group call fails, return one of the exceptions
         return do_with(std::move(_global_controller_db->deleted_scheduling_groups), std::exception_ptr(),
-                [] (std::stack<scheduling_group>& deleted_scheduling_groups, std::exception_ptr& ex) {
+                [] (std::deque<scheduling_group>& deleted_scheduling_groups, std::exception_ptr& ex) {
             return do_until([&] () { return deleted_scheduling_groups.empty(); }, [&] () {
-                return destroy_scheduling_group(deleted_scheduling_groups.top()).then_wrapped([&] (future<> f) {
+                return destroy_scheduling_group(deleted_scheduling_groups.front()).then_wrapped([&] (future<> f) {
                     if (f.failed()) {
                         auto e = f.get_exception();
-                        sl_logger.error("Destroying scheduling group \"{}\" on stop failed: {}.  Ignored.", deleted_scheduling_groups.top().name(), e);
+                        sl_logger.error("Destroying scheduling group \"{}\" on stop failed: {}.  Ignored.", deleted_scheduling_groups.front().name(), e);
                         ex = std::move(e);
                     }
-                    deleted_scheduling_groups.pop();
+                    deleted_scheduling_groups.pop_front();
                 });
             }).finally([&] () {
                 return ex ? make_exception_future<>(std::move(ex)) : make_ready_future<>();
@@ -323,8 +338,8 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         _sl_lookup[sl_idx].first = nullptr;
         _sl_lookup[sl_idx].second = nullptr;
         if (this_shard_id() == global_controller) {
-            _global_controller_db->deleted_scheduling_groups.emplace(sl_it->second.sg);
-            _global_controller_db->deleted_priority_classes.emplace(sl_it->second.pc);
+            _global_controller_db->deleted_scheduling_groups.emplace_back(sl_it->second.sg);
+            _global_controller_db->deleted_priority_classes.emplace_back(sl_it->second.pc);
         }
         _service_levels_db.erase(sl_it);
         return seastar::async( [this, name] {
@@ -507,8 +522,8 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             return make_ready_future().then([this, &sl] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
                     scheduling_group sg;
-                    sg =  _global_controller_db->deleted_scheduling_groups.top();
-                    _global_controller_db->deleted_scheduling_groups.pop();
+                    sg =  _global_controller_db->deleted_scheduling_groups.front();
+                    _global_controller_db->deleted_scheduling_groups.pop_front();
                     sl.sg = sg;
                     return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
                         scheduling_group non_const_sg = sg;
@@ -533,8 +548,8 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
                         shares = *shares_p;
                     }
-                    io_priority_class pc = _global_controller_db->deleted_priority_classes.top();
-                    _global_controller_db->deleted_priority_classes.pop();
+                    io_priority_class pc = _global_controller_db->deleted_priority_classes.front();
+                    _global_controller_db->deleted_priority_classes.pop_front();
                     sl.pc = pc;
                     return container().invoke_on_all([pc, shares] (service_level_controller& service) {
                         return engine().update_shares_for_class(pc, shares);

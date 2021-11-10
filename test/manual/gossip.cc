@@ -76,7 +76,7 @@ int main(int ac, char ** av) {
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
             auto stop_token_mgr = defer([&] { token_metadata.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
-            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group()).get();
             messaging.start(std::ref(sl_controller), listen).get();
             gms::gossip_config gcfg;
             gcfg.cluster_name = "Test Cluster";

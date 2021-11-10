@@ -103,7 +103,7 @@ std::ostream& operator<<(std::ostream& os, const service_level_op& op) {
 SEASTAR_THREAD_TEST_CASE(subscriber_simple) {
     sharded<service_level_controller> sl_controller;
     sharded<auth::service> auth_service;
-    sl_controller.start(std::ref(auth_service), service_level_options{}).get();
+    sl_controller.start(std::ref(auth_service), service_level_options{}, default_scheduling_group()).get();
     qos_configuration_change_suscriber_simple ccss;
     sl_controller.local().register_subscriber(&ccss);
     sl_controller.local().add_service_level("sl1", service_level_options{}).get();

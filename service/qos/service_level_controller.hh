@@ -66,8 +66,8 @@ public:
 private:
     struct global_controller_data {
         service_levels_info  static_configurations{};
-        std::stack<scheduling_group> deleted_scheduling_groups{};
-        std::stack<io_priority_class> deleted_priority_classes{};
+        std::deque<scheduling_group> deleted_scheduling_groups{};
+        std::deque<io_priority_class> deleted_priority_classes{};
         int schedg_group_cnt = 0;
         int io_priority_cnt = 0;
         service_level_options default_service_level_config;
@@ -78,6 +78,8 @@ private:
         semaphore notifications_serializer = semaphore(1);
         future<> distributed_data_update = make_ready_future();
         abort_source dist_data_update_aborter;
+        scheduling_group default_sg;
+        bool destroy_default_sg;
     };
 
     std::unique_ptr<global_controller_data> _global_controller_db;
@@ -94,7 +96,8 @@ private:
     unsigned _logged_intervals;
     atomic_vector<qos_configuration_change_subscriber*> _subscribers;
 public:
-    service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config);
+    service_level_controller(sharded<auth::service>& auth_service, service_level_options default_service_level_config,
+            scheduling_group default_scheduling_group, bool destroy_default_sg_on_drain = false);
 
     /**
      * this function must be called *once* from any shard before any other functions are called.
