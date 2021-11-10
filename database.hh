@@ -53,7 +53,7 @@
 #include "utils/phased_barrier.hh"
 #include "backlog_controller.hh"
 #include "dirty_memory_manager.hh"
-#include "reader_concurrency_semaphore.hh"
+#include "reader_concurrency_semaphore_group.hh"
 #include "db/timeout_clock.hh"
 #include "querier.hh"
 #include "mutation_query.hh"
@@ -65,6 +65,7 @@
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
+#include "service/qos/qos_configuration_change_subscriber.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -119,6 +120,10 @@ future<> system_keyspace_make(distributed<database>& db, distributed<service::st
 
 namespace wasm {
 class engine;
+}
+
+namespace qos {
+    class service_level_controller;
 }
 
 class mutation_reordered_with_truncate_exception : public std::exception {};
@@ -1259,7 +1264,7 @@ struct string_pair_eq {
 //   local metadata reads
 //   use shard_of() for data
 
-class database {
+class database : public qos::qos_configuration_change_subscriber {
     friend class database_test;
 public:
     enum class table_kind {
@@ -1319,7 +1324,7 @@ private:
     flush_controller _memtable_controller;
     drain_progress _drain_progress {};
 
-    reader_concurrency_semaphore _read_concurrency_sem;
+
     reader_concurrency_semaphore _streaming_concurrency_sem;
     reader_concurrency_semaphore _compaction_concurrency_sem;
     reader_concurrency_semaphore _system_read_concurrency_sem;
@@ -1369,6 +1374,9 @@ private:
     const locator::shared_token_metadata& _shared_token_metadata;
 
     sharded<semaphore>& _sst_dir_semaphore;
+    reader_concurrency_semaphore_group _reader_concurrency_semaphores_group;
+    scheduling_group _default_read_concurrency_group;
+    noncopyable_function<future<>()> _unsubscribe_qos_configuration_change;
 
     std::unique_ptr<wasm::engine> _wasm_engine;
     utils::cross_shard_barrier _stop_barrier;
@@ -1398,6 +1406,9 @@ private:
     friend future<> db::system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, db::config& cfg);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
+    reader_concurrency_semaphore& read_concurrency_sem();
+    auto sum_read_concurrency_sem_var(std::invocable<reader_concurrency_semaphore&> auto member);
+    auto sum_read_concurrency_sem_stat(std::invocable<reader_concurrency_semaphore::stats&> auto stats_member);
 
     friend class db_apply_executor;
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
@@ -1516,7 +1527,7 @@ public:
     /// reads, to speed up startup. After startup this should be reverted to
     /// the normal concurrency.
     void revert_initial_system_read_concurrency_boost();
-    future<> start();
+    future<> start(sharded<qos::service_level_controller>&);
     future<> shutdown();
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
@@ -1658,6 +1669,13 @@ public:
     sharded<semaphore>& get_sharded_sst_dir_semaphore() {
         return _sst_dir_semaphore;
     }
+
+    /** This callback is going to be called just before the service level is available **/
+    virtual future<> on_before_service_level_add(qos::service_level_options slo, qos::service_level_info sl_info) override;
+    /** This callback is going to be called just after the service level is removed **/
+    virtual future<> on_after_service_level_remove(qos::service_level_info sl_info) override;
+    /** This callback is going to be called just before the service level is changed **/
+    virtual future<> on_before_service_level_change(qos::service_level_options slo_before, qos::service_level_options slo_after, qos::service_level_info sl_info) override;
 };
 
 future<> start_large_data_handler(sharded<database>& db);

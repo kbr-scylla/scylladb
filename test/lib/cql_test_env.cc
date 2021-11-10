@@ -596,7 +596,7 @@ public:
                 db.stop().get();
             });
 
-            db.invoke_on_all(&database::start).get();
+            db.invoke_on_all(&database::start, std::ref(sl_controller)).get();
 
             feature_service.invoke_on_all([] (auto& fs) {
                 fs.enable(fs.known_feature_set());

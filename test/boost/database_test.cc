@@ -41,7 +41,7 @@ public:
     explicit database_test(database& db) : _db(db) { }
 
     reader_concurrency_semaphore& get_user_read_concurrency_semaphore() {
-        return _db._read_concurrency_sem;
+        return _db.read_concurrency_sem();
     }
     reader_concurrency_semaphore& get_streaming_read_concurrency_semaphore() {
         return _db._streaming_concurrency_sem;
@@ -698,9 +698,11 @@ SEASTAR_THREAD_TEST_CASE(reader_concurrency_semaphore_selection_test) {
 
     do_with_cql_env_thread([&scheduling_group_and_expected_semaphore] (cql_test_env& e) {
         auto& db = e.local_db();
+
         database_test tdb(db);
         for (const auto& [sched_group, expected_sem_getter] : scheduling_group_and_expected_semaphore) {
-            with_scheduling_group(sched_group, [&db, sched_group = sched_group, expected_sem_ptr = &expected_sem_getter(tdb)] {
+            with_scheduling_group(sched_group, [&db, sched_group = sched_group, &tdb, &expected_sem_getter = expected_sem_getter] {
+                auto expected_sem_ptr = &expected_sem_getter(tdb);
                 auto& sem = db.get_reader_concurrency_semaphore();
                 if (&sem != expected_sem_ptr) {
                     BOOST_FAIL(fmt::format("Unexpected semaphore for scheduling group {}, expected {}, got {}", sched_group.name(), expected_sem_ptr->name(), sem.name()));

@@ -283,9 +283,14 @@ future<std::optional<service_level_options>> service_level_controller::find_serv
 
 future<>  service_level_controller::notify_service_level_added(sstring name, service_level sl_data) {
     return seastar::async( [this, name, sl_data] {
-        _subscribers.for_each([name, sl_data] (qos_configuration_change_subscriber* subscriber) {
+        service_level_info sl_info = {
+            .name = name,
+            .sg = sl_data.sg,
+            .pc = sl_data.pc
+        };
+        _subscribers.for_each([name, sl_data, sl_info] (qos_configuration_change_subscriber* subscriber) {
             try {
-                subscriber->on_before_service_level_add(sl_data.slo, {name}).get();
+                subscriber->on_before_service_level_add(sl_data.slo, sl_info).get();
             } catch (...) {
                 sl_logger.error("notify_service_level_added: exception occurred in one of the observers callbacks {}", std::current_exception());
             }
@@ -307,9 +312,14 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
         service_level_options slo_before = sl_it->second.slo;
         return seastar::async( [this,sl_it, name, slo_before, slo] {
             future<> f = make_ready_future();
-            _subscribers.for_each([name, slo_before, slo] (qos_configuration_change_subscriber* subscriber) {
+            service_level_info sl_info = {
+                .name = name,
+                .sg = sl_it->second.sg,
+                .pc = sl_it->second.pc
+            };
+            _subscribers.for_each([name, slo_before, slo, sl_info] (qos_configuration_change_subscriber* subscriber) {
                 try {
-                    subscriber->on_before_service_level_change(slo_before, slo, {name}).get();
+                    subscriber->on_before_service_level_change(slo_before, slo, sl_info).get();
                 } catch (...) {
                     sl_logger.error("notify_service_level_updated: exception occurred in one of the observers callbacks {}", std::current_exception());
                 }
@@ -341,11 +351,16 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
             _global_controller_db->deleted_scheduling_groups.emplace_back(sl_it->second.sg);
             _global_controller_db->deleted_priority_classes.emplace_back(sl_it->second.pc);
         }
+        service_level_info sl_info = {
+            .name = name,
+            .sg = sl_it->second.sg,
+            .pc = sl_it->second.pc
+        };
         _service_levels_db.erase(sl_it);
-        return seastar::async( [this, name] {
-            _subscribers.for_each([name] (qos_configuration_change_subscriber* subscriber) {
+        return seastar::async( [this, name, sl_info] {
+            _subscribers.for_each([name, sl_info] (qos_configuration_change_subscriber* subscriber) {
                 try {
-                    subscriber->on_after_service_level_remove({name}).get();
+                    subscriber->on_after_service_level_remove(sl_info).get();
                 } catch (...) {
                     sl_logger.error("notify_service_level_removed: exception occurred in one of the observers callbacks {}", std::current_exception());
                 }

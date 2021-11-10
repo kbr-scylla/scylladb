@@ -844,7 +844,6 @@ int main(int ac, char** av) {
                 // Uncomment this once services release all the memory on stop
                 // service_memory_limiter.stop().get();
             });
-
             supervisor::notify("creating and verifying directories");
             utils::directories::set dir_set;
             dir_set.add(cfg->data_file_directories());
@@ -874,7 +873,7 @@ int main(int ac, char** av) {
             // because it obtains the list of pre-existing segments for replay, which must
             // not include reserve segments created by active commitlogs.
             db.local().init_commitlog().get();
-            db.invoke_on_all(&database::start).get();
+            db.invoke_on_all(&database::start, std::ref(sl_controller)).get();
 
             // Initialization of a keyspace is done by shard 0 only. For system
             // keyspace, the procedure  will go through the hardcoded column
