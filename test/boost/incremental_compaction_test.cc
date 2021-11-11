@@ -42,6 +42,38 @@ static flat_mutation_reader sstable_reader(reader_permit permit, shared_sstable 
 
 }
 
+class table_state_for_test : public table_state {
+    table* _t;
+public:
+    explicit table_state_for_test(table& t)
+        : _t(&t)
+    {
+    }
+    const schema_ptr& schema() const noexcept override {
+        return _t->schema();
+    }
+    unsigned min_compaction_threshold() const noexcept override {
+        return _t->min_compaction_threshold();
+    }
+    bool compaction_enforce_min_threshold() const noexcept override {
+        return _t->compaction_enforce_min_threshold();
+    }
+    const sstables::sstable_set& get_sstable_set() const override {
+        return _t->get_sstable_set();
+    }
+    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
+        return sstables::get_fully_expired_sstables(*_t, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    }
+
+    bool has_table_ongoing_compaction() const override {
+        return false;
+    }
+};
+
+static std::unique_ptr<table_state> make_table_state_for_test(column_family& t) {
+    return std::make_unique<table_state_for_test>(t);
+}
+
 SEASTAR_TEST_CASE(incremental_compaction_test) {
     return sstables::test_env::do_with_async([&] (sstables::test_env& env) {
         cell_locker_stats cl_stats;
@@ -62,6 +94,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto cm = make_lw_shared<compaction_manager>();
         auto tracker = make_lw_shared<cache_tracker>();
         auto cf = make_lw_shared<column_family>(s, column_family_test_config(env.manager(), env.semaphore()), column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        auto table_s = make_table_state_for_test(*cf);
         cf->mark_ready_for_writes();
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
@@ -122,7 +155,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
             auto input_ssts = std::vector<shared_sstable>(sstables.begin(), sstables.end());
-            auto desc = cs.get_sstables_for_compaction(*cf, std::move(input_ssts));
+            auto desc = cs.get_sstables_for_compaction(*table_s, std::move(input_ssts));
 
             // nothing to compact, move on.
             if (desc.sstables.empty()) {
@@ -239,8 +272,9 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
         }
 
         void run() {
+            auto table_s = make_table_state_for_test(*_cf);
             for (;;) {
-                auto desc = _ics.get_sstables_for_compaction(*_cf, _cf->in_strategy_sstables());
+                auto desc = _ics.get_sstables_for_compaction(*table_s, _cf->in_strategy_sstables());
                 // no more jobs, bailing out...
                 if (desc.sstables.empty()) {
                     break;
@@ -308,6 +342,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
         }
 
         column_family_for_tests cf(env.manager(), s);
+        auto table_s = make_table_state_for_test(*cf);
         auto close_cf = deferred_stop(cf);
 
         auto creator = [&, gen = make_lw_shared<unsigned>(1)] {
@@ -338,7 +373,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             // that's needed because sstable with droppable data should be old enough.
             options.emplace("tombstone_compaction_interval", "0");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
-            auto descriptor = cs.get_sstables_for_compaction(*cf, {sst});
+            auto descriptor = cs.get_sstables_for_compaction(*table_s, {sst});
             BOOST_REQUIRE(descriptor.sstables.size() == 1);
             BOOST_REQUIRE(descriptor.sstables.front() == sst);
         }
@@ -348,7 +383,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             std::map<sstring, sstring> options;
             options.emplace("tombstone_threshold", "0.5f");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
-            auto descriptor = cs.get_sstables_for_compaction(*cf, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
         // sstable which was recently created won't be included due to min interval
@@ -357,7 +392,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             options.emplace("tombstone_compaction_interval", "3600");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
             sstables::test(sst).set_data_file_write_time(db_clock::now());
-            auto descriptor = cs.get_sstables_for_compaction(*cf, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
     });

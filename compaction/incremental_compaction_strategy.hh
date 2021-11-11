@@ -82,7 +82,7 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
 
-    compaction_descriptor find_garbage_collection_job(const table& t, std::vector<size_bucket_t>& buckets);
+    compaction_descriptor find_garbage_collection_job(const table_state& t, std::vector<size_bucket_t>& buckets);
 
     static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
     static std::vector<sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
@@ -91,11 +91,11 @@ public:
 
     incremental_compaction_strategy(const std::map<sstring, sstring>& options);
 
-    virtual compaction_descriptor get_sstables_for_compaction(column_family& cf, std::vector<sstables::shared_sstable> candidates) override;
+    virtual compaction_descriptor get_sstables_for_compaction(table_state& cf, std::vector<sstables::shared_sstable> candidates) override;
 
-    virtual compaction_descriptor get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) override;
+    virtual compaction_descriptor get_major_compaction_job(table_state& cf, std::vector<sstables::shared_sstable> candidates) override;
 
-    virtual int64_t estimated_pending_compactions(column_family& cf) const override;
+    virtual int64_t estimated_pending_compactions(table_state& cf) const override;
 
     virtual compaction_strategy_type type() const override {
         return compaction_strategy_type::incremental;

@@ -60,9 +60,9 @@ public:
     , _backlog_tracker(std::make_unique<in_memory_backlog_tracker>())
     {}
 
-    compaction_descriptor get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) override;
+    compaction_descriptor get_sstables_for_compaction(table_state& cfs, std::vector<sstables::shared_sstable> candidates) override;
 
-    int64_t estimated_pending_compactions(column_family& cf) const override;
+    int64_t estimated_pending_compactions(table_state& cf) const override;
 
     compaction_strategy_type type() const override {
         return compaction_strategy_type::in_memory;
@@ -74,7 +74,7 @@ public:
 };
 
 inline compaction_descriptor
-in_memory_compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
+in_memory_compaction_strategy::get_sstables_for_compaction(table_state& cfs, std::vector<sstables::shared_sstable> candidates) {
     // compact everything into one sstable
     if (candidates.size() > 1) {
         return sstables::compaction_descriptor(std::move(candidates), cfs.get_sstable_set(), service::get_local_compaction_priority());
@@ -82,7 +82,7 @@ in_memory_compaction_strategy::get_sstables_for_compaction(column_family& cfs, s
     return sstables::compaction_descriptor();
 }
 
-inline int64_t in_memory_compaction_strategy::estimated_pending_compactions(column_family& cf) const {
-    return cf.sstables_count() > 1;
+inline int64_t in_memory_compaction_strategy::estimated_pending_compactions(table_state& cf) const {
+    return cf.get_sstable_set().all()->size() > 1;
 }
 }

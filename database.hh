@@ -96,6 +96,10 @@ class compaction_data;
 
 class compaction_manager;
 
+namespace compaction {
+class table_state;
+}
+
 namespace ser {
 template<typename T>
 class serializer;
@@ -431,7 +435,6 @@ private:
     bool _durable_writes;
     compaction_manager& _compaction_manager;
     secondary_index::secondary_index_manager _index_manager;
-    int _compaction_disabled = 0;
     bool _compaction_disabled_by_user = false;
     utils::phased_barrier _flush_barrier;
     std::vector<view_ptr> _views;
@@ -477,6 +480,9 @@ private:
     db_clock::time_point _truncated_at = db_clock::time_point::min();
 
     bool _is_bootstrap_or_replace = false;
+
+    class table_state;
+    std::unique_ptr<table_state> _table_state;
 public:
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
                                           sstables::offstrategy offstrategy = sstables::offstrategy::no);
@@ -911,8 +917,6 @@ public:
     cache_hit_rate get_hit_rate(gms::inet_address addr);
     void drop_hit_rate(gms::inet_address addr);
 
-    future<> run_with_compaction_disabled(std::function<future<> ()> func);
-
     void enable_auto_compaction();
     void disable_auto_compaction();
     bool is_auto_compaction_disabled_by_user() const {
@@ -1052,6 +1056,8 @@ private:
 public:
     void update_off_strategy_trigger();
     void enable_off_strategy_trigger();
+
+    compaction::table_state& as_table_state() const noexcept;
 };
 
 class user_types_metadata;
