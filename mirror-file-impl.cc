@@ -103,7 +103,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, void* buffer, size_t len
             auto p = b.get();
             return get_file_impl(_primary)->read_dma(pos, p, len, pc).then([this, secondary_size, buffer, b = std::move(b)] (size_t primary_size) {
                 if (primary_size != secondary_size) {
-                    throw std::runtime_error(sprint("inconsistency between on disk and memory file sizes (%d != %d)", primary_size, secondary_size));
+                    throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} != {})", primary_size, secondary_size));
                 }
                 if (std::memcmp(buffer, b.get(), primary_size)) {
                     throw std::runtime_error("inconsistency between on disk and memory file data");
@@ -128,7 +128,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, 
             }
             return get_file_impl(_primary)->read_dma(pos, std::move(iov2), pc).then([this, secondary_size, iov = std::move(iov), vb = std::move(vb)] (size_t primary_size) {
                 if (primary_size != secondary_size) {
-                    throw std::runtime_error(sprint("inconsistency between on disk and memory file sizes (%d != %d)", primary_size, secondary_size));
+                    throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} != {})", primary_size, secondary_size));
                 }
                 auto to_compare = primary_size;
                 for (size_t i = 0; i < iov.size(); i++) {
@@ -198,7 +198,7 @@ future<temporary_buffer<uint8_t>> mirror_file_impl::dma_read_bulk(uint64_t offse
         return f.then([this, offset, range_size, &pc] (temporary_buffer<uint8_t> sb) {
             return get_file_impl(_primary)->dma_read_bulk(offset, range_size, pc).then([this, sb = std::move(sb), range_size, offset] (temporary_buffer<uint8_t> pb) mutable {
                 if (sb.size() > pb.size()) { // bulk interface allows reading more than requested size, but memory file always exact
-                    throw std::runtime_error(sprint("inconsistency between on disk and memory file sizes (%d < %d)", pb.size(), sb.size()));
+                    throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} < {})", pb.size(), sb.size()));
                 }
                 if (std::memcmp(sb.get(), pb.get(), sb.size())) {
                     throw std::runtime_error("inconsistency between on disk and memory file data");

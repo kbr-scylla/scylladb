@@ -89,7 +89,7 @@ static void kmip_chk(int res, KMIP_CMD * cmd = nullptr) {
 
         if (KMIP_CMD_get_result(cmd, &status, &reason, &message) == KMIP_ERROR_NONE) {
             auto* ctxt = cmd != nullptr ? KMIP_CMD_get_ctx(cmd) : "(unknown cmd)";
-            auto s = sprint("%s: status=%s, reason=%s, message=%s",
+            auto s = fmt::format("{}: status={}, reason={}, message={}",
                             ctxt,
                             KMIP_RESULT_STATUS_to_string(status, 0, nullptr),
                             KMIP_RESULT_REASON_to_string(reason, 0, nullptr),
@@ -956,7 +956,7 @@ shared_ptr<symmetric_key> kmip_host::impl::ensure_compatible_key(shared_ptr<symm
     // Check and re-init the actual key used based
     // on what the user wants so we adhere to block mode etc.
     if (!info.compatible(k->info())) {
-        throw std::invalid_argument(sprint("Incompatible key: %s", k->info()));
+        throw std::invalid_argument(fmt::format("Incompatible key: {}", k->info()));
     }
     if (k->info() != info) {
         k = ::make_shared<symmetric_key>(info, k->key());

@@ -119,15 +119,15 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         }
     }
 
-    auto str = sprint("%s-%d-%s", type, info.len, mode);
+    auto str = fmt::format("{}-{}-{}", type, info.len, mode);
     auto cipher = EVP_get_cipherbyname(str.c_str());
 
     if (!cipher) {
-        str = sprint("%s-%s", type, mode);
+        str = fmt::format("{}-{}", type, mode);
         cipher = EVP_get_cipherbyname(str.c_str());
     }
     if (!cipher) {
-        str = sprint("%s-%d", type, info.len);
+        str = fmt::format("{}-{}", type, info.len);
         cipher = EVP_get_cipherbyname(str.c_str());
     }
     if (!cipher) {
@@ -154,7 +154,7 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         // if we had to find a cipher without explicit key length (like rc2),
         // try to set the key length to the desired strength.
         if (!EVP_CIPHER_CTX_set_key_length(*this, dlen)) {
-            throw std::invalid_argument(sprint("Invalid length %d for resolved type %s (wanted %d)", len*8, str, _info.len));
+            throw std::invalid_argument(fmt::format("Invalid length {} for resolved type {} (wanted {})", len*8, str, _info.len));
         }
 
         len = EVP_CIPHER_key_length(cipher);
@@ -168,7 +168,7 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         }
     }
     if (_key.size() < len) {
-        throw std::invalid_argument(sprint("Invalid key data length %d for resolved type %s (%d)", _key.size()*8, str, len*8));
+        throw std::invalid_argument(fmt::format("Invalid key data length {} for resolved type {} ({})", _key.size()*8, str, len*8));
     }
 
     if (!EVP_CipherInit_ex(*this, cipher, nullptr,

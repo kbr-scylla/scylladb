@@ -70,7 +70,7 @@ static category_set parse_audit_categories(const sstring& data) {
             } else if (category == "ADMIN") {
                 result.set(statement_category::ADMIN);
             } else {
-                throw audit_exception(sprint("Bad configuration: invalid 'audit_categories': %s", data));
+                throw audit_exception(fmt::format("Bad configuration: invalid 'audit_categories': {}", data));
             }
         }
     }
@@ -86,7 +86,7 @@ static std::map<sstring, std::set<sstring>> parse_audit_tables(const sstring& da
             std::vector<sstring> parts;
             boost::split(parts, token, boost::is_any_of("."));
             if (parts.size() != 2) {
-                throw audit_exception(sprint("Bad configuration: invalid 'audit_tables': %s", data));
+                throw audit_exception(fmt::format("Bad configuration: invalid 'audit_tables': {}", data));
             }
             boost::trim(parts[0]);
             boost::trim(parts[1]);
@@ -119,7 +119,7 @@ future<> audit::create_audit(const db::config& cfg) {
         // Audit is off
         return make_ready_future<>();
     } else {
-        throw audit_exception(sprint("Bad configuration: invalid 'audit': %s", cfg.audit()));
+        throw audit_exception(fmt::format("Bad configuration: invalid 'audit': {}", cfg.audit()));
     }
     category_set audited_categories = parse_audit_categories(cfg.audit_categories());
     if (!audited_categories) {

@@ -46,7 +46,7 @@ future<> audit_syslog_storage_helper::start(const db::config& cfg) {
     strncpy(syslog_address.sa_data, _PATH_LOG, sizeof(syslog_address.sa_data));
     _syslog_fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
     if (_syslog_fd == -1) {
-        throw audit_exception(sprint("Error creating socket to syslog (error %d)", errno));
+        throw audit_exception(fmt::format("Error creating socket to syslog (error {})", errno));
     } else {
         int newMaxBuff= cfg.audit_syslog_write_buffer_size();
         setsockopt(_syslog_fd, SOL_SOCKET, SO_SNDBUF, &newMaxBuff, sizeof(newMaxBuff));
@@ -54,7 +54,7 @@ future<> audit_syslog_storage_helper::start(const db::config& cfg) {
         if (connect(_syslog_fd, &syslog_address, sizeof(syslog_address)) == -1) {
             close(_syslog_fd);
             _syslog_fd = -1;
-            throw audit_exception(sprint("Error connecting to syslog (error %d)", errno));
+            throw audit_exception(fmt::format("Error connecting to syslog (error {})", errno));
         }
     }
     return make_ready_future<>();

@@ -273,11 +273,11 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
         if (id.id) {
             uuid = utils::UUID_gen::get_UUID(*id.id);
             log.debug("Finding key {} ({})", uuid, info);
-            auto s = sprint("SELECT * FROM %s.%s WHERE key_file=? AND cipher=? AND strength=? AND key_id=?;", KSNAME, TABLENAME);
+            auto s = fmt::format("SELECT * FROM {}.{} WHERE key_file=? AND cipher=? AND strength=? AND key_id=?;", KSNAME, TABLENAME);
             return query(std::move(s), _system_key->name(), cipher, int32_t(id.info.len), uuid);
         } else {
             log.debug("Finding key ({})", info);
-            auto s = sprint("SELECT * FROM %s.%s WHERE key_file=? AND cipher=? AND strength=? LIMIT 1;", KSNAME, TABLENAME);
+            auto s = fmt::format("SELECT * FROM {}.{} WHERE key_file=? AND cipher=? AND strength=? LIMIT 1;", KSNAME, TABLENAME);
             return query(std::move(s), _system_key->name(), cipher, int32_t(id.info.len));
         }
     }();
@@ -286,7 +286,7 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
         // if we find nothing, and we actually queried a specific key (by uuid), we've failed.
         if (res->empty() && id.id) {
             log.debug("Could not find key {}", id.id);
-            return make_exception_future<std::tuple<UUID, key_ptr>>(std::runtime_error(sprint("Unable to find key for cipher=%s strength=%s id=%s", cipher, id.info.len, uuid)));
+            return make_exception_future<std::tuple<UUID, key_ptr>>(std::runtime_error(fmt::format("Unable to find key for cipher={} strength={} id={}", cipher, id.info.len, uuid)));
         }
         // otoh, if we don't need a specific key, we can just create a new one (writing a sstable)
         if (res->empty()) {
@@ -298,7 +298,7 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
             store_key(id, uuid, k);
             return _system_key->encrypt(k->key()).then([this, id = std::move(id), cipher = std::move(cipher), uuid](bytes b) {
                 auto ks = base64_encode(b);
-                return query(sprint("INSERT INTO %s.%s (key_file, cipher, strength, key_id, key) VALUES (?, ?, ?, ?, ?)", KSNAME, TABLENAME)
+                return query(fmt::format("INSERT INTO {}.{} (key_file, cipher, strength, key_id, key) VALUES (?, ?, ?, ?, ?)", KSNAME, TABLENAME)
                                 , _system_key->name(), cipher, int32_t(id.info.len), uuid, ks
                 ).then([this](auto&&) {
                     return force_blocking_flush();
@@ -322,7 +322,7 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
 
 future<> replicated_key_provider::validate() const {
     auto f = _system_key->validate().handle_exception([this](auto ep) {
-        std::throw_with_nested(std::invalid_argument(sprint("Could not validate system key: %s (%s)", _system_key->name(), ep)));
+        std::throw_with_nested(std::invalid_argument(fmt::format("Could not validate system key: {} ({})", _system_key->name(), ep)));
     });
     if (_local_provider){
         f = f.then([this] {

@@ -19,7 +19,7 @@ const sstring audit_cf_storage_helper::TABLE_NAME("audit_log");
 audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
     : _qp(qp)
     , _table(KEYSPACE_NAME, TABLE_NAME,
-             sprint("CREATE TABLE IF NOT EXISTS %s.%s ("
+             fmt::format("CREATE TABLE IF NOT EXISTS {}.{} ("
                        "date timestamp, "
                        "node inet, "
                        "event_time timeuuid, "
@@ -33,7 +33,7 @@ audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
                        "error boolean, "
                        "PRIMARY KEY ((date, node), event_time))",
                        KEYSPACE_NAME, TABLE_NAME),
-             sprint("INSERT INTO %s.%s ("
+             fmt::format("INSERT INTO {}.{} ("
                        "date,"
                        "node,"
                        "event_time,"

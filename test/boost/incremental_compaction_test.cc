@@ -146,11 +146,11 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             do_replace(old_sstables, new_sstables);
 
             observers.push_back(old_sstables.front()->add_on_closed_handler([&] (sstable& sst) {
-                BOOST_TEST_MESSAGE(sprint("Closing sstable of generation %d", sst.generation()));
+                BOOST_TEST_MESSAGE(fmt::format("Closing sstable of generation {}", sst.generation()));
                 closed_sstables_tracker++;
             }));
 
-            BOOST_TEST_MESSAGE(sprint("Removing sstable of generation %d, refcnt: %d", old_sstables.front()->generation(), old_sstables.front().use_count()));
+            BOOST_TEST_MESSAGE(fmt::format("Removing sstable of generation {}, refcnt: {}", old_sstables.front()->generation(), old_sstables.front().use_count()));
         };
 
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
