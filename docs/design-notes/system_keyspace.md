@@ -6,11 +6,12 @@ This section describes layouts and usage of system.* tables.
 
 Scylla performs better if partitions, rows, or cells are not too
 large. To help diagnose cases where these grow too large, scylla keeps
-3 tables that record large partitions, rows, and cells, respectively.
+3 tables that record large partitions (including those with too many
+rows), rows, and cells, respectively.
 
 The meaning of an entry in each of these tables is similar. It means
-that there is a particular sstable with a large partition, row, or
-cell. In particular, this implies that:
+that there is a particular sstable with a large partition, row, cell,
+or a partition with too many rows. In particular, this implies that:
 
 * There is no entry until compaction aggregates enough data in a
   single sstable.
@@ -20,7 +21,8 @@ In addition, the entries also have a TTL of 30 days.
 
 ## system.large\_partitions
 
-Large partition table can be used to trace largest partitions in a cluster.
+Large partition table can be used to trace largest partitions in a
+cluster.  Partitions with too many rows are also recorded there.
 
 Schema:
 ~~~
@@ -30,6 +32,7 @@ CREATE TABLE system.large_partitions (
     sstable_name text,
     partition_size bigint,
     partition_key text,
+    rows bigint,
     compaction_time timestamp,
     PRIMARY KEY ((keyspace_name, table_name), sstable_name, partition_size, partition_key)
 ) WITH CLUSTERING ORDER BY (sstable_name ASC, partition_size DESC, partition_key ASC);
@@ -295,3 +298,34 @@ CREATE TABLE system.versions (
 ```
 
 Implemented by `versions_table` in `db/system_keyspace.cc`.
+
+## system.config
+
+Holds all configuration variables in use
+
+Schema:
+~~~
+CREATE TABLE system.config (
+    name text PRIMARY KEY,
+    source text,
+    type text,
+    value text
+)
+~~~
+
+The source of the option is one of 'default', 'config', 'cli', 'cql' or 'internal'
+which means the value wasn't changed from its default, was configured via config
+file, was set by commanline option or via updating this table, or was deliberately
+configured by Scylla internals. Any way the option was updated overrides the
+previous one, so shown here is the latest one used.
+
+The type denotes the variable type like 'string', 'bool', 'integer', etc. Including
+some scylla-internal configuration types.
+
+The value is shown as it would appear in the json config file.
+
+The table can be updated with the UPDATE statement. The accepted value parameter
+must (of course) be a text, it's converted to the target configuration value as
+needed.
+
+## TODO: the rest

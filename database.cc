@@ -1775,19 +1775,15 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
 
     data_listeners().on_write(m_schema, m);
 
-  return with_gate(cf.async_gate(), [this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf, timeout] () mutable -> future<> {
-    return cf.dirty_memory_region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf]() mutable {
-        cf.apply(m, m_schema, std::move(h));
-    }, timeout);
-  });
+    return with_gate(cf.async_gate(), [this, &m, m_schema = std::move(m_schema), h = std::move(h), &cf, timeout] () mutable -> future<> {
+        return cf.apply(m, std::move(m_schema), std::move(h), timeout);
+    });
 }
 
 future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
-  return with_gate(cf.async_gate(), [this, &m, h = std::move(h), &cf, timeout]() mutable -> future<> {
-    return cf.dirty_memory_region_group().run_when_memory_available([this, &m, &cf, h = std::move(h)] () mutable {
-        cf.apply(m, std::move(h));
-    }, timeout);
-  });
+    return with_gate(cf.async_gate(), [this, &m, h = std::move(h), &cf, timeout]() mutable -> future<> {
+        return cf.apply(m, std::move(h), timeout);
+    });
 }
 
 future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {
@@ -2257,6 +2253,49 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
             }, table_filter);
         }, *filter);
     });
+}
+
+future<> database::flush_non_system_column_families() {
+    auto non_system_cfs = get_column_families() | boost::adaptors::filtered([] (auto& uuid_and_cf) {
+        auto cf = uuid_and_cf.second;
+        return !is_system_keyspace(cf->schema()->ks_name());
+    });
+    // count CFs first
+    auto total_cfs = boost::distance(non_system_cfs);
+    _drain_progress.total_cfs = total_cfs;
+    _drain_progress.remaining_cfs = total_cfs;
+    // flush
+    return parallel_for_each(non_system_cfs, [this] (auto&& uuid_and_cf) {
+        auto cf = uuid_and_cf.second;
+        return cf->flush().then([this] {
+            _drain_progress.remaining_cfs--;
+        });
+    });
+}
+
+future<> database::flush_system_column_families() {
+    auto system_cfs = get_column_families() | boost::adaptors::filtered([] (auto& uuid_and_cf) {
+        auto cf = uuid_and_cf.second;
+        return is_system_keyspace(cf->schema()->ks_name());
+    });
+    return parallel_for_each(system_cfs, [] (auto&& uuid_and_cf) {
+        auto cf = uuid_and_cf.second;
+        return cf->flush();
+    });
+}
+
+future<> database::drain() {
+    // Interrupt on going compaction and shutdown to prevent further compaction
+    co_await _compaction_manager->drain();
+
+    // flush the system ones after all the rest are done, just in case flushing modifies any system state
+    // like CASSANDRA-5151. don't bother with progress tracking since system data is tiny.
+    co_await _stop_barrier.arrive_and_wait();
+    co_await flush_non_system_column_families();
+    co_await _stop_barrier.arrive_and_wait();
+    co_await flush_system_column_families();
+    co_await _stop_barrier.arrive_and_wait();
+    co_await _commitlog->shutdown();
 }
 
 std::ostream& operator<<(std::ostream& os, const user_types_metadata& m) {

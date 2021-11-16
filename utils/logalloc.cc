@@ -1436,6 +1436,7 @@ private:
 
         if (seg != _buf_active) {
             if (desc.is_empty()) {
+                assert(desc._buf_pointers.empty());
                 _segment_descs.erase(desc);
                 desc._buf_pointers = std::vector<entangled>();
                 free_segment(seg, desc);
@@ -1446,7 +1447,7 @@ private:
         }
     }
 
-    void compact_segment_locked(segment* seg, segment_descriptor& desc) {
+    void compact_segment_locked(segment* seg, segment_descriptor& desc) noexcept {
         auto seg_occupancy = desc.occupancy();
         llogger.debug("Compacting segment {} from region {}, {}", fmt::ptr(seg), id(), seg_occupancy);
 
@@ -1461,6 +1462,7 @@ private:
             for (entangled& e : _buf_ptrs_for_compact_segment) {
                 if (e) {
                     lsa_buffer* old_ptr = e.get(&lsa_buffer::_link);
+                    assert(&desc == old_ptr->_desc);
                     lsa_buffer dst = alloc_buf(old_ptr->_size);
                     memcpy(dst._buf, old_ptr->_buf, dst._size);
                     old_ptr->_link = std::move(dst._link);

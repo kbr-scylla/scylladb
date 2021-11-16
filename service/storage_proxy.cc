@@ -95,6 +95,7 @@
 #include "mutation_partition_view.hh"
 #include "service/paxos/paxos_state.hh"
 #include "gms/feature_service.hh"
+#include "db/virtual_table.hh"
 
 namespace bi = boost::intrusive;
 
@@ -370,6 +371,7 @@ protected:
     bool _cl_achieved = false;
     bool _throttled = false;
     error _error = error::NONE;
+    std::optional<sstring> _message;
     size_t _failed = 0; // only failures that may impact consistency
     size_t _all_failures = 0; // total amount of failures
     size_t _total_endpoints = 0;
@@ -413,7 +415,11 @@ public:
             if (_error == error::TIMEOUT) {
                 _ready.set_exception(mutation_write_timeout_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _total_block_for, _type));
             } else if (_error == error::FAILURE) {
-                _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
+                if (!_message) {
+                    _ready.set_exception(mutation_write_failure_exception(get_schema()->ks_name(), get_schema()->cf_name(), _cl, _cl_acks, _failed, _total_block_for, _type));
+                } else {
+                    _ready.set_exception(mutation_write_failure_exception(*_message, _cl, _cl_acks, _failed, _total_block_for, _type));
+                }
             }
             if (_cdc_operation_result_tracker) {
                 _cdc_operation_result_tracker->on_mutation_failed();
@@ -450,17 +456,24 @@ public:
             });
         }
     }
-    virtual bool failure(gms::inet_address from, size_t count, error err) {
+
+    bool failure(gms::inet_address from, size_t count, error err, std::optional<sstring> msg) {
         if (waited_for(from)) {
             _failed += count;
             if (_total_block_for + _failed > _total_endpoints) {
                 _error = err;
+                _message = std::move(msg);
                 delay(get_trace_state(), [] (abstract_write_response_handler*) { });
                 return true;
             }
         }
         return false;
     }
+
+    virtual bool failure(gms::inet_address from, size_t count, error err) {
+        return failure(std::move(from), count, std::move(err), {});
+    }
+
     void on_timeout() {
         if (_cl_achieved) {
             slogger.trace("Write is not acknowledged by {} replicas after achieving CL", get_targets());
@@ -483,7 +496,7 @@ public:
     }
     // return true if handler is no longer needed because
     // CL cannot be reached
-    bool failure_response(gms::inet_address from, size_t count, error err) {
+    bool failure_response(gms::inet_address from, size_t count, error err, std::optional<sstring> msg) {
         if (boost::find(_targets, from) == _targets.end()) {
             // There is a little change we can get outdated reply
             // if the coordinator was restarted after sending a request and
@@ -495,7 +508,7 @@ public:
         _all_failures += count;
         // we should not fail CL=ANY requests since they may succeed after
         // writing hints
-        return _cl != db::consistency_level::ANY && failure(from, count, err);
+        return _cl != db::consistency_level::ANY && failure(from, count, err, std::move(msg));
     }
     void check_for_early_completion() {
         if (_all_failures == _targets.size()) {
@@ -776,12 +789,6 @@ static future<> sleep_approx_50ms() {
     return seastar::sleep(std::chrono::milliseconds(dist(re)));
 }
 
-static future<std::optional<paxos_response_handler::ballot_and_data>> sleep_and_restart() {
-    return sleep_approx_50ms().then([] {
-         return std::optional<paxos_response_handler::ballot_and_data>(); // continue
-    });
-}
-
 /**
  * Begin a Paxos session by sending a prepare request and completing any in-progress requests seen in the replies.
  *
@@ -791,118 +798,115 @@ static future<std::optional<paxos_response_handler::ballot_and_data>> sleep_and_
 future<paxos_response_handler::ballot_and_data>
 paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& contentions, bool is_write) {
     if (!_proxy->features().cluster_supports_lwt()) {
-        return make_exception_future<paxos_response_handler::ballot_and_data>(std::runtime_error("The cluster does not support Paxos. Upgrade all the nodes to the version with LWT support."));
+        co_return coroutine::make_exception(std::runtime_error("The cluster does not support Paxos. Upgrade all the nodes to the version with LWT support."));
     }
 
-    return do_with(api::timestamp_type(0), shared_from_this(), [this, &cs, &contentions, is_write]
-            (api::timestamp_type& min_timestamp_micros_to_use, shared_ptr<paxos_response_handler>& prh) {
-        return repeat_until_value([this, &contentions, &cs, &min_timestamp_micros_to_use, is_write] {
-            if (storage_proxy::clock_type::now() > _cas_timeout) {
-                return make_exception_future<std::optional<ballot_and_data>>(
-                        mutation_write_timeout_exception(_schema->ks_name(), _schema->cf_name(), _cl_for_paxos, 0,
-                                _required_participants, db::write_type::CAS)
-                        );
+    api::timestamp_type min_timestamp_micros_to_use = 0;
+    auto _ = shared_from_this(); // hold the handler until co-routine ends
+
+    while(true) {
+        if (storage_proxy::clock_type::now() > _cas_timeout) {
+            co_return coroutine::make_exception(
+                mutation_write_timeout_exception(_schema->ks_name(), _schema->cf_name(), _cl_for_paxos, 0, _required_participants, db::write_type::CAS)
+            );
+        }
+
+        // We want a timestamp that is guaranteed to be unique for that node (so that the ballot is
+        // globally unique), but if we've got a prepare rejected already we also want to make sure
+        // we pick a timestamp that has a chance to be promised, i.e. one that is greater that the
+        // most recently known in progress (#5667). Lastly, we don't want to use a timestamp that is
+        // older than the last one assigned by ClientState or operations may appear out-of-order
+        // (#7801).
+        api::timestamp_type ballot_micros = cs.get_timestamp_for_paxos(min_timestamp_micros_to_use);
+        // Note that ballotMicros is not guaranteed to be unique if two proposal are being handled
+        // concurrently by the same coordinator. But we still need ballots to be unique for each
+        // proposal so we have to use getRandomTimeUUIDFromMicros.
+        utils::UUID ballot = utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{ballot_micros});
+
+        paxos::paxos_state::logger.debug("CAS[{}] Preparing {}", _id, ballot);
+        tracing::trace(tr_state, "Preparing {}", ballot);
+
+        paxos::prepare_summary summary = co_await prepare_ballot(ballot);
+
+        if (!summary.promised) {
+            paxos::paxos_state::logger.debug("CAS[{}] Some replicas have already promised a higher ballot than ours; aborting", _id);
+            tracing::trace(tr_state, "Some replicas have already promised a higher ballot than ours; aborting");
+            contentions++;
+            co_await sleep_approx_50ms();
+            continue;
+        }
+
+        min_timestamp_micros_to_use = utils::UUID_gen::micros_timestamp(summary.most_recent_promised_ballot) + 1;
+
+        std::optional<paxos::proposal> in_progress = std::move(summary.most_recent_proposal);
+
+        // If we have an in-progress accepted ballot greater than the most recent commit
+        // we know, then it's an in-progress round that needs to be completed, so do it.
+        if (in_progress &&
+            (!summary.most_recent_commit || (summary.most_recent_commit && in_progress->ballot.timestamp() > summary.most_recent_commit->ballot.timestamp()))) {
+            paxos::paxos_state::logger.debug("CAS[{}] Finishing incomplete paxos round {}", _id, *in_progress);
+            tracing::trace(tr_state, "Finishing incomplete paxos round {}", *in_progress);
+            if (is_write) {
+                ++_proxy->get_stats().cas_write_unfinished_commit;
+            } else {
+                ++_proxy->get_stats().cas_read_unfinished_commit;
             }
 
-            // We want a timestamp that is guaranteed to be unique for that node (so that the ballot is
-            // globally unique), but if we've got a prepare rejected already we also want to make sure
-            // we pick a timestamp that has a chance to be promised, i.e. one that is greater that the
-            // most recently known in progress (#5667). Lastly, we don't want to use a timestamp that is
-            // older than the last one assigned by ClientState or operations may appear out-of-order
-            // (#7801).
-            api::timestamp_type ballot_micros = cs.get_timestamp_for_paxos(min_timestamp_micros_to_use);
-            // Note that ballotMicros is not guaranteed to be unique if two proposal are being handled
-            // concurrently by the same coordinator. But we still need ballots to be unique for each
-            // proposal so we have to use getRandomTimeUUIDFromMicros.
-            utils::UUID ballot = utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{ballot_micros});
+            auto refreshed_in_progress = make_lw_shared<paxos::proposal>(ballot, std::move(in_progress->update));
 
-            paxos::paxos_state::logger.debug("CAS[{}] Preparing {}", _id, ballot);
-            tracing::trace(tr_state, "Preparing {}", ballot);
+            bool is_accepted = co_await accept_proposal(refreshed_in_progress, false);
 
-            return prepare_ballot(ballot)
-                    .then([this, &contentions, ballot, &min_timestamp_micros_to_use, is_write] (paxos::prepare_summary summary) {
-                if (!summary.promised) {
-                    paxos::paxos_state::logger.debug("CAS[{}] Some replicas have already promised a higher ballot than ours; aborting", _id);
-                    tracing::trace(tr_state, "Some replicas have already promised a higher ballot than ours; aborting");
-                    contentions++;
-                    return sleep_and_restart();
+            if (is_accepted) {
+                try {
+                    co_await learn_decision(std::move(refreshed_in_progress), false);
+                    continue;
+                } catch (mutation_write_timeout_exception& e) {
+                    e.type = db::write_type::CAS;
+                    // we're still doing preparation for the paxos rounds, so we want to use the CAS (see CASSANDRA-8672)
+                    co_return coroutine::make_exception(std::move(e));
                 }
+            } else {
+                paxos::paxos_state::logger.debug("CAS[{}] Some replicas have already promised a higher ballot than ours; aborting", _id);
+                tracing::trace(tr_state, "Some replicas have already promised a higher ballot than ours; aborting");
+                // sleep a random amount to give the other proposer a chance to finish
+                contentions++;
+                co_await sleep_approx_50ms();
+                continue;
+            }
+            assert(true); // no fall through
+        }
 
-                min_timestamp_micros_to_use = utils::UUID_gen::micros_timestamp(summary.most_recent_promised_ballot) + 1;
+        // To be able to propose our value on a new round, we need a quorum of replica to have learn
+        // the previous one. Why is explained at:
+        // https://issues.apache.org/jira/browse/CASSANDRA-5062?focusedCommentId=13619810&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-13619810)
+        // Since we waited for quorum nodes, if some of them haven't seen the last commit (which may
+        // just be a timing issue, but may also mean we lost messages), we pro-actively "repair"
+        // those nodes, and retry.
+        auto now_in_sec = utils::UUID_gen::unix_timestamp_in_sec(ballot);
 
-                std::optional<paxos::proposal> in_progress = std::move(summary.most_recent_proposal);
+        inet_address_vector_replica_set missing_mrc = summary.replicas_missing_most_recent_commit(_schema, now_in_sec);
+        if (missing_mrc.size() > 0) {
+            paxos::paxos_state::logger.debug("CAS[{}] Repairing replicas that missed the most recent commit", _id);
+            tracing::trace(tr_state, "Repairing replicas that missed the most recent commit");
+            std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>, 1>
+                m{std::make_tuple(make_lw_shared<paxos::proposal>(std::move(*summary.most_recent_commit)), _schema, _key.token(), std::move(missing_mrc))};
+            // create_write_response_handler is overloaded for paxos::proposal and will
+            // create cas_mutation holder, which consequently will ensure paxos::learn is
+            // used.
+            auto f = _proxy->mutate_internal(std::move(m), db::consistency_level::ANY, false, tr_state, _permit, _timeout);
 
-                // If we have an in-progress accepted ballot greater than the most recent commit
-                // we know, then it's an in-progress round that needs to be completed, so do it.
-                if (in_progress &&
-                        (!summary.most_recent_commit ||
-                         (summary.most_recent_commit &&
-                         in_progress->ballot.timestamp() > summary.most_recent_commit->ballot.timestamp()))) {
-                    paxos::paxos_state::logger.debug("CAS[{}] Finishing incomplete paxos round {}", _id, *in_progress);
-                    tracing::trace(tr_state, "Finishing incomplete paxos round {}", *in_progress);
-                    if (is_write) {
-                        ++_proxy->get_stats().cas_write_unfinished_commit;
-                    } else {
-                        ++_proxy->get_stats().cas_read_unfinished_commit;
-                    }
-
-                    auto refreshed_in_progress = make_lw_shared<paxos::proposal>(ballot, std::move(in_progress->update));
-
-                    return accept_proposal(refreshed_in_progress, false).then([this, &contentions, refreshed_in_progress] (bool is_accepted) mutable {
-                        if (is_accepted) {
-                            return learn_decision(std::move(refreshed_in_progress), false).then([] {
-                                    return make_ready_future<std::optional<ballot_and_data>>(std::optional<ballot_and_data>());
-                            }).handle_exception_type([] (mutation_write_timeout_exception& e) {
-                                e.type = db::write_type::CAS;
-                                // we're still doing preparation for the paxos rounds, so we want to use the CAS (see cASSANDRA-8672)
-                                return make_exception_future<std::optional<ballot_and_data>>(std::move(e));
-                            });
-                        } else {
-                            paxos::paxos_state::logger.debug("CAS[{}] Some replicas have already promised a higher ballot than ours; aborting", _id);
-                            tracing::trace(tr_state, "Some replicas have already promised a higher ballot than ours; aborting");
-                            // sleep a random amount to give the other proposer a chance to finish
-                            contentions++;
-                            return sleep_and_restart();
-                        }
-                    });
-                }
-
-                // To be able to propose our value on a new round, we need a quorum of replica to have learn
-                // the previous one. Why is explained at:
-                // https://issues.apache.org/jira/browse/CASSANDRA-5062?focusedCommentId=13619810&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-13619810)
-                // Since we waited for quorum nodes, if some of them haven't seen the last commit (which may
-                // just be a timing issue, but may also mean we lost messages), we pro-actively "repair"
-                // those nodes, and retry.
-                auto now_in_sec = utils::UUID_gen::unix_timestamp_in_sec(ballot);
-
-                inet_address_vector_replica_set missing_mrc = summary.replicas_missing_most_recent_commit(_schema, now_in_sec);
-                if (missing_mrc.size() > 0) {
-                    paxos::paxos_state::logger.debug("CAS[{}] Repairing replicas that missed the most recent commit", _id);
-                    tracing::trace(tr_state, "Repairing replicas that missed the most recent commit");
-                    std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>, 1>
-                      m{std::make_tuple(make_lw_shared<paxos::proposal>(std::move(*summary.most_recent_commit)), _schema, _key.token(), std::move(missing_mrc))};
-                    // create_write_response_handler is overloaded for paxos::proposal and will
-                    // create cas_mutation holder, which consequently will ensure paxos::learn is
-                    // used.
-                    auto f = _proxy->mutate_internal(std::move(m), db::consistency_level::ANY, false, tr_state, _permit, _timeout);
-
-                    // TODO: provided commits did not invalidate the prepare we just did above (which they
-                    // didn't), we could just wait for all the missing most recent commits to
-                    // acknowledge this decision and then move on with proposing our value.
-                    return f.then_wrapped([prh = shared_from_this()] (future<> f) {
-                        if (f.failed()) {
-                            paxos::paxos_state::logger.debug("CAS[{}] Failure during commit repair {}", prh->_id, f.get_exception());
-                        } else {
-                            f.ignore_ready_future();
-                        }
-                        return std::optional<ballot_and_data>(); // continue
-                    });
-                }
-
-                return make_ready_future<std::optional<ballot_and_data>>(ballot_and_data{ballot, std::move(summary.data)});
-            });
-        });
-    });
+            // TODO: provided commits did not invalidate the prepare we just did above (which they
+            // didn't), we could just wait for all the missing most recent commits to
+            // acknowledge this decision and then move on with proposing our value.
+            try {
+                co_await std::move(f);
+            } catch(...) {
+                paxos::paxos_state::logger.debug("CAS[{}] Failure during commit repair {}", _id, std::current_exception());
+                continue;
+            }
+        }
+        co_return ballot_and_data{ballot, std::move(summary.data)};
+    }
 }
 
 template<class T> struct dependent_false : std::false_type {};
@@ -933,34 +937,29 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
 
     // We may continue collecting prepare responses in the background after the reply is ready
     (void)do_with(paxos::prepare_summary(_live_endpoints.size()), std::move(request_tracker), shared_from_this(),
-            [this, ballot] (paxos::prepare_summary& summary, auto& request_tracker, shared_ptr<paxos_response_handler>& prh) mutable {
+            [this, ballot] (paxos::prepare_summary& summary, auto& request_tracker, shared_ptr<paxos_response_handler>& prh) mutable -> future<> {
         paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: sending ballot {} to {}", _id, ballot, _live_endpoints);
-        return parallel_for_each(_live_endpoints, [this, &summary, ballot, &request_tracker] (gms::inet_address peer) mutable {
-            return futurize_invoke([&] {
+        auto handle_one_msg = [this, &summary, ballot, &request_tracker] (gms::inet_address peer) mutable -> future<> {
+            paxos::prepare_response response;
+            try {
                 // To generate less network traffic, only the closest replica (first one in the list of participants)
                 // sends query result content while other replicas send digests needed to check consistency.
                 bool only_digest = peer != _live_endpoints[0];
                 auto da = digest_algorithm(get_local_storage_proxy());
                 if (fbu::is_me(peer)) {
                     tracing::trace(tr_state, "prepare_ballot: prepare {} locally", ballot);
-                    return paxos::paxos_state::prepare(tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
+                    response = co_await paxos::paxos_state::prepare(tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
                 } else {
                     tracing::trace(tr_state, "prepare_ballot: sending prepare {} to {}", ballot, peer);
-                    return _proxy->_messaging.send_paxos_prepare(peer, _timeout, *_cmd, _key.key(), ballot, only_digest, da,
+                    response = co_await _proxy->_messaging.send_paxos_prepare(peer, _timeout, *_cmd, _key.key(), ballot, only_digest, da,
                             tracing::make_trace_info(tr_state));
                 }
-            }).then_wrapped([this, &summary, &request_tracker, peer, ballot]
-                              (future<paxos::prepare_response> response_f) mutable {
-                if (!request_tracker.p) {
-                    response_f.ignore_ready_future();
-                    return; // ignore the response since a completion was already signaled
-                }
-
-                if (response_f.failed()) {
-                    auto ex = response_f.get_exception();
+            } catch (...) {
+                if (request_tracker.p) {
+                    auto ex = std::current_exception();
                     if (is_timeout_exception(ex)) {
                         paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: timeout while sending ballot {} to {}", _id,
-                                ballot, peer);
+                                    ballot, peer);
                         auto e = std::make_exception_ptr(mutation_write_timeout_exception(_schema->ks_name(), _schema->cf_name(),
                                     _cl_for_paxos, summary.committed_ballots_by_replica.size(),  _required_participants,
                                     db::write_type::CAS));
@@ -976,88 +975,93 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                             request_tracker.set_exception(std::move(e));
                         }
                     }
-                    return;
                 }
+                co_return;
+            }
 
-                auto on_prepare_response = [&] (auto&& response) {
-                    using T = std::decay_t<decltype(response)>;
-                    if constexpr (std::is_same_v<T, utils::UUID>) {
-                        tracing::trace(tr_state, "prepare_ballot: got more up to date ballot {} from /{}", response, peer);
-                        paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got more up to date ballot {} from {}", _id, response, peer);
-                        // We got an UUID that prevented our proposal from succeeding
-                        summary.update_most_recent_promised_ballot(response);
-                        summary.promised = false;
-                        request_tracker.set_value(std::move(summary));
-                        return;
-                    } else if constexpr (std::is_same_v<T, paxos::promise>) {
-                        utils::UUID mrc_ballot = utils::UUID_gen::min_time_UUID();
+            if (!request_tracker.p) {
+                co_return;
+            }
 
-                        paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got a response {} from {}", _id, response, peer);
-                        tracing::trace(tr_state, "prepare_ballot: got a response {} from /{}", response, peer);
+            auto on_prepare_response = [&] (auto&& response) {
+                using T = std::decay_t<decltype(response)>;
+                if constexpr (std::is_same_v<T, utils::UUID>) {
+                    tracing::trace(tr_state, "prepare_ballot: got more up to date ballot {} from /{}", response, peer);
+                    paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got more up to date ballot {} from {}", _id, response, peer);
+                    // We got an UUID that prevented our proposal from succeeding
+                    summary.update_most_recent_promised_ballot(response);
+                    summary.promised = false;
+                    request_tracker.set_value(std::move(summary));
+                    return;
+                } else if constexpr (std::is_same_v<T, paxos::promise>) {
+                    utils::UUID mrc_ballot = utils::UUID_gen::min_time_UUID();
 
-                        // Find the newest learned value among all replicas that answered.
-                        // It will be used to "repair" replicas that did not learn this value yet.
-                        if (response.most_recent_commit) {
-                            mrc_ballot = response.most_recent_commit->ballot;
+                    paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got a response {} from {}", _id, response, peer);
+                    tracing::trace(tr_state, "prepare_ballot: got a response {} from /{}", response, peer);
 
-                            if (!summary.most_recent_commit ||
-                                    summary.most_recent_commit->ballot.timestamp() < mrc_ballot.timestamp()) {
-                                summary.most_recent_commit = std::move(response.most_recent_commit);
-                            }
+                    // Find the newest learned value among all replicas that answered.
+                    // It will be used to "repair" replicas that did not learn this value yet.
+                    if (response.most_recent_commit) {
+                        mrc_ballot = response.most_recent_commit->ballot;
+
+                        if (!summary.most_recent_commit ||
+                            summary.most_recent_commit->ballot.timestamp() < mrc_ballot.timestamp()) {
+                            summary.most_recent_commit = std::move(response.most_recent_commit);
                         }
+                    }
 
-                        // cannot throw since the memory was reserved ahead
-                        summary.committed_ballots_by_replica.emplace(peer, mrc_ballot);
+                    // cannot throw since the memory was reserved ahead
+                    summary.committed_ballots_by_replica.emplace(peer, mrc_ballot);
 
-                        if (response.accepted_proposal) {
-                            summary.update_most_recent_promised_ballot(response.accepted_proposal->ballot);
+                    if (response.accepted_proposal) {
+                        summary.update_most_recent_promised_ballot(response.accepted_proposal->ballot);
 
-                            // If some response has an accepted proposal, then we should replay the proposal with the highest ballot.
-                            // So find the highest accepted proposal here.
-                            if (!summary.most_recent_proposal || response.accepted_proposal > summary.most_recent_proposal) {
-                                summary.most_recent_proposal = std::move(response.accepted_proposal);
-                            }
+                        // If some response has an accepted proposal, then we should replay the proposal with the highest ballot.
+                        // So find the highest accepted proposal here.
+                        if (!summary.most_recent_proposal || response.accepted_proposal > summary.most_recent_proposal) {
+                            summary.most_recent_proposal = std::move(response.accepted_proposal);
                         }
+                    }
 
-                        // Check if the query result attached to the promise matches query results received from other participants.
-                        if (request_tracker.digests_match) {
-                            if (response.data_or_digest) {
-                                foreign_ptr<lw_shared_ptr<query::result>> data;
-                                if (std::holds_alternative<foreign_ptr<lw_shared_ptr<query::result>>>(*response.data_or_digest)) {
-                                    data = std::move(std::get<foreign_ptr<lw_shared_ptr<query::result>>>(*response.data_or_digest));
-                                }
-                                auto& digest = data ? data->digest() : std::get<query::result_digest>(*response.data_or_digest);
-                                if (request_tracker.digest) {
-                                    if (*request_tracker.digest != digest) {
-                                        request_tracker.digests_match = false;
-                                    }
-                                } else {
-                                    request_tracker.digest = digest;
-                                }
-                                if (request_tracker.digests_match && !summary.data && data) {
-                                    summary.data = std::move(data);
+                    // Check if the query result attached to the promise matches query results received from other participants.
+                    if (request_tracker.digests_match) {
+                        if (response.data_or_digest) {
+                            foreign_ptr<lw_shared_ptr<query::result>> data;
+                            if (std::holds_alternative<foreign_ptr<lw_shared_ptr<query::result>>>(*response.data_or_digest)) {
+                                data = std::move(std::get<foreign_ptr<lw_shared_ptr<query::result>>>(*response.data_or_digest));
+                            }
+                            auto& digest = data ? data->digest() : std::get<query::result_digest>(*response.data_or_digest);
+                            if (request_tracker.digest) {
+                                if (*request_tracker.digest != digest) {
+                                    request_tracker.digests_match = false;
                                 }
                             } else {
-                                request_tracker.digests_match = false;
+                                request_tracker.digest = digest;
                             }
-                            if (!request_tracker.digests_match) {
-                                request_tracker.digest.reset();
-                                summary.data.reset();
+                            if (request_tracker.digests_match && !summary.data && data) {
+                                summary.data = std::move(data);
                             }
+                        } else {
+                            request_tracker.digests_match = false;
                         }
-
-                        if (summary.committed_ballots_by_replica.size() == _required_participants) { // got all replies
-                            tracing::trace(tr_state, "prepare_ballot: got enough replies to proceed");
-                            paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got enough replies to proceed", _id);
-                            request_tracker.set_value(std::move(summary));
+                        if (!request_tracker.digests_match) {
+                            request_tracker.digest.reset();
+                            summary.data.reset();
                         }
-                    } else {
-                        static_assert(dependent_false<T>::value, "unexpected type!");
                     }
-                };
-                std::visit(on_prepare_response, response_f.get0());
-             });
-        });
+
+                    if (summary.committed_ballots_by_replica.size() == _required_participants) { // got all replies
+                        tracing::trace(tr_state, "prepare_ballot: got enough replies to proceed");
+                        paxos::paxos_state::logger.trace("CAS[{}] prepare_ballot: got enough replies to proceed", _id);
+                        request_tracker.set_value(std::move(summary));
+                    }
+                } else {
+                    static_assert(dependent_false<T>::value, "unexpected type!");
+                }
+            };
+            std::visit(on_prepare_response, std::move(response));
+        };
+        co_return co_await parallel_for_each(_live_endpoints, handle_one_msg);
     });
 
     return f;
@@ -1096,27 +1100,23 @@ future<bool> paxos_response_handler::accept_proposal(lw_shared_ptr<paxos::propos
 
     // We may continue collecting propose responses in the background after the reply is ready
     (void)do_with(std::move(request_tracker), shared_from_this(), [this, timeout_if_partially_accepted, proposal = std::move(proposal)]
-                           (auto& request_tracker, shared_ptr<paxos_response_handler>& prh) {
+                           (auto& request_tracker, shared_ptr<paxos_response_handler>& prh) -> future<> {
         paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: sending commit {} to {}", _id, *proposal, _live_endpoints);
-        return parallel_for_each(_live_endpoints, [this, &request_tracker, timeout_if_partially_accepted, proposal = std::move(proposal)] (gms::inet_address peer) mutable {
-            return futurize_invoke([&] {
+        auto handle_one_msg = [this, &request_tracker, timeout_if_partially_accepted, proposal = std::move(proposal)] (gms::inet_address peer) mutable -> future<> {
+            bool is_timeout = false;
+            std::optional<bool> accepted;
+
+            try {
                 if (fbu::is_me(peer)) {
                     tracing::trace(tr_state, "accept_proposal: accept {} locally", *proposal);
-                    return paxos::paxos_state::accept(tr_state, _schema, proposal->update.decorated_key(*_schema).token(), *proposal, _timeout);
+                    accepted = co_await paxos::paxos_state::accept(tr_state, _schema, proposal->update.decorated_key(*_schema).token(), *proposal, _timeout);
                 } else {
                     tracing::trace(tr_state, "accept_proposal: send accept {} to {}", *proposal, peer);
-                    return _proxy->_messaging.send_paxos_accept(peer, _timeout, *proposal, tracing::make_trace_info(tr_state));
+                    accepted = co_await _proxy->_messaging.send_paxos_accept(peer, _timeout, *proposal, tracing::make_trace_info(tr_state));
                 }
-            }).then_wrapped([this, &request_tracker, timeout_if_partially_accepted, proposal, peer] (future<bool> accepted_f) {
-                if (!request_tracker.p) {
-                    accepted_f.ignore_ready_future();
-                    // Ignore the response since a completion was already signaled.
-                    return;
-                }
-
-                bool is_timeout = false;
-                if (accepted_f.failed()) {
-                    auto ex = accepted_f.get_exception();
+            } catch(...) {
+                if (request_tracker.p) {
+                    auto ex = std::current_exception();
                     if (is_timeout_exception(ex)) {
                         paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: timeout while sending proposal {} to {}",
                                 _id, *proposal, peer);
@@ -1126,74 +1126,82 @@ future<bool> paxos_response_handler::accept_proposal(lw_shared_ptr<paxos::propos
                                 *proposal, peer, ex);
                         request_tracker.errors++;
                     }
-                } else {
-                    bool accepted = accepted_f.get0();
-                    tracing::trace(tr_state, "accept_proposal: got \"{}\" from /{}", accepted ? "accepted" : "rejected", peer);
-                    paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got \"{}\" from {}", _id,
-                            accepted ? "accepted" : "rejected", peer);
-
-                    accepted ? request_tracker.accepts++ : request_tracker.rejects++;
                 }
-                /**
-                 * The code has two modes of operation, controlled by the timeout_if_partially_accepted parameter.
-                 *
-                 * In timeout_if_partially_accepted is false, we will return a failure as soon as a majority of nodes reject
-                 * the proposal. This is used when replaying a proposal from an earlier leader.
-                 *
-                 * Otherwise, we wait for either all replicas to respond or until we achieve
-                 * the desired quorum. We continue to wait for all replicas even after we know we cannot succeed
-                 * because we need to know if no node at all has accepted our proposal or if at least one has.
-                 * In the former case, a proposer is guaranteed no-one will replay its value; in the
-                 * latter we don't, so we must timeout in case another leader replays it before we
-                 * can; see CASSANDRA-6013.
-                 */
-                if (request_tracker.accepts == _required_participants) {
-                    tracing::trace(tr_state, "accept_proposal: got enough accepts to proceed");
-                    paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough accepts to proceed", _id);
-                    request_tracker.set_value(true);
-                } else if (is_timeout) {
-                    auto e = std::make_exception_ptr(mutation_write_timeout_exception(_schema->ks_name(), _schema->cf_name(),
-                                _cl_for_paxos, request_tracker.non_error_replies(), _required_participants, db::write_type::CAS));
-                    request_tracker.set_exception(std::move(e));
-                } else if (_required_participants + request_tracker.errors > _live_endpoints.size()) {
-                    // We got one too many errors. The quorum is no longer reachable. We can fail here
-                    // timeout_if_partially_accepted or not because failing is always safe - a client cannot
-                    // assume that the value was not committed.
-                    auto e = std::make_exception_ptr(mutation_write_failure_exception(_schema->ks_name(),
-                                _schema->cf_name(), _cl_for_paxos, request_tracker.non_error_replies(),
-                                request_tracker.errors, _required_participants, db::write_type::CAS));
-                    request_tracker.set_exception(std::move(e));
-                } else if (_required_participants + request_tracker.non_accept_replies()  > _live_endpoints.size() && !timeout_if_partially_accepted) {
-                    // In case there is no need to reply with a timeout if at least one node is accepted
-                    // we can fail the request as soon is we know a quorum is unreachable.
-                    tracing::trace(tr_state, "accept_proposal: got enough rejects to proceed");
-                    paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough rejects to proceed", _id);
+            }
+
+            if (!request_tracker.p) {
+                // Ignore the response since a completion was already signaled.
+                co_return;
+            }
+
+            if (accepted) {
+                tracing::trace(tr_state, "accept_proposal: got \"{}\" from /{}", *accepted ? "accepted" : "rejected", peer);
+                paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got \"{}\" from {}", _id,
+                        accepted ? "accepted" : "rejected", peer);
+
+                *accepted ? request_tracker.accepts++ : request_tracker.rejects++;
+            }
+
+            /**
+            * The code has two modes of operation, controlled by the timeout_if_partially_accepted parameter.
+            *
+            * In timeout_if_partially_accepted is false, we will return a failure as soon as a majority of nodes reject
+            * the proposal. This is used when replaying a proposal from an earlier leader.
+            *
+            * Otherwise, we wait for either all replicas to respond or until we achieve
+            * the desired quorum. We continue to wait for all replicas even after we know we cannot succeed
+            * because we need to know if no node at all has accepted our proposal or if at least one has.
+            * In the former case, a proposer is guaranteed no-one will replay its value; in the
+            * latter we don't, so we must timeout in case another leader replays it before we
+            * can; see CASSANDRA-6013.
+            */
+            if (request_tracker.accepts == _required_participants) {
+                tracing::trace(tr_state, "accept_proposal: got enough accepts to proceed");
+                paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough accepts to proceed", _id);
+                request_tracker.set_value(true);
+            } else if (is_timeout) {
+                auto e = std::make_exception_ptr(mutation_write_timeout_exception(_schema->ks_name(), _schema->cf_name(),
+                            _cl_for_paxos, request_tracker.non_error_replies(), _required_participants, db::write_type::CAS));
+                request_tracker.set_exception(std::move(e));
+            } else if (_required_participants + request_tracker.errors > _live_endpoints.size()) {
+                // We got one too many errors. The quorum is no longer reachable. We can fail here
+                // timeout_if_partially_accepted or not because failing is always safe - a client cannot
+                // assume that the value was not committed.
+                auto e = std::make_exception_ptr(mutation_write_failure_exception(_schema->ks_name(),
+                            _schema->cf_name(), _cl_for_paxos, request_tracker.non_error_replies(),
+                            request_tracker.errors, _required_participants, db::write_type::CAS));
+                request_tracker.set_exception(std::move(e));
+            } else if (_required_participants + request_tracker.non_accept_replies()  > _live_endpoints.size() && !timeout_if_partially_accepted) {
+                // In case there is no need to reply with a timeout if at least one node is accepted
+                // we can fail the request as soon is we know a quorum is unreachable.
+                tracing::trace(tr_state, "accept_proposal: got enough rejects to proceed");
+                paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: got enough rejects to proceed", _id);
+                request_tracker.set_value(false);
+            } else if (request_tracker.all_replies() == _live_endpoints.size()) { // wait for all replies
+                if (request_tracker.accepts == 0 && request_tracker.errors == 0) {
+                    tracing::trace(tr_state, "accept_proposal: proposal is fully rejected");
+                    paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is fully rejected", _id);
+                    // Return false if fully refused. Consider errors as accepts here since it
+                    // is not possible to know for sure.
                     request_tracker.set_value(false);
-                } else if (request_tracker.all_replies() == _live_endpoints.size()) { // wait for all replies
-                    if (request_tracker.accepts == 0 && request_tracker.errors == 0) {
-                        tracing::trace(tr_state, "accept_proposal: proposal is fully rejected");
-                        paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is fully rejected", _id);
-                        // Return false if fully refused. Consider errors as accepts here since it
-                        // is not possible to know for sure.
-                        request_tracker.set_value(false);
-                    } else {
-                        // We got some rejects, but not all, and there were errors. So we can't know for
-                        // sure that the proposal is fully rejected, and it is obviously not
-                        // accepted, either.
-                        paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is partially rejected", _id);
-                        tracing::trace(tr_state, "accept_proposal: proposal is partially rejected");
-                        _proxy->get_stats().cas_write_timeout_due_to_uncertainty++;
-                        // TODO: we report write timeout exception to be compatible with Cassandra,
-                        // which uses write_timeout_exception to signal any "unknown" state.
-                        // To be changed in scope of work on https://issues.apache.org/jira/browse/CASSANDRA-15350
-                        auto e = std::make_exception_ptr(mutation_write_timeout_exception(_schema->ks_name(),
-                                    _schema->cf_name(), _cl_for_paxos, request_tracker.accepts, _required_participants,
-                                    db::write_type::CAS));
-                        request_tracker.set_exception(std::move(e));
-                    }
-                } // wait for more replies
-            }); // send_paxos_accept.then_wrapped
-        }); // parallel_for_each
+                } else {
+                    // We got some rejects, but not all, and there were errors. So we can't know for
+                    // sure that the proposal is fully rejected, and it is obviously not
+                    // accepted, either.
+                    paxos::paxos_state::logger.trace("CAS[{}] accept_proposal: proposal is partially rejected", _id);
+                    tracing::trace(tr_state, "accept_proposal: proposal is partially rejected");
+                    _proxy->get_stats().cas_write_timeout_due_to_uncertainty++;
+                    // TODO: we report write timeout exception to be compatible with Cassandra,
+                    // which uses write_timeout_exception to signal any "unknown" state.
+                    // To be changed in scope of work on https://issues.apache.org/jira/browse/CASSANDRA-15350
+                    auto e = std::make_exception_ptr(mutation_write_timeout_exception(_schema->ks_name(),
+                                _schema->cf_name(), _cl_for_paxos, request_tracker.accepts, _required_participants,
+                                db::write_type::CAS));
+                    request_tracker.set_exception(std::move(e));
+                }
+            } // wait for more replies
+        };
+        co_return co_await parallel_for_each(_live_endpoints, handle_one_msg);
     }); // do_with
 
     return f;
@@ -1375,11 +1383,11 @@ void storage_proxy::got_response(storage_proxy::response_id_type id, gms::inet_a
     maybe_update_view_backlog_of(std::move(from), std::move(backlog));
 }
 
-void storage_proxy::got_failure_response(storage_proxy::response_id_type id, gms::inet_address from, size_t count, std::optional<db::view::update_backlog> backlog, error err) {
+void storage_proxy::got_failure_response(storage_proxy::response_id_type id, gms::inet_address from, size_t count, std::optional<db::view::update_backlog> backlog, error err, std::optional<sstring> msg) {
     auto it = _response_handlers.find(id);
     if (it != _response_handlers.end()) {
         tracing::trace(it->second->get_trace_state(), "Got {} failures from /{}", count, from);
-        if (it->second->failure_response(from, count, err)) {
+        if (it->second->failure_response(from, count, err, std::move(msg))) {
             remove_response_handler_entry(std::move(it));
         } else {
             it->second->check_for_early_completion();
@@ -2728,6 +2736,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
         (void)f.handle_exception([response_id, forward_size, coordinator, handler_ptr, p = shared_from_this(), &stats] (std::exception_ptr eptr) {
             ++stats.writes_errors.get_ep_stat(coordinator);
             error err = error::FAILURE;
+            std::optional<sstring> msg;
             try {
                 std::rethrow_exception(eptr);
             } catch(rpc::closed_error&) {
@@ -2739,10 +2748,12 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
                 // database total_writes_timedout counter was incremented.
                 // It needs to be recorded that the timeout occurred locally though.
                 err = error::TIMEOUT;
+            } catch(db::virtual_table_update_exception& e) {
+                msg = e.grab_cause();
             } catch(...) {
                 slogger.error("exception during mutation write to {}: {}", coordinator, std::current_exception());
             }
-            p->got_failure_response(response_id, coordinator, forward_size + 1, std::nullopt, err);
+            p->got_failure_response(response_id, coordinator, forward_size + 1, std::nullopt, err, std::move(msg));
         });
     }
 }
@@ -5007,7 +5018,7 @@ void storage_proxy::init_messaging_service(shared_ptr<migration_manager> mm) {
         auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         get_stats().replica_cross_shard_ops += shard != this_shard_id();
         return container().invoke_on(shard, _write_ack_smp_service_group, [from, response_id, num_failed, backlog = std::move(backlog)] (storage_proxy& sp) mutable {
-            sp.got_failure_response(response_id, from, num_failed, std::move(backlog), error::FAILURE);
+            sp.got_failure_response(response_id, from, num_failed, std::move(backlog), error::FAILURE, std::nullopt);
             return netw::messaging_service::no_wait();
         });
     });

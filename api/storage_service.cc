@@ -172,7 +172,7 @@ void set_transport_controller(http_context& ctx, routes& r, cql_transport::contr
 
     ss::is_native_transport_running.set(r, [&ctl] (std::unique_ptr<request> req) {
         return smp::submit_to(0, [&] {
-            return !ctl.listen_addresses().empty();
+            return ctl.is_server_running();
         }).then([] (bool running) {
             return make_ready_future<json::json_return_type>(running);
         });
@@ -728,9 +728,9 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         });
     });
 
-    ss::get_drain_progress.set(r, [&ss](std::unique_ptr<request> req) {
-        return ss.map_reduce(adder<service::storage_service::drain_progress>(), [] (auto& ss) {
-            return ss.get_drain_progress();
+    ss::get_drain_progress.set(r, [&ctx](std::unique_ptr<request> req) {
+        return ctx.db.map_reduce(adder<database::drain_progress>(), [] (auto& db) {
+            return db.get_drain_progress();
         }).then([] (auto&& progress) {
             auto progress_str = format("Drained {}/{} ColumnFamilies", progress.remaining_cfs, progress.total_cfs);
             return make_ready_future<json::json_return_type>(std::move(progress_str));

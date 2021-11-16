@@ -883,7 +883,7 @@ int main(int ac, char** av) {
             // Iteration through column family directory for sstable loading is
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
-            distributed_loader::init_system_keyspace(db, ss).get();
+            distributed_loader::init_system_keyspace(db, ss, *cfg).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -1396,12 +1396,6 @@ int main(int ac, char** av) {
             auto drain_view_builder = defer_verbose_shutdown("view builder ops", [cfg] {
                 if (cfg->view_building()) {
                     view_builder.invoke_on_all(&db::view::view_builder::drain).get();
-                }
-            });
-
-            auto stop_redis_service = defer_verbose_shutdown("redis service", [&cfg, &redis] {
-                if (cfg->redis_port() || cfg->redis_ssl_port()) {
-                    redis.stop_server().get();
                 }
             });
 

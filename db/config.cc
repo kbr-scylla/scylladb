@@ -220,6 +220,12 @@ public:
 #define ENABLE_SSTABLE_KEY_VALIDATION false
 #endif
 
+#if defined(DEBUG) || defined(DEVEL)
+#define DEVELOPER_MODE_DEFAULT true
+#else
+#define DEVELOPER_MODE_DEFAULT false
+#endif
+
 #define str(x)  #x
 #define _mk_init(name, type, deflt, status, desc, ...)  , name(this, str(name), value_status::status, type(deflt), desc)
 
@@ -764,7 +770,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , fd_max_interval_ms(this, "fd_max_interval_ms", value_status::Used, 2 * 1000, "The maximum failure_detector interval time in milliseconds. Interval larger than the maximum will be ignored. Larger cluster may need to increase the default.")
     , fd_initial_value_ms(this, "fd_initial_value_ms", value_status::Used, 2 * 1000, "The initial failure_detector interval time in milliseconds.")
     , shutdown_announce_in_ms(this, "shutdown_announce_in_ms", value_status::Used, 2 * 1000, "Time a node waits after sending gossip shutdown message in milliseconds. Same as -Dcassandra.shutdown_announce_in_ms in cassandra.")
-    , developer_mode(this, "developer_mode", value_status::Used, false, "Relax environment checks. Setting to true can reduce performance and reliability significantly.")
+    , developer_mode(this, "developer_mode", value_status::Used, DEVELOPER_MODE_DEFAULT, "Relax environment checks. Setting to true can reduce performance and reliability significantly.")
     , skip_wait_for_gossip_to_settle(this, "skip_wait_for_gossip_to_settle", value_status::Used, -1, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.")
     , force_gossip_generation(this, "force_gossip_generation", liveness::LiveUpdate, value_status::Used, -1 , "Force gossip to use the generation number provided by user")
     , experimental(this, "experimental", value_status::Used, false, "[Deprecated] Set to true to unlock all experimental features (except 'raft' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
@@ -917,6 +923,13 @@ namespace db {
 std::ostream& operator<<(std::ostream& os, const db::seed_provider_type& s) {
     os << "seed_provider_type{class=" << s.class_name << ", params=" << s.parameters << "}";
     return os;
+}
+
+std::istream& operator>>(std::istream& is, db::seed_provider_type& s) {
+    // FIXME -- this operator is used, in particular, by boost lexical_cast<>
+    // it's here just to make the code compile, but it's not yet called for real
+    throw std::runtime_error("reading seed_provider_type from istream is not implemented");
+    return is;
 }
 
 }
