@@ -449,7 +449,7 @@ class LdapTest(BoostTest):
         super().__init__(test_no, shortname, args, suite, None, mode, options)
 
     async def setup(self, port, options):
-        instances_root = os.path.join(os.path.split(self.path)[0], 'ldap_instances');
+        instances_root = os.path.join(options.tmpdir, self.mode, 'ldap_instances');
         instance_path = os.path.join(os.path.abspath(instances_root), str(port))
         slapd_pid_file = os.path.join(instance_path, 'slapd.pid')
         data_path = os.path.join(instance_path, 'data')
@@ -678,7 +678,7 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
             os.getenv("ASAN_OPTIONS"),
         ]
         ldap_instance_path = os.path.join(
-            os.path.abspath(os.path.join(os.path.split(test.path)[0], 'ldap_instances')),
+            os.path.abspath(os.path.join(options.tmpdir, test.mode, 'ldap_instances')),
             str(ldap_port))
         saslauthd_mux_path = os.path.join(ldap_instance_path, 'mux')
         if options.manual_execution:
