@@ -421,6 +421,11 @@ def can_connect(address, family=socket.AF_INET):
     try:
         s.connect(address)
         return True
+    except OSError as e:
+        if 'AF_UNIX path too long' in str(e):
+            raise OSError(e.errno, "{} ({})".format(str(e), address)) from None
+        else:
+            return False
     except:
         return False
 
@@ -501,12 +506,14 @@ class LdapTest(BoostTest):
             saslauthd_proc.kill() # Somehow, invoking terminate() here also terminates toxiproxy-server. o_O
             shutil.rmtree(instance_path)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
-        if not try_something_backoff(can_connect_to_slapd):
+        try:
+            if not try_something_backoff(can_connect_to_slapd):
+                raise Exception('Unable to connect to slapd')
+            if not try_something_backoff(can_connect_to_saslauthd):
+                raise Exception('Unable to connect to saslauthd')
+        except:
             finalize()
-            raise Exception('Unable to connect to slapd')
-        if not try_something_backoff(can_connect_to_saslauthd):
-            finalize()
-            raise Exception('Unable to connect to saslauthd')
+            raise
         return finalize, '--byte-limit={}'.format(byte_limit)
 
 class CqlTest(Test):
