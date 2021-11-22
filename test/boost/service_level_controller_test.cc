@@ -103,20 +103,28 @@ std::ostream& operator<<(std::ostream& os, const service_level_op& op) {
 SEASTAR_THREAD_TEST_CASE(subscriber_simple) {
     sharded<service_level_controller> sl_controller;
     sharded<auth::service> auth_service;
-    sl_controller.start(std::ref(auth_service), service_level_options{}, default_scheduling_group()).get();
+    service_level_options sl_options;
+    sl_options.shares.emplace<int32_t>(1000);
+    sl_controller.start(std::ref(auth_service), sl_options, default_scheduling_group()).get();
     qos_configuration_change_suscriber_simple ccss;
     sl_controller.local().register_subscriber(&ccss);
-    sl_controller.local().add_service_level("sl1", service_level_options{}).get();
-    sl_controller.local().add_service_level("sl2", service_level_options{}).get();
+    sl_controller.local().add_service_level("sl1", sl_options).get();
+    sl_controller.local().add_service_level("sl2", sl_options).get();
+    sl_controller.local().add_service_level("sl3", service_level_options{}).get();
     service_level_options slo;
+    slo.shares.emplace<int32_t>(500);
     slo.workload = service_level_options::workload_type::interactive;
     sl_controller.local().add_service_level("sl1", slo).get();
     sl_controller.local().remove_service_level("sl2", false).get();
 
     std::vector<service_level_op> expected_result = {
-        add_op{"sl1", service_level_options{}},
-        add_op{"sl2", service_level_options{}},
-        change_op{"sl1", service_level_options{}, slo},
+        add_op{"sl1", sl_options},
+        add_op{"sl2", sl_options},
+        // if this one fails - it means that the default shares amount that is added by the service level
+        // controller has changed, in which case a consideration should be made to either alter the test or
+        // change the default back.
+        add_op{"sl3", sl_options},
+        change_op{"sl1", sl_options, slo},
         remove_op{"sl2"},
     };
 

@@ -501,6 +501,9 @@ future<> service_level_controller::set_distributed_service_level(sstring name, s
 
 future<> service_level_controller::do_add_service_level(sstring name, service_level_options slo, bool is_static) {
     auto service_level_it = _service_levels_db.find(name);
+    if (!std::holds_alternative<int32_t>(slo.shares)) {
+        slo.shares.emplace<int32_t>(1000);
+    }
     if (is_static) {
         _global_controller_db->static_configurations[name] = slo;
     }
@@ -527,27 +530,16 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     sl.sg = sg;
                     return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
                         scheduling_group non_const_sg = sg;
-                        int32_t shares = 1000;
-                        if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
-                            shares = *shares_p;
-                        }
-                        return non_const_sg.set_shares((float)shares);
+                        return non_const_sg.set_shares((float)std::get<int32_t>(sl.slo.shares));
                     });
                 } else {
-                   int32_t shares = 1000;
-                   if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
-                       shares = *shares_p;
-                   }
-                   return create_scheduling_group(format("service_level_sg_{}", _global_controller_db->schedg_group_cnt++), shares).then([&sl] (scheduling_group sg) {
+                   return create_scheduling_group(format("service_level_sg_{}", _global_controller_db->schedg_group_cnt++), std::get<int32_t>(sl.slo.shares)).then([&sl] (scheduling_group sg) {
                        sl.sg = sg;
                    });
                 }
             }).then([this, &sl] () mutable {
                 if (!_global_controller_db->deleted_priority_classes.empty()) {
-                    int32_t shares = 1000;
-                    if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
-                        shares = *shares_p;
-                    }
+                    int32_t shares = std::get<int32_t>(sl.slo.shares);
                     io_priority_class pc = _global_controller_db->deleted_priority_classes.front();
                     _global_controller_db->deleted_priority_classes.pop_front();
                     sl.pc = pc;
@@ -555,12 +547,8 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                         return engine().update_shares_for_class(pc, shares);
                     });
                 } else {
-                    int32_t shares = 1000;
-                    if (auto shares_p = std::get_if<int32_t>(&sl.slo.shares)) {
-                        shares = *shares_p;
-                    }
                     sl. pc = engine().
-                            register_one_priority_class(format("service_level_pc_{}", _global_controller_db->io_priority_cnt++), shares);
+                            register_one_priority_class(format("service_level_pc_{}", _global_controller_db->io_priority_cnt++), std::get<int32_t>(sl.slo.shares));
                     return make_ready_future();
                 }
             }).then([this, &sl, name] () {
