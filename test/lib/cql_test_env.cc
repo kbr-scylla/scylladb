@@ -794,6 +794,10 @@ public:
         auto& lqo = *qo;
         return local_qp().execute_batch(batch, *qs, lqo, {}).finally([qs, batch, qo = std::move(qo)] {});
     }
+
+    virtual sharded<qos::service_level_controller>& service_level_controller_service() override {
+        return _sl_controller;
+    }
 };
 
 std::atomic<bool> single_node_cql_env::active = { false };

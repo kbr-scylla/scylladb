@@ -26,6 +26,7 @@ class reader_concurrency_semaphore_group {
     size_t _spare_memory;
     size_t _max_concurrent_reads;
     size_t _max_queue_length;
+    friend class database_test;
 
     struct weighted_reader_concurrency_semaphore {
         size_t weight;

@@ -17,6 +17,7 @@
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/result_set_assertions.hh"
 #include "test/lib/log.hh"
+#include "test/lib/random_utils.hh"
 
 #include "database.hh"
 #include "lister.hh"
@@ -48,6 +49,14 @@ public:
     }
     reader_concurrency_semaphore& get_system_read_concurrency_semaphore() {
         return _db._system_read_concurrency_sem;
+    }
+
+    size_t get_total_user_reader_concurrency_semaphore_memory() {
+        return _db._reader_concurrency_semaphores_group._total_memory;
+    }
+
+    size_t get_total_user_reader_concurrency_semaphore_weight() {
+        return _db._reader_concurrency_semaphores_group._total_weight;
     }
 };
 
@@ -774,4 +783,83 @@ SEASTAR_TEST_CASE(upgrade_sstables) {
             });
         }).get();
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
+    cql_test_config cfg;
+    do_with_cql_env_thread([] (cql_test_env& e) {
+        const size_t num_service_levels = 3;
+        const size_t num_keys_to_insert = 10;
+        const size_t num_individual_reads_to_test = 50;
+        auto& db = e.local_db();
+        database_test dbt(db);
+        size_t total_memory = dbt.get_total_user_reader_concurrency_semaphore_memory();
+        sharded<qos::service_level_controller>& sl_controller = e.service_level_controller_service();
+        std::array<sstring, num_service_levels> sl_names;
+        qos::service_level_options slo;
+        size_t expected_total_weight = 0;
+        auto index_to_weight = [] (size_t i) -> size_t {
+            return (i + 1)*100;
+        };
+
+        // make the default service level take as little memory as possible
+        slo.shares.emplace<int32_t>(1);
+        expected_total_weight += 1;
+        sl_controller.local().add_service_level(qos::service_level_controller::default_service_level_name, slo).get();
+
+        // Just to make the code more readable.
+        auto get_reader_concurrency_semaphore_for_sl = [&] (sstring sl_name) -> reader_concurrency_semaphore& {
+            return *sl_controller.local().with_service_level(sl_name, noncopyable_function<reader_concurrency_semaphore*()>([&] {
+                return &db.get_reader_concurrency_semaphore();
+            })).get0();
+        };
+
+        for (int i = 0; i < num_service_levels; i++) {
+            sstring sl_name = format("sl{}", i);
+            slo.shares.emplace<int32_t>(index_to_weight(i));
+            sl_controller.local().add_service_level(sl_name, slo).get();
+            expected_total_weight += index_to_weight(i);
+            // Make sure that the total weight is tracked correctly in the semaphore group
+            BOOST_REQUIRE_EQUAL(expected_total_weight, dbt.get_total_user_reader_concurrency_semaphore_weight());
+            sl_names[i] = sl_name;
+            for (int j = 0 ; j <= i ; j++) {
+                reader_concurrency_semaphore& sem = get_reader_concurrency_semaphore_for_sl(sl_names[j]);
+                // Make sure that all semaphores that has been created until now - have the right amount of available memory
+                // after the operation has ended.
+                BOOST_REQUIRE_EQUAL((index_to_weight(j) * total_memory) / expected_total_weight, sem.available_resources().memory);
+            }
+        }
+
+        size_t total_weight = dbt.get_total_user_reader_concurrency_semaphore_weight();
+        auto get_semaphores_stats_snapshot = [&] () {
+            std::unordered_map<sstring, reader_concurrency_semaphore::stats> snapshot;
+            for (auto&& sl_name : sl_names) {
+                snapshot[sl_name] = get_reader_concurrency_semaphore_for_sl(sl_name).get_stats();
+            }
+            return snapshot;
+        };
+        e.execute_cql("CREATE TABLE tbl (a int, b int, PRIMARY KEY (a));").get();
+
+        for (int i = 0; i < num_keys_to_insert; i++) {
+            for (int j = 0; j < num_keys_to_insert; j++) {
+                e.execute_cql(format("INSERT INTO tbl(a, b) VALUES ({}, {});", i, j)).get();
+            }
+        }
+
+        for (int i = 0; i < num_individual_reads_to_test; i++) {
+            int random_service_level = tests::random::get_int(num_service_levels - 1);
+            auto snapshot_before = get_semaphores_stats_snapshot();
+
+            sl_controller.local().with_service_level(sl_names[random_service_level], noncopyable_function<future<>()> ([&] {
+                return e.execute_cql("SELECT * FROM tbl;").discard_result();
+            })).get();
+            auto snapshot_after = get_semaphores_stats_snapshot();
+            for (auto& [sl_name, stats] : snapshot_before) {
+                // Make sure that the only semaphore that experienced any activity (at least measured activity) is
+                // the semaphore that belongs to the current service level.
+                BOOST_REQUIRE((stats == snapshot_after[sl_name] && sl_name != sl_names[random_service_level]) ||
+                        (stats != snapshot_after[sl_name] && sl_name == sl_names[random_service_level]));
+            }
+        }
+    }, std::move(cfg)).get();
 }

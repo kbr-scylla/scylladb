@@ -19,6 +19,7 @@
 #include <seastar/core/shared_ptr.hh>
 
 #include "db/view/view_update_generator.hh"
+#include "service/qos/service_level_controller.hh"
 #include "transport/messages/result_message_base.hh"
 #include "cql3/query_options_fwd.hh"
 #include "cql3/values.hh"
@@ -152,6 +153,8 @@ public:
     virtual sharded<service::migration_manager>& migration_manager() = 0;
 
     virtual future<> refresh_client_state() = 0;
+
+    virtual sharded<qos::service_level_controller>& service_level_controller_service() = 0;
 };
 
 future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_config = {});
