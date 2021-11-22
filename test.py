@@ -32,6 +32,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import yaml
+import traceback
 from random import randint
 
 from scripts import coverage
@@ -660,8 +661,6 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
         ldap_port = 5000 + test.id * 3
         cleanup_fn = None
         finject_desc = None
-        cleanup_fn, finject_desc = await test.setup(ldap_port, options)
-
         def report_error(error, failure_injection_desc = None):
             msg = "=== TEST.PY SUMMARY START ===\n"
             msg += "{}\n".format(error)
@@ -669,6 +668,12 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
             if failure_injection_desc is not None:
                 msg += 'failure injection: {}'.format(failure_injection_desc)
             log.write(msg.encode(encoding="UTF-8"))
+
+        try:
+            cleanup_fn, finject_desc = await test.setup(ldap_port, options)
+        except Exception as e:
+            report_error("Test setup failed ({})\n{}".format(str(e), traceback.format_exc()))
+            return False
         process = None
         stdout = None
         logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
