@@ -32,6 +32,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import yaml
+import traceback
 from random import randint
 
 from scripts import coverage
@@ -421,6 +422,11 @@ def can_connect(address, family=socket.AF_INET):
     try:
         s.connect(address)
         return True
+    except OSError as e:
+        if 'AF_UNIX path too long' in str(e):
+            raise OSError(e.errno, "{} ({})".format(str(e), address)) from None
+        else:
+            return False
     except:
         return False
 
@@ -449,7 +455,7 @@ class LdapTest(BoostTest):
         super().__init__(test_no, shortname, args, suite, None, mode, options)
 
     async def setup(self, port, options):
-        instances_root = os.path.join(os.path.split(self.path)[0], 'ldap_instances');
+        instances_root = os.path.join(options.tmpdir, self.mode, 'ldap_instances');
         instance_path = os.path.join(os.path.abspath(instances_root), str(port))
         slapd_pid_file = os.path.join(instance_path, 'slapd.pid')
         data_path = os.path.join(instance_path, 'data')
@@ -501,12 +507,14 @@ class LdapTest(BoostTest):
             saslauthd_proc.kill() # Somehow, invoking terminate() here also terminates toxiproxy-server. o_O
             shutil.rmtree(instance_path)
             subprocess.check_output(['toxiproxy-cli', 'd', proxy_name])
-        if not try_something_backoff(can_connect_to_slapd):
+        try:
+            if not try_something_backoff(can_connect_to_slapd):
+                raise Exception('Unable to connect to slapd')
+            if not try_something_backoff(can_connect_to_saslauthd):
+                raise Exception('Unable to connect to saslauthd')
+        except:
             finalize()
-            raise Exception('Unable to connect to slapd')
-        if not try_something_backoff(can_connect_to_saslauthd):
-            finalize()
-            raise Exception('Unable to connect to saslauthd')
+            raise
         return finalize, '--byte-limit={}'.format(byte_limit)
 
 class CqlTest(Test):
@@ -653,8 +661,6 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
         ldap_port = 5000 + test.id * 3
         cleanup_fn = None
         finject_desc = None
-        cleanup_fn, finject_desc = await test.setup(ldap_port, options)
-
         def report_error(error, failure_injection_desc = None):
             msg = "=== TEST.PY SUMMARY START ===\n"
             msg += "{}\n".format(error)
@@ -662,6 +668,12 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
             if failure_injection_desc is not None:
                 msg += 'failure injection: {}'.format(failure_injection_desc)
             log.write(msg.encode(encoding="UTF-8"))
+
+        try:
+            cleanup_fn, finject_desc = await test.setup(ldap_port, options)
+        except Exception as e:
+            report_error("Test setup failed ({})\n{}".format(str(e), traceback.format_exc()))
+            return False
         process = None
         stdout = None
         logging.info("Starting test #%d: %s %s", test.id, test.path, " ".join(test.args))
@@ -678,7 +690,7 @@ async def run_test(test, options, gentle_kill=False, env=dict()):
             os.getenv("ASAN_OPTIONS"),
         ]
         ldap_instance_path = os.path.join(
-            os.path.abspath(os.path.join(os.path.split(test.path)[0], 'ldap_instances')),
+            os.path.abspath(os.path.join(options.tmpdir, test.mode, 'ldap_instances')),
             str(ldap_port))
         saslauthd_mux_path = os.path.join(ldap_instance_path, 'mux')
         if options.manual_execution:
