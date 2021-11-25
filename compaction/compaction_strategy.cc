@@ -44,6 +44,7 @@
 #include "leveled_compaction_strategy.hh"
 #include "time_window_compaction_strategy.hh"
 #include "in_memory_compaction_strategy.hh"
+#include "backlog_controller.hh"
 #include "compaction_backlog_manager.hh"
 #include "size_tiered_backlog_tracker.hh"
 #include "leveled_manifest.hh"

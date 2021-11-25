@@ -580,26 +580,26 @@ table::seal_active_memtable(flush_permit&& permit) {
 
 future<stop_iteration>
 table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_permit&& permit) {
-  return with_scheduling_group(_config.memtable_scheduling_group, [this, old = std::move(old), permit = std::move(permit)] () mutable {
-    // Note that due to our sharded architecture, it is possible that
-    // in the face of a value change some shards will backup sstables
-    // while others won't.
-    //
-    // This is, in theory, possible to mitigate through a rwlock.
-    // However, this doesn't differ from the situation where all tables
-    // are coming from a single shard and the toggle happens in the
-    // middle of them.
-    //
-    // The code as is guarantees that we'll never partially backup a
-    // single sstable, so that is enough of a guarantee.
+    auto try_flush = [this, old = std::move(old), permit = make_lw_shared(std::move(permit))] () mutable -> future<stop_iteration> {
+        // Note that due to our sharded architecture, it is possible that
+        // in the face of a value change some shards will backup sstables
+        // while others won't.
+        //
+        // This is, in theory, possible to mitigate through a rwlock.
+        // However, this doesn't differ from the situation where all tables
+        // are coming from a single shard and the toggle happens in the
+        // middle of them.
+        //
+        // The code as is guarantees that we'll never partially backup a
+        // single sstable, so that is enough of a guarantee.
 
-    return do_with(std::vector<sstables::shared_sstable>(), [this, old, permit = make_lw_shared(std::move(permit))] (auto& newtabs) {
+        auto newtabs = std::vector<sstables::shared_sstable>();
         auto metadata = mutation_source_metadata{};
         metadata.min_timestamp = old->get_min_timestamp();
         metadata.max_timestamp = old->get_max_timestamp();
         auto estimated_partitions = _compaction_strategy.adjust_partition_estimate(metadata, old->partition_count());
 
-        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader reader) mutable {
+        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader reader) mutable -> future<> {
             auto&& priority = service::get_local_memtable_flush_priority();
             sstables::sstable_writer_config cfg = get_sstables_manager().configure_writer("memtable");
             cfg.backup = incremental_backups_enabled();
@@ -611,35 +611,32 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             auto monitor = database_sstable_write_monitor(permit, newtab, _compaction_strategy,
                 old->get_max_timestamp());
 
-            return do_with(std::move(monitor), [newtab, cfg = std::move(cfg), old, reader = std::move(reader), &priority, estimated_partitions] (auto& monitor) mutable {
-                return write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg, priority);
-            });
+            co_return co_await write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg, priority);
         });
 
         auto f = consumer(old->make_flush_reader(
-                    old->schema(),
-                    compaction_concurrency_semaphore().make_tracking_only_permit(old->schema().get(), "try_flush_memtable_to_sstable()", db::no_timeout),
-                    service::get_local_memtable_flush_priority()));
+            old->schema(),
+            compaction_concurrency_semaphore().make_tracking_only_permit(old->schema().get(), "try_flush_memtable_to_sstable()", db::no_timeout),
+            service::get_local_memtable_flush_priority()));
 
         // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
         // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
         // priority inversion.
-        return with_scheduling_group(default_scheduling_group(), [this, old = std::move(old), &newtabs, f = std::move(f)] () mutable {
-            return f.then([this, &newtabs, old] {
-                return parallel_for_each(newtabs, [] (auto& newtab) {
-                    return newtab->open_data().then([&newtab] {
-                        tlogger.debug("Flushing to {} done", newtab->get_filename());
-                    });
-                }).then([this, old, &newtabs] () {
-                    return with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, &newtabs] {
-                        return update_cache(old, newtabs);
-                    });
-                }).then([this, old, &newtabs] () noexcept {
-                    _memtables->erase(old);
-                    tlogger.debug("Memtable for {}.{} replaced, into {} sstables", old->schema()->ks_name(), old->schema()->cf_name(), newtabs.size());
-                    return stop_iteration::yes;
+        auto post_flush = [this, old = std::move(old), &newtabs, f = std::move(f)] () mutable -> future<stop_iteration> {
+            try {
+                co_await std::move(f);
+                co_await parallel_for_each(newtabs, [] (auto& newtab) -> future<> {
+                    co_await newtab->open_data();
+                    tlogger.debug("Flushing to {} done", newtab->get_filename());
                 });
-            }).handle_exception([this, old, &newtabs] (auto e) {
+
+                co_await with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, &newtabs] () -> future<> {
+                    return update_cache(old, newtabs);
+                });
+                _memtables->erase(old);
+                tlogger.debug("Memtable for {}.{} replaced, into {} sstables", old->schema()->ks_name(), old->schema()->cf_name(), newtabs.size());
+                co_return stop_iteration::yes;
+            } catch (const std::exception& e) {
                 for (auto& newtab : newtabs) {
                     newtab->mark_for_deletion();
                     tlogger.error("failed to write sstable {}: {}", newtab->get_filename(), e);
@@ -648,11 +645,12 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
                 // If we failed this write we will try the write again and that will create a new flush reader
                 // that will decrease dirty memory again. So we need to reset the accounting.
                 old->revert_flushed_memory();
-                return stop_iteration(_async_gate.is_closed());
-            });
-        });
-    });
-  });
+                co_return stop_iteration(_async_gate.is_closed());
+            }
+        };
+        co_return co_await with_scheduling_group(default_scheduling_group(), std::ref(post_flush));
+    };
+    co_return co_await with_scheduling_group(_config.memtable_scheduling_group, std::ref(try_flush));
 }
 
 void
@@ -927,7 +925,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::co
     auto compaction_type = descriptor.options.type();
     auto start_size = boost::accumulate(descriptor.sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
 
-    return sstables::compact_sstables(std::move(descriptor), cdata, *this).then([this, &cdata, compaction_type, start_size] (sstables::compaction_result res) {
+    return sstables::compact_sstables(std::move(descriptor), cdata, as_table_state()).then([this, &cdata, compaction_type, start_size] (sstables::compaction_result res) {
         if (compaction_type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
         }
@@ -1026,7 +1024,7 @@ future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
         };
         auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.sstables);
 
-        auto ret = co_await sstables::compact_sstables(std::move(desc), info, *this);
+        auto ret = co_await sstables::compact_sstables(std::move(desc), info, as_table_state());
 
         // update list of reshape candidates without input but with output added to it
         auto it = boost::remove_if(reshape_candidates, [&] (auto& s) { return input.contains(s); });
@@ -2353,7 +2351,19 @@ public:
         return _t.get_sstable_set();
     }
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
-        return sstables::get_fully_expired_sstables(_t, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+        return sstables::get_fully_expired_sstables(*this, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    }
+    const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
+        return _t.compacted_undeleted_sstables();
+    }
+    sstables::compaction_strategy& get_compaction_strategy() const noexcept override {
+        return _t.get_compaction_strategy();
+    }
+    reader_permit make_compaction_reader_permit() const override {
+        return _t.compaction_concurrency_semaphore().make_tracking_only_permit(schema().get(), "compaction", db::no_timeout);
+    }
+    sstables::sstable_writer_config configure_writer(sstring origin) const override {
+        return _t.get_sstables_manager().configure_writer(std::move(origin));
     }
 
     bool has_table_ongoing_compaction() const override {

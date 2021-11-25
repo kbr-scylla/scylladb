@@ -77,7 +77,7 @@
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "db/schema_tables.hh"
 
-#include "redis/service.hh"
+#include "redis/controller.hh"
 #include "cdc/log.hh"
 #include "cdc/cdc_extension.hh"
 #include "cdc/generation_service.hh"
@@ -386,6 +386,7 @@ sharded<qos::service_level_controller>* the_sl_controller;
 sharded<service::migration_manager>* the_migration_manager;
 sharded<service::storage_service>* the_storage_service;
 sharded<database>* the_database;
+sharded<streaming::stream_manager> *the_stream_manager;
 }
 
 int main(int ac, char** av) {
@@ -460,6 +461,7 @@ int main(int ac, char** av) {
     print_starting_message(ac, av, parsed_opts);
 
     sharded<locator::shared_token_metadata> token_metadata;
+    sharded<locator::effective_replication_map_factory> erm_factory;
     sharded<service::migration_notifier> mm_notifier;
     sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
     distributed<database> db;
@@ -481,11 +483,13 @@ int main(int ac, char** av) {
     sharded<db::snapshot_ctl> snapshot_ctl;
     sharded<netw::messaging_service> messaging;
     sharded<cql3::query_processor> qp;
+    sharded<db::batchlog_manager> bm;
     sharded<semaphore> sst_dir_semaphore;
     sharded<service::raft_group_registry> raft_gr;
     sharded<service::memory_limiter> service_memory_limiter;
     sharded<repair_service> repair;
     sharded<sstables_loader> sst_loader;
+    sharded<streaming::stream_manager> stream_manager;
 
     return app.run(ac, av, [&] () -> future<int> {
 
@@ -512,10 +516,10 @@ int main(int ac, char** av) {
 
         tcp_syncookies_sanity();
 
-        return seastar::async([cfg, ext, &db, &qp, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
+        return seastar::async([cfg, ext, &db, &qp, &bm, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
-                &token_metadata, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair, &sst_loader, &ss, &lifecycle_notifier] {
+                &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
+                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager] {
           try {
             // disable reactor stall detection during startup
             auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
@@ -678,6 +682,10 @@ int main(int ac, char** av) {
             //    token_metadata.stop().get();
             //});
 
+            supervisor::notify("starting effective_replication_map factory");
+            erm_factory.start().get();
+            auto stop_erm_factory = deferred_stop(erm_factory);
+
             supervisor::notify("starting migration manager notifier");
             mm_notifier.start().get();
             auto stop_mm_notifier = defer_verbose_shutdown("migration manager notifier", [ &mm_notifier ] {
@@ -824,9 +832,9 @@ int main(int ac, char** av) {
             debug::the_storage_service = &ss;
             ss.start(std::ref(stop_signal.as_sharded_abort_source()),
                 std::ref(db), std::ref(gossiper), std::ref(sys_dist_ks),
-                std::ref(feature_service), sscfg, std::ref(mm), std::ref(token_metadata),
+                std::ref(feature_service), sscfg, std::ref(mm), std::ref(token_metadata), std::ref(erm_factory),
                 std::ref(messaging), std::ref(cdc_generation_service), std::ref(repair),
-                std::ref(raft_gr), std::ref(lifecycle_notifier), std::ref(sl_controller)).get();
+                std::ref(stream_manager), std::ref(raft_gr), std::ref(lifecycle_notifier), std::ref(bm), std::ref(sl_controller)).get();
 
             auto stop_storage_service = defer_verbose_shutdown("storage_service", [&] {
                 ss.stop().get();
@@ -912,7 +920,7 @@ int main(int ac, char** av) {
             };
             proxy.start(std::ref(db), std::ref(gossiper), spcfg, std::ref(node_backlog),
                     scheduling_group_key_create(storage_proxy_stats_cfg).get0(),
-                    std::ref(feature_service), std::ref(token_metadata), std::ref(messaging)).get();
+                    std::ref(feature_service), std::ref(token_metadata), std::ref(erm_factory), std::ref(messaging)).get();
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
             supervisor::notify("starting migration manager");
@@ -935,8 +943,8 @@ int main(int ac, char** av) {
             bm_cfg.replay_rate = cfg->batchlog_replay_throttle_in_kb() * 1000;
             bm_cfg.delay = std::chrono::milliseconds(cfg->ring_delay_ms());
 
-            db::get_batchlog_manager().start(std::ref(qp), bm_cfg).get();
-            // #293 - do not stop anything
+            bm.start(std::ref(qp), bm_cfg).get();
+
             sstables::init_metrics().get();
 
             db::system_keyspace::minimal_setup(qp);
@@ -1039,12 +1047,20 @@ int main(int ac, char** av) {
                 stop_raft_rpc->cancel();
             }
 
+            debug::the_stream_manager = &stream_manager;
             supervisor::notify("starting streaming service");
-            streaming::stream_session::init_streaming_service(db, sys_dist_ks, view_update_generator, messaging, mm).get();
-            auto stop_streaming_service = defer_verbose_shutdown("streaming service", [] {
-                streaming::stream_session::uninit_streaming_service().get();
+            stream_manager.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging), std::ref(mm), std::ref(gossiper)).get();
+            auto stop_stream_manager = defer_verbose_shutdown("stream manager", [&stream_manager] {
+                // FIXME -- keep the instances alive, just call .stop on them
+                stream_manager.invoke_on_all(&streaming::stream_manager::stop).get();
             });
-            api::set_server_stream_manager(ctx).get();
+
+            stream_manager.invoke_on_all(&streaming::stream_manager::start).get();
+
+            api::set_server_stream_manager(ctx, stream_manager).get();
+            auto stop_stream_manager_api = defer_verbose_shutdown("stream manager api", [&ctx] {
+                api::unset_server_stream_manager(ctx).get();
+            });
 
             supervisor::notify("starting hinted handoff manager");
             if (!hinted_handoff_enabled.is_disabled_for_all()) {
@@ -1227,11 +1243,11 @@ int main(int ac, char** av) {
             });
 
             supervisor::notify("starting batchlog manager");
-            db::get_batchlog_manager().invoke_on_all([] (db::batchlog_manager& b) {
+            bm.invoke_on_all([] (db::batchlog_manager& b) {
                 return b.start();
             }).get();
-            auto stop_batchlog_manager = defer_verbose_shutdown("batchlog manager", [] {
-                db::get_batchlog_manager().invoke_on_all(&db::batchlog_manager::stop).get();
+            auto stop_batchlog_manager = defer_verbose_shutdown("batchlog manager", [&bm] {
+                bm.stop().get();
             });
 
             supervisor::notify("starting load meter");
@@ -1361,13 +1377,13 @@ int main(int ac, char** av) {
             }
             ss.local().register_protocol_server(alternator_ctl);
 
-            redis_service redis(proxy, auth_service, mm, *cfg, gossiper);
+            redis::controller redis_ctl(proxy, auth_service, mm, *cfg, gossiper);
             if (cfg->redis_port() || cfg->redis_ssl_port()) {
-                with_scheduling_group(dbcfg.statement_scheduling_group, [&redis] {
-                    return redis.start_server();
+                with_scheduling_group(dbcfg.statement_scheduling_group, [&redis_ctl] {
+                    return redis_ctl.start_server();
                 }).get();
             }
-            ss.local().register_protocol_server(redis);
+            ss.local().register_protocol_server(redis_ctl);
 
             seastar::set_abort_on_ebadf(cfg->abort_on_ebadf());
             api::set_server_done(ctx).get();

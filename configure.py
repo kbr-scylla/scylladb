@@ -411,7 +411,6 @@ scylla_tests = set([
     'test/boost/flush_queue_test',
     'test/boost/fragmented_temporary_buffer_test',
     'test/boost/frozen_mutation_test',
-    'test/boost/gossip_test',
     'test/boost/gossiping_property_file_snitch_test',
     'test/boost/hash_test',
     'test/boost/hashers_test',
@@ -1087,7 +1086,7 @@ alternator = [
 ]
 
 redis = [
-        'redis/service.cc',
+        'redis/controller.cc',
         'redis/server.cc',
         'redis/query_processor.cc',
         'redis/protocol_parser.rl',

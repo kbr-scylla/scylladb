@@ -104,11 +104,14 @@ storage_service::storage_service(abort_source& abort_source,
     storage_service_config config,
     sharded<service::migration_manager>& mm,
     locator::shared_token_metadata& stm,
+    locator::effective_replication_map_factory& erm_factory,
     sharded<netw::messaging_service>& ms,
     sharded<cdc::generation_service>& cdc_gen_service,
     sharded<repair_service>& repair,
+    sharded<streaming::stream_manager>& stream_manager,
     raft_group_registry& raft_gr,
     endpoint_lifecycle_notifier& elc_notif,
+    sharded<db::batchlog_manager>& bm,
     sharded<qos::service_level_controller>& sl_controller)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
@@ -118,11 +121,14 @@ storage_service::storage_service(abort_source& abort_source,
         , _messaging(ms)
         , _migration_manager(mm)
         , _repair(repair)
+        , _stream_manager(stream_manager)
         , _sl_controller(sl_controller)
         , _node_ops_abort_thread(node_ops_abort_thread())
         , _shared_token_metadata(stm)
+        , _erm_factory(erm_factory)
         , _cdc_gen_service(cdc_gen_service)
         , _lifecycle_notifier(elc_notif)
+        , _batchlog_manager(bm)
         , _sys_dist_ks(sys_dist_ks)
         , _snitch_reconfigure([this] { return snitch_reconfigured(); })
         , _schema_version_publisher([this] { return publish_schema_version(); }) {
@@ -707,7 +713,7 @@ void storage_service::bootstrap() {
         if (bootstrap_rbno) {
             run_bootstrap_ops();
         } else {
-            dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
+            dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
             bs.bootstrap(streaming::stream_reason::bootstrap).get();
         }
     }
@@ -1303,7 +1309,7 @@ future<> storage_service::stop_transport() {
             do_stop_ms().get();
             slogger.info("Stop transport: shutdown messaging_service done");
 
-            do_stop_stream_manager().get();
+            _stream_manager.invoke_on_all(&streaming::stream_manager::shutdown).get();
             slogger.info("Stop transport: shutdown stream_manager done");
         }).then_wrapped([this] (future<> f) {
             if (f.failed()) {
@@ -1405,7 +1411,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
 
     std::vector<mutable_token_metadata_ptr> pending_token_metadata_ptr;
     pending_token_metadata_ptr.resize(smp::count);
-    std::vector<std::unordered_map<sstring, locator::mutable_effective_replication_map_ptr>> pending_effective_replication_maps;
+    std::vector<std::unordered_map<sstring, locator::effective_replication_map_ptr>> pending_effective_replication_maps;
     pending_effective_replication_maps.resize(smp::count);
 
     try {
@@ -1418,22 +1424,23 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
 
         // Precalculate new effective_replication_map for all keyspaces
         // and clone to all shards;
+        //
+        // TODO: at the moment create on shard 0 first
+        // but in the future we may want to use hash() % smp::count
+        // to evenly distribute the load.
         auto& db = _db.local();
         auto keyspaces = db.get_all_keyspaces();
         for (auto& ks_name : keyspaces) {
             auto rs = db.find_keyspace(ks_name).get_replication_strategy_ptr();
-            auto erm = co_await calculate_effective_replication_map(std::move(rs), tmptr);
+            auto erm = co_await get_erm_factory().create_effective_replication_map(rs, tmptr);
             pending_effective_replication_maps[base_shard].emplace(ks_name, std::move(erm));
         }
         co_await container().invoke_on_others([&, base_shard] (storage_service& ss) -> future<> {
             auto& db = ss._db.local();
             for (auto& ks_name : keyspaces) {
-                auto local_rs = db.find_keyspace(ks_name).get_replication_strategy_ptr();
-                const auto& erm0 = pending_effective_replication_maps[base_shard].at(ks_name);
-                auto rf = erm0->get_replication_factor();
-                auto local_replication_map = co_await erm0->clone_endpoints_gently();
-                auto local_tmptr = pending_token_metadata_ptr[this_shard_id()];
-                auto erm = make_effective_replication_map(std::move(local_rs), std::move(local_tmptr), std::move(local_replication_map), rf);
+                auto rs = db.find_keyspace(ks_name).get_replication_strategy_ptr();
+                auto tmptr = pending_token_metadata_ptr[this_shard_id()];
+                auto erm = co_await ss.get_erm_factory().create_effective_replication_map(rs, std::move(tmptr));
                 pending_effective_replication_maps[this_shard_id()].emplace(ks_name, std::move(erm));
 
             }
@@ -1834,18 +1841,6 @@ future<> storage_service::do_stop_ms() {
     });
 }
 
-future<> storage_service::do_stop_stream_manager() {
-    if (_stream_manager_stopped) {
-        return make_ready_future<>();
-    }
-    _stream_manager_stopped = true;
-    return streaming::get_stream_manager().invoke_on_all([] (auto& sm) {
-        return sm.stop();
-    }).then([] {
-        slogger.info("stream_manager stopped");
-    });
-}
-
 future<> storage_service::node_ops_cmd_heartbeat_updater(const node_ops_cmd& cmd, utils::UUID uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done) {
     return seastar::async([this, cmd, uuid, nodes = std::move(nodes), heartbeat_updater_done] {
         std::string ops;
@@ -1995,7 +1990,7 @@ future<> storage_service::decommission() {
             ss.stop_transport().get();
             slogger.info("DECOMMISSIONING: stopped transport");
 
-            db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
+            ss.get_batchlog_manager().invoke_on_all([] (auto& bm) {
                 return bm.drain();
             }).get();
             slogger.info("DECOMMISSIONING: stop batchlog_manager done");
@@ -2226,7 +2221,7 @@ void storage_service::run_replace_ops() {
             _repair.local().replace_with_repair(get_token_metadata_ptr(), _bootstrap_tokens).get();
         } else {
             slogger.info("replace[{}]: Using streaming based node ops to sync data", uuid);
-            dht::boot_strapper bs(_db, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
+            dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
             bs.bootstrap(streaming::stream_reason::replace).get();
         }
 
@@ -2641,7 +2636,7 @@ future<> storage_service::do_drain() {
 
         tracing::tracing::tracing_instance().invoke_on_all(&tracing::tracing::shutdown).get();
 
-        db::get_batchlog_manager().invoke_on_all([] (auto& bm) {
+        get_batchlog_manager().invoke_on_all([] (auto& bm) {
             return bm.drain();
         }).get();
 
@@ -2660,7 +2655,7 @@ future<> storage_service::rebuild(sstring source_dc) {
         if (ss.is_repair_based_node_ops_enabled(streaming::stream_reason::rebuild)) {
             co_await ss._repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
         } else {
-            auto streamer = make_lw_shared<dht::range_streamer>(ss._db, tmptr, ss._abort_source,
+            auto streamer = make_lw_shared<dht::range_streamer>(ss._db, ss._stream_manager, tmptr, ss._abort_source,
                     ss.get_broadcast_address(), "Rebuild", streaming::stream_reason::rebuild);
             streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(ss._gossiper.get_unreachable_members()));
             if (source_dc != "") {
@@ -2714,6 +2709,7 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
         auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
         auto eps = erm->get_natural_endpoints(end_token);
         current_replica_endpoints.emplace(r, std::move(eps));
+        seastar::thread::maybe_yield();
     }
 
     auto temp = get_token_metadata_ptr()->clone_after_all_left().get0();
@@ -2758,6 +2754,9 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
         for (auto& ep : new_replica_endpoints) {
             changed_ranges.emplace(r, ep);
         }
+        // Replication strategy doesn't necessarily yield in calculate_natural_endpoints.
+        // E.g. everywhere_replication_strategy
+        seastar::thread::maybe_yield();
     }
     temp.clear_gently().get();
 
@@ -2766,7 +2765,7 @@ std::unordered_multimap<dht::token_range, inet_address> storage_service::get_cha
 
 // Runs inside seastar::async context
 void storage_service::unbootstrap() {
-    db::get_local_batchlog_manager().do_batch_log_replay().get();
+    get_batchlog_manager().local().do_batch_log_replay().get();
     if (is_repair_based_node_ops_enabled(streaming::stream_reason::decommission)) {
         _repair.local().decommission_with_repair(get_token_metadata_ptr()).get();
     } else {
@@ -2791,7 +2790,7 @@ void storage_service::unbootstrap() {
         // Wait for batch log to complete before streaming hints.
         slogger.debug("waiting for batch log processing.");
         // Start with BatchLog replay, which may create hints but no writes since this is no longer a valid endpoint.
-        db::get_local_batchlog_manager().do_batch_log_replay().get();
+        get_batchlog_manager().local().do_batch_log_replay().get();
 
         set_mode(mode::LEAVING, "streaming hints to other nodes", true);
 
@@ -2808,6 +2807,7 @@ void storage_service::unbootstrap() {
     leave_ring();
 }
 
+// Runs inside seastar::async context
 void storage_service::removenode_add_ranges(lw_shared_ptr<dht::range_streamer> streamer, gms::inet_address leaving_node) {
     auto my_address = get_broadcast_address();
     auto non_system_keyspaces = _db.local().get_non_system_keyspaces();
@@ -2845,7 +2845,7 @@ future<> storage_service::removenode_with_stream(gms::inet_address leaving_node,
                 as.request_abort();
             }
         });
-        auto streamer = make_lw_shared<dht::range_streamer>(_db, tmptr, as, get_broadcast_address(), "Removenode", streaming::stream_reason::removenode);
+        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tmptr, as, get_broadcast_address(), "Removenode", streaming::stream_reason::removenode);
         removenode_add_ranges(streamer, leaving_node);
         try {
             streamer->stream_async().get();
@@ -2872,7 +2872,7 @@ future<> storage_service::restore_replica_count(inet_address endpoint, inet_addr
             as.request_abort();
         }
     });
-    auto streamer = make_lw_shared<dht::range_streamer>(_db, tmptr, as, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
+    auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tmptr, as, get_broadcast_address(), "Restore_replica_count", streaming::stream_reason::removenode);
     removenode_add_ranges(streamer, endpoint);
     auto status_checker = seastar::async([this, endpoint, &as] {
         slogger.info("restore_replica_count: Started status checker for removing node {}", endpoint);
@@ -3009,7 +3009,7 @@ void storage_service::leave_ring() {
 
 future<>
 storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, inet_address>> ranges_to_stream_by_keyspace) {
-    auto streamer = make_lw_shared<dht::range_streamer>(_db, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), "Unbootstrap", streaming::stream_reason::decommission);
+    auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), "Unbootstrap", streaming::stream_reason::decommission);
     for (auto& entry : ranges_to_stream_by_keyspace) {
         const auto& keyspace = entry.first;
         auto& ranges_with_endpoints = entry.second;

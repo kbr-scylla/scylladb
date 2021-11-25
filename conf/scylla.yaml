@@ -439,6 +439,7 @@ commitlog_total_space_in_mb: -1
 #    certificate: conf/scylla.crt
 #    keyfile: conf/scylla.key
 #    truststore: <none, use system trust>
+#    certficate_revocation_list: <none>
 #    require_client_auth: False
 #    priority_string: <none, use default>
 
@@ -448,6 +449,7 @@ commitlog_total_space_in_mb: -1
 #    certificate: conf/scylla.crt
 #    keyfile: conf/scylla.key
 #    truststore: <none, use system trust>
+#    certficate_revocation_list: <none>
 #    require_client_auth: False
 #    priority_string: <none, use default>
 
@@ -494,7 +496,7 @@ commitlog_total_space_in_mb: -1
 # prometheus address
 # By default, Scylla binds all interfaces to the prometheus API
 # It is possible to restrict the listening address to a specific one
-# prometheus_address: 0.0.0.0
+prometheus_address: localhost
 
 #
 # audit setting

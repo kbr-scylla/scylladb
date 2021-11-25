@@ -25,7 +25,6 @@
 #include "canonical_mutation.hh"
 #include "schema_mutations.hh"
 #include "db/config.hh"
-#include "db/system_keyspace.hh"
 #include "db/view/view_update_backlog.hh"
 #include "dht/i_partitioner.hh"
 #include "range.hh"
@@ -657,18 +656,16 @@ gms::inet_address messaging_service::get_preferred_ip(gms::inet_address ep) {
     return ep;
 }
 
-future<> messaging_service::init_local_preferred_ip_cache() {
-    return db::system_keyspace::get_preferred_ips().then([this] (auto ips_cache) {
-        _preferred_ip_cache = ips_cache;
-        //
-        // Reset the connections to the endpoints that have entries in
-        // _preferred_ip_cache so that they reopen with the preferred IPs we've
-        // just read.
-        //
-        for (auto& p : _preferred_ip_cache) {
-            this->remove_rpc_client(msg_addr(p.first));
-        }
-    });
+void messaging_service::init_local_preferred_ip_cache(const std::unordered_map<gms::inet_address, gms::inet_address>& ips_cache) {
+    _preferred_ip_cache = ips_cache;
+    //
+    // Reset the connections to the endpoints that have entries in
+    // _preferred_ip_cache so that they reopen with the preferred IPs we've
+    // just read.
+    //
+    for (auto& p : _preferred_ip_cache) {
+        this->remove_rpc_client(msg_addr(p.first));
+    }
 }
 
 void messaging_service::cache_preferred_ip(gms::inet_address ep, gms::inet_address ip) {

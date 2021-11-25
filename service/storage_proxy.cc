@@ -96,6 +96,14 @@
 #include "service/paxos/paxos_state.hh"
 #include "gms/feature_service.hh"
 #include "db/virtual_table.hh"
+#include "canonical_mutation.hh"
+#include "schema_mutations.hh"
+#include "serializer_impl.hh"
+#include "serialization_visitors.hh"
+#include "idl/uuid.dist.hh"
+#include "idl/uuid.dist.impl.hh"
+#include "idl/frozen_schema.dist.hh"
+#include "idl/frozen_schema.dist.impl.hh"
 
 namespace bi = boost::intrusive;
 
@@ -1273,13 +1281,18 @@ void paxos_response_handler::prune(utils::UUID ballot) {
             tracing::trace(tr_state, "prune: send prune of {} to {}", ballot, peer);
             return _proxy->_messaging.send_paxos_prune(peer, _timeout, _schema->version(), _key.key(), ballot, tracing::make_trace_info(tr_state));
         }
-    }).then_wrapped([h = shared_from_this()] (future<> f) {
+    }).then_wrapped([this, h = shared_from_this()] (future<> f) {
         h->_proxy->get_stats().cas_now_pruning--;
         try {
             f.get();
         } catch (rpc::closed_error&) {
             // ignore errors due to closed connection
+            tracing::trace(tr_state, "prune failed: connection closed");
+        } catch (const mutation_write_timeout_exception& ex) {
+            tracing::trace(tr_state, "prune failed: write timeout; received {:d} of {:d} required replies", ex.received, ex.block_for);
+            paxos::paxos_state::logger.debug("CAS[{}] prune: failed {}", h->_id, std::current_exception());
         } catch (...) {
+            tracing::trace(tr_state, "prune failed: {}", std::current_exception());
             paxos::paxos_state::logger.error("CAS[{}] prune: failed {}", h->_id, std::current_exception());
         }
     });
@@ -1791,10 +1804,11 @@ using namespace std::literals::chrono_literals;
 
 storage_proxy::~storage_proxy() {}
 storage_proxy::storage_proxy(distributed<database>& db, gms::gossiper& gossiper, storage_proxy::config cfg, db::view::node_update_backlog& max_view_update_backlog,
-        scheduling_group_key stats_key, gms::feature_service& feat, const locator::shared_token_metadata& stm, netw::messaging_service& ms)
+        scheduling_group_key stats_key, gms::feature_service& feat, const locator::shared_token_metadata& stm, locator::effective_replication_map_factory& erm_factory, netw::messaging_service& ms)
     : _db(db)
     , _gossiper(gossiper)
     , _shared_token_metadata(stm)
+    , _erm_factory(erm_factory)
     , _read_smp_service_group(cfg.read_smp_service_group)
     , _write_smp_service_group(cfg.write_smp_service_group)
     , _hints_write_smp_service_group(cfg.hints_write_smp_service_group)
@@ -2439,7 +2453,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
                             auto& topology = _tmptr->get_topology();
                             auto& local_endpoints = topology.get_datacenter_racks().at(get_local_dc());
                             auto local_rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(local_addr);
-                            auto chosen_endpoints = db::get_batchlog_manager().local().endpoint_filter(local_rack, local_endpoints);
+                            auto chosen_endpoints = _p.gossiper().endpoint_filter(local_rack, local_endpoints);
 
                             if (chosen_endpoints.empty()) {
                                 if (_cl == db::consistency_level::ANY) {
@@ -2463,7 +2477,7 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
             });
         }
         future<> sync_write_to_batchlog() {
-            auto m = db::get_batchlog_manager().local().get_batch_log_mutation_for(_mutations, _batch_uuid, netw::messaging_service::current_version);
+            auto m = _p.get_batchlog_mutation_for(_mutations, _batch_uuid, netw::messaging_service::current_version, db_clock::now());
             tracing::trace(_trace_state, "Sending a batchlog write mutation");
             return send_batchlog_mutation(std::move(m));
         };
@@ -2516,6 +2530,27 @@ storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistenc
     return mk_ctxt(std::move(mutations), nullptr).then([this] (lw_shared_ptr<context> ctxt) {
         return ctxt->run().finally([ctxt]{});
     }).then_wrapped(std::move(cleanup));
+}
+
+mutation storage_proxy::get_batchlog_mutation_for(const std::vector<mutation>& mutations, const utils::UUID& id, int32_t version, db_clock::time_point now) {
+    auto schema = local_db().find_schema(db::system_keyspace::NAME, db::system_keyspace::BATCHLOG);
+    auto key = partition_key::from_singular(*schema, id);
+    auto timestamp = api::new_timestamp();
+    auto data = [this, &mutations] {
+        std::vector<canonical_mutation> fm(mutations.begin(), mutations.end());
+        bytes_ostream out;
+        for (auto& m : fm) {
+            ser::serialize(out, m);
+        }
+        return to_bytes(out.linearize());
+    }();
+
+    mutation m(schema, key);
+    m.set_cell(clustering_key_prefix::make_empty(), to_bytes("version"), version, timestamp);
+    m.set_cell(clustering_key_prefix::make_empty(), to_bytes("written_at"), now, timestamp);
+    m.set_cell(clustering_key_prefix::make_empty(), to_bytes("data"), data_value(std::move(data)), timestamp);
+
+    return m;
 }
 
 template<typename Range>
@@ -4151,6 +4186,30 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
             // *  wire compatibility, so It's likely easier not to bother;
             // It obviously not apply for us(?), but lets follow origin for now
             if (end_token(range) == dht::maximum_token()) {
+                break;
+            }
+
+            // Implementing a proper contiguity check is hard, because it requires
+            // is_successor(range_bound<dht::ring_position> a, range_bound<dht::ring_position> b)
+            // relation to be defined. It is needed for intervals for which their possibly adjacent
+            // bounds are either both exclusive or inclusive.
+            // For example: is_adjacent([a, b], [c, d]) requires checking is_successor(b, c).
+            // Defining a successor relationship for dht::ring_position is hard, because
+            // dht::ring_position can possibly contain partition key.
+            // Luckily, a full contiguity check here is not needed.
+            // Ranges that we want to merge here are formed by dividing a bigger ranges using
+            // query_ranges_to_vnodes_generator. By knowing query_ranges_to_vnodes_generator internals,
+            // it can be assumed that usually, mergable ranges are of the form [a, b) [b, c).
+            // Therefore, for the most part, contiguity check is reduced to equality & inclusivity test.
+            // It's fine, that we don't detect contiguity of some other possibly contiguous
+            // ranges (like [a, b] [b+1, c]), because not merging contiguous ranges (as opposed
+            // to merging discontiguous ones) is not a correctness problem.
+            bool maybe_discontiguous = !next_range.start() || !(
+                range.end()->value().equal(*schema, next_range.start()->value()) ?
+                (range.end()->is_inclusive() || next_range.start()->is_inclusive()) : false
+            );
+            // Do not merge ranges that may be discontiguous with each other
+            if (maybe_discontiguous) {
                 break;
             }
 

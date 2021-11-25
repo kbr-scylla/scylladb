@@ -38,8 +38,28 @@
 #include <seastar/core/metrics_registration.hh>
 #include <map>
 
+namespace db {
+class system_distributed_keyspace;
+namespace view {
+class view_update_generator;
+}
+}
+
+namespace service {
+class migration_manager;
+};
+
+namespace netw {
+class messaging_service;
+};
+
+namespace gms {
+class gossiper;
+}
+
 namespace streaming {
 
+class stream_session;
 class stream_result_future;
 
 struct stream_bytes {
@@ -68,7 +88,7 @@ struct stream_bytes {
  *
  * All stream operation should be created through this class to track streaming status and progress.
  */
-class stream_manager : public gms::i_endpoint_state_change_subscriber, public enable_shared_from_this<stream_manager> {
+class stream_manager : public gms::i_endpoint_state_change_subscriber, public enable_shared_from_this<stream_manager>, public peering_sharded_service<stream_manager> {
     using UUID = utils::UUID;
     using inet_address = gms::inet_address;
     using endpoint_state = gms::endpoint_state;
@@ -80,6 +100,13 @@ class stream_manager : public gms::i_endpoint_state_change_subscriber, public en
      * receiving ones withing the same JVM.
      */
 private:
+    sharded<database>& _db;
+    sharded<db::system_distributed_keyspace>& _sys_dist_ks;
+    sharded<db::view::view_update_generator>& _view_update_generator;
+    sharded<netw::messaging_service>& _ms;
+    sharded<service::migration_manager>& _mm;
+    gms::gossiper& _gossiper;
+
     std::unordered_map<UUID, shared_ptr<stream_result_future>> _initiated_streams;
     std::unordered_map<UUID, shared_ptr<stream_result_future>> _receiving_streams;
     std::unordered_map<UUID, std::unordered_map<gms::inet_address, stream_bytes>> _stream_bytes;
@@ -89,7 +116,15 @@ private:
     seastar::metrics::metric_groups _metrics;
 
 public:
-    stream_manager();
+    stream_manager(sharded<database>& db,
+            sharded<db::system_distributed_keyspace>& sys_dist_ks,
+            sharded<db::view::view_update_generator>& view_update_generator,
+            sharded<netw::messaging_service>& ms,
+            sharded<service::migration_manager>& mm,
+            gms::gossiper& gossiper);
+
+    future<> start();
+    future<> stop();
 
     semaphore& mutation_send_limiter() { return _mutation_send_limiter; }
 
@@ -103,6 +138,8 @@ public:
 
     std::vector<shared_ptr<stream_result_future>> get_all_streams() const;
 
+    database& db() noexcept { return _db.local(); }
+    netw::messaging_service& ms() noexcept { return _ms.local(); }
 
     const std::unordered_map<UUID, shared_ptr<stream_result_future>>& get_initiated_streams() const {
         return _initiated_streams;
@@ -116,7 +153,7 @@ public:
 
     void show_streams() const;
 
-    future<> stop() {
+    future<> shutdown() {
         fail_all_sessions();
         return make_ready_future<>();
     }
@@ -142,6 +179,8 @@ public:
 
     stream_bytes get_progress_on_local_shard() const;
 
+    shared_ptr<stream_session> get_session(utils::UUID plan_id, gms::inet_address from, const char* verb, std::optional<utils::UUID> cf_id = {});
+
 public:
     virtual void on_join(inet_address endpoint, endpoint_state ep_state) override {}
     virtual void before_change(inet_address endpoint, endpoint_state current_state, application_state new_state_key, const versioned_value& new_value) override {}
@@ -155,16 +194,9 @@ private:
     void fail_all_sessions();
     void fail_sessions(inet_address endpoint);
     bool has_peer(inet_address endpoint) const;
+
+    void init_messaging_service_handler();
+    future<> uninit_messaging_service_handler();
 };
-
-extern distributed<stream_manager> _the_stream_manager;
-
-inline distributed<stream_manager>& get_stream_manager() {
-    return _the_stream_manager;
-}
-
-inline stream_manager& get_local_stream_manager() {
-    return _the_stream_manager.local();
-}
 
 } // namespace streaming

@@ -76,13 +76,13 @@ static hs::stream_state get_state(
     return state;
 }
 
-void set_stream_manager(http_context& ctx, routes& r) {
+void set_stream_manager(http_context& ctx, routes& r, sharded<streaming::stream_manager>& sm) {
     hs::get_current_streams.set(r,
-            [] (std::unique_ptr<request> req) {
-                return streaming::get_stream_manager().invoke_on_all([] (auto& sm) {
+            [&sm] (std::unique_ptr<request> req) {
+                return sm.invoke_on_all([] (auto& sm) {
                     return sm.update_all_progress_info();
-                }).then([] {
-                    return streaming::get_stream_manager().map_reduce0([](streaming::stream_manager& stream) {
+                }).then([&sm] {
+                    return sm.map_reduce0([](streaming::stream_manager& stream) {
                         std::vector<hs::stream_state> res;
                         for (auto i : stream.get_initiated_streams()) {
                             res.push_back(get_state(*i.second.get()));
@@ -98,17 +98,17 @@ void set_stream_manager(http_context& ctx, routes& r) {
                 });
             });
 
-    hs::get_all_active_streams_outbound.set(r, [](std::unique_ptr<request> req) {
-        return streaming::get_stream_manager().map_reduce0([](streaming::stream_manager& stream) {
+    hs::get_all_active_streams_outbound.set(r, [&sm](std::unique_ptr<request> req) {
+        return sm.map_reduce0([](streaming::stream_manager& stream) {
             return stream.get_initiated_streams().size();
         }, 0, std::plus<int64_t>()).then([](int64_t res) {
             return make_ready_future<json::json_return_type>(res);
         });
     });
 
-    hs::get_total_incoming_bytes.set(r, [](std::unique_ptr<request> req) {
+    hs::get_total_incoming_bytes.set(r, [&sm](std::unique_ptr<request> req) {
         gms::inet_address peer(req->param["peer"]);
-        return streaming::get_stream_manager().map_reduce0([peer](streaming::stream_manager& sm) {
+        return sm.map_reduce0([peer](streaming::stream_manager& sm) {
             return sm.get_progress_on_all_shards(peer).then([] (auto sbytes) {
                 return sbytes.bytes_received;
             });
@@ -117,8 +117,8 @@ void set_stream_manager(http_context& ctx, routes& r) {
         });
     });
 
-    hs::get_all_total_incoming_bytes.set(r, [](std::unique_ptr<request> req) {
-        return streaming::get_stream_manager().map_reduce0([](streaming::stream_manager& sm) {
+    hs::get_all_total_incoming_bytes.set(r, [&sm](std::unique_ptr<request> req) {
+        return sm.map_reduce0([](streaming::stream_manager& sm) {
             return sm.get_progress_on_all_shards().then([] (auto sbytes) {
                 return sbytes.bytes_received;
             });
@@ -127,9 +127,9 @@ void set_stream_manager(http_context& ctx, routes& r) {
         });
     });
 
-    hs::get_total_outgoing_bytes.set(r, [](std::unique_ptr<request> req) {
+    hs::get_total_outgoing_bytes.set(r, [&sm](std::unique_ptr<request> req) {
         gms::inet_address peer(req->param["peer"]);
-        return streaming::get_stream_manager().map_reduce0([peer] (streaming::stream_manager& sm) {
+        return sm.map_reduce0([peer] (streaming::stream_manager& sm) {
             return sm.get_progress_on_all_shards(peer).then([] (auto sbytes) {
                 return sbytes.bytes_sent;
             });
@@ -138,8 +138,8 @@ void set_stream_manager(http_context& ctx, routes& r) {
         });
     });
 
-    hs::get_all_total_outgoing_bytes.set(r, [](std::unique_ptr<request> req) {
-        return streaming::get_stream_manager().map_reduce0([](streaming::stream_manager& sm) {
+    hs::get_all_total_outgoing_bytes.set(r, [&sm](std::unique_ptr<request> req) {
+        return sm.map_reduce0([](streaming::stream_manager& sm) {
             return sm.get_progress_on_all_shards().then([] (auto sbytes) {
                 return sbytes.bytes_sent;
             });
@@ -147,6 +147,15 @@ void set_stream_manager(http_context& ctx, routes& r) {
             return make_ready_future<json::json_return_type>(res);
         });
     });
+}
+
+void unset_stream_manager(http_context& ctx, routes& r) {
+    hs::get_current_streams.unset(r);
+    hs::get_all_active_streams_outbound.unset(r);
+    hs::get_total_incoming_bytes.unset(r);
+    hs::get_all_total_incoming_bytes.unset(r);
+    hs::get_total_outgoing_bytes.unset(r);
+    hs::get_all_total_outgoing_bytes.unset(r);
 }
 
 }

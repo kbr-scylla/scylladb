@@ -697,6 +697,10 @@ public:
         return _components->scylla_metadata->get_features();
     }
 
+    const scylla_metadata* get_scylla_metadata() const {
+        return _components->scylla_metadata ? &*_components->scylla_metadata : nullptr;
+    }
+
     utils::UUID run_identifier() const {
         return _run_identifier;
     }
@@ -746,6 +750,9 @@ public:
         return t;
     }
 
+    const statistics& get_statistics() const {
+        return _components->statistics;
+    }
     const stats_metadata& get_stats_metadata() const {
         auto entry = _components->statistics.contents.find(metadata_type::Stats);
         if (entry == _components->statistics.contents.end()) {

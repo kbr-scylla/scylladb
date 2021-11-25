@@ -25,6 +25,10 @@ class storage_service;
 
 class sstables_loader;
 
+namespace streaming {
+class stream_manager;
+}
+
 namespace locator {
 
 class token_metadata;
@@ -92,7 +96,8 @@ future<> set_server_load_sstable(http_context& ctx);
 future<> set_server_messaging_service(http_context& ctx, sharded<netw::messaging_service>& ms);
 future<> unset_server_messaging_service(http_context& ctx);
 future<> set_server_storage_proxy(http_context& ctx, sharded<service::storage_service>& ss);
-future<> set_server_stream_manager(http_context& ctx);
+future<> set_server_stream_manager(http_context& ctx, sharded<streaming::stream_manager>& sm);
+future<> unset_server_stream_manager(http_context& ctx);
 future<> set_hinted_handoff(http_context& ctx, sharded<gms::gossiper>& g);
 future<> unset_hinted_handoff(http_context& ctx);
 future<> set_server_gossip_settle(http_context& ctx, sharded<gms::gossiper>& g);

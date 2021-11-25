@@ -30,7 +30,7 @@
 
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
-#include "locator/token_metadata.hh"
+#include "locator/abstract_replication_strategy.hh"
 #include "inet_address_vectors.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/condition-variable.hh>
@@ -75,8 +75,13 @@ namespace cdc {
 class generation_service;
 }
 
+namespace streaming {
+class stream_manager;
+}
+
 namespace db {
 class system_distributed_keyspace;
+class batchlog_manager;
 }
 
 namespace netw {
@@ -163,10 +168,10 @@ private:
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
     sharded<repair_service>& _repair;
+    sharded<streaming::stream_manager>& _stream_manager;
     sharded<qos::service_level_controller>& _sl_controller;
     sstring _operation_in_progress;
     bool _ms_stopped = false;
-    bool _stream_manager_stopped = false;
     seastar::metrics::metric_groups _metrics;
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<protocol_server*> _protocol_servers;
@@ -191,11 +196,14 @@ public:
         storage_service_config config,
         sharded<service::migration_manager>& mm,
         locator::shared_token_metadata& stm,
+        locator::effective_replication_map_factory& erm_factory,
         sharded<netw::messaging_service>& ms,
         sharded<cdc::generation_service>&,
         sharded<repair_service>& repair,
+        sharded<streaming::stream_manager>& stream_manager,
         raft_group_registry& raft_gr,
         endpoint_lifecycle_notifier& elc_notif,
+        sharded<db::batchlog_manager>& bm,
         sharded<qos::service_level_controller>&);
 
     // Needed by distributed<>
@@ -237,7 +245,7 @@ private:
     void install_schema_version_change_listener();
 
     future<mutable_token_metadata_ptr> get_mutable_token_metadata_ptr() noexcept {
-        return _shared_token_metadata.get()->clone_async().then([] (token_metadata tm) {
+        return get_token_metadata_ptr()->clone_async().then([] (token_metadata tm) {
             // bump the token_metadata ring_version
             // to invalidate cached token/replication mappings
             // when the modified token_metadata is committed.
@@ -245,7 +253,20 @@ private:
             return make_ready_future<mutable_token_metadata_ptr>(make_token_metadata_ptr(std::move(tm)));
         });
     }
+
+    sharded<db::batchlog_manager>& get_batchlog_manager() noexcept {
+        return _batchlog_manager;
+    }
+
 public:
+
+    locator::effective_replication_map_factory& get_erm_factory() noexcept {
+        return _erm_factory;
+    }
+
+    const locator::effective_replication_map_factory& get_erm_factory() const noexcept {
+        return _erm_factory;
+    }
 
     token_metadata_ptr get_token_metadata_ptr() const noexcept {
         return _shared_token_metadata.get();
@@ -262,6 +283,7 @@ private:
     }
     /* This abstraction maintains the token/endpoint metadata information */
     shared_token_metadata& _shared_token_metadata;
+    locator::effective_replication_map_factory& _erm_factory;
 
     /* CDC generation management service.
      * It is sharded<>& and not simply a reference because the service will not yet be started
@@ -291,6 +313,7 @@ private:
     /* Used for tracking drain progress */
 
     endpoint_lifecycle_notifier& _lifecycle_notifier;
+    sharded<db::batchlog_manager>& _batchlog_manager;
 
     std::unordered_set<token> _bootstrap_tokens;
 
@@ -329,7 +352,6 @@ public:
     }
 private:
     future<> do_stop_ms();
-    future<> do_stop_stream_manager();
     // Runs in thread context
     void shutdown_protocol_servers();
 

@@ -12,6 +12,7 @@
 #include <iterator>
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
+#include "database_fwd.hh"
 #include "sstables/sstables.hh"
 #include <seastar/core/do_with.hh>
 #include "test/lib/cql_test_env.hh"
@@ -59,6 +60,7 @@
 #include "db/sstables-format-selector.hh"
 #include "repair/row_level.hh"
 #include "utils/cross-shard-barrier.hh"
+#include "streaming/stream_manager.hh"
 #include "debug.hh"
 #include "db/schema_tables.hh"
 
@@ -124,6 +126,7 @@ private:
     sharded<service::migration_notifier>& _mnotifier;
     sharded<qos::service_level_controller>& _sl_controller;
     sharded<service::migration_manager>& _mm;
+    sharded<db::batchlog_manager>& _batchlog_manager;
 private:
     struct core_local_state {
         service::client_state client_state;
@@ -171,7 +174,8 @@ public:
             sharded<db::view::view_update_generator>& view_update_generator,
             sharded<service::migration_notifier>& mnotifier,
             sharded<service::migration_manager>& mm,
-            sharded<qos::service_level_controller> &sl_controller)
+            sharded<qos::service_level_controller> &sl_controller,
+            sharded<db::batchlog_manager>& batchlog_manager)
             : _db(db)
             , _qp(qp)
             , _auth_service(auth_service)
@@ -180,6 +184,7 @@ public:
             , _mnotifier(mnotifier)
             , _sl_controller(sl_controller)
             , _mm(mm)
+            , _batchlog_manager(batchlog_manager)
     {
         adjust_rlimit();
     }
@@ -379,6 +384,10 @@ public:
         return _mm;
     }
 
+    virtual sharded<db::batchlog_manager>& batchlog_manager() override {
+        return _batchlog_manager;
+    }
+
     virtual future<> refresh_client_state() override {
         return _core_local.invoke_on_all([] (core_local_state& state) {
             return state.client_state.maybe_update_per_service_level_params();
@@ -474,6 +483,10 @@ public:
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
             auto stop_token_metadata = defer([&token_metadata] { token_metadata.stop().get(); });
 
+            sharded<locator::effective_replication_map_factory> erm_factory;
+            erm_factory.start().get();
+            auto stop_erm_factory = deferred_stop(erm_factory);
+
             sharded<service::migration_notifier> mm_notif;
             mm_notif.start().get();
             auto stop_mm_notify = defer([&mm_notif] { mm_notif.stop().get(); });
@@ -540,7 +553,6 @@ public:
 
             distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
             distributed<service::migration_manager> mm;
-            distributed<db::batchlog_manager>& bm = db::get_batchlog_manager();
             sharded<cql3::cql_config> cql_config;
             cql_config.start(cql3::cql_config::default_tag{}).get();
             auto stop_cql_config = defer([&] { cql_config.stop().get(); });
@@ -550,22 +562,13 @@ public:
             sharded<repair_service> repair;
             sharded<cql3::query_processor> qp;
             sharded<service::raft_group_registry> raft_gr;
+            sharded<streaming::stream_manager> stream_manager;
+
             raft_gr.start(std::ref(ms), std::ref(gossiper), std::ref(qp)).get();
             auto stop_raft = defer([&raft_gr] { raft_gr.stop().get(); });
 
-            sharded<service::storage_service> ss;
-            service::storage_service_config sscfg;
-            sscfg.available_memory = memory::stats().total_memory();
-            ss.start(std::ref(abort_sources), std::ref(db),
-                std::ref(gossiper),
-                std::ref(sys_dist_ks),
-                std::ref(feature_service), sscfg, std::ref(mm),
-                std::ref(token_metadata), std::ref(ms),
-                std::ref(cdc_generation_service),
-                std::ref(repair),
-                std::ref(raft_gr), std::ref(elc_notif),
-                std::ref(sl_controller)).get();
-            auto stop_storage_service = defer([&ss] { ss.stop().get(); });
+            stream_manager.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(ms), std::ref(mm), std::ref(gms::get_gossiper())).get();
+            auto stop_streaming = defer([&stream_manager] { stream_manager.stop().get(); });
 
             sharded<semaphore> sst_dir_semaphore;
             sst_dir_semaphore.start(cfg->initial_sstable_loading_concurrency()).get();
@@ -612,7 +615,7 @@ public:
             db::view::node_update_backlog b(smp::count, 10ms);
             scheduling_group_key_config sg_conf =
                     make_scheduling_group_key_config<service::storage_proxy_stats::stats>();
-            proxy.start(std::ref(db), std::ref(gossiper), spcfg, std::ref(b), scheduling_group_key_create(sg_conf).get0(), std::ref(feature_service), std::ref(token_metadata), std::ref(ms)).get();
+            proxy.start(std::ref(db), std::ref(gossiper), spcfg, std::ref(b), scheduling_group_key_create(sg_conf).get0(), std::ref(feature_service), std::ref(token_metadata), std::ref(erm_factory), std::ref(ms)).get();
             auto stop_proxy = defer([&proxy] { proxy.stop().get(); });
 
             mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(gossiper)).get();
@@ -629,14 +632,27 @@ public:
             db::batchlog_manager_config bmcfg;
             bmcfg.replay_rate = 100000000;
             bmcfg.write_request_timeout = 2s;
+            distributed<db::batchlog_manager> bm;
             bm.start(std::ref(qp), bmcfg).get();
-            auto stop_bm = defer([&bm] { bm.stop().get(); });
-
-            view_update_generator.start(std::ref(db)).get();
-            view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
-            auto stop_view_update_generator = defer([&view_update_generator] {
-                view_update_generator.stop().get();
+            auto stop_bm = defer([&bm] {
+                bm.stop().get();
             });
+
+            sharded<service::storage_service> ss;
+            service::storage_service_config sscfg;
+            sscfg.available_memory = memory::stats().total_memory();
+            ss.start(std::ref(abort_sources), std::ref(db),
+                std::ref(gossiper),
+                std::ref(sys_dist_ks),
+                std::ref(feature_service), sscfg, std::ref(mm),
+                std::ref(token_metadata), std::ref(erm_factory), std::ref(ms),
+                std::ref(cdc_generation_service),
+                std::ref(repair),
+                std::ref(stream_manager),
+                std::ref(raft_gr), std::ref(elc_notif),
+                std::ref(bm),
+                std::ref(sl_controller)).get();
+            auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
             distributed_loader::init_system_keyspace(db, ss, *cfg).get();
 
@@ -658,6 +674,12 @@ public:
 
             auto shutdown_db = defer([&db] {
                 db.invoke_on_all(&database::shutdown).get();
+            });
+
+            view_update_generator.start(std::ref(db)).get();
+            view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
+            auto stop_view_update_generator = defer([&view_update_generator] {
+                view_update_generator.stop().get();
             });
 
             db::system_keyspace::init_local_cache().get();
@@ -757,7 +779,7 @@ public:
                 // The default user may already exist if this `cql_test_env` is starting with previously populated data.
             }
 
-            single_node_cql_env env(db, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller));
+            single_node_cql_env env(db, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), bm);
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 

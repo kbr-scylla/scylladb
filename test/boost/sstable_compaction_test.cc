@@ -131,9 +131,12 @@ static flat_mutation_reader sstable_reader(shared_sstable sst, schema_ptr s, rea
 
 class table_state_for_test : public table_state {
     column_family_for_tests& _t;
+    test_env& _env;
+    std::vector<sstables::shared_sstable> _compacted_undeleted;
 public:
-    explicit table_state_for_test(column_family_for_tests& t)
+    explicit table_state_for_test(column_family_for_tests& t, test_env& env)
         : _t(t)
+        , _env(env)
     {
     }
     const schema_ptr& schema() const noexcept override {
@@ -149,7 +152,19 @@ public:
         return _t->get_sstable_set();
     }
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
-        return sstables::get_fully_expired_sstables(*_t, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+        return sstables::get_fully_expired_sstables(_t->as_table_state(), sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    }
+    const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
+        return _compacted_undeleted;
+    }
+    sstables::compaction_strategy& get_compaction_strategy() const noexcept override {
+        return _t->get_compaction_strategy();
+    }
+    reader_permit make_compaction_reader_permit() const override {
+        return _env.make_reader_permit();
+    }
+    sstables::sstable_writer_config configure_writer(sstring origin) const override {
+        return _env.manager().configure_writer(std::move(origin));
     }
 
     bool has_table_ongoing_compaction() const override {
@@ -157,8 +172,8 @@ public:
     }
 };
 
-static std::unique_ptr<table_state> make_table_state_for_test(column_family_for_tests& t) {
-    return std::make_unique<table_state_for_test>(t);
+static std::unique_ptr<table_state> make_table_state_for_test(column_family_for_tests& t, test_env& env) {
+    return std::make_unique<table_state_for_test>(t, env);
 }
 
 SEASTAR_TEST_CASE(compaction_manager_basic_test) {
@@ -417,7 +432,7 @@ static future<std::vector<unsigned long>> compact_sstables(test_env& env, sstrin
             }
             auto candidates = get_candidates_for_leveled_strategy(*cf);
             sstables::size_tiered_compaction_strategy_options stcs_options;
-            auto table_s = make_table_state_for_test(cf);
+            auto table_s = make_table_state_for_test(cf, env);
             leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, 1, stcs_options);
             std::vector<std::optional<dht::decorated_key>> last_compacted_keys(leveled_manifest::MAX_LEVELS);
             std::vector<int> compaction_counter(leveled_manifest::MAX_LEVELS);
@@ -575,6 +590,7 @@ static bool sstable_overlaps(const lw_shared_ptr<column_family>& cf, int64_t gen
 }
 
 SEASTAR_TEST_CASE(leveled_01) {
+  BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with([] (test_env& env) {
     column_family_for_tests cf(env.manager());
 
@@ -596,7 +612,7 @@ SEASTAR_TEST_CASE(leveled_01) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     BOOST_REQUIRE(manifest.get_level_size(0) == 2);
     std::vector<std::optional<dht::decorated_key>> last_compacted_keys(leveled_manifest::MAX_LEVELS);
@@ -618,6 +634,7 @@ SEASTAR_TEST_CASE(leveled_01) {
 }
 
 SEASTAR_TEST_CASE(leveled_02) {
+  BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with([] (test_env& env) {
     column_family_for_tests cf(env.manager());
 
@@ -649,7 +666,7 @@ SEASTAR_TEST_CASE(leveled_02) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     BOOST_REQUIRE(manifest.get_level_size(0) == 3);
     std::vector<std::optional<dht::decorated_key>> last_compacted_keys(leveled_manifest::MAX_LEVELS);
@@ -671,6 +688,7 @@ SEASTAR_TEST_CASE(leveled_02) {
 }
 
 SEASTAR_TEST_CASE(leveled_03) {
+  BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with([] (test_env& env) {
     column_family_for_tests cf(env.manager());
 
@@ -703,7 +721,7 @@ SEASTAR_TEST_CASE(leveled_03) {
     auto max_sstable_size_in_mb = 1;
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     BOOST_REQUIRE(manifest.get_level_size(0) == 2);
     BOOST_REQUIRE(manifest.get_level_size(1) == 2);
@@ -728,6 +746,7 @@ SEASTAR_TEST_CASE(leveled_03) {
 }
 
 SEASTAR_TEST_CASE(leveled_04) {
+  BOOST_REQUIRE_EQUAL(smp::count, 1);
   return test_env::do_with([] (test_env& env) {
     column_family_for_tests cf(env.manager());
 
@@ -763,7 +782,7 @@ SEASTAR_TEST_CASE(leveled_04) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     BOOST_REQUIRE(manifest.get_level_size(0) == 1);
     BOOST_REQUIRE(manifest.get_level_size(1) == 2);
@@ -827,7 +846,7 @@ SEASTAR_TEST_CASE(leveled_06) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     BOOST_REQUIRE(manifest.get_level_size(0) == 0);
     BOOST_REQUIRE(manifest.get_level_size(1) == 1);
@@ -855,7 +874,7 @@ SEASTAR_TEST_CASE(leveled_07) {
     }
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, 1, stcs_options);
     std::vector<std::optional<dht::decorated_key>> last_compacted_keys(leveled_manifest::MAX_LEVELS);
     std::vector<int> compaction_counter(leveled_manifest::MAX_LEVELS);
@@ -892,7 +911,7 @@ SEASTAR_TEST_CASE(leveled_invariant_fix) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, 1, stcs_options);
     std::vector<std::optional<dht::decorated_key>> last_compacted_keys(leveled_manifest::MAX_LEVELS);
     std::vector<int> compaction_counter(leveled_manifest::MAX_LEVELS);
@@ -935,7 +954,7 @@ SEASTAR_TEST_CASE(leveled_stcs_on_L0) {
     std::vector<int> compaction_counter(leveled_manifest::MAX_LEVELS);
     sstables::size_tiered_compaction_strategy_options stcs_options;
 
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
 
     {
         leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, sstable_max_size_in_mb, stcs_options);
@@ -983,7 +1002,7 @@ SEASTAR_TEST_CASE(overlapping_starved_sstables_test) {
 
     auto candidates = get_candidates_for_leveled_strategy(*cf);
     sstables::size_tiered_compaction_strategy_options stcs_options;
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     leveled_manifest manifest = leveled_manifest::create(*table_s, candidates, max_sstable_size_in_mb, stcs_options);
     auto candidate = manifest.get_compaction_candidates(last_compacted_keys, compaction_counter);
     BOOST_REQUIRE(candidate.level == 2);
@@ -1362,7 +1381,7 @@ SEASTAR_TEST_CASE(get_fully_expired_sstables_test) {
         auto sst2 = add_sstable_for_overlapping_test(env, cf, /*gen*/2, min_key, key_and_token_pair[2].first, build_stats(t0, t1, std::numeric_limits<int32_t>::max()));
         auto sst3 = add_sstable_for_overlapping_test(env, cf, /*gen*/3, min_key, max_key, build_stats(t3, t4, std::numeric_limits<int32_t>::max()));
         std::vector<sstables::shared_sstable> compacting = { sst1, sst2 };
-        auto expired = get_fully_expired_sstables(*cf, compacting, /*gc before*/gc_clock::from_time_t(15));
+        auto expired = get_fully_expired_sstables(cf->as_table_state(), compacting, /*gc before*/gc_clock::from_time_t(15));
         BOOST_REQUIRE(expired.size() == 0);
     }
 
@@ -1374,7 +1393,7 @@ SEASTAR_TEST_CASE(get_fully_expired_sstables_test) {
         auto sst2 = add_sstable_for_overlapping_test(env, cf, /*gen*/2, min_key, key_and_token_pair[2].first, build_stats(t2, t3, std::numeric_limits<int32_t>::max()));
         auto sst3 = add_sstable_for_overlapping_test(env, cf, /*gen*/3, min_key, max_key, build_stats(t3, t4, std::numeric_limits<int32_t>::max()));
         std::vector<sstables::shared_sstable> compacting = { sst1, sst2 };
-        auto expired = get_fully_expired_sstables(*cf, compacting, /*gc before*/gc_clock::from_time_t(25));
+        auto expired = get_fully_expired_sstables(cf->as_table_state(), compacting, /*gc before*/gc_clock::from_time_t(25));
         BOOST_REQUIRE(expired.size() == 1);
         auto expired_sst = *expired.begin();
         BOOST_REQUIRE(expired_sst->generation() == 1);
@@ -1413,7 +1432,7 @@ SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
 
         auto ssts = std::vector<shared_sstable>{ sst };
 
-        auto expired = get_fully_expired_sstables(*cf, ssts, gc_clock::now());
+        auto expired = get_fully_expired_sstables(cf->as_table_state(), ssts, gc_clock::now());
         BOOST_REQUIRE(expired.size() == 1);
         auto expired_sst = *expired.begin();
         BOOST_REQUIRE(expired_sst->generation() == 1);
@@ -1452,7 +1471,7 @@ SEASTAR_TEST_CASE(basic_date_tiered_strategy_test) {
     auto gc_before = gc_clock::now() - cf->schema()->gc_grace_seconds();
     std::map<sstring, sstring> options;
     date_tiered_manifest manifest(options);
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     auto sstables = manifest.get_next_sstables(*table_s, candidates, gc_before);
     BOOST_REQUIRE(sstables.size() == 4);
     for (auto& sst : sstables) {
@@ -1504,7 +1523,7 @@ SEASTAR_TEST_CASE(date_tiered_strategy_test_2) {
 
     date_tiered_manifest manifest(options);
     auto gc_before = gc_clock::time_point(std::chrono::seconds(0)); // disable gc before.
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     auto sstables = manifest.get_next_sstables(*table_s, candidates, gc_before);
     std::unordered_set<int64_t> gens;
     for (auto sst : sstables) {
@@ -1826,7 +1845,7 @@ SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
         sstables::test(sst).set_data_file_size(1);
         candidates.push_back(std::move(sst));
     }
-    auto table_s = make_table_state_for_test(cf);
+    auto table_s = make_table_state_for_test(cf, env);
     auto desc = cs.get_sstables_for_compaction(*table_s, std::move(candidates));
     BOOST_REQUIRE(desc.sstables.size() == size_t(max_threshold));
     return cf.stop_and_keep_alive();
@@ -1896,7 +1915,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, options);
         // that's needed because sstable with expired data should be old enough.
         sstables::test(sst).set_data_file_write_time(db_clock::time_point::min());
-        auto table_s = make_table_state_for_test(cf);
+        auto table_s = make_table_state_for_test(cf, env);
         auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
@@ -2899,7 +2918,7 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
 
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
             auto input_ssts = std::vector<shared_sstable>(sstables.begin(), sstables.end());
-            auto table_s = make_table_state_for_test(cf);
+            auto table_s = make_table_state_for_test(cf, env);
             auto desc = cs.get_sstables_for_compaction(*table_s, std::move(input_ssts));
 
             // nothing to compact, move on.
@@ -2984,7 +3003,7 @@ SEASTAR_TEST_CASE(compaction_strategy_aware_major_compaction_test) {
 
         column_family_for_tests cf(env.manager());
         auto close_cf = deferred_stop(cf);
-        auto table_s = make_table_state_for_test(cf);
+        auto table_s = make_table_state_for_test(cf, env);
 
         {
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, cf.schema()->compaction_strategy_options());
@@ -3479,6 +3498,7 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
         cache_tracker tracker;
 
         compaction_manager cm;
+        auto stop_compaction_manager = deferred_stop(cm);
         cm.enable();
 
         auto s = schema_builder(some_keyspace, some_column_family)
@@ -3526,6 +3546,7 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
 
         // check compaction manager does not receive background compaction submissions
         cf->start();
+        auto stop_cf = deferred_stop(*cf);
         cf->trigger_compaction();
         cf->get_compaction_manager().submit(cf.get());
         BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0 && ss.completed_tasks == 0);
@@ -3542,9 +3563,6 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
         // test compaction successfully finished
         BOOST_REQUIRE(ss.errors == 0);
         BOOST_REQUIRE(ss.completed_tasks == 1);
-
-        cf->stop().wait();
-        cm.stop().wait();
     });
 }
 
@@ -3941,9 +3959,28 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
         auto s = builder.build();
         auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::time_window, s->compaction_strategy_options());
 
-        auto next_timestamp = [](auto step) {
-            using namespace std::chrono;
-            return (gc_clock::now().time_since_epoch() + duration_cast<microseconds>(step)).count();
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> distrib(1, 3600*24);
+
+        using namespace std::chrono;
+
+        // Make it easier to reproduce timing-based issues by running this test multiple times.
+        auto offset_duration = duration_cast<microseconds>(minutes(distrib(gen)));
+
+        auto now = gc_clock::now().time_since_epoch() + offset_duration;
+        // The twcs is configured with 8-hours time window. If the starting time
+        // is not aligned with that then some buckets may get less than this
+        // number of sstables in and potentially hit the minimal threshold of
+        // 4 sstables. Align the starting time not to make this happen.
+        auto now_in_minutes = duration_cast<minutes>(now);
+        constexpr auto window_size_in_minutes = 8 * 60;
+        forward_jump_clocks(minutes(window_size_in_minutes - now_in_minutes.count() % window_size_in_minutes));
+        now = gc_clock::now().time_since_epoch() + offset_duration;
+        assert(std::chrono::duration_cast<minutes>(now).count() % window_size_in_minutes == 0);
+
+        auto next_timestamp = [now](auto step) {
+            return (now + duration_cast<seconds>(step)).count();
         };
 
         auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
@@ -3965,13 +4002,6 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
         auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)]() {
             return env.make_sstable(s, tmp.path().string(), (*gen)++, sstables::sstable::version_types::md, big);
         };
-
-        // The twcs is configured with 8-hours time window. If the starting time
-        // is not aligned with that then some buckets may get less than this
-        // number of sstables in and potentially hit the minimal threshold of
-        // 4 sstables. Align the starting time not to make this happen.
-        auto hours = std::chrono::duration_cast<std::chrono::hours>(gc_clock::now().time_since_epoch());
-        forward_jump_clocks(std::chrono::hours(8 - hours.count() % 8));
 
         {
             // create set of 256 disjoint ssts that belong to the same time window and expect that twcs reshape allows them all to be compacted at once
