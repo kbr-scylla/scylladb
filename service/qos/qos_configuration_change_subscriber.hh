@@ -28,6 +28,8 @@ namespace qos {
 
     struct service_level_info {
         sstring name;
+        seastar::scheduling_group sg;
+        io_priority_class pc;
     };
     class qos_configuration_change_subscriber {
     public:

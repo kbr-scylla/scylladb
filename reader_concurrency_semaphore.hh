@@ -83,6 +83,8 @@ public:
         uint64_t used_permits = 0;
         // Current number of blocked permits.
         uint64_t blocked_permits = 0;
+
+        friend auto operator<=>(const stats&, const stats&) = default;
     };
 
     using permit_list_type = bi::list<

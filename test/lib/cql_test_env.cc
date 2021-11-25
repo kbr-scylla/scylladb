@@ -501,7 +501,9 @@ public:
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto sl_controller = sharded<qos::service_level_controller>();
-            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}).get();
+            auto scheduling_groups = get_scheduling_groups().get();
+
+            sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, scheduling_groups.statement_scheduling_group).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
 
@@ -583,7 +585,6 @@ public:
                 dbcfg.available_memory = memory::stats().total_memory();
             }
 
-            auto scheduling_groups = get_scheduling_groups().get();
             dbcfg.compaction_scheduling_group = scheduling_groups.compaction_scheduling_group;
             dbcfg.memory_compaction_scheduling_group = scheduling_groups.memory_compaction_scheduling_group;
             dbcfg.streaming_scheduling_group = scheduling_groups.streaming_scheduling_group;
@@ -598,7 +599,7 @@ public:
                 db.stop().get();
             });
 
-            db.invoke_on_all(&database::start).get();
+            db.invoke_on_all(&database::start, std::ref(sl_controller)).get();
 
             feature_service.invoke_on_all([] (auto& fs) {
                 fs.enable(fs.known_feature_set());
@@ -814,6 +815,10 @@ public:
         auto qs = make_query_state();
         auto& lqo = *qo;
         return local_qp().execute_batch(batch, *qs, lqo, {}).finally([qs, batch, qo = std::move(qo)] {});
+    }
+
+    virtual sharded<qos::service_level_controller>& service_level_controller_service() override {
+        return _sl_controller;
     }
 };
 
