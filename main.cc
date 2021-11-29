@@ -86,6 +86,7 @@
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "service/storage_proxy.hh"
 #include "alternator/controller.hh"
+#include "alternator/ttl.hh"
 
 #include "service/raft/raft_group_registry.hh"
 
@@ -890,7 +891,7 @@ int main(int ac, char** av) {
             // Iteration through column family directory for sstable loading is
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
-            distributed_loader::init_system_keyspace(db, ss, *cfg).get();
+            distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -973,6 +974,12 @@ int main(int ac, char** av) {
 
             supervisor::notify("setting up system keyspace");
             db::system_keyspace::setup(db, qp, feature_service, messaging).get();
+
+            // Re-enable previously enabled features on node startup.
+            // This should be done before commitlog starts replaying
+            // since some features affect storage.
+            db::system_keyspace::enable_features_on_startup(feature_service).get();
+
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
             if (cl != nullptr) {
@@ -1256,7 +1263,7 @@ int main(int ac, char** av) {
             });
 
             supervisor::notify("starting cf cache hit rate calculator");
-            cf_cache_hitrate_calculator.start(std::ref(db)).get();
+            cf_cache_hitrate_calculator.start(std::ref(db), std::ref(gossiper)).get();
             auto stop_cache_hitrate_calculator = defer_verbose_shutdown("cf cache hit rate calculator",
                     [&cf_cache_hitrate_calculator] {
                         return cf_cache_hitrate_calculator.stop().get();
@@ -1324,7 +1331,7 @@ int main(int ac, char** av) {
                 audit::audit::stop_audit().get();
             });
 
-            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper.local(), qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg);
+            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper, qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg);
 
             ss.local().register_protocol_server(cql_server_ctl);
 
@@ -1368,11 +1375,28 @@ int main(int ac, char** av) {
             });
 
             alternator::controller alternator_ctl(gossiper, proxy, mm, sys_dist_ks, cdc_generation_service, service_memory_limiter, *cfg);
+            sharded<alternator::expiration_service> es;
+            std::any stop_expiration_service;
 
             if (cfg->alternator_port() || cfg->alternator_https_port()) {
                 with_scheduling_group(dbcfg.statement_scheduling_group, [&alternator_ctl] () mutable {
                     return alternator_ctl.start_server();
                 }).get();
+                // Start the expiration service on all shards.
+                // Currently we only run it if Alternator is enabled, because
+                // only Alternator uses it for its TTL feature. But in the
+                // future if we add a CQL interface to it, we may want to
+                // start this outside the Alternator if().
+                if (cfg->check_experimental(db::experimental_features_t::ALTERNATOR_TTL)) {
+                    supervisor::notify("starting the expiration service");
+                    es.start(std::ref(db), std::ref(proxy)).get();
+                    stop_expiration_service = defer_verbose_shutdown("expiration service", [&es] {
+                        es.stop().get();
+                    });
+                    with_scheduling_group(maintenance_scheduling_group, [&es] {
+                        return es.invoke_on_all(&alternator::expiration_service::start);
+                    }).get();
+                }
             }
             ss.local().register_protocol_server(alternator_ctl);
 

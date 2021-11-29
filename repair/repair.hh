@@ -43,6 +43,7 @@ namespace netw { class messaging_service; }
 namespace service {
 class migration_manager;
 }
+namespace gms { class gossiper; }
 
 class repair_exception : public std::exception {
 private:
@@ -161,6 +162,7 @@ public:
     sharded<db::system_distributed_keyspace>& sys_dist_ks;
     sharded<db::view::view_update_generator>& view_update_generator;
     service::migration_manager& mm;
+    gms::gossiper& gossiper;
     const dht::sharder& sharder;
     sstring keyspace;
     dht::token_range_vector ranges;

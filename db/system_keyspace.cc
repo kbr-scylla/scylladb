@@ -1794,10 +1794,11 @@ future<> system_keyspace::set_bootstrap_state(bootstrap_state state) {
 class cluster_status_table : public memtable_filling_virtual_table {
 private:
     service::storage_service& _ss;
+    gms::gossiper& _gossiper;
 public:
-    cluster_status_table(service::storage_service& ss)
+    cluster_status_table(service::storage_service& ss, gms::gossiper& g)
             : memtable_filling_virtual_table(build_schema())
-            , _ss(ss) {}
+            , _ss(ss), _gossiper(g) {}
 
     static schema_ptr build_schema() {
         auto id = generate_legacy_id(system_keyspace::NAME, "cluster_status");
@@ -1817,17 +1818,16 @@ public:
     future<> execute(std::function<void(mutation)> mutation_sink) override {
         return _ss.get_ownership().then([&, mutation_sink] (std::map<gms::inet_address, float> ownership) {
             const locator::token_metadata& tm = _ss.get_token_metadata();
-            gms::gossiper& gs = gms::get_local_gossiper();
 
-            for (auto&& e : gs.endpoint_state_map) {
+            for (auto&& e : _gossiper.endpoint_state_map) {
                 auto endpoint = e.first;
 
                 mutation m(schema(), partition_key::from_single_value(*schema(), data_value(endpoint).serialize_nonnull()));
                 row& cr = m.partition().clustered_row(*schema(), clustering_key::make_empty()).cells();
 
-                set_cell(cr, "up", gs.is_alive(endpoint));
-                set_cell(cr, "status", gs.get_gossip_status(endpoint));
-                set_cell(cr, "load", gs.get_application_state_value(endpoint, gms::application_state::LOAD));
+                set_cell(cr, "up", _gossiper.is_alive(endpoint));
+                set_cell(cr, "status", _gossiper.get_gossip_status(endpoint));
+                set_cell(cr, "load", _gossiper.get_application_state_value(endpoint, gms::application_state::LOAD));
 
                 std::optional<utils::UUID> hostid = tm.get_host_id_if_known(endpoint);
                 if (hostid) {
@@ -2455,16 +2455,17 @@ public:
 // Map from table's schema ID to table itself. Helps avoiding accidental duplication.
 static thread_local std::map<utils::UUID, std::unique_ptr<virtual_table>> virtual_tables;
 
-void register_virtual_tables(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, db::config& cfg) {
+void register_virtual_tables(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
     auto add_table = [] (std::unique_ptr<virtual_table>&& tbl) {
         virtual_tables[tbl->schema()->id()] = std::move(tbl);
     };
 
     auto& db = dist_db.local();
     auto& ss = dist_ss.local();
+    auto& gossiper = dist_gossiper.local();
 
     // Add built-in virtual tables here.
-    add_table(std::make_unique<cluster_status_table>(ss));
+    add_table(std::make_unique<cluster_status_table>(ss, gossiper));
     add_table(std::make_unique<token_ring_table>(db, ss));
     add_table(std::make_unique<snapshots_table>(dist_db));
     add_table(std::make_unique<protocol_servers_table>(ss));
@@ -2522,8 +2523,8 @@ static bool maybe_write_in_user_memory(schema_ptr s, database& db) {
             || s == system_keyspace::v3::scylla_views_builds_in_progress();
 }
 
-future<> system_keyspace_make(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, db::config& cfg) {
-    register_virtual_tables(dist_db, dist_ss, cfg);
+future<> system_keyspace_make(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
+    register_virtual_tables(dist_db, dist_ss, dist_gossiper, cfg);
 
     auto& db = dist_db.local();
     auto& db_config = db.get_config();
@@ -2553,8 +2554,8 @@ future<> system_keyspace_make(distributed<database>& dist_db, distributed<servic
     install_virtual_readers(db);
 }
 
-future<> system_keyspace::make(distributed<database>& db, distributed<service::storage_service>& ss, db::config& cfg) {
-    return system_keyspace_make(db, ss, cfg);
+future<> system_keyspace::make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg) {
+    return system_keyspace_make(db, ss, g, cfg);
 }
 
 utils::UUID system_keyspace::get_local_host_id() {
@@ -2919,6 +2920,41 @@ future<> system_keyspace::delete_paxos_decision(const schema& s, const partition
             to_legacy(*key.get_compound_type(s), key.representation()),
             s.id()
         ).discard_result();
+}
+
+future<> system_keyspace::enable_features_on_startup(sharded<gms::feature_service>& feat) {
+    auto pre_enabled_features = co_await get_scylla_local_param(gms::feature_service::ENABLED_FEATURES_KEY);
+    if (!pre_enabled_features) {
+        co_return;
+    }
+    gms::feature_service& local_feat_srv = feat.local();
+    const auto known_features = local_feat_srv.known_feature_set();
+    const auto& registered_features = local_feat_srv.registered_features();
+    const auto persisted_features = gms::feature_service::to_feature_set(*pre_enabled_features);
+    for (auto&& f : persisted_features) {
+        slogger.debug("Enabling persisted feature '{}'", f);
+        const bool is_registered_feat = registered_features.contains(sstring(f));
+        if (!is_registered_feat || !known_features.contains(f)) {
+            if (is_registered_feat) {
+                throw std::runtime_error(format(
+                    "Feature '{}' was previously enabled in the cluster but its support is disabled by this node. "
+                    "Set the corresponding configuration option to enable the support for the feature.", f));
+            } else {
+                throw std::runtime_error(format("Unknown feature '{}' was previously enabled in the cluster. "
+                    " That means this node is performing a prohibited downgrade procedure"
+                    " and should not be allowed to boot.", f));
+            }
+        }
+        if (is_registered_feat) {
+            // `gms::feature::enable` should be run within a seastar thread context
+            co_await seastar::async([&local_feat_srv, f] {
+                local_feat_srv.enable(sstring(f));
+            });
+        }
+        // If a feature is not in `registered_features` but still in `known_features` list
+        // that means the feature name is used for backward compatibility and should be implicitly
+        // enabled in the code by default, so just skip it.
+    }
 }
 
 sstring system_keyspace_name() {

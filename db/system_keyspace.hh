@@ -74,6 +74,10 @@ namespace locator {
     class endpoint_dc_rack;
 } // namespace locator
 
+namespace gms {
+    class gossiper;
+}
+
 bool is_system_keyspace(std::string_view ks_name);
 
 namespace db {
@@ -251,7 +255,7 @@ public:
     static future<std::optional<sstring>> get_scylla_local_param(const sstring& key);
 
     static std::vector<schema_ptr> all_tables(const db::config& cfg);
-    static future<> make(distributed<database>& db, distributed<service::storage_service>& ss, db::config& cfg);
+    static future<> make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
 
     /// overloads
 
@@ -404,9 +408,10 @@ public:
     static future<bool> cdc_is_rewritten();
     static future<> cdc_set_rewritten(std::optional<cdc::generation_id_v1>);
 
+    static future<> enable_features_on_startup(sharded<gms::feature_service>& feat);
 }; // class system_keyspace
 
-future<> system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss);
+future<> system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g);
 extern const char *const system_keyspace_CLIENTS;
 
 } // namespace db
