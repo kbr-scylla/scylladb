@@ -555,6 +555,7 @@ raft_tests = set([
     'test/raft/etcd_test',
     'test/raft/raft_sys_table_storage_test',
     'test/raft/raft_address_map_test',
+    'test/raft/discovery_test',
 ])
 
 apps = set([
@@ -748,11 +749,10 @@ scylla_core = (['database.cc',
                 'cql3/keyspace_element_name.cc',
                 'cql3/lists.cc',
                 'cql3/sets.cc',
-                'cql3/tuples.cc',
                 'cql3/maps.cc',
                 'cql3/values.cc',
                 'cql3/expr/expression.cc',
-                'cql3/expr/term_expr.cc',
+                'cql3/expr/prepare_expr.cc',
                 'cql3/functions/user_function.cc',
                 'cql3/functions/functions.cc',
                 'cql3/functions/aggregate_fcts.cc',
@@ -1029,6 +1029,8 @@ scylla_core = (['database.cc',
                 'service/raft/raft_rpc.cc',
                 'service/raft/raft_gossip_failure_detector.cc',
                 'service/raft/raft_group_registry.cc',
+                'service/raft/discovery.cc',
+                'service/raft/raft_group0.cc',
                 'reader_concurrency_semaphore_group.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
@@ -1129,6 +1131,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/messaging_service.idl.hh',
         'idl/paxos.idl.hh',
         'idl/raft.idl.hh',
+        'idl/group0.idl.hh',
         'idl/hinted_handoff.idl.hh',
         ]
 
@@ -1292,6 +1295,10 @@ deps['test/raft/etcd_test'] =  ['test/raft/etcd_test.cc', 'test/raft/helpers.cc'
 deps['test/raft/raft_sys_table_storage_test'] = ['test/raft/raft_sys_table_storage_test.cc'] + \
     scylla_core + scylla_tests_generic_dependencies
 deps['test/raft/raft_address_map_test'] = ['test/raft/raft_address_map_test.cc'] + scylla_core
+deps['test/raft/discovery_test'] =  ['test/raft/discovery_test.cc',
+                                     'test/raft/helpers.cc',
+                                     'test/lib/log.cc',
+                                     'service/raft/discovery.cc'] + scylla_raft_dependencies
 
 deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
 

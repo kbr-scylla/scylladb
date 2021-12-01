@@ -545,22 +545,22 @@ future<> compaction_manager::stop_tasks(std::vector<lw_shared_ptr<task>> tasks, 
     });
 }
 
-future<> compaction_manager::stop_ongoing_compactions(sstring reason) {
-    auto ongoing_compactions = get_compactions().size();
-
-    // Wait for each task handler to stop. Copy list because task remove itself
-    // from the list when done.
-    auto tasks = boost::copy_range<std::vector<lw_shared_ptr<task>>>(_tasks);
-    cmlog.info("Stopping {} tasks for {} ongoing compactions due to {}", tasks.size(), ongoing_compactions, reason);
-    return stop_tasks(std::move(tasks), std::move(reason));
-}
-
-future<> compaction_manager::stop_ongoing_compactions(sstring reason, column_family* cf) {
-    auto ongoing_compactions = get_compactions().size();
-    auto tasks = boost::copy_range<std::vector<lw_shared_ptr<task>>>(_tasks | boost::adaptors::filtered([cf] (auto& task) {
-        return task->compacting_cf == cf;
+future<> compaction_manager::stop_ongoing_compactions(sstring reason, column_family* cf, std::optional<sstables::compaction_type> type_opt) {
+    auto ongoing_compactions = get_compactions(cf).size();
+    auto tasks = boost::copy_range<std::vector<lw_shared_ptr<task>>>(_tasks | boost::adaptors::filtered([cf, type_opt] (auto& task) {
+        return (!cf || task->compacting_cf == cf) && (!type_opt || task->type == *type_opt);
     }));
-    cmlog.info("Stopping {} tasks for {} ongoing compactions for table {}.{} due to {}", tasks.size(), ongoing_compactions, cf->schema()->ks_name(), cf->schema()->cf_name(), reason);
+    logging::log_level level = tasks.empty() ? log_level::debug : log_level::info;
+    if (cmlog.is_enabled(level)) {
+        std::string scope = "";
+        if (cf) {
+            scope = fmt::format(" for table {}.{}", cf->schema()->ks_name(), cf->schema()->cf_name());
+        }
+        if (type_opt) {
+            scope += fmt::format(" {} type={}", scope.size() ? "and" : "for", *type_opt);
+        }
+        cmlog.log(level, "Stopping {} tasks for {} ongoing compactions{} due to {}", tasks.size(), ongoing_compactions, scope, reason);
+    }
     return stop_tasks(std::move(tasks), std::move(reason));
 }
 
@@ -784,7 +784,17 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
     _tasks.push_back(task);
     cmlog.debug("{} task {} cf={}: started", options.type(), fmt::ptr(task.get()), fmt::ptr(task->compacting_cf));
 
-    auto sstables = std::make_unique<std::vector<sstables::shared_sstable>>(get_func(*cf));
+    std::unique_ptr<std::vector<sstables::shared_sstable>> sstables;
+    lw_shared_ptr<compacting_sstable_registration> compacting;
+
+    // since we might potentially have ongoing compactions, and we
+    // must ensure that all sstables created before we run are included
+    // in the re-write, we need to barrier out any previously running
+    // compaction.
+    co_await run_with_compaction_disabled(cf, [&] () mutable -> future<> {
+        sstables = std::make_unique<std::vector<sstables::shared_sstable>>(co_await get_func());
+        compacting = make_lw_shared<compacting_sstable_registration>(this, *sstables);
+    });
     // sort sstables by size in descending order, such that the smallest files will be rewritten first
     // (as sstable to be rewritten is popped off from the back of container), so rewrite will have higher
     // chance to succeed when the biggest files are reached.
@@ -792,7 +802,6 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
         return a->data_size() > b->data_size();
     });
 
-    auto compacting = make_lw_shared<compacting_sstable_registration>(this, *sstables);
     auto sstables_ptr = sstables.get();
     _stats.pending_tasks += sstables->size();
 
@@ -852,7 +861,7 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
         cmlog.debug("{} task {} cf={}: done", type, fmt::ptr(task.get()), fmt::ptr(task->compacting_cf));
     });
 
-    return task->compaction_done.get_future().then([task] {});
+    co_return co_await task->compaction_done.get_future();
 }
 
 future<> compaction_manager::perform_sstable_scrub_validate_mode(column_family* cf) {
@@ -934,31 +943,30 @@ future<> compaction_manager::perform_cleanup(database& db, column_family* cf) {
         return make_exception_future<>(std::runtime_error(format("cleanup request failed: there is an ongoing cleanup on {}.{}",
             cf->schema()->ks_name(), cf->schema()->cf_name())));
     }
-    return seastar::async([this, cf, &db] {
+  // FIXME: indentation
+  auto sorted_owned_ranges = db.get_keyspace_local_ranges(cf->schema()->ks_name());
+  auto get_sstables = [this, &db, cf, sorted_owned_ranges] () -> future<std::vector<sstables::shared_sstable>> {
+    return seastar::async([this, &db, cf, sorted_owned_ranges = std::move(sorted_owned_ranges)] {
         auto schema = cf->schema();
-        auto sorted_owned_ranges = db.get_keyspace_local_ranges(schema->ks_name());
         auto sstables = std::vector<sstables::shared_sstable>{};
         const auto candidates = get_candidates(*cf);
         std::copy_if(candidates.begin(), candidates.end(), std::back_inserter(sstables), [&sorted_owned_ranges, schema] (const sstables::shared_sstable& sst) {
             seastar::thread::maybe_yield();
             return sorted_owned_ranges.empty() || needs_cleanup(sst, sorted_owned_ranges, schema);
         });
-        return std::tuple<dht::token_range_vector, std::vector<sstables::shared_sstable>>(sorted_owned_ranges, sstables);
-    }).then_unpack([this, cf, &db] (dht::token_range_vector owned_ranges, std::vector<sstables::shared_sstable> sstables) {
-        return rewrite_sstables(cf, sstables::compaction_type_options::make_cleanup(std::move(owned_ranges)),
-                [sstables = std::move(sstables)] (const table&) { return sstables; });
+        return sstables;
     });
+  };
+
+  return rewrite_sstables(cf, sstables::compaction_type_options::make_cleanup(std::move(sorted_owned_ranges)), std::move(get_sstables));
 }
 
 // Submit a column family to be upgraded and wait for its termination.
 future<> compaction_manager::perform_sstable_upgrade(database& db, column_family* cf, bool exclude_current_version) {
-    using shared_sstables = std::vector<sstables::shared_sstable>;
-    return do_with(shared_sstables{}, [this, &db, cf, exclude_current_version](shared_sstables& tables) {
-        // since we might potentially have ongoing compactions, and we
-        // must ensure that all sstables created before we run are included
-        // in the re-write, we need to barrier out any previously running
-        // compaction.
-        return run_with_compaction_disabled(cf, [this, cf, &tables, exclude_current_version] {
+    auto get_sstables = [this, &db, cf, exclude_current_version] {
+            // FIXME: indentation
+            std::vector<sstables::shared_sstable> tables;
+
             auto last_version = cf->get_sstables_manager().get_highest_supported_format();
 
             for (auto& sst : get_candidates(*cf)) {
@@ -969,21 +977,17 @@ future<> compaction_manager::perform_sstable_upgrade(database& db, column_family
                     tables.emplace_back(sst);
                 }
             }
-            return make_ready_future<>();
-        }).then([&db, cf] {
-             return db.get_keyspace_local_ranges(cf->schema()->ks_name());
-        }).then([this, &db, cf, &tables] (dht::token_range_vector owned_ranges) {
-            // doing a "cleanup" is about as compacting as we need
-            // to be, provided we get to decide the tables to process,
-            // and ignoring any existing operations.
-            // Note that we potentially could be doing multiple
-            // upgrades here in parallel, but that is really the users
-            // problem.
-            return rewrite_sstables(cf, sstables::compaction_type_options::make_upgrade(std::move(owned_ranges)), [&](auto&) mutable {
-                return std::exchange(tables, {});
-            });
-        });
-    });
+
+            return make_ready_future<std::vector<sstables::shared_sstable>>(tables);
+    };
+
+    // doing a "cleanup" is about as compacting as we need
+    // to be, provided we get to decide the tables to process,
+    // and ignoring any existing operations.
+    // Note that we potentially could be doing multiple
+    // upgrades here in parallel, but that is really the users
+    // problem.
+    return rewrite_sstables(cf, sstables::compaction_type_options::make_upgrade(db.get_keyspace_local_ranges(cf->schema()->ks_name())), std::move(get_sstables));
 }
 
 // Submit a column family to be scrubbed and wait for its termination.
@@ -991,14 +995,10 @@ future<> compaction_manager::perform_sstable_scrub(column_family* cf, sstables::
     if (scrub_mode == sstables::compaction_type_options::scrub::mode::validate) {
         return perform_sstable_scrub_validate_mode(cf);
     }
-    // since we might potentially have ongoing compactions, and we
-    // must ensure that all sstables created before we run are scrubbed,
-    // we need to barrier out any previously running compaction.
-    return run_with_compaction_disabled(cf, [this, cf, scrub_mode] {
-        return rewrite_sstables(cf, sstables::compaction_type_options::make_scrub(scrub_mode), [this] (const table& cf) {
-            return get_candidates(cf);
+        // FIXME: indentation
+        return rewrite_sstables(cf, sstables::compaction_type_options::make_scrub(scrub_mode), [this, cf] {
+            return make_ready_future<std::vector<sstables::shared_sstable>>(get_candidates(*cf));
         }, can_purge_tombstones::no);
-    });
 }
 
 void compaction_manager::add(column_family* cf) {
@@ -1044,7 +1044,7 @@ future<> compaction_manager::remove(column_family* cf) {
 #endif
 }
 
-const std::vector<sstables::compaction_info> compaction_manager::get_compactions() const {
+const std::vector<sstables::compaction_info> compaction_manager::get_compactions(table* cf) const {
     auto to_info = [] (const lw_shared_ptr<task>& t) {
         sstables::compaction_info ret;
         ret.compaction_uuid = t->compaction_data.compaction_uuid;
@@ -1056,22 +1056,19 @@ const std::vector<sstables::compaction_info> compaction_manager::get_compactions
         return ret;
     };
     using ret = std::vector<sstables::compaction_info>;
-    return boost::copy_range<ret>(_tasks | boost::adaptors::filtered(std::mem_fn(&task::compaction_running)) | boost::adaptors::transformed(to_info));
+    return boost::copy_range<ret>(_tasks | boost::adaptors::filtered([cf] (const lw_shared_ptr<task>& t) {
+                return (!cf || t->compacting_cf == cf) && t->compaction_running;
+            }) | boost::adaptors::transformed(to_info));
 }
 
-void compaction_manager::stop_compaction(sstring type) {
+future<> compaction_manager::stop_compaction(sstring type) {
     sstables::compaction_type target_type;
     try {
         target_type = sstables::to_compaction_type(type);
     } catch (...) {
         throw std::runtime_error(format("Compaction of type {} cannot be stopped by compaction manager: {}", type.c_str(), std::current_exception()));
     }
-    // FIXME: switch to task_stop(), and wait for their termination, so API user can know when compactions actually stopped.
-    for (auto& task : _tasks) {
-        if (task->compaction_running && target_type == task->type) {
-            task->compaction_data.stop("user request");
-        }
-    }
+    return stop_ongoing_compactions("user request", nullptr, target_type);
 }
 
 void compaction_manager::propagate_replacement(column_family* cf,

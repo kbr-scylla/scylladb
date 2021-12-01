@@ -194,14 +194,12 @@ private:
     maintenance_scheduling_group _maintenance_sg;
     size_t _available_memory;
 
-    using get_candidates_func = std::function<std::vector<sstables::shared_sstable>(const column_family&)>;
+    using get_candidates_func = std::function<future<std::vector<sstables::shared_sstable>>()>;
     class can_purge_tombstones_tag;
     using can_purge_tombstones = bool_class<can_purge_tombstones_tag>;
 
     future<> rewrite_sstables(column_family* cf, sstables::compaction_type_options options, get_candidates_func, can_purge_tombstones can_purge = can_purge_tombstones::yes);
 
-    future<> stop_ongoing_compactions(sstring reason);
-    future<> stop_ongoing_compactions(sstring reason, column_family* cf);
     optimized_optional<abort_source::subscription> _early_abort_subscription;
 public:
     compaction_manager(compaction_scheduling_group csg, maintenance_scheduling_group msg, size_t available_memory, abort_source& as);
@@ -282,7 +280,7 @@ public:
     // throws std::out_of_range exception if not found.
     compaction_state& get_compaction_state(table* t);
 
-    const std::vector<sstables::compaction_info> get_compactions() const;
+    const std::vector<sstables::compaction_info> get_compactions(table* cf = nullptr) const;
 
     // Returns true if table has an ongoing compaction, running on its behalf
     bool has_table_ongoing_compaction(const column_family* cf) const {
@@ -296,7 +294,10 @@ public:
     }
 
     // Stops ongoing compaction of a given type.
-    void stop_compaction(sstring type);
+    future<> stop_compaction(sstring type);
+
+    // Stops ongoing compaction of a given table and/or compaction_type.
+    future<> stop_ongoing_compactions(sstring reason, column_family* cf = nullptr, std::optional<sstables::compaction_type> type_opt = {});
 
     double backlog() {
         return _backlog_manager.backlog();

@@ -638,6 +638,8 @@ schema_ptr system_keyspace::large_cells() {
         "Scylla specific information about the local node"
        );
        builder.set_gc_grace_seconds(0);
+       // Raft Group id and server id updates must be sync
+       builder.set_wait_for_sync_to_commitlog(true);
        builder.with_version(generate_schema_version(builder.uuid()));
        return builder.build(schema_builder::compact_storage::no);
     }();
@@ -1584,19 +1586,33 @@ template future<> system_keyspace::update_peer_info<sstring>(gms::inet_address e
 template future<> system_keyspace::update_peer_info<utils::UUID>(gms::inet_address ep, sstring column_name, utils::UUID);
 template future<> system_keyspace::update_peer_info<net::inet_address>(gms::inet_address ep, sstring column_name, net::inet_address);
 
+template <typename T>
+future<> set_scylla_local_param_as(const sstring& key, const T& value) {
+    sstring req = format("UPDATE system.{} SET value = ? WHERE key = ?", system_keyspace::SCYLLA_LOCAL);
+    auto type = data_type_for<T>();
+    return qctx->execute_cql(req, type->to_string_impl(data_value(value)), key).discard_result();
+}
+
+template <typename T>
+future<std::optional<T>> get_scylla_local_param_as(const sstring& key) {
+    sstring req = format("SELECT value FROM system.{} WHERE key = ?", system_keyspace::SCYLLA_LOCAL);
+    return qctx->execute_cql(req, key).then([] (::shared_ptr<cql3::untyped_result_set> res)
+            -> future<std::optional<T>> {
+        if (res->empty() || !res->one().has("value")) {
+            return make_ready_future<std::optional<T>>(std::optional<T>());
+        }
+        auto type = data_type_for<T>();
+        return make_ready_future<std::optional<T>>(value_cast<T>(type->deserialize(
+                    type->from_string(res->one().get_as<sstring>("value")))));
+    });
+}
+
 future<> system_keyspace::set_scylla_local_param(const sstring& key, const sstring& value) {
-    sstring req = format("UPDATE system.{} SET value = ? WHERE key = ?", SCYLLA_LOCAL);
-    return qctx->execute_cql(req, value, key).discard_result();
+    return set_scylla_local_param_as<sstring>(key, value);
 }
 
 future<std::optional<sstring>> system_keyspace::get_scylla_local_param(const sstring& key){
-    sstring req = format("SELECT value FROM system.{} WHERE key = ?", SCYLLA_LOCAL);
-    return qctx->execute_cql(req, key).then([] (::shared_ptr<cql3::untyped_result_set> res) {
-        if (res->empty() || !res->one().has("value")) {
-            return std::optional<sstring>();
-        }
-        return std::optional<sstring>(res->one().get_as<sstring>("value"));
-    });
+    return get_scylla_local_param_as<sstring>(key);
 }
 
 future<> system_keyspace::update_schema_version(utils::UUID version) {
@@ -2520,7 +2536,8 @@ static void install_virtual_readers(database& db) {
 
 static bool maybe_write_in_user_memory(schema_ptr s, database& db) {
     return (s.get() == system_keyspace::batchlog().get()) || (s.get() == system_keyspace::paxos().get())
-            || s == system_keyspace::v3::scylla_views_builds_in_progress();
+            || s == system_keyspace::v3::scylla_views_builds_in_progress()
+            || s == system_keyspace::raft();
 }
 
 future<> system_keyspace_make(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
@@ -2955,6 +2972,24 @@ future<> system_keyspace::enable_features_on_startup(sharded<gms::feature_servic
         // that means the feature name is used for backward compatibility and should be implicitly
         // enabled in the code by default, so just skip it.
     }
+}
+
+future<utils::UUID> system_keyspace::get_raft_group0_id() {
+    auto opt = co_await get_scylla_local_param_as<utils::UUID>("raft_group0_id");
+    co_return opt.value_or<utils::UUID>({});
+}
+
+future<utils::UUID> system_keyspace::get_raft_server_id() {
+    auto opt = co_await get_scylla_local_param_as<utils::UUID>("raft_server_id");
+    co_return opt.value_or<utils::UUID>({});
+}
+
+future<> system_keyspace::set_raft_group0_id(utils::UUID uuid) {
+    return set_scylla_local_param_as<utils::UUID>("raft_group0_id", uuid);
+}
+
+future<> system_keyspace::set_raft_server_id(utils::UUID uuid) {
+    return set_scylla_local_param_as<utils::UUID>("raft_server_id", uuid);
 }
 
 sstring system_keyspace_name() {

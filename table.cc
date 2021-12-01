@@ -614,10 +614,26 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             co_return co_await write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg, priority);
         });
 
-        auto f = consumer(old->make_flush_reader(
+        flat_mutation_reader reader = old->make_flush_reader(
             old->schema(),
             compaction_concurrency_semaphore().make_tracking_only_permit(old->schema().get(), "try_flush_memtable_to_sstable()", db::no_timeout),
-            service::get_local_memtable_flush_priority()));
+            service::get_local_memtable_flush_priority());
+
+        if (old->has_any_tombstones()) {
+            reader = make_compacting_reader(
+                std::move(reader),
+                gc_clock::now(),
+                [] (const dht::decorated_key&) { return api::min_timestamp; });
+        }
+
+        mutation_fragment* fragment = co_await reader.peek();
+        if (!fragment) {
+            co_await reader.close();
+            _memtables->erase(old);
+            co_return stop_iteration::yes;
+        }
+
+        auto f = consumer(std::move(reader));
 
         // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
         // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
@@ -2133,14 +2149,14 @@ std::chrono::milliseconds table::get_coordinator_read_latency_percentile(double 
 
 void
 table::enable_auto_compaction() {
-    // XXX: unmute backlog. turn table backlog back on.
+    // FIXME: unmute backlog. turn table backlog back on.
     //      see table::disable_auto_compaction() notes.
     _compaction_disabled_by_user = false;
 }
 
-void
+future<>
 table::disable_auto_compaction() {
-    // XXX: mute backlog. When we disable background compactions
+    // FIXME: mute backlog. When we disable background compactions
     // for the table, we must also disable current backlog of the
     // table compaction strategy that contributes to the scheduling
     // group resources prioritization.
@@ -2167,6 +2183,9 @@ table::disable_auto_compaction() {
     // - it will break computation of major compaction descriptor
     //   for new submissions
     _compaction_disabled_by_user = true;
+    return with_gate(_async_gate, [this] {
+        return compaction_manager().stop_ongoing_compactions("disable auto-compaction", this);
+    });
 }
 
 flat_mutation_reader

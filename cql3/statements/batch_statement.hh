@@ -31,6 +31,7 @@
 #include "raw/batch_statement.hh"
 #include "timestamp.hh"
 #include "log.hh"
+#include "service_permit.hh"
 
 namespace cql_transport::messages {
     class result_message;
