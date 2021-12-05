@@ -59,26 +59,35 @@ static future<schema_ptr> get_schema_definition(table_schema_version v, netw::me
 
 migration_manager::migration_manager(migration_notifier& notifier, gms::feature_service& feat, netw::messaging_service& ms, gms::gossiper& gossiper) :
         _notifier(notifier), _feat(feat), _messaging(ms), _gossiper(gossiper)
+        , _schema_push([this] { return passive_announce(); })
 {
 }
 
-future<> migration_manager::stop()
-{
-    if (_as.abort_requested()) {
-        return make_ready_future<>();
+future<> migration_manager::stop() {
+    if (!_as.abort_requested()) {
+        co_await drain();
     }
+    try {
+        co_await _schema_push.join();
+    } catch (...) {
+        mlogger.error("schema_push failed: {}", std::current_exception());
+    }
+}
 
+future<> migration_manager::drain()
+{
     mlogger.info("stopping migration service");
     _as.request_abort();
 
-  return uninit_messaging_service().then([this] {
-    return parallel_for_each(_schema_pulls.begin(), _schema_pulls.end(), [] (auto&& e) {
-        serialized_action& sp = e.second;
-        return sp.join();
-    }).finally([this] {
-        return _background_tasks.close();
-    });
-  });
+    co_await uninit_messaging_service();
+    try {
+        co_await parallel_for_each(_schema_pulls, [] (auto&& e) {
+            return e.second.join();
+        });
+    } catch (...) {
+        mlogger.error("schema_pull failed: {}", std::current_exception());
+    }
+    co_await _background_tasks.close();
 }
 
 void migration_manager::init_messaging_service()
@@ -175,14 +184,16 @@ future<> migration_notifier::unregister_listener(migration_listener* listener)
     return _listeners.remove(listener);
 }
 
-future<> migration_manager::schedule_schema_pull(const gms::inet_address& endpoint, const gms::endpoint_state& state)
+void migration_manager::schedule_schema_pull(const gms::inet_address& endpoint, const gms::endpoint_state& state)
 {
     const auto* value = state.get_application_state_ptr(gms::application_state::SCHEMA);
 
     if (endpoint != utils::fb_utilities::get_broadcast_address() && value) {
-        return maybe_schedule_schema_pull(utils::UUID{value->value}, endpoint);
+        // FIXME: discarded future
+        (void)maybe_schedule_schema_pull(utils::UUID{value->value}, endpoint).handle_exception([endpoint] (auto ep) {
+            mlogger.warn("Fail to pull schema from {}: {}", endpoint, ep);
+        });
     }
-    return make_ready_future<>();
 }
 
 bool migration_manager::have_schema_agreement() {
@@ -814,45 +825,43 @@ future<> migration_manager::announce_column_family_drop(const sstring& ks_name,
         }
         auto keyspace = db.find_keyspace(ks_name).metadata();
 
-        return seastar::async([this, keyspace, schema, &old_cfm, drop_views, &db] {
-            // If drop_views is false (the default), we don't allow to delete a
-            // table which has views which aren't part of an index. If drop_views
-            // is true, we delete those views as well.
-            auto&& views = old_cfm.views();
-            if (!drop_views && views.size() > schema->all_indices().size()) {
-                auto explicit_view_names = views
-                                        | boost::adaptors::filtered([&old_cfm](const view_ptr& v) { return !old_cfm.get_index_manager().is_index(v); })
-                                        | boost::adaptors::transformed([](const view_ptr& v) { return v->cf_name(); });
-                throw exceptions::invalid_request_exception(format("Cannot drop table when materialized views still depend on it ({}.{{{}}})",
-                            schema->ks_name(), ::join(", ", explicit_view_names)));
-            }
-            mlogger.info("Drop table '{}.{}'", schema->ks_name(), schema->cf_name());
+        // If drop_views is false (the default), we don't allow to delete a
+        // table which has views which aren't part of an index. If drop_views
+        // is true, we delete those views as well.
+        auto&& views = old_cfm.views();
+        if (!drop_views && views.size() > schema->all_indices().size()) {
+            auto explicit_view_names = views
+                                    | boost::adaptors::filtered([&old_cfm](const view_ptr& v) { return !old_cfm.get_index_manager().is_index(v); })
+                                    | boost::adaptors::transformed([](const view_ptr& v) { return v->cf_name(); });
+            throw exceptions::invalid_request_exception(format("Cannot drop table when materialized views still depend on it ({}.{{{}}})",
+                        schema->ks_name(), ::join(", ", explicit_view_names)));
+        }
+        mlogger.info("Drop table '{}.{}'", schema->ks_name(), schema->cf_name());
 
-            std::vector<mutation> drop_si_mutations;
-            if (!schema->all_indices().empty()) {
-                auto builder = schema_builder(schema).without_indexes();
-                drop_si_mutations = db::schema_tables::make_update_table_mutations(db, keyspace, schema, builder.build(), api::new_timestamp(), false);
+        std::vector<mutation> drop_si_mutations;
+        if (!schema->all_indices().empty()) {
+            auto builder = schema_builder(schema).without_indexes();
+            drop_si_mutations = db::schema_tables::make_update_table_mutations(db, keyspace, schema, builder.build(), api::new_timestamp(), false);
+        }
+        auto ts = api::new_timestamp();
+        auto mutations = db::schema_tables::make_drop_table_mutations(keyspace, schema, ts);
+        mutations.insert(mutations.end(), std::make_move_iterator(drop_si_mutations.begin()), std::make_move_iterator(drop_si_mutations.end()));
+        for (auto& v : views) {
+            if (!old_cfm.get_index_manager().is_index(v)) {
+                mlogger.info("Drop view '{}.{}' of table '{}'", v->ks_name(), v->cf_name(), schema->cf_name());
+                auto m = db::schema_tables::make_drop_view_mutations(keyspace, v, api::new_timestamp());
+                mutations.insert(mutations.end(), std::make_move_iterator(m.begin()), std::make_move_iterator(m.end()));
             }
-            auto ts = api::new_timestamp();
-            auto mutations = db::schema_tables::make_drop_table_mutations(keyspace, schema, ts);
-            mutations.insert(mutations.end(), std::make_move_iterator(drop_si_mutations.begin()), std::make_move_iterator(drop_si_mutations.end()));
-            for (auto& v : views) {
-                if (!old_cfm.get_index_manager().is_index(v)) {
-                    mlogger.info("Drop view '{}.{}' of table '{}'", v->ks_name(), v->cf_name(), schema->cf_name());
-                    auto m = db::schema_tables::make_drop_view_mutations(keyspace, v, api::new_timestamp());
-                    mutations.insert(mutations.end(), std::make_move_iterator(m.begin()), std::make_move_iterator(m.end()));
-                }
-            }
+        }
 
+        // notifiers must run in seastar thread
+        co_await seastar::async([&] {
             get_notifier().before_drop_column_family(*schema, mutations, ts);
-            return mutations;
-        }).then([this, keyspace](std::vector<mutation> mutations) {
-            return include_keyspace_and_announce(*keyspace, std::move(mutations));
         });
+        co_return co_await include_keyspace_and_announce(*keyspace, std::move(mutations));
     } catch (const no_such_column_family& e) {
         throw exceptions::configuration_exception(format("Cannot drop non existing table '{}' in keyspace '{}'.", cf_name, ks_name));
     }
-
 }
 
 future<> migration_manager::announce_type_drop(user_type dropped_type)
@@ -975,11 +984,15 @@ future<> migration_manager::announce(std::vector<mutation> schema) {
  *
  * @param version The schema version to announce
  */
-future<> migration_manager::passive_announce(utils::UUID version) {
-    return _gossiper.container().invoke_on(0, [version] (auto&& gossiper) {
-        mlogger.debug("Gossiping my schema version {}", version);
-        return gossiper.add_local_application_state(gms::application_state::SCHEMA, gms::versioned_value::schema(version));
-    });
+void migration_manager::passive_announce(utils::UUID version) {
+    _schema_version_to_publish = std::move(version);
+    (void)_schema_push.trigger();
+}
+
+future<> migration_manager::passive_announce() {
+    assert(this_shard_id() == 0);
+    mlogger.debug("Gossiping my schema version {}", _schema_version_to_publish);
+    return _gossiper.add_local_application_state(gms::application_state::SCHEMA, gms::versioned_value::schema(_schema_version_to_publish));
 }
 
 #if 0
@@ -1157,6 +1170,27 @@ future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_ver
         return make_ready_future<column_mapping>(s->get_column_mapping());
     }
     return db::schema_tables::get_column_mapping(table_id, v);
+}
+
+void migration_manager::on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) {
+    schedule_schema_pull(endpoint, ep_state);
+}
+
+void migration_manager::on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value) {
+    if (state == gms::application_state::SCHEMA) {
+        auto* ep_state = _gossiper.get_endpoint_state_for_endpoint_ptr(endpoint);
+        if (!ep_state || _gossiper.is_dead_state(*ep_state)) {
+            mlogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
+            return;
+        }
+        if (get_local_storage_proxy().get_token_metadata_ptr()->is_member(endpoint)) {
+            schedule_schema_pull(endpoint, *ep_state);
+        }
+    }
+}
+
+void migration_manager::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
+    schedule_schema_pull(endpoint, state);
 }
 
 }

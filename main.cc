@@ -642,7 +642,7 @@ int main(int ac, char** av) {
                     prometheus_server.stop().get();
                 });
 
-                auto ip = utils::resolve(cfg->prometheus_address, family, preferred).get0();
+                auto ip = utils::resolve(cfg->prometheus_address || cfg->listen_address, family, preferred).get0();
 
                 //FIXME discarded future
                 prometheus::config pctx;
@@ -1157,6 +1157,11 @@ int main(int ac, char** av) {
                 gossiper.local().unregister_(ss.local().shared_from_this()).get();
             });
 
+            gossiper.local().register_(mm.local().shared_from_this());
+            auto stop_mm_listening = defer_verbose_shutdown("migration manager notifications", [&gossiper, &mm] {
+                gossiper.local().unregister_(mm.local().shared_from_this()).get();
+            });
+
             sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
             auto stop_sdks = defer_verbose_shutdown("system distributed keyspace", [] {
                 sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::stop).get();
@@ -1186,6 +1191,9 @@ int main(int ac, char** av) {
                 return ss.local().init_server(qp.local());
             }).get();
 
+            auto schema_change_announce = db.local().observable_schema_version().observe([&mm] (utils::UUID schema_version) mutable {
+                mm.local().passive_announce(std::move(schema_version));
+            });
             gossiper.local().wait_for_gossip_to_settle().get();
             sst_format_selector.sync();
 

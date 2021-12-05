@@ -3415,7 +3415,11 @@ class std_unique_ptr:
         self.obj = obj
 
     def get(self):
-        return self.obj['_M_t']['_M_t']['_M_head_impl']
+        try:
+            std_tuple(self.obj['_M_t']['_M_t'])[0].dereference()
+            return std_tuple(self.obj['_M_t']['_M_t'])[0]
+        except:
+            return self.obj['_M_t']['_M_t']['_M_head_impl']
 
     def dereference(self):
         return self.get().dereference()
@@ -4201,7 +4205,11 @@ class scylla_compaction_tasks(gdb.Command):
         task_list = list(std_list(cm['_tasks']))
         for task in task_list:
             task = seastar_lw_shared_ptr(task).get().dereference()
-            schema = schema_ptr(task['compacting_cf'].dereference()['_schema'])
+            try:
+                schema = schema_ptr(task['compacting_table'].dereference()['_schema'])
+            except:
+                schema = schema_ptr(task['compacting_cf'].dereference()['_schema'])
+
             key = 'type={}, running={:5}, {}'.format(task['type'], str(task['compaction_running']), schema.table_name())
             task_hist.add(key)
 

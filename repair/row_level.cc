@@ -516,6 +516,7 @@ public:
             streaming::stream_reason::removenode,
             streaming::stream_reason::decommission,
             streaming::stream_reason::repair,
+            streaming::stream_reason::rebuild,
         };
         return sstables::offstrategy(operations_supported.contains(reason));
     }

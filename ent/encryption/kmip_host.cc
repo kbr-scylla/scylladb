@@ -204,12 +204,12 @@ private:
     encryption_context& _ctxt;
     sstring _name;
     host_options _options;
-    utils::loading_cache<kmip_key_info, key_and_id_type,
+    utils::loading_cache<kmip_key_info, key_and_id_type, 2,
                     utils::loading_cache_reload_enabled::yes,
                     utils::simple_entry_size<key_and_id_type>,
                     kmip_key_info_hash> _attr_cache;
 
-    utils::loading_cache<id_type, ::shared_ptr<symmetric_key>,
+    utils::loading_cache<id_type, ::shared_ptr<symmetric_key>, 2,
                     utils::loading_cache_reload_enabled::yes,
                     utils::simple_entry_size<::shared_ptr<symmetric_key>>> _id_cache;
 

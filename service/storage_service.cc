@@ -132,7 +132,7 @@ storage_service::storage_service(abort_source& abort_source,
         , _batchlog_manager(bm)
         , _sys_dist_ks(sys_dist_ks)
         , _snitch_reconfigure([this] { return snitch_reconfigured(); })
-        , _schema_version_publisher([this] { return publish_schema_version(); }) {
+{
     register_metrics();
 
     _listeners.emplace_back(make_lw_shared(bs2::scoped_connection(sstable_read_error.connect([this] { do_isolate_on_error(disk_error::regular); }))));
@@ -213,16 +213,6 @@ bool storage_service::is_first_node() {
 
 bool storage_service::should_bootstrap() {
     return !db::system_keyspace::bootstrap_complete() && !is_first_node();
-}
-
-void storage_service::install_schema_version_change_listener() {
-    _listeners.emplace_back(make_lw_shared(_db.local().observable_schema_version().observe([this] (utils::UUID schema_version) {
-        (void)_schema_version_publisher.trigger();
-    })));
-}
-
-future<> storage_service::publish_schema_version() {
-    return _migration_manager.local().passive_announce(_db.local().get_version());
 }
 
 future<> storage_service::snitch_reconfigured() {
@@ -353,8 +343,6 @@ void storage_service::prepare_to_join(
     auto generation_number = db::system_keyspace::increment_and_get_generation().get0();
     auto advertise = gms::advertise_myself(!replacing_a_node_with_same_ip);
     _gossiper.start_gossiping(generation_number, app_states, advertise).get();
-
-    install_schema_version_change_listener();
 }
 
 void storage_service::maybe_start_sys_dist_ks() {
@@ -1123,18 +1111,10 @@ void storage_service::on_join(gms::inet_address endpoint, gms::endpoint_state ep
     for (const auto& e : ep_state.get_application_state_map()) {
         on_change(endpoint, e.first, e.second);
     }
-    //FIXME: discarded future.
-    (void)_migration_manager.local().schedule_schema_pull(endpoint, ep_state).handle_exception([endpoint] (auto ep) {
-        slogger.warn("Fail to pull schema from {}: {}", endpoint, ep);
-    });
 }
 
 void storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
     slogger.debug("endpoint={} on_alive", endpoint);
-    //FIXME: discarded future.
-    (void)_migration_manager.local().schedule_schema_pull(endpoint, state).handle_exception([endpoint] (auto ep) {
-        slogger.warn("Fail to pull schema from {}: {}", endpoint, ep);
-    });
     if (get_token_metadata().is_member(endpoint)) {
         notify_up(endpoint);
     }
@@ -1189,12 +1169,7 @@ void storage_service::on_change(inet_address endpoint, application_state state, 
         }
         if (get_token_metadata().is_member(endpoint)) {
             do_update_system_peers_table(endpoint, state, value);
-            if (state == application_state::SCHEMA) {
-                //FIXME: discarded future.
-                (void)_migration_manager.local().schedule_schema_pull(endpoint, *ep_state).handle_exception([endpoint] (auto ep) {
-                    slogger.warn("Failed to pull schema from {}: {}", endpoint, ep);
-                });
-            } else if (state == application_state::RPC_READY) {
+            if (state == application_state::RPC_READY) {
                 slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
                 notify_cql_change(endpoint, ep_state->is_cql_ready());
             }
@@ -1503,11 +1478,6 @@ future<> storage_service::stop() {
         co_await (_group0 ?  _group0->abort() : make_ready_future<>());
     } catch (...) {
         slogger.error("failed to stop Raft Group 0: {}", std::current_exception());
-    }
-    try {
-        co_await _schema_version_publisher.join();
-    } catch (...) {
-        slogger.error("schema_version_publisher failed: {}", std::current_exception());
     }
     co_await std::move(_node_ops_abort_thread);
 }
@@ -2657,7 +2627,7 @@ future<> storage_service::do_drain() {
         }).get();
 
         set_mode(mode::DRAINING, "shutting down migration manager", false);
-        _migration_manager.invoke_on_all(&service::migration_manager::stop).get();
+        _migration_manager.invoke_on_all(&service::migration_manager::drain).get();
 
         set_mode(mode::DRAINING, "flushing column families", false);
         _db.invoke_on_all(&database::drain).get();
