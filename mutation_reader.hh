@@ -63,12 +63,12 @@ template <typename MutationFilter>
 requires requires(MutationFilter mf, const dht::decorated_key& dk) {
     { mf(dk) } -> std::same_as<bool>;
 }
-class filtering_reader : public flat_mutation_reader::impl {
-    flat_mutation_reader _rd;
+class filtering_reader : public flat_mutation_reader_v2::impl {
+    flat_mutation_reader_v2 _rd;
     MutationFilter _filter;
     static_assert(std::is_same<bool, std::result_of_t<MutationFilter(const dht::decorated_key&)>>::value, "bad MutationFilter signature");
 public:
-    filtering_reader(flat_mutation_reader rd, MutationFilter&& filter)
+    filtering_reader(flat_mutation_reader_v2 rd, MutationFilter&& filter)
         : impl(rd.schema(), rd.permit())
         , _rd(std::move(rd))
         , _filter(std::forward<MutationFilter>(filter)) {
@@ -121,8 +121,8 @@ public:
 // accepts mutation const& and returns a bool. The mutation stays in the
 // stream if and only if the filter returns true.
 template <typename MutationFilter>
-flat_mutation_reader make_filtering_reader(flat_mutation_reader rd, MutationFilter&& filter) {
-    return make_flat_mutation_reader<filtering_reader<MutationFilter>>(std::move(rd), std::forward<MutationFilter>(filter));
+flat_mutation_reader_v2 make_filtering_reader(flat_mutation_reader_v2 rd, MutationFilter&& filter) {
+    return make_flat_mutation_reader_v2<filtering_reader<MutationFilter>>(std::move(rd), std::forward<MutationFilter>(filter));
 }
 
 /// Create a wrapper that filters fragments according to partition range and slice.
@@ -479,6 +479,17 @@ public:
             const io_priority_class& pc,
             tracing::trace_state_ptr trace_state,
             mutation_reader::forwarding fwd_mr) = 0;
+
+    /// Updates the read-range of the shard reader.
+    ///
+    /// Gives the lifecycle-policy a chance to update its stored read-range (if
+    /// the case). Called after any modification to the read range (typically
+    /// after fast_forward_to()). The range is identical to the one the reader
+    /// holds a reference to after the modification happened. When this method
+    /// is called, it is safe to destroy the previous range instance.
+    ///
+    /// This method has to be called on the shard the reader lives on.
+    virtual void update_read_range(lw_shared_ptr<const dht::partition_range> pr) = 0;
 
     /// Destroy the shard reader.
     ///

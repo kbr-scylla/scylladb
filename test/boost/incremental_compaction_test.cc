@@ -80,6 +80,9 @@ public:
     bool has_table_ongoing_compaction() const override {
         return false;
     }
+    api::timestamp_type min_memtable_timestamp() const override {
+        return api::max_timestamp;
+    }
 };
 
 static std::unique_ptr<table_state> make_table_state_for_test(column_family& t) {

@@ -68,6 +68,10 @@
 
 namespace sstables {
 
+bool is_eligible_for_compaction(const shared_sstable& sst) noexcept {
+    return !sst->requires_view_building() && !sst->is_quarantined();
+}
+
 logging::logger clogger("compaction");
 
 static const std::unordered_map<compaction_type, sstring> compaction_types = {
@@ -137,6 +141,23 @@ std::ostream& operator<<(std::ostream& os, compaction_type_options::scrub::mode 
     return os << to_string(scrub_mode);
 }
 
+std::string_view to_string(compaction_type_options::scrub::quarantine_mode quarantine_mode) {
+    switch (quarantine_mode) {
+        case compaction_type_options::scrub::quarantine_mode::include:
+            return "include";
+        case compaction_type_options::scrub::quarantine_mode::exclude:
+            return "exclude";
+        case compaction_type_options::scrub::quarantine_mode::only:
+            return "only";
+    }
+    on_internal_error_noexcept(clogger, format("Invalid scrub quarantine mode {}", int(quarantine_mode)));
+    return "(invalid)";
+}
+
+std::ostream& operator<<(std::ostream& os, compaction_type_options::scrub::quarantine_mode quarantine_mode) {
+    return os << to_string(quarantine_mode);
+}
+
 std::ostream& operator<<(std::ostream& os, pretty_printed_data_size data) {
     static constexpr const char* suffixes[] = { " bytes", "kB", "MB", "GB", "TB", "PB" };
 
@@ -158,7 +179,7 @@ std::ostream& operator<<(std::ostream& os, pretty_printed_throughput tp) {
 
 static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_s, sstable_set::incremental_selector& selector,
         const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk) {
-    auto timestamp = api::max_timestamp;
+    auto timestamp = table_s.min_memtable_timestamp();
     std::optional<utils::hashed_key> hk;
     for (auto&& sst : boost::range::join(selector.select(dk).sstables, table_s.compacted_undeleted_sstables())) {
         if (compacting_set.contains(sst)) {
@@ -596,7 +617,7 @@ public:
     }
 private:
     // Default range sstable reader that will only return mutation that belongs to current shard.
-    virtual flat_mutation_reader make_sstable_reader() const = 0;
+    virtual flat_mutation_reader_v2 make_sstable_reader() const = 0;
 
     virtual sstables::sstable_set make_sstable_set_for_input() const {
         return _table_s.get_compaction_strategy().make_sstable_set(_schema);
@@ -679,7 +700,7 @@ private:
                 reader.consume_in_thread(std::move(cfc));
             });
         });
-        return consumer(make_sstable_reader());
+        return consumer(downgrade_to_v1(make_sstable_reader()));
     }
 
     virtual reader_consumer make_interposer_consumer(reader_consumer end_consumer) {
@@ -861,7 +882,7 @@ public:
         return sstables::make_partitioned_sstable_set(_schema, make_lw_shared<sstable_list>(sstable_list{}), false);
     }
 
-    flat_mutation_reader make_sstable_reader() const override {
+    flat_mutation_reader_v2 make_sstable_reader() const override {
         return _compacting->make_local_shard_sstable_reader(_schema,
                 _permit,
                 query::full_partition_range,
@@ -907,7 +928,7 @@ public:
     {
     }
 
-    flat_mutation_reader make_sstable_reader() const override {
+    flat_mutation_reader_v2 make_sstable_reader() const override {
         return _compacting->make_local_shard_sstable_reader(_schema,
                 _permit,
                 query::full_partition_range,
@@ -1102,7 +1123,7 @@ public:
     cleanup_compaction(table_state& table_s, compaction_descriptor descriptor, compaction_data& cdata, compaction_type_options::upgrade opts)
         : cleanup_compaction(table_s, std::move(descriptor), cdata, opts.owned_ranges) {}
 
-    flat_mutation_reader make_sstable_reader() const override {
+    flat_mutation_reader_v2 make_sstable_reader() const override {
         return make_filtering_reader(regular_compaction::make_sstable_reader(), make_partition_filter());
     }
 
@@ -1393,9 +1414,9 @@ public:
         return _scrub_finish_description;
     }
 
-    flat_mutation_reader make_sstable_reader() const override {
-        auto crawling_reader = _compacting->make_crawling_reader(_schema, _permit, _io_priority, nullptr);
-        return make_flat_mutation_reader<reader>(std::move(crawling_reader), _options.operation_mode);
+    flat_mutation_reader_v2 make_sstable_reader() const override {
+        auto crawling_reader = downgrade_to_v1(_compacting->make_crawling_reader(_schema, _permit, _io_priority, nullptr));
+        return upgrade_to_v2(make_flat_mutation_reader<reader>(std::move(crawling_reader), _options.operation_mode));
     }
 
     uint64_t partitions_per_sstable() const override {
@@ -1479,7 +1500,7 @@ public:
     ~resharding_compaction() { }
 
     // Use reader that makes sure no non-local mutation will not be filtered out.
-    flat_mutation_reader make_sstable_reader() const override {
+    flat_mutation_reader_v2 make_sstable_reader() const override {
         return _compacting->make_range_sstable_reader(_schema,
                 _permit,
                 query::full_partition_range,
@@ -1659,11 +1680,17 @@ static future<compaction_result> scrub_sstables_validate_mode(sstables::compacti
     clogger.info("Scrubbing in validate mode {}", sstables_list_msg);
 
     auto permit = table_s.make_compaction_reader_permit();
-    auto reader = sstables->make_crawling_reader(schema, permit, descriptor.io_priority, nullptr);
+    auto reader = downgrade_to_v1(sstables->make_crawling_reader(schema, permit, descriptor.io_priority, nullptr));
 
     const auto valid = co_await scrub_validate_mode_validate_reader(std::move(reader), cdata);
 
     clogger.info("Finished scrubbing in validate mode {} - sstable(s) are {}", sstables_list_msg, valid ? "valid" : "invalid");
+
+    if (!valid) {
+        for (auto& sst : *sstables->all()) {
+            co_await sst->move_to_quarantine();
+        }
+    }
 
     co_return compaction_result {
         .new_sstables = {},

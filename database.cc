@@ -975,7 +975,12 @@ future<> database::remove(const column_family& cf) noexcept {
 future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_name, timestamp_func tsf, bool snapshot) {
     auto& ks = find_keyspace(ks_name);
     auto uuid = find_uuid(ks_name, cf_name);
-    auto cf = _column_families.at(uuid);
+    lw_shared_ptr<table> cf;
+    try {
+        cf = _column_families.at(uuid);
+    } catch (std::out_of_range&) {
+        on_internal_error(dblog, fmt::format("drop_column_family {}.{}: UUID={} not found", ks_name, cf_name, uuid));
+    }
     co_await remove(*cf);
     cf->clear_views();
     co_return co_await cf->await_pending_ops().then([this, &ks, cf, tsf = std::move(tsf), snapshot] {
@@ -988,8 +993,8 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
 const utils::UUID& database::find_uuid(std::string_view ks, std::string_view cf) const {
     try {
         return _ks_cf_to_uuid.at(std::make_pair(ks, cf));
-    } catch (...) {
-        throw std::out_of_range("");
+    } catch (std::out_of_range&) {
+        throw no_such_column_family(ks, cf);
     }
 }
 
@@ -1000,16 +1005,16 @@ const utils::UUID& database::find_uuid(const schema_ptr& schema) const {
 keyspace& database::find_keyspace(std::string_view name) {
     try {
         return _keyspaces.at(name);
-    } catch (...) {
-        std::throw_with_nested(no_such_keyspace(name));
+    } catch (std::out_of_range&) {
+        throw no_such_keyspace(name);
     }
 }
 
 const keyspace& database::find_keyspace(std::string_view name) const {
     try {
         return _keyspaces.at(name);
-    } catch (...) {
-        std::throw_with_nested(no_such_keyspace(name));
+    } catch (std::out_of_range&) {
+        throw no_such_keyspace(name);
     }
 }
 
@@ -1046,18 +1051,20 @@ std::vector<lw_shared_ptr<column_family>> database::get_non_system_column_famili
 }
 
 column_family& database::find_column_family(std::string_view ks_name, std::string_view cf_name) {
+    auto uuid = find_uuid(ks_name, cf_name);
     try {
-        return find_column_family(find_uuid(ks_name, cf_name));
-    } catch (...) {
-        std::throw_with_nested(no_such_column_family(ks_name, cf_name));
+        return find_column_family(uuid);
+    } catch (no_such_column_family&) {
+        on_internal_error(dblog, fmt::format("find_column_family {}.{}: UUID={} not found", ks_name, cf_name, uuid));
     }
 }
 
 const column_family& database::find_column_family(std::string_view ks_name, std::string_view cf_name) const {
+    auto uuid = find_uuid(ks_name, cf_name);
     try {
-        return find_column_family(find_uuid(ks_name, cf_name));
-    } catch (...) {
-        std::throw_with_nested(no_such_column_family(ks_name, cf_name));
+        return find_column_family(uuid);
+    } catch (no_such_column_family&) {
+        on_internal_error(dblog, fmt::format("find_column_family {}.{}: UUID={} not found", ks_name, cf_name, uuid));
     }
 }
 
@@ -1065,7 +1072,7 @@ column_family& database::find_column_family(const utils::UUID& uuid) {
     try {
         return *_column_families.at(uuid);
     } catch (...) {
-        std::throw_with_nested(no_such_column_family(uuid));
+        throw no_such_column_family(uuid);
     }
 }
 
@@ -1073,7 +1080,7 @@ const column_family& database::find_column_family(const utils::UUID& uuid) const
     try {
         return *_column_families.at(uuid);
     } catch (...) {
-        std::throw_with_nested(no_such_column_family(uuid));
+        throw no_such_column_family(uuid);
     }
 }
 
@@ -1290,10 +1297,11 @@ std::vector<view_ptr> keyspace_metadata::views() const {
 }
 
 schema_ptr database::find_schema(const sstring& ks_name, const sstring& cf_name) const {
+    auto uuid = find_uuid(ks_name, cf_name);
     try {
-        return find_schema(find_uuid(ks_name, cf_name));
-    } catch (std::out_of_range&) {
-        std::throw_with_nested(no_such_column_family(ks_name, cf_name));
+        return find_schema(uuid);
+    } catch (no_such_column_family&) {
+        on_internal_error(dblog, fmt::format("find_schema {}.{}: UUID={} not found", ks_name, cf_name, uuid));
     }
 }
 
@@ -2343,7 +2351,7 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
                             return lister::rmdir(std::move(snapshot_dir));
                         }, [tag_ptr] (const fs::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == *tag_ptr; });
                     }
-                 }, [] (const fs::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == "snapshots"; });
+                 }, [] (const fs::path& parent_dir, const directory_entry& dir_entry) { return dir_entry.name == sstables::snapshots_dir; });
             }, table_filter);
         }, *filter);
     });
@@ -2434,7 +2442,7 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             : public reader_lifecycle_policy
             , public enable_shared_from_this<streaming_reader_lifecycle_policy> {
         struct reader_context {
-            foreign_unique_ptr<const dht::partition_range> range;
+            foreign_ptr<lw_shared_ptr<const dht::partition_range>> range;
             foreign_unique_ptr<utils::phased_barrier::operation> read_operation;
             reader_concurrency_semaphore* semaphore;
         };
@@ -2455,11 +2463,15 @@ flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db,
             const auto shard = this_shard_id();
             auto& cf = _db.local().find_column_family(schema);
 
-            _contexts[shard].range = make_foreign(std::make_unique<const dht::partition_range>(range));
+            _contexts[shard].range = make_foreign(make_lw_shared<const dht::partition_range>(range));
             _contexts[shard].read_operation = make_foreign(std::make_unique<utils::phased_barrier::operation>(cf.read_in_progress()));
             _contexts[shard].semaphore = &cf.streaming_read_concurrency_semaphore();
 
             return cf.make_streaming_reader(std::move(schema), std::move(permit), *_contexts[shard].range, slice, fwd_mr);
+        }
+        virtual void update_read_range(lw_shared_ptr<const dht::partition_range> range) override {
+            const auto shard = this_shard_id();
+            _contexts[shard].range = make_foreign(std::move(range));
         }
         virtual future<> destroy_reader(stopped_reader reader) noexcept override {
             auto ctx = std::move(_contexts[this_shard_id()]);

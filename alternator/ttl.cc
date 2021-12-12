@@ -71,7 +71,7 @@ static const sstring TTL_TAG_KEY("system:ttl_attribute");
 future<executor::request_return_type> executor::update_time_to_live(client_state& client_state, service_permit permit, rjson::value request) {
     _stats.api_operations.update_time_to_live++;
     if (!_proxy.get_db().local().features().cluster_supports_alternator_ttl()) {
-        co_return api_error::unknown_operation("UpdateTimeToLive not yet supported. Experimental support is available if the 'alternator_ttl' experimental feature is enabled on all nodes.");
+        co_return api_error::unknown_operation("UpdateTimeToLive not yet supported. Experimental support is available if the 'alternator-ttl' experimental feature is enabled on all nodes.");
     }
 
     schema_ptr schema = get_table(_proxy, request);
@@ -123,7 +123,7 @@ future<executor::request_return_type> executor::update_time_to_live(client_state
 }
 
 future<executor::request_return_type> executor::describe_time_to_live(client_state& client_state, service_permit permit, rjson::value request) {
-    _stats.api_operations.update_time_to_live++;
+    _stats.api_operations.describe_time_to_live++;
     if (!_proxy.get_db().local().features().cluster_supports_alternator_ttl()) {
         co_return api_error::unknown_operation("DescribeTimeToLive not yet supported. Experimental support is available if the 'alternator_ttl' experimental feature is enabled on all nodes.");
     }
@@ -298,6 +298,12 @@ static future<> expire_item(service::storage_proxy& proxy,
         qs.get_trace_state(), qs.get_permit());
 }
 
+static size_t random_offset(size_t min, size_t max) {
+    static thread_local std::default_random_engine re{std::random_device{}()};
+    std::uniform_int_distribution<size_t> dist(min, max);
+    return dist(re);
+}
+
 // A class for iterating over all the token ranges *owned* by this shard.
 // We consider a token *owned* by this shard if:
 // 1. This node is a replica for this token.
@@ -313,25 +319,32 @@ static future<> expire_item(service::storage_proxy& proxy,
 // do.
 // FIXME: need to decide how to choose primary ranges in multi-DC setup!
 // We could call get_primary_ranges_within_dc() below instead of get_primary_ranges().
+// NOTICE: Iteration currently starts from a random token range in order to improve
+// the chances of covering all ranges during a scan when restarts occur.
+// A more deterministic way would be to regularly persist the scanning state,
+// but that incurs overhead that we want to avoid if not needed.
 class token_ranges_owned_by_this_shard {
     schema_ptr _s;
     // _token_ranges will contain a list of token ranges owned by this node.
     // We'll further need to split each such range to the pieces owned by
     // the current shard, using _intersecter.
-    dht::token_range_vector _token_ranges;
-    dht::token_range_vector::const_iterator _range_it;
+    const dht::token_range_vector _token_ranges;
+    // NOTICE: _range_idx is used modulo _token_ranges size when accessing
+    // the data to ensure that it doesn't go out of bounds
+    size_t _range_idx;
+    size_t _end_idx;
     std::optional<dht::selective_token_range_sharder> _intersecter;
 public:
-    // FIXME: add a constructor to start iteration in the middle, to continue
-    // a scan after reboot. A simpler option is to begin the scan at a random
-    // position.
     token_ranges_owned_by_this_shard(database& db, schema_ptr s)
         :  _s(s)
         , _token_ranges(db.find_keyspace(s->ks_name()).
             get_effective_replication_map()->get_primary_ranges(
             utils::fb_utilities::get_broadcast_address()))
-        , _range_it(_token_ranges.cbegin())
-    {}
+        , _range_idx(random_offset(0, _token_ranges.size() - 1))
+        , _end_idx(_range_idx + _token_ranges.size())
+    {
+        tlogger.debug("Generating token ranges starting from base range {} of {}", _range_idx, _token_ranges.size());
+    }
 
     // Return the next token_range owned by this shard, or nullopt when the
     // iteration ends.
@@ -339,7 +352,7 @@ public:
         // We may need three or more iterations in the following loop if a
         // vnode doesn't intersect with the given shard at all (such a small
         // vnode is unlikely, but possible). The loop cannot be infinite
-        // because each iteration of the loop advances _range_it.
+        // because each iteration of the loop advances _range_idx.
         for (;;) {
             if (_intersecter) {
                 std::optional<dht::token_range> ret = _intersecter->next();
@@ -347,13 +360,13 @@ public:
                     return ret;
                 }
                 // done with this range, go to next one
-                ++_range_it;
+                ++_range_idx;
                 _intersecter = std::nullopt;
             }
-            if (_range_it == _token_ranges.cend()) {
+            if (_range_idx == _end_idx) {
                 return std::nullopt;
             }
-            _intersecter.emplace(_s->get_sharder(), *_range_it, this_shard_id());
+            _intersecter.emplace(_s->get_sharder(), _token_ranges[_range_idx % _token_ranges.size()], this_shard_id());
         }
     }
 
@@ -401,8 +414,7 @@ struct scan_ranges_context {
         command = ::make_lw_shared<query::read_command>(s->id(), s->version(), partition_slice, proxy.get_max_result_size(partition_slice));
         executor::client_state client_state{executor::client_state::internal_tag()};
         tracing::trace_state_ptr trace_state;
-        // FIXME: is empty_service_permit() the right thing?
-        // view builder has _permit = _db.get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "view_builder", db::no_timeout))
+        // NOTICE: empty_service_permit is used because the TTL service has fixed parallelism
         query_state_ptr = std::make_unique<service::query_state>(client_state, trace_state, empty_service_permit());
         // FIXME: What should we do on multi-DC? Will we run the expiration on the same ranges on all
         // DCs or only once for each range? If the latter, we need to change the CLs in the
@@ -421,7 +433,8 @@ static future<> scan_table_ranges(
         service::storage_proxy& proxy,
         const scan_ranges_context& scan_ctx,
         dht::partition_range_vector&& partition_ranges,
-        abort_source& abort_source)
+        abort_source& abort_source,
+        named_semaphore& page_sem)
 {
     const schema_ptr& s = scan_ctx.s;
     assert (partition_ranges.size() == 1); // otherwise issue #9167 will cause incorrect results.
@@ -431,6 +444,7 @@ static future<> scan_table_ranges(
         if (abort_source.abort_requested()) {
             co_return;
         }
+        auto units = co_await get_units(page_sem, 1);
         // We don't to limit page size in number of rows because there is a
         // builtin limit of the page's size in bytes. Setting this limit to 1
         // is useful for debugging the paging code with moderate-size data.
@@ -522,7 +536,8 @@ static future<bool> scan_table(
     service::storage_proxy& proxy,
     database& db,
     schema_ptr s,
-    abort_source& abort_source)
+    abort_source& abort_source,
+    named_semaphore& page_sem)
 {
     // Check if an expiration-time attribute is enabled for this table.
     // If not, just return false immediately.
@@ -567,9 +582,6 @@ static future<bool> scan_table(
         tlogger.info("table {} TTL column has unsupported type, not scanning", s->cf_name());
         co_return false;
     }
-    // FIXME: need to persist position in the scan, and start from it instead
-    // of the beginning. Alternatively/additionally, can scan from a random
-    // position.
     // FIXME: need to pace the scan, not do it all at once.
     // FIXME: consider if we should ask the scan without caching?
     // can we use cache but not fill it?
@@ -579,12 +591,13 @@ static future<bool> scan_table(
         // Note that because of issue #9167 we need to run a separate
         // query on each partition range, and can't pass several of
         // them into one partition_range_vector.
-        dht::partition_range_vector partition_ranges = {*range};
+        dht::partition_range_vector partition_ranges;
+        partition_ranges.push_back(std::move(*range));
         // FIXME: if scanning a single range fails, including network errors,
         // we fail the entire scan (and rescan from the beginning). Need to
         // reconsider this. Saving the scan position might be a good enough
         // solution for this problem.
-        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source);
+        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source, page_sem);
     }
     co_return true;
 }
@@ -610,7 +623,7 @@ future<> expiration_service::run() {
                 co_return;
             }
             try {
-                co_await scan_table(_proxy, _db, s, _abort_source);
+                co_await scan_table(_proxy, _db, s, _abort_source, _page_sem);
             } catch (...) {
                 // The scan of a table may fail in the middle for many
                 // reasons, including network failure and even the table

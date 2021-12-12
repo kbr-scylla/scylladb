@@ -73,6 +73,7 @@ protected:
     lw_shared_ptr<const parameters> _parameters;
     ::shared_ptr<selection::selection> _selection;
     ::shared_ptr<restrictions::statement_restrictions> _restrictions;
+    const bool _restrictions_need_filtering;
     ::shared_ptr<std::vector<size_t>> _group_by_cell_indices; ///< Indices in result row of cells holding GROUP BY values.
     bool _is_reversed;
     std::optional<expr::expression> _limit;
@@ -220,7 +221,7 @@ private:
             service::query_state& state, const query_options& options) const override;
 
     lw_shared_ptr<const service::pager::paging_state> generate_view_paging_state_from_base_query_results(lw_shared_ptr<const service::pager::paging_state> paging_state,
-            const foreign_ptr<lw_shared_ptr<query::result>>& results, service::storage_proxy& proxy, service::query_state& state, const query_options& options) const;
+            const foreign_ptr<lw_shared_ptr<query::result>>& results, service::query_state& state, const query_options& options) const;
 
     future<std::tuple<dht::partition_range_vector, lw_shared_ptr<const service::pager::paging_state>>> find_index_partition_ranges(service::storage_proxy& proxy,
                                                                     service::query_state& state,
@@ -234,7 +235,6 @@ private:
     process_base_query_results(
             foreign_ptr<lw_shared_ptr<query::result>> results,
             lw_shared_ptr<query::read_command> cmd,
-            service::storage_proxy& proxy,
             service::query_state& state,
             const query_options& options,
             gc_clock::time_point now,

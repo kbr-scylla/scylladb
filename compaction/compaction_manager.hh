@@ -139,14 +139,11 @@ private:
     // weight is value assigned to a compaction job that is log base N of total size of all input sstables.
     std::unordered_set<int> _weight_tracker;
 
-    // Purpose is to serialize major compaction across all tables, so to
-    // reduce disk space requirement.
-    semaphore _major_compaction_sem{1};
-
     std::unordered_map<table*, compaction_state> _compaction_state;
 
-    semaphore _custom_job_sem{1};
-    seastar::named_semaphore _rewrite_sstables_sem = {1, named_semaphore_exception_factory{"rewrite sstables"}};
+    // Purpose is to serialize all maintenance (non regular) compaction activity to reduce aggressiveness and space requirement.
+    // If the operation must be serialized with regular, then the per-table write lock must be taken.
+    seastar::named_semaphore _maintenance_ops_sem = {1, named_semaphore_exception_factory{"maintenance operation"}};
 
     std::function<void()> compaction_submission_callback();
     // all registered tables are reevaluated at a constant interval.
@@ -173,6 +170,10 @@ private:
 
     void register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
     void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
+
+    // gets the table's compaction state
+    // throws std::out_of_range exception if not found.
+    compaction_state& get_compaction_state(table* t);
 
     // Return true if compaction manager and task weren't asked to stop.
     inline bool can_proceed(const lw_shared_ptr<task>& task);
@@ -248,7 +249,7 @@ public:
     future<> perform_sstable_upgrade(database& db, table* t, bool exclude_current_version);
 
     // Submit a table to be scrubbed and wait for its termination.
-    future<> perform_sstable_scrub(table* t, sstables::compaction_type_options::scrub::mode scrub_mode);
+    future<> perform_sstable_scrub(table* t, sstables::compaction_type_options::scrub opts);
 
     // Submit a table for major compaction.
     future<> perform_major_compaction(table* t);
@@ -278,10 +279,6 @@ public:
     const stats& get_stats() const {
         return _stats;
     }
-
-    // gets the table's compaction state
-    // throws std::out_of_range exception if not found.
-    compaction_state& get_compaction_state(table* t);
 
     const std::vector<sstables::compaction_info> get_compactions(table* t = nullptr) const;
 

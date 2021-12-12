@@ -139,6 +139,7 @@ select_statement::select_statement(schema_ptr schema,
     , _parameters(std::move(parameters))
     , _selection(std::move(selection))
     , _restrictions(std::move(restrictions))
+    , _restrictions_need_filtering(_restrictions->need_filtering())
     , _group_by_cell_indices(group_by_cell_indices)
     , _is_reversed(is_reversed)
     , _limit(std::move(limit))
@@ -304,8 +305,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
     uint64_t limit = get_limit(options);
     auto now = gc_clock::now();
 
-    const bool restrictions_need_filtering = _restrictions->need_filtering();
-    _stats.filtered_reads += restrictions_need_filtering;
+    _stats.filtered_reads += _restrictions_need_filtering;
 
     const source_selector src_sel = state.get_client_state().is_internal()
             ? source_selector::INTERNAL : source_selector::USER;
@@ -317,11 +317,12 @@ select_statement::do_execute(service::storage_proxy& proxy,
     _stats.select_partition_range_scan_no_bypass_cache += _range_scan_no_bypass_cache;
 
     auto slice = make_partition_slice(options);
+    auto max_result_size = proxy.get_max_result_size(slice);
     auto command = ::make_lw_shared<query::read_command>(
             _schema->id(),
             _schema->version(),
             std::move(slice),
-            proxy.get_max_result_size(slice),
+            max_result_size,
             query::row_limit(limit),
             query::partition_limit(query::max_partitions),
             now,
@@ -339,7 +340,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
     // Note that if there are some nodes in the cluster with a version less than 2.0, we can't use paging (CASSANDRA-6707).
     // Also note: all GROUP BY queries are considered aggregation.
     const bool aggregate = _selection->is_aggregate() || has_group_by();
-    const bool nonpaged_filtering = restrictions_need_filtering && page_size <= 0;
+    const bool nonpaged_filtering = _restrictions_need_filtering && page_size <= 0;
     if (aggregate || nonpaged_filtering) {
         page_size = internal_paging_size;
     }
@@ -360,7 +361,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
         }
     }
 
-    if (!aggregate && !restrictions_need_filtering && (page_size <= 0
+    if (!aggregate && !_restrictions_need_filtering && (page_size <= 0
             || !service::pager::query_pagers::may_need_paging(*_schema, page_size,
                     *command, key_ranges))) {
         return execute(proxy, command, std::move(key_ranges), state, options, now);
@@ -370,21 +371,21 @@ select_statement::do_execute(service::storage_proxy& proxy,
     auto timeout_duration = get_timeout(state.get_client_state(), options);
     auto timeout = db::timeout_clock::now() + timeout_duration;
     auto p = service::pager::query_pagers::pager(_schema, _selection,
-            state, options, command, std::move(key_ranges), restrictions_need_filtering ? _restrictions : nullptr);
+            state, options, command, std::move(key_ranges), _restrictions_need_filtering ? _restrictions : nullptr);
 
     if (aggregate || nonpaged_filtering) {
         return do_with(
                 cql3::selection::result_set_builder(*_selection, now,
                         options.get_cql_serialization_format(), *_group_by_cell_indices), std::move(p),
-                [this, page_size, now, timeout, restrictions_need_filtering](auto& builder, std::unique_ptr<service::pager::query_pager>& p) {
+                [this, page_size, now, timeout](auto& builder, std::unique_ptr<service::pager::query_pager>& p) {
                     return do_until([&p] {return p->is_exhausted();},
                             [&p, &builder, page_size, now, timeout] {
                                 return p->fetch_page(builder, page_size, now, timeout);
                             }
-                    ).then([this, &p, &builder, restrictions_need_filtering] {
-                        return builder.with_thread_if_needed([this, &p, &builder, restrictions_need_filtering] {
+                    ).then([this, &p, &builder] {
+                        return builder.with_thread_if_needed([this, &p, &builder] {
                             auto rs = builder.build();
-                            if (restrictions_need_filtering) {
+                            if (_restrictions_need_filtering) {
                                 _stats.filtered_rows_read_total += p->stats().rows_read_total;
                                 _stats.filtered_rows_matched_total += rs->size();
                             }
@@ -402,7 +403,7 @@ select_statement::do_execute(service::storage_proxy& proxy,
                         " you must either remove the ORDER BY or the IN and sort client side, or disable paging for this query");
     }
 
-    if (_selection->is_trivial() && !restrictions_need_filtering && !_per_partition_limit) {
+    if (_selection->is_trivial() && !_restrictions_need_filtering && !_per_partition_limit) {
         return p->fetch_page_generator(page_size, now, timeout, _stats).then([this, p = std::move(p)] (result_generator generator) {
             auto meta = [&] () -> shared_ptr<const cql3::metadata> {
                 if (!p->is_exhausted()) {
@@ -421,13 +422,13 @@ select_statement::do_execute(service::storage_proxy& proxy,
     }
 
     return p->fetch_page(page_size, now, timeout).then(
-            [this, p = std::move(p), &options, now, restrictions_need_filtering](std::unique_ptr<cql3::result_set> rs) {
+            [this, p = std::move(p), &options, now](std::unique_ptr<cql3::result_set> rs) {
 
                 if (!p->is_exhausted()) {
                     rs->get_metadata().set_paging_state(p->state());
                 }
 
-                if (restrictions_need_filtering) {
+                if (_restrictions_need_filtering) {
                     _stats.filtered_rows_read_total += p->stats().rows_read_total;
                     _stats.filtered_rows_matched_total += rs->size();
                 }
@@ -601,8 +602,8 @@ indexed_table_select_statement::execute_base_query(
         gc_clock::time_point now,
         lw_shared_ptr<const service::pager::paging_state> paging_state) const {
     return do_execute_base_query(proxy, std::move(partition_ranges), state, options, now, paging_state).then_unpack(
-            [this, &proxy, &state, &options, now, paging_state = std::move(paging_state)] (foreign_ptr<lw_shared_ptr<query::result>> result, lw_shared_ptr<query::read_command> cmd) {
-        return process_base_query_results(std::move(result), std::move(cmd), proxy, state, options, now, std::move(paging_state));
+            [this, &state, &options, now, paging_state = std::move(paging_state)] (foreign_ptr<lw_shared_ptr<query::result>> result, lw_shared_ptr<query::read_command> cmd) {
+        return process_base_query_results(std::move(result), std::move(cmd), state, options, now, std::move(paging_state));
     });
 }
 
@@ -693,8 +694,8 @@ indexed_table_select_statement::execute_base_query(
         gc_clock::time_point now,
         lw_shared_ptr<const service::pager::paging_state> paging_state) const {
     return do_execute_base_query(proxy, std::move(primary_keys), state, options, now, paging_state).then_unpack(
-            [this, &proxy, &state, &options, now, paging_state = std::move(paging_state)] (foreign_ptr<lw_shared_ptr<query::result>> result, lw_shared_ptr<query::read_command> cmd) {
-        return process_base_query_results(std::move(result), std::move(cmd), proxy, state, options, now, std::move(paging_state));
+            [this, &state, &options, now, paging_state = std::move(paging_state)] (foreign_ptr<lw_shared_ptr<query::result>> result, lw_shared_ptr<query::read_command> cmd) {
+        return process_base_query_results(std::move(result), std::move(cmd), state, options, now, std::move(paging_state));
     });
 }
 
@@ -741,14 +742,13 @@ future<shared_ptr<cql_transport::messages::result_message>>
 indexed_table_select_statement::process_base_query_results(
         foreign_ptr<lw_shared_ptr<query::result>> results,
         lw_shared_ptr<query::read_command> cmd,
-        service::storage_proxy& proxy,
         service::query_state& state,
         const query_options& options,
         gc_clock::time_point now,
         lw_shared_ptr<const service::pager::paging_state> paging_state) const
 {
     if (paging_state) {
-        paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, proxy, state, options);
+        paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, state, options);
         _selection->get_result_metadata()->maybe_set_paging_state(std::move(paging_state));
     }
     return process_results(std::move(results), std::move(cmd), options, now);
@@ -760,8 +760,7 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
                                   const query_options& options,
                                   gc_clock::time_point now) const
 {
-    const bool restrictions_need_filtering = _restrictions->need_filtering();
-    const bool fast_path = !needs_post_query_ordering() && _selection->is_trivial() && !restrictions_need_filtering;
+    const bool fast_path = !needs_post_query_ordering() && _selection->is_trivial() && !_restrictions_need_filtering;
     if (fast_path) {
         return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(make_shared<cql_transport::messages::result_message::rows>(result(
             result_generator(_schema, std::move(results), std::move(cmd), _selection, _stats),
@@ -771,9 +770,9 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
 
     cql3::selection::result_set_builder builder(*_selection, now,
             options.get_cql_serialization_format());
-    return do_with(std::move(builder), [this, cmd, restrictions_need_filtering, results = std::move(results), options] (cql3::selection::result_set_builder& builder) mutable {
-        return builder.with_thread_if_needed([this, &builder, cmd, restrictions_need_filtering, results = std::move(results), options] {
-            if (restrictions_need_filtering) {
+    return do_with(std::move(builder), [this, cmd, results = std::move(results), options] (cql3::selection::result_set_builder& builder) mutable {
+        return builder.with_thread_if_needed([this, &builder, cmd, results = std::move(results), options] {
+            if (_restrictions_need_filtering) {
                 results->ensure_counts();
                 _stats.filtered_rows_read_total += *results->row_count();
                 query::result_view::consume(*results, cmd->slice,
@@ -794,7 +793,7 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
                 rs->trim(cmd->get_row_limit());
             }
             update_stats_rows_read(rs->size());
-            _stats.filtered_rows_matched_total += restrictions_need_filtering ? rs->size() : 0;
+            _stats.filtered_rows_matched_total += _restrictions_need_filtering ? rs->size() : 0;
             return shared_ptr<cql_transport::messages::result_message>(::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs))));
         });
     });
@@ -939,7 +938,7 @@ bytes indexed_table_select_statement::compute_idx_token(const partition_key& key
 }
 
 lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement::generate_view_paging_state_from_base_query_results(lw_shared_ptr<const service::pager::paging_state> paging_state,
-        const foreign_ptr<lw_shared_ptr<query::result>>& results, service::storage_proxy& proxy, service::query_state& state, const query_options& options) const {
+        const foreign_ptr<lw_shared_ptr<query::result>>& results, service::query_state& state, const query_options& options) const {
     const column_definition* cdef = _schema->get_column_definition(to_bytes(_index.target_column()));
     if (!cdef) {
         throw exceptions::invalid_request_exception("Indexed column not found in schema");
@@ -1058,18 +1057,17 @@ indexed_table_select_statement::do_execute(service::storage_proxy& proxy,
     // the paging state between requesting data from replicas.
     const bool aggregate = _selection->is_aggregate() || has_group_by();
     if (aggregate) {
-        const bool restrictions_need_filtering = _restrictions->need_filtering();
         return do_with(cql3::selection::result_set_builder(*_selection, now, options.get_cql_serialization_format(), *_group_by_cell_indices), std::make_unique<cql3::query_options>(cql3::query_options(options)),
-                [this, &options, &proxy, &state, now, whole_partitions, partition_slices, restrictions_need_filtering] (cql3::selection::result_set_builder& builder, std::unique_ptr<cql3::query_options>& internal_options) {
+                [this, &options, &proxy, &state, now, whole_partitions, partition_slices] (cql3::selection::result_set_builder& builder, std::unique_ptr<cql3::query_options>& internal_options) {
             // page size is set to the internal count page size, regardless of the user-provided value
             internal_options.reset(new cql3::query_options(std::move(internal_options), options.get_paging_state(), internal_paging_size));
-            return repeat([this, &builder, &options, &internal_options, &proxy, &state, now, whole_partitions, partition_slices, restrictions_need_filtering] () {
-                auto consume_results = [this, &builder, &options, &internal_options, &proxy, &state, restrictions_need_filtering] (foreign_ptr<lw_shared_ptr<query::result>> results, lw_shared_ptr<query::read_command> cmd, lw_shared_ptr<const service::pager::paging_state> paging_state) {
+            return repeat([this, &builder, &options, &internal_options, &proxy, &state, now, whole_partitions, partition_slices] () {
+                auto consume_results = [this, &builder, &options, &internal_options, &state] (foreign_ptr<lw_shared_ptr<query::result>> results, lw_shared_ptr<query::read_command> cmd, lw_shared_ptr<const service::pager::paging_state> paging_state) {
                     if (paging_state) {
-                        paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, proxy, state, options);
+                        paging_state = generate_view_paging_state_from_base_query_results(paging_state, results, state, options);
                     }
                     internal_options.reset(new cql3::query_options(std::move(internal_options), paging_state ? make_lw_shared<service::pager::paging_state>(*paging_state) : nullptr));
-                    if (restrictions_need_filtering) {
+                    if (_restrictions_need_filtering) {
                         _stats.filtered_rows_read_total += *results->row_count();
                         query::result_view::consume(*results, cmd->slice, cql3::selection::result_set_builder::visitor(builder, *_schema, *_selection,
                                 cql3::selection::result_set_builder::restrictions_filter(_restrictions, options, cmd->get_row_limit(), _schema, cmd->slice.partition_row_limit())));
@@ -1097,10 +1095,10 @@ indexed_table_select_statement::do_execute(service::storage_proxy& proxy,
                         });
                     });
                 }
-            }).then([this, &builder, restrictions_need_filtering] () {
+            }).then([this, &builder] () {
                 auto rs = builder.build();
                 update_stats_rows_read(rs->size());
-                _stats.filtered_rows_matched_total += restrictions_need_filtering ? rs->size() : 0;
+                _stats.filtered_rows_matched_total += _restrictions_need_filtering ? rs->size() : 0;
                 auto msg = ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
                 return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(std::move(msg));
             });
@@ -1405,8 +1403,11 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
     if (!_parameters->orderings().empty()) {
         assert(!for_view);
         verify_ordering_is_allowed(*restrictions);
-        ordering_comparator = get_ordering_comparator(*schema, *selection, *restrictions);
-        is_reversed_ = is_reversed(*schema);
+        prepared_orderings_type prepared_orderings = prepare_orderings(*schema);
+        verify_ordering_is_valid(prepared_orderings, *schema, *restrictions);
+
+        ordering_comparator = get_ordering_comparator(prepared_orderings, *selection, *restrictions);
+        is_reversed_ = is_ordering_reversed(prepared_orderings);
     }
 
     std::vector<sstring> warnings;
@@ -1495,6 +1496,164 @@ void select_statement::verify_ordering_is_allowed(const restrictions::statement_
     }
 }
 
+void select_statement::handle_unrecognized_ordering_column(const column_identifier& column) const
+{
+    if (contains_alias(column)) {
+        throw exceptions::invalid_request_exception(format("Aliases are not allowed in order by clause ('{}')", column));
+    }
+    throw exceptions::invalid_request_exception(format("Order by on unknown column {}", column));
+}
+
+select_statement::prepared_orderings_type select_statement::prepare_orderings(const schema& schema) const {
+    prepared_orderings_type prepared_orderings;
+    prepared_orderings.reserve(_parameters->orderings().size());
+
+    for (auto&& [column_id, column_ordering] : _parameters->orderings()) {
+        ::shared_ptr<column_identifier> column = column_id->prepare_column_identifier(schema);
+
+        const column_definition* def = schema.get_column_definition(column->name());
+        if (def == nullptr) {
+            handle_unrecognized_ordering_column(*column);
+        }
+
+        if (!def->is_clustering_key()) {
+            throw exceptions::invalid_request_exception(format("Order by is currently only supported on the clustered columns of the PRIMARY KEY, got {}", *column));
+        }
+
+        prepared_orderings.emplace_back(def, column_ordering);
+    }
+
+    // Uncomment this to allow specifing ORDER BY columns in any order.
+    // Right now specifying ORDER BY (c2 asc, c1 asc) is illegal, it can only be ORDER BY (c1 asc, c2 asc).
+    //
+    // std::sort(prepared_orderings.begin(), prepared_orderings.end(),
+    //     [](const std::pair<const column_definition*, ordering>& a, const std::pair<const column_definition*, ordering>& b) {
+    //         return a.first->component_index() < b.first->component_index();
+    //     }
+    // );
+
+    return prepared_orderings;
+}
+
+// Checks whether this ordering causes select results on this column to be reversed.
+// A clustering column can be ordered in the descending order in the table.
+// Then specifying ascending order would cause the results of this column to be reverse in comparison to a standard select.
+static bool are_column_select_results_reversed(const column_definition& column, select_statement::ordering column_ordering) {
+    if (column_ordering == select_statement::ordering::ascending) {
+        if (column.type->is_reversed()) {
+            return true;
+        } else {
+            return false;
+        }
+    } else { // descending ordering
+        if (column.type->is_reversed()) {
+            return false;
+        } else {
+            return true;
+        }
+    }
+}
+
+bool select_statement::is_ordering_reversed(const prepared_orderings_type& orderings) const {
+    if (orderings.empty()) {
+        return false;
+    }
+
+    return are_column_select_results_reversed(*orderings[0].first, orderings[0].second);
+}
+
+void select_statement::verify_ordering_is_valid(const prepared_orderings_type& orderings,
+                                                const schema& schema,
+                                                const restrictions::statement_restrictions& restrictions) const {
+    if (orderings.empty()) {
+        return;
+    }
+
+    // Verify that columns are in the same order as in schema definition
+    for (size_t i = 0; i + 1 < orderings.size(); i++) {
+        if (orderings[i].first->component_index() >= orderings[i + 1].first->component_index()) {
+            throw exceptions::invalid_request_exception("Order by currently only supports the ordering of columns following their declared order in the PRIMARY KEY");
+        }
+    }
+
+    // We only allow leaving select results unchanged or reversing them. Find out if they should be reversed.
+    bool is_reversed = is_ordering_reversed(orderings);
+
+    // Now verify that
+    // 1. Each column in the specified clustering prefix either has an ordering, or an EQ restriction.
+    //    When there is an EQ restriction ordering is not needed because only a single value is possible.
+    // 2. The ordering leaves the selected rows unchanged or reverses the normal result.
+    //    For that to happen the ordering must reverse all columns or none at all.
+    uint32_t max_ck_index = orderings.back().first->component_index();
+    auto orderings_iterator = orderings.begin();
+    for (uint32_t ck_column_index = 0; ck_column_index <= max_ck_index; ck_column_index++) {
+         if (orderings_iterator->first->component_index() == ck_column_index) {
+            // We have ordering for this column, let's see if its reversing is right.
+            const column_definition* cur_ck_column = orderings_iterator->first;
+            bool is_cur_column_reversed = are_column_select_results_reversed(*cur_ck_column, orderings_iterator->second);
+            if (is_cur_column_reversed != is_reversed) {
+                throw exceptions::invalid_request_exception(
+                    format("Unsupported order by relation - only reversing all columns is supported, "
+                           "but column {} has opposite ordering", cur_ck_column->name_as_text()));
+            }
+            orderings_iterator++;
+        } else {
+            // We don't have ordering for this column. Check if there is an EQ restriction or fail with an error.
+            const column_definition& cur_ck_column = schema.clustering_column_at(ck_column_index);
+            if (!restrictions.has_eq_restriction_on_column(cur_ck_column)) {
+                throw exceptions::invalid_request_exception(format(
+                    "Unsupported order by relation - column {} doesn't have an ordering or EQ relation.",
+                    cur_ck_column.name_as_text()));
+            }
+        }
+    }
+}
+
+select_statement::ordering_comparator_type select_statement::get_ordering_comparator(const prepared_orderings_type& orderings,
+    selection::selection& selection,
+    const restrictions::statement_restrictions& restrictions) {
+    if (!restrictions.key_is_in_relation()) {
+        return {};
+    }
+
+    // For the comparator we only need columns that have ordering defined.
+    // Other columns are required to have an EQ restriction, so they will have no more than a single value.
+
+    std::vector<std::pair<uint32_t, data_type>> sorters;
+    sorters.reserve(orderings.size());
+
+    // If we order post-query (see orderResults), the sorted column needs to be in the ResultSet for sorting,
+    // even if we don't
+    // ultimately ship them to the client (CASSANDRA-4911).
+    for (auto&& [column_def, is_descending] : orderings) {
+        auto index = selection.index_of(*column_def);
+        if (index < 0) {
+            index = selection.add_column_for_post_processing(*column_def);
+        }
+
+        sorters.emplace_back(index, column_def->type);
+    }
+
+    return [sorters = std::move(sorters)] (const result_row_type& r1, const result_row_type& r2) mutable {
+        for (auto&& e : sorters) {
+            auto& c1 = r1[e.first];
+            auto& c2 = r2[e.first];
+            auto type = e.second;
+
+            if (bool(c1) != bool(c2)) {
+                return bool(c2);
+            }
+            if (c1) {
+                auto result = type->compare(*c1, *c2);
+                if (result != 0) {
+                    return result < 0;
+                }
+            }
+        }
+        return false;
+    };
+}
+
 void select_statement::validate_distinct_selection(const schema& schema,
                                                    const selection::selection& selection,
                                                    const restrictions::statement_restrictions& restrictions)
@@ -1521,107 +1680,6 @@ void select_statement::validate_distinct_selection(const schema& schema,
             throw exceptions::invalid_request_exception(format("SELECT DISTINCT queries must request all the partition key columns (missing {})", def.name_as_text()));
         }
     }
-}
-
-void select_statement::handle_unrecognized_ordering_column(const column_identifier& column) const
-{
-    if (contains_alias(column)) {
-        throw exceptions::invalid_request_exception(format("Aliases are not allowed in order by clause ('{}')", column));
-    }
-    throw exceptions::invalid_request_exception(format("Order by on unknown column {}", column));
-}
-
-select_statement::ordering_comparator_type
-select_statement::get_ordering_comparator(const schema& schema,
-                                          selection::selection& selection,
-                                          const restrictions::statement_restrictions& restrictions)
-{
-    if (!restrictions.key_is_in_relation()) {
-        return {};
-    }
-
-    std::vector<std::pair<uint32_t, data_type>> sorters;
-    sorters.reserve(_parameters->orderings().size());
-
-    // If we order post-query (see orderResults), the sorted column needs to be in the ResultSet for sorting,
-    // even if we don't
-    // ultimately ship them to the client (CASSANDRA-4911).
-    for (auto&& e : _parameters->orderings()) {
-        auto&& raw = e.first;
-        ::shared_ptr<column_identifier> column = raw->prepare_column_identifier(schema);
-        const column_definition* def = schema.get_column_definition(column->name());
-        if (!def) {
-            handle_unrecognized_ordering_column(*column);
-        }
-        auto index = selection.index_of(*def);
-        if (index < 0) {
-            index = selection.add_column_for_post_processing(*def);
-        }
-
-        sorters.emplace_back(index, def->type);
-    }
-
-    return [sorters = std::move(sorters)] (const result_row_type& r1, const result_row_type& r2) mutable {
-        for (auto&& e : sorters) {
-            auto& c1 = r1[e.first];
-            auto& c2 = r2[e.first];
-            auto type = e.second;
-
-            if (bool(c1) != bool(c2)) {
-                return bool(c2);
-            }
-            if (c1) {
-                auto result = type->compare(*c1, *c2);
-                if (result != 0) {
-                    return result < 0;
-                }
-            }
-        }
-        return false;
-    };
-}
-
-bool select_statement::is_reversed(const schema& schema) const {
-    assert(_parameters->orderings().size() > 0);
-    parameters::orderings_type::size_type i = 0;
-    bool is_reversed_ = false;
-    bool relation_order_unsupported = false;
-
-    for (auto&& e : _parameters->orderings()) {
-        ::shared_ptr<column_identifier> column = e.first->prepare_column_identifier(schema);
-        bool reversed = e.second;
-
-        auto def = schema.get_column_definition(column->name());
-        if (!def) {
-            handle_unrecognized_ordering_column(*column);
-        }
-
-        if (!def->is_clustering_key()) {
-            throw exceptions::invalid_request_exception(format("Order by is currently only supported on the clustered columns of the PRIMARY KEY, got {}", *column));
-        }
-
-        if (i != def->component_index()) {
-            throw exceptions::invalid_request_exception(
-                "Order by currently only support the ordering of columns following their declared order in the PRIMARY KEY");
-        }
-
-        bool current_reverse_status = (reversed != def->type->is_reversed());
-
-        if (i == 0) {
-            is_reversed_ = current_reverse_status;
-        }
-
-        if (is_reversed_ != current_reverse_status) {
-            relation_order_unsupported = true;
-        }
-        ++i;
-    }
-
-    if (relation_order_unsupported) {
-        throw exceptions::invalid_request_exception("Unsupported order by relation");
-    }
-
-    return is_reversed_;
 }
 
 /// True iff restrictions require ALLOW FILTERING despite there being no coordinator-side filtering.

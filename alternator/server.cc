@@ -15,6 +15,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/json/json_elements.hh>
 #include <seastar/util/defer.hh>
+#include <seastar/util/short_streams.hh>
 #include "seastarx.hh"
 #include "error.hh"
 #include "utils/rjson.hh"
@@ -388,7 +389,7 @@ future<executor::request_return_type> server::handle_api_request(std::unique_ptr
     }
     auto units = co_await std::move(units_fut);
     assert(req->content_stream);
-    chunked_content content = co_await httpd::read_entire_stream(*req->content_stream);
+    chunked_content content = co_await util::read_entire_stream(*req->content_stream);
     auto username = co_await verify_signature(*req, content);
 
     if (slogger.is_enabled(log_level::trace)) {

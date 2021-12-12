@@ -166,6 +166,9 @@ private:
     seastar::scheduling_group _compaction_scheduling_group;
     table_stats& _table_stats;
 public:
+    using iterator = decltype(_memtables)::iterator;
+    using const_iterator = decltype(_memtables)::const_iterator;
+public:
     memtable_list(
             seal_immediate_fn_type seal_immediate_fn,
             std::function<schema_ptr()> cs,
@@ -700,9 +703,7 @@ public:
             lw_shared_ptr<sstables::sstable_set> sstables) const;
 
     sstables::shared_sstable make_streaming_sstable_for_write(std::optional<sstring> subdir = {});
-    sstables::shared_sstable make_streaming_staging_sstable() {
-        return make_streaming_sstable_for_write("staging");
-    }
+    sstables::shared_sstable make_streaming_staging_sstable();
 
     mutation_source as_mutation_source() const;
     mutation_source as_mutation_source_excluding(std::vector<sstables::shared_sstable>& sst) const;
@@ -722,6 +723,7 @@ public:
     using const_mutation_partition_ptr = std::unique_ptr<const mutation_partition>;
     using const_row_ptr = std::unique_ptr<const row>;
     memtable& active_memtable() { return _memtables->active_memtable(); }
+    api::timestamp_type min_memtable_timestamp() const;
     const row_cache& get_row_cache() const {
         return _cache;
     }

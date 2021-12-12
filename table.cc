@@ -42,6 +42,7 @@
 #include "db/commitlog/commitlog.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
+#include <boost/range/algorithm.hpp>
 
 static logging::logger tlogger("table");
 static seastar::metrics::label column_family_label("cf");
@@ -73,8 +74,8 @@ table::make_sstable_reader(schema_ptr s,
         return sstables->create_single_key_sstable_reader(const_cast<column_family*>(this), std::move(s), std::move(permit),
                 _stats.estimated_sstable_per_read, pr, slice, pc, std::move(trace_state), fwd, fwd_mr);
     } else {
-        return sstables->make_local_shard_sstable_reader(std::move(s), std::move(permit), pr, slice, pc,
-                std::move(trace_state), fwd, fwd_mr);
+        return downgrade_to_v1(sstables->make_local_shard_sstable_reader(std::move(s), std::move(permit), pr, slice, pc,
+                std::move(trace_state), fwd, fwd_mr));
     }
 }
 
@@ -209,6 +210,10 @@ sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<s
     return newtab;
 }
 
+sstables::shared_sstable table::make_streaming_staging_sstable() {
+    return make_streaming_sstable_for_write(sstables::staging_dir);
+}
+
 flat_mutation_reader
 table::make_streaming_reader(schema_ptr s, reader_permit permit,
                            const dht::partition_range_vector& ranges) const {
@@ -251,13 +256,26 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, reader_perm
     auto trace_state = tracing::trace_state_ptr();
     const auto fwd = streamed_mutation::forwarding::no;
     const auto fwd_mr = mutation_reader::forwarding::no;
-    return sstables->make_range_sstable_reader(std::move(schema), std::move(permit), range, slice, pc,
-            std::move(trace_state), fwd, fwd_mr);
+    return downgrade_to_v1(sstables->make_range_sstable_reader(std::move(schema), std::move(permit), range, slice, pc,
+            std::move(trace_state), fwd, fwd_mr));
 }
 
 future<std::vector<locked_cell>> table::lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout) {
     assert(m.schema() == _counter_cell_locks->schema());
     return _counter_cell_locks->lock_cells(m.decorated_key(), partition_cells_range(m.partition()), timeout);
+}
+
+api::timestamp_type table::min_memtable_timestamp() const {
+    if (_memtables->empty()) {
+        return api::max_timestamp;
+    }
+
+    return *boost::range::min_element(
+        *_memtables
+        | boost::adaptors::transformed(
+            [](const shared_memtable& m) { return m->get_min_timestamp(); }
+        )
+    );
 }
 
 // Not performance critical. Currently used for testing only.
@@ -1144,7 +1162,7 @@ std::vector<sstables::shared_sstable> table::in_strategy_sstables() const {
     auto sstables = _main_sstables->all();
     return boost::copy_range<std::vector<sstables::shared_sstable>>(*sstables
             | boost::adaptors::filtered([this] (auto& sst) {
-        return !_sstables_staging.contains(sst->generation());
+        return sstables::is_eligible_for_compaction(sst);
     }));
 }
 
@@ -1442,7 +1460,7 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
     return seastar::async([this] {
         std::unordered_map<sstring, snapshot_details> all_snapshots;
         for (auto& datadir : _config.all_datadirs) {
-            fs::path snapshots_dir = fs::path(datadir) / "snapshots";
+            fs::path snapshots_dir = fs::path(datadir) / sstables::snapshots_dir;
             auto file_exists = io_check([&snapshots_dir] { return seastar::file_exists(snapshots_dir.native()); }).get0();
             if (!file_exists) {
                 continue;
@@ -2384,6 +2402,9 @@ public:
     }
     sstables::sstable_writer_config configure_writer(sstring origin) const override {
         return _t.get_sstables_manager().configure_writer(std::move(origin));
+    }
+    api::timestamp_type min_memtable_timestamp() const override {
+        return _t.min_memtable_timestamp();
     }
 
     bool has_table_ongoing_compaction() const override {

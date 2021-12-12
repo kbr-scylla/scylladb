@@ -11,6 +11,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <seastar/core/sstring.hh>
 #include "seastarx.hh"
 
@@ -38,7 +39,7 @@ std::ostream& operator<<(std::ostream& os, delta_mode);
 std::ostream& operator<<(std::ostream& os, image_mode);
 
 class options final {
-    bool _enabled = false;
+    std::optional<bool> _enabled;
     image_mode _preimage = image_mode::off;
     bool _postimage = false;
     delta_mode _delta_mode = delta_mode::full;
@@ -50,7 +51,8 @@ public:
     std::map<sstring, sstring> to_map() const;
     sstring to_sstring() const;
 
-    bool enabled() const { return _enabled; }
+    bool enabled() const { return _enabled.value_or(false); }
+    bool is_enabled_set() const { return _enabled.has_value(); }
     bool preimage() const { return _preimage != image_mode::off; }
     bool full_preimage() const { return _preimage == image_mode::full; }
     bool postimage() const { return _postimage; }

@@ -517,7 +517,7 @@ int main(int ac, char** av) {
 
         tcp_syncookies_sanity();
 
-        return seastar::async([cfg, ext, &db, &qp, &bm, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
+        return seastar::async([&app, cfg, ext, &db, &qp, &bm, &proxy, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
                 &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager] {
@@ -546,7 +546,7 @@ int main(int ac, char** av) {
             });
 
             logalloc::prime_segment_pool(get_available_memory(), memory::min_free_memory()).get();
-            logging::apply_settings(cfg->logging_settings(opts));
+            logging::apply_settings(cfg->logging_settings(app.options().log_opts));
 
             startlog.info(startup_msg, scylla_version(), get_build_id());
 
@@ -1358,7 +1358,7 @@ int main(int ac, char** av) {
                 api::unset_transport_controller(ctx).get();
             });
 
-            ::thrift_controller thrift_ctl(db, auth_service, qp, service_memory_limiter, ss);
+            ::thrift_controller thrift_ctl(db, auth_service, qp, service_memory_limiter, ss, proxy);
 
             ss.local().register_protocol_server(thrift_ctl);
 

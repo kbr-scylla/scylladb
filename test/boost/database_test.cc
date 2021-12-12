@@ -11,6 +11,8 @@
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/core/coroutine.hh>
+
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 
@@ -33,6 +35,7 @@
 #include "test/lib/tmpdir.hh"
 #include "db/data_listeners.hh"
 #include "multishard_mutation_query.hh"
+#include "transport/messages/result_message.hh"
 
 using namespace std::chrono_literals;
 
@@ -363,11 +366,13 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_pending_delete) {
 }
 
 // Snapshot tests and their helpers
-future<> do_with_some_data(std::function<future<> (cql_test_env& env)> func) {
-    return seastar::async([func = std::move(func)] () mutable {
-        tmpdir tmpdir_for_data;
+future<> do_with_some_data(std::function<future<> (cql_test_env& env)> func, lw_shared_ptr<tmpdir> tmpdir_for_data = {}) {
+    return seastar::async([func = std::move(func), tmpdir_for_data = std::move(tmpdir_for_data)] () mutable {
+        if (!tmpdir_for_data) {
+            tmpdir_for_data = make_lw_shared<tmpdir>();
+        }
         auto db_cfg_ptr = make_shared<db::config>();
-        db_cfg_ptr->data_file_directories(std::vector<sstring>({ tmpdir_for_data.path().string() }));
+        db_cfg_ptr->data_file_directories(std::vector<sstring>({ tmpdir_for_data->path().string() }));
         do_with_cql_env_thread([func = std::move(func)] (cql_test_env& e) {
             e.create_table([](std::string_view ks_name) {
                 return *schema_builder(ks_name, "cf")
@@ -381,16 +386,24 @@ future<> do_with_some_data(std::function<future<> (cql_test_env& env)> func) {
             e.execute_cql("insert into cf (p1, c1, c2, r1) values ('key1', 2, 2, 3);").get();
             e.execute_cql("insert into cf (p1, c1, c2, r1) values ('key1', 3, 2, 3);").get();
 
-            return func(e);
+            e.execute_cql("insert into cf (p1, c1, c2, r1) values ('key2', 4, 5, 6);").get();
+            e.execute_cql("insert into cf (p1, c1, c2, r1) values ('key2', 5, 5, 6);").get();
+            e.execute_cql("insert into cf (p1, c1, c2, r1) values ('key2', 6, 5, 6);").get();
+
+            func(e).get();
         }, db_cfg_ptr).get();
     });
 }
 
-future<> take_snapshot(cql_test_env& e, bool skip_flush = false) {
-    return e.db().invoke_on_all([skip_flush] (database& db) {
+future<> take_snapshot(sharded<database>& db, bool skip_flush = false) {
+    return db.invoke_on_all([skip_flush] (database& db) {
         auto& cf = db.find_column_family("ks", "cf");
         return cf.snapshot(db, "test", skip_flush);
     });
+}
+
+future<> take_snapshot(cql_test_env& e, bool skip_flush = false) {
+    return take_snapshot(e.db(), skip_flush);
 }
 
 SEASTAR_TEST_CASE(snapshot_works) {
@@ -410,7 +423,7 @@ SEASTAR_TEST_CASE(snapshot_works) {
         BOOST_REQUIRE_GT(expected.size(), 1);
 
         // all files were copied and manifest was generated
-        lister::scan_dir((fs::path(cf.dir()) / "snapshots" / "test"), { directory_entry_type::regular }, [&expected] (fs::path parent_dir, directory_entry de) {
+        lister::scan_dir((fs::path(cf.dir()) / sstables::snapshots_dir / "test"), { directory_entry_type::regular }, [&expected] (fs::path parent_dir, directory_entry de) {
             expected.erase(de.name);
             return make_ready_future<>();
         }).get();
@@ -438,7 +451,7 @@ SEASTAR_TEST_CASE(snapshot_skip_flush_works) {
         BOOST_REQUIRE_EQUAL(expected.size(), 1);
 
         // all files were copied and manifest was generated
-        lister::scan_dir((fs::path(cf.dir()) / "snapshots" / "test"), { directory_entry_type::regular }, [&expected] (fs::path parent_dir, directory_entry de) {
+        lister::scan_dir((fs::path(cf.dir()) / sstables::snapshots_dir / "test"), { directory_entry_type::regular }, [&expected] (fs::path parent_dir, directory_entry de) {
             expected.erase(de.name);
             return make_ready_future<>();
         }).get();
@@ -490,7 +503,7 @@ SEASTAR_TEST_CASE(clear_snapshot) {
         auto& cf = e.local_db().find_column_family("ks", "cf");
 
         unsigned count = 0;
-        lister::scan_dir((fs::path(cf.dir()) / "snapshots" / "test"), { directory_entry_type::regular }, [&count] (fs::path parent_dir, directory_entry de) {
+        lister::scan_dir((fs::path(cf.dir()) / sstables::snapshots_dir / "test"), { directory_entry_type::regular }, [&count] (fs::path parent_dir, directory_entry de) {
             count++;
             return make_ready_future<>();
         }).get();
@@ -499,7 +512,7 @@ SEASTAR_TEST_CASE(clear_snapshot) {
         e.local_db().clear_snapshot("test", {"ks"}, "").get();
         count = 0;
 
-        BOOST_REQUIRE_EQUAL(fs::exists(fs::path(cf.dir()) / "snapshots" / "test"), false);
+        BOOST_REQUIRE_EQUAL(fs::exists(fs::path(cf.dir()) / sstables::snapshots_dir / "test"), false);
         return make_ready_future<>();
     });
 }
@@ -862,4 +875,113 @@ SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
             }
         }
     }, std::move(cfg)).get();
+}
+
+SEASTAR_TEST_CASE(populate_from_quarantine_works) {
+    auto tmpdir_for_data = make_lw_shared<tmpdir>();
+
+    // populate tmpdir_for_data and
+    // move a random sstable to quarantine
+    co_await do_with_some_data([] (cql_test_env& e) -> future<> {
+        auto& db = e.db();
+        co_await db.invoke_on_all([] (database& db) {
+            auto& cf = db.find_column_family("ks", "cf");
+            return cf.flush();
+        });
+        auto shard = tests::random::get_int<unsigned>(0, smp::count);
+        auto found = false;
+        for (auto i = 0; i < smp::count && !found; i++) {
+            found = co_await db.invoke_on((shard + i) % smp::count, [] (database& db) -> future<bool> {
+                auto& cf = db.find_column_family("ks", "cf");
+                auto sstables = cf.in_strategy_sstables();
+                if (sstables.empty()) {
+                    co_return false;
+                }
+                auto idx = tests::random::get_int<size_t>(0, sstables.size() - 1);
+                testlog.debug("Moving sstable #{} out of {} to quarantine", idx, sstables.size());
+                auto sst = sstables[idx];
+                auto quarantine_dir = sst->get_dir() + "/" + sstables::quarantine_dir;
+                co_await touch_directory(quarantine_dir);
+                co_await sst->move_to_new_dir(quarantine_dir, sst->generation());
+                co_return true;
+            });
+        }
+        BOOST_REQUIRE(found);
+    }, tmpdir_for_data);
+
+    // reload the table from tmpdir_for_data and
+    // verify that all rows are still there
+    auto db_cfg_ptr = make_shared<db::config>();
+    db_cfg_ptr->data_file_directories(std::vector<sstring>({ tmpdir_for_data->path().string() }));
+    size_t row_count = 0;
+    co_await do_with_cql_env([&row_count] (cql_test_env& e) -> future<> {
+        auto res = co_await e.execute_cql("select * from ks.cf;");
+        auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(res);
+        BOOST_REQUIRE(rows);
+        row_count = rows->rs().result_set().size();
+    }, std::move(db_cfg_ptr));
+    BOOST_REQUIRE_EQUAL(row_count, 6);
+}
+
+SEASTAR_TEST_CASE(snapshot_with_quarantine_works) {
+    return do_with_some_data([] (cql_test_env& e) -> future<> {
+        auto& db = e.db();
+        co_await db.invoke_on_all([] (database& db) {
+            auto& cf = db.find_column_family("ks", "cf");
+            return cf.flush();
+        });
+
+        std::set<sstring> expected = {
+            "manifest.json",
+        };
+
+        // move a random sstable to quarantine
+        auto shard = tests::random::get_int<unsigned>(0, smp::count);
+        auto found = false;
+        for (auto i = 0; i < smp::count; i++) {
+            co_await db.invoke_on((shard + i) % smp::count, [&] (database& db) -> future<> {
+                auto& cf = db.find_column_family("ks", "cf");
+                auto sstables = cf.in_strategy_sstables();
+                if (sstables.empty()) {
+                    co_return;
+                }
+                // collect all expected sstable data files
+                for (auto sst : sstables) {
+                    expected.insert(fs::path(sst->get_filename()).filename().native());
+                }
+                if (std::exchange(found, true)) {
+                    co_return;
+                }
+                auto idx = tests::random::get_int<size_t>(0, sstables.size() - 1);
+                auto sst = sstables[idx];
+                auto quarantine_dir = sst->get_dir() + "/" + sstables::quarantine_dir;
+                co_await touch_directory(quarantine_dir);
+                testlog.debug("Moving sstable #{} out of {}: {} to quarantine", idx, sstables.size(), sst->get_filename());
+                co_await sst->move_to_new_dir(quarantine_dir, sst->generation());
+            });
+        }
+        BOOST_REQUIRE(found);
+
+        co_await take_snapshot(db, true /* skip_flush */);
+
+        testlog.debug("Expected: {}", expected);
+
+        // snapshot triggered a flush and wrote the data down.
+        BOOST_REQUIRE_GT(expected.size(), 1);
+
+        auto& cf = db.local().find_column_family("ks", "cf");
+
+        // all files were copied and manifest was generated
+        co_await lister::scan_dir((fs::path(cf.dir()) / sstables::snapshots_dir / "test"), { directory_entry_type::regular }, [&expected] (fs::path parent_dir, directory_entry de) {
+            testlog.debug("Found in snapshots: {}", de.name);
+            expected.erase(de.name);
+            return make_ready_future<>();
+        });
+
+        if (!expected.empty()) {
+            testlog.error("Not in snapshots: {}", expected);
+        }
+
+        BOOST_REQUIRE(expected.empty());
+    });
 }
