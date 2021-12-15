@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/coroutine.hh>
 #include "cql3/statements/create_function_statement.hh"
 #include "cql3/functions/functions.hh"
 #include "cql3/functions/user_function.hh"
@@ -22,7 +23,7 @@ namespace cql3 {
 
 namespace statements {
 
-void create_function_statement::create(service::storage_proxy& proxy, functions::function* old) const {
+shared_ptr<functions::function> create_function_statement::create(service::storage_proxy& proxy, functions::function* old) const {
     if (old && !dynamic_cast<functions::user_function*>(old)) {
         throw exceptions::invalid_request_exception(format("Cannot replace '{}' which is not a user defined function", *old));
     }
@@ -43,19 +44,19 @@ void create_function_statement::create(service::storage_proxy& proxy, functions:
             .cfg = cfg,
         };
 
-        _func = ::make_shared<functions::user_function>(_name, _arg_types, std::move(arg_names), _body, _language,
+        return ::make_shared<functions::user_function>(_name, _arg_types, std::move(arg_names), _body, _language,
             std::move(return_type), _called_on_null_input, std::move(ctx));
     } else if (_language == "xwasm") {
        wasm::context ctx{db.wasm_engine(), _name.name};
        try {
             wasm::compile(ctx, arg_names, _body);
-            _func = ::make_shared<functions::user_function>(_name, _arg_types, std::move(arg_names), _body, _language,
+            return ::make_shared<functions::user_function>(_name, _arg_types, std::move(arg_names), _body, _language,
                 std::move(return_type), _called_on_null_input, std::move(ctx));
        } catch (const wasm::exception& we) {
            throw exceptions::invalid_request_exception(we.what());
        }
     }
-    return;
+    return nullptr;
 }
 
 audit::statement_category
@@ -72,14 +73,19 @@ std::unique_ptr<prepared_statement> create_function_statement::prepare(database&
     return std::make_unique<prepared_statement>(audit_info(), make_shared<create_function_statement>(*this));
 }
 
-future<shared_ptr<cql_transport::event::schema_change>> create_function_statement::announce_migration(
-        query_processor& qp) const {
-    if (!_func) {
-        return make_ready_future<::shared_ptr<cql_transport::event::schema_change>>();
+future<std::pair<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>>>
+create_function_statement::prepare_schema_mutations(query_processor& qp) const {
+    ::shared_ptr<cql_transport::event::schema_change> ret;
+    std::vector<mutation> m;
+
+    auto func = dynamic_pointer_cast<functions::user_function>(validate_while_executing(qp.proxy()));
+
+    if (func) {
+        m = co_await qp.get_migration_manager().prepare_new_function_announcement(func);
+        ret = create_schema_change(*func, true);
     }
-    return qp.get_migration_manager().announce_new_function(_func).then([this] {
-        return create_schema_change(*_func, true);
-    });
+
+    co_return std::make_pair(std::move(ret), std::move(m));
 }
 
 create_function_statement::create_function_statement(functions::function_name name, sstring language, sstring body,

@@ -2170,6 +2170,7 @@ table::enable_auto_compaction() {
     // FIXME: unmute backlog. turn table backlog back on.
     //      see table::disable_auto_compaction() notes.
     _compaction_disabled_by_user = false;
+    trigger_compaction();
 }
 
 future<>
@@ -2202,7 +2203,7 @@ table::disable_auto_compaction() {
     //   for new submissions
     _compaction_disabled_by_user = true;
     return with_gate(_async_gate, [this] {
-        return compaction_manager().stop_ongoing_compactions("disable auto-compaction", this);
+        return compaction_manager().stop_ongoing_compactions("disable auto-compaction", this, sstables::compaction_type::Compaction);
     });
 }
 

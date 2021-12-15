@@ -28,6 +28,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/coroutine.hh>
 #include "cql3/statements/drop_view_statement.hh"
 #include "cql3/statements/prepared_statement.hh"
 #include "cql3/query_processor.hh"
@@ -65,26 +66,27 @@ void drop_view_statement::validate(service::storage_proxy&, const service::clien
     // validated in migration_manager::announce_view_drop()
 }
 
-future<shared_ptr<cql_transport::event::schema_change>> drop_view_statement::announce_migration(query_processor& qp) const
-{
-    return make_ready_future<>().then([this, &mm = qp.get_migration_manager()] {
-        return mm.announce_view_drop(keyspace(), column_family());
-    }).then_wrapped([this] (auto&& f) {
-        try {
-            f.get();
-            using namespace cql_transport;
+future<std::pair<::shared_ptr<cql_transport::event::schema_change>, std::vector<mutation>>>
+drop_view_statement::prepare_schema_mutations(query_processor& qp) const {
+    ::shared_ptr<cql_transport::event::schema_change> ret;
+    std::vector<mutation> m;
 
-            return ::make_shared<event::schema_change>(event::schema_change::change_type::DROPPED,
-                                                     event::schema_change::target_type::TABLE,
-                                                     this->keyspace(),
-                                                     this->column_family());
-        } catch (const exceptions::configuration_exception& e) {
-            if (_if_exists) {
-                return ::shared_ptr<cql_transport::event::schema_change>();
-            }
-            throw e;
+    try {
+        m = co_await qp.get_migration_manager().prepare_view_drop_announcement(keyspace(), column_family());
+
+        using namespace cql_transport;
+        ret = ::make_shared<event::schema_change>(
+            event::schema_change::change_type::DROPPED,
+            event::schema_change::target_type::TABLE,
+            keyspace(),
+            column_family());
+    } catch (const exceptions::configuration_exception& e) {
+        if (!_if_exists) {
+            co_return coroutine::exception(std::current_exception());
         }
-    });
+    }
+
+    co_return std::make_pair(std::move(ret), std::move(m));
 }
 
 std::unique_ptr<cql3::statements::prepared_statement>
