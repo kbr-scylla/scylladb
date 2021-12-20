@@ -68,8 +68,6 @@ private:
         service_levels_info  static_configurations{};
         std::deque<scheduling_group> deleted_scheduling_groups{};
         std::deque<io_priority_class> deleted_priority_classes{};
-        int schedg_group_cnt = 0;
-        int io_priority_cnt = 0;
         service_level_options default_service_level_config;
         // The below future is used to serialize work so no reordering can occur.
         // This is needed so for example: delete(x), add(x) will not reverse yielding
@@ -80,6 +78,8 @@ private:
         abort_source dist_data_update_aborter;
         scheduling_group default_sg;
         bool destroy_default_sg;
+        // a counter for making unique temp scheduling groups names
+        int unique_group_counter;
     };
 
     std::unique_ptr<global_controller_data> _global_controller_db;
@@ -305,6 +305,10 @@ private:
         alter
     };
 
+    /** Validate that we can handle an addition of another service level
+     *  Must be called from on the global controller
+     */
+    future<bool> validate_before_service_level_add();
     future<> set_distributed_service_level(sstring name, service_level_options slo, set_service_level_op_type op_type);
 public:
 
