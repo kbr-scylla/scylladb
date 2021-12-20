@@ -260,7 +260,7 @@ void storage_service::prepare_to_join(
         _gossiper.check_snitch_name_matches();
         _gossiper.reset_endpoint_state_map().get();
         for (auto ep : loaded_endpoints) {
-            _gossiper.add_saved_endpoint(ep);
+            _gossiper.add_saved_endpoint(ep).get();
         }
     }
 
@@ -618,6 +618,26 @@ void storage_service::mark_existing_views_as_built() {
     }).get();
 }
 
+std::list<gms::inet_address> storage_service::get_ignore_dead_nodes_for_replace() {
+    std::vector<sstring> ignore_nodes_strs;
+    std::list<gms::inet_address> ignore_nodes;
+    boost::split(ignore_nodes_strs, _db.local().get_config().ignore_dead_nodes_for_replace(), boost::is_any_of(","));
+    for (std::string n : ignore_nodes_strs) {
+        try {
+            std::replace(n.begin(), n.end(), '\"', ' ');
+            std::replace(n.begin(), n.end(), '\'', ' ');
+            boost::trim_all(n);
+            if (!n.empty()) {
+                auto node = gms::inet_address(n);
+                ignore_nodes.push_back(node);
+            }
+        } catch (...) {
+            throw std::runtime_error(format("Failed to parse --ignore-dead-nodes-for-replace parameter: ignore_nodes={}, node={}", ignore_nodes_strs, n));
+        }
+    }
+    return ignore_nodes;
+}
+
 // Runs inside seastar::async context
 void storage_service::bootstrap() {
     _is_bootstrap_mode = true;
@@ -628,8 +648,12 @@ void storage_service::bootstrap() {
     if (!_db.local().is_replacing()) {
         // Wait until we know tokens of existing node before announcing join status.
         _gossiper.wait_for_range_setup().get();
-
-        if (get_token_metadata_ptr()->count_normal_token_owners() == 0) {
+        int retry = 0;
+        while (get_token_metadata_ptr()->count_normal_token_owners() == 0) {
+            if (retry++ < 500) {
+                sleep_abortable(std::chrono::milliseconds(10), _abort_source).get();
+                continue;
+            }
             // We're joining an existing cluster, so there are normal nodes in the cluster.
             // We've waited for tokens to arrive.
             // But we didn't see any normal token owners. Something's wrong, we cannot proceed.
@@ -777,7 +801,7 @@ storage_service::get_range_to_address_map(const sstring& keyspace,
 void storage_service::handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node) {
     try {
         slogger.info("handle_state_replacing: Waiting for replacing node {} to be alive on all shards", replacing_node);
-        _gossiper.wait_alive({replacing_node}, std::chrono::milliseconds(5 * 1000));
+        _gossiper.wait_alive({replacing_node}, std::chrono::milliseconds(5 * 1000)).get();
         slogger.info("handle_state_replacing: Replacing node {} is now alive on all shards", replacing_node);
     } catch (...) {
         slogger.warn("handle_state_replacing: Failed to wait for replacing node {} to be alive on all shards: {}",
@@ -1352,7 +1376,7 @@ future<> storage_service::init_server(cql3::query_processor& qp) {
                         tmptr->update_host_id(loaded_host_ids.at(ep), ep);
                     }
                     loaded_endpoints.insert(ep);
-                    _gossiper.add_saved_endpoint(ep);
+                    _gossiper.add_saved_endpoint(ep).get();
                 }
             }
             replicate_to_all_cores(std::move(tmptr)).get();
@@ -2114,8 +2138,7 @@ void storage_service::run_replace_ops() {
     }
     auto replace_address = _db.local().get_replace_address().value();
     auto uuid = utils::make_random_uuid();
-    // TODO: Specify ignore_nodes
-    std::list<gms::inet_address> ignore_nodes;
+    std::list<gms::inet_address> ignore_nodes = get_ignore_dead_nodes_for_replace();
     // Step 1: Decide who needs to sync data for replace operation
     std::list<gms::inet_address> sync_nodes;
     for (const auto& x :_gossiper.endpoint_state_map) {
@@ -2159,7 +2182,7 @@ void storage_service::run_replace_ops() {
             throw std::runtime_error(msg);
         }
         if (!nodes_down.empty()) {
-            auto msg = format("replace[{}]: Nodes={} needed for replace operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, add --ignore-dead-nodes <list_of_dead_nodes>. E.g., scylla --ignore-dead-nodes 127.0.0.1,127.0.0.2", uuid, nodes_down);
+            auto msg = format("replace[{}]: Nodes={} needed for replace operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, add --ignore-dead-nodes-for-replace <list_of_dead_nodes>. E.g., scylla --ignore-dead-nodes-for-replace 127.0.0.1,127.0.0.2", uuid, nodes_down);
             slogger.warn("{}", msg);
             throw std::runtime_error(msg);
         }
@@ -2199,7 +2222,7 @@ void storage_service::run_replace_ops() {
         // Step 7: Sync data for replace
         if (is_repair_based_node_ops_enabled(streaming::stream_reason::replace)) {
             slogger.info("replace[{}]: Using repair based node ops to sync data", uuid);
-            _repair.local().replace_with_repair(get_token_metadata_ptr(), _bootstrap_tokens).get();
+            _repair.local().replace_with_repair(get_token_metadata_ptr(), _bootstrap_tokens, ignore_nodes).get();
         } else {
             slogger.info("replace[{}]: Using streaming based node ops to sync data", uuid);
             dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _bootstrap_tokens, get_token_metadata_ptr());
@@ -2528,7 +2551,7 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
             // Wait for local node has marked replacing node as alive
             auto nodes = boost::copy_range<std::vector<inet_address>>(req.replace_nodes| boost::adaptors::map_values);
             try {
-                _gossiper.wait_alive(nodes, std::chrono::milliseconds(120 * 1000));
+                _gossiper.wait_alive(nodes, std::chrono::milliseconds(120 * 1000)).get();
             } catch (...) {
                 slogger.warn("replace[{}]: Failed to wait for marking replacing node as up, replace_nodes={}: {}",
                         req.ops_uuid, req.replace_nodes, std::current_exception());

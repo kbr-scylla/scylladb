@@ -104,7 +104,7 @@ public:
 
 protected:
     virtual expr::expression to_expression(const std::vector<lw_shared_ptr<column_specification>>& receivers,
-                                           const expr::expression& raw, database& db, const sstring& keyspace,
+                                           const expr::expression& raw, data_dictionary::database db, const sstring& keyspace,
                                            prepare_context& ctx) const override;
 
 #if 0
@@ -133,13 +133,13 @@ protected:
     }
 
 protected:
-    virtual ::shared_ptr<restrictions::restriction> new_EQ_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_EQ_restriction(data_dictionary::database db, schema_ptr schema,
                                            prepare_context& ctx) override;
 
-    virtual ::shared_ptr<restrictions::restriction> new_IN_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_IN_restriction(data_dictionary::database db, schema_ptr schema,
                                            prepare_context& ctx) override;
 
-    virtual ::shared_ptr<restrictions::restriction> new_slice_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_slice_restriction(data_dictionary::database db, schema_ptr schema,
             prepare_context& ctx,
             statements::bound bound,
             bool inclusive) override {
@@ -163,7 +163,7 @@ protected:
         return r;
     }
 
-    virtual shared_ptr<restrictions::restriction> new_contains_restriction(database& db, schema_ptr schema,
+    virtual shared_ptr<restrictions::restriction> new_contains_restriction(data_dictionary::database db, schema_ptr schema,
                                                  prepare_context& ctx,
                                                  bool is_key) override {
         auto&& column_def = to_column_definition(*schema, *_entity);
@@ -175,7 +175,7 @@ protected:
     }
 
     virtual ::shared_ptr<restrictions::restriction> new_LIKE_restriction(
-            database& db, schema_ptr schema, prepare_context& ctx) override;
+            data_dictionary::database db, schema_ptr schema, prepare_context& ctx) override;
 
     virtual ::shared_ptr<relation> maybe_rename_identifier(const column_identifier::raw& from, column_identifier::raw to) override {
         return *_entity == from

@@ -934,14 +934,15 @@ int main(int ac, char** av) {
             // engine().at_exit([&proxy] { return proxy.stop(); });
             supervisor::notify("starting migration manager");
             debug::the_migration_manager = &mm;
-            mm.start(std::ref(mm_notifier), std::ref(feature_service), std::ref(messaging), std::ref(gossiper), std::ref(raft_gr)).get();
+            mm.start(std::ref(mm_notifier), std::ref(feature_service), std::ref(messaging), std::ref(proxy), std::ref(gossiper), std::ref(raft_gr)).get();
             auto stop_migration_manager = defer_verbose_shutdown("migration manager", [&mm] {
                 mm.stop().get();
             });
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             debug::the_query_processor = &qp;
-            qp.start(std::ref(proxy), std::ref(db), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
+            auto local_data_dict = seastar::sharded_parameter([] (const database& db) { return db.as_data_dictionary(); }, std::ref(db));
+            qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything

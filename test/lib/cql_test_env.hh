@@ -160,6 +160,8 @@ public:
 
     virtual future<> refresh_client_state() = 0;
 
+    data_dictionary::database data_dictionary();
+
     virtual sharded<qos::service_level_controller>& service_level_controller_service() = 0;
 };
 

@@ -51,7 +51,7 @@
 #include "cql3/untyped_result_set.hh"
 #include "db/timeout_clock.hh"
 #include "db/consistency_level_validations.hh"
-#include "database.hh"
+#include "data_dictionary/data_dictionary.hh"
 #include "test/lib/select_statement_utils.hh"
 #include <boost/algorithm/cxx11/any_of.hpp>
 
@@ -170,11 +170,11 @@ uint32_t select_statement::get_bound_terms() const {
 
 future<> select_statement::check_access(service::storage_proxy& proxy, const service::client_state& state) const {
     try {
-        const database& db = proxy.local_db();
+        const data_dictionary::database db = proxy.data_dictionary();
         auto&& s = db.find_schema(keyspace(), column_family());
         auto& cf_name = s->is_view() ? s->view_info()->base_name() : column_family();
-        return state.has_column_family_access(db, keyspace(), cf_name, auth::permission::SELECT);
-    } catch (const no_such_column_family& e) {
+        return state.has_column_family_access(db.real_database(), keyspace(), cf_name, auth::permission::SELECT);
+    } catch (const data_dictionary::no_such_column_family& e) {
         // Will be validated afterwards.
         return make_ready_future<>();
     }
@@ -829,7 +829,7 @@ primary_key_select_statement::primary_key_select_statement(schema_ptr schema, ui
 }
 
 ::shared_ptr<cql3::statements::select_statement>
-indexed_table_select_statement::prepare(database& db,
+indexed_table_select_statement::prepare(data_dictionary::database db,
                                         schema_ptr schema,
                                         uint32_t bound_terms,
                                         lw_shared_ptr<const parameters> parameters,
@@ -1342,7 +1342,7 @@ select_statement::select_statement(cf_name cf_name,
     validate_attrs(*_attrs);
 }
 
-void select_statement::maybe_jsonize_select_clause(database& db, schema_ptr schema) {
+void select_statement::maybe_jsonize_select_clause(data_dictionary::database db, schema_ptr schema) {
     // Fill wildcard clause with explicit column identifiers for as_json function
     if (_parameters->is_json()) {
         if (_select_clause.empty()) {
@@ -1381,8 +1381,8 @@ void select_statement::maybe_jsonize_select_clause(database& db, schema_ptr sche
     }
 }
 
-std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_stats& stats, bool for_view) {
-    schema_ptr schema = validation::validate_column_family(db, keyspace(), column_family());
+std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::database db, cql_stats& stats, bool for_view) {
+    schema_ptr schema = validation::validate_column_family(db.real_database(), keyspace(), column_family());
     prepare_context& ctx = get_prepare_context();
 
     maybe_jsonize_select_clause(db, schema);
@@ -1455,7 +1455,7 @@ std::unique_ptr<prepared_statement> select_statement::prepare(database& db, cql_
 }
 
 ::shared_ptr<restrictions::statement_restrictions>
-select_statement::prepare_restrictions(database& db,
+select_statement::prepare_restrictions(data_dictionary::database db,
                                        schema_ptr schema,
                                        prepare_context& ctx,
                                        ::shared_ptr<selection::selection> selection,
@@ -1475,7 +1475,7 @@ select_statement::prepare_restrictions(database& db,
 
 /** Returns a expr::expression for the limit or nullopt if no limit is set */
 std::optional<expr::expression>
-select_statement::prepare_limit(database& db, prepare_context& ctx, const std::optional<expr::expression>& limit)
+select_statement::prepare_limit(data_dictionary::database db, prepare_context& ctx, const std::optional<expr::expression>& limit)
 {
     if (!limit.has_value()) {
         return std::nullopt;
@@ -1731,7 +1731,7 @@ void select_statement::check_needs_filtering(
  * The columns are added with a meta-data indicating they are not to be returned
  * to the user.
  */
-void select_statement::ensure_filtering_columns_retrieval(database& db,
+void select_statement::ensure_filtering_columns_retrieval(data_dictionary::database db,
                                         selection::selection& selection,
                                         const restrictions::statement_restrictions& restrictions) {
     for (auto&& cdef : restrictions.get_column_defs_for_filtering(db)) {

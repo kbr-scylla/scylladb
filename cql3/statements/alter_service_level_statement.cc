@@ -27,7 +27,7 @@ alter_service_level_statement::alter_service_level_statement(sstring service_lev
 
 std::unique_ptr<cql3::statements::prepared_statement>
 cql3::statements::alter_service_level_statement::prepare(
-        database &db, cql_stats &stats) {
+        data_dictionary::database db, cql_stats &stats) {
     return std::make_unique<prepared_statement>(audit_info(), ::make_shared<alter_service_level_statement>(*this));
 }
 

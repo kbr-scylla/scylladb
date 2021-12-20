@@ -127,7 +127,7 @@ public:
      * @return the <code>Restriction</code> corresponding to this <code>Relation</code>
      * @throws InvalidRequestException if this <code>Relation</code> is not valid
      */
-    virtual ::shared_ptr<restrictions::restriction> to_restriction(database& db, schema_ptr schema, prepare_context& ctx) final {
+    virtual ::shared_ptr<restrictions::restriction> to_restriction(data_dictionary::database db, schema_ptr schema, prepare_context& ctx) final {
         if (_relation_type == expr::oper_t::EQ) {
             return new_EQ_restriction(db, schema, ctx);
         } else if (_relation_type == expr::oper_t::LT) {
@@ -169,7 +169,7 @@ public:
      * @return a new EQ restriction instance.
      * @throws InvalidRequestException if the relation cannot be converted into an EQ restriction.
      */
-    virtual ::shared_ptr<restrictions::restriction> new_EQ_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_EQ_restriction(data_dictionary::database db, schema_ptr schema,
         prepare_context& ctx) = 0;
 
     /**
@@ -180,7 +180,7 @@ public:
      * @return a new IN restriction instance
      * @throws InvalidRequestException if the relation cannot be converted into an IN restriction.
      */
-    virtual ::shared_ptr<restrictions::restriction> new_IN_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_IN_restriction(data_dictionary::database db, schema_ptr schema,
         prepare_context& ctx) = 0;
 
     /**
@@ -193,7 +193,7 @@ public:
      * @return a new slice restriction instance
      * @throws InvalidRequestException if the <code>Relation</code> is not valid
      */
-    virtual ::shared_ptr<restrictions::restriction> new_slice_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_slice_restriction(data_dictionary::database db, schema_ptr schema,
         prepare_context& ctx,
         statements::bound bound,
         bool inclusive) = 0;
@@ -207,13 +207,13 @@ public:
      * @return a new Contains <code>::shared_ptr<restrictions::restriction></code> instance
      * @throws InvalidRequestException if the <code>Relation</code> is not valid
      */
-    virtual ::shared_ptr<restrictions::restriction> new_contains_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_contains_restriction(data_dictionary::database db, schema_ptr schema,
         prepare_context& ctx, bool isKey) = 0;
 
     /**
      * Creates a new LIKE restriction instance.
      */
-    virtual ::shared_ptr<restrictions::restriction> new_LIKE_restriction(database& db, schema_ptr schema,
+    virtual ::shared_ptr<restrictions::restriction> new_LIKE_restriction(data_dictionary::database db, schema_ptr schema,
         prepare_context& ctx) = 0;
 
     /**
@@ -239,7 +239,7 @@ protected:
      */
     virtual expr::expression to_expression(const std::vector<lw_shared_ptr<column_specification>>& receivers,
                                            const expr::expression& raw,
-                                           database& db,
+                                           data_dictionary::database db,
                                            const sstring& keyspace,
                                            prepare_context& ctx) const = 0;
 
@@ -255,7 +255,7 @@ protected:
      */
     std::vector<expr::expression> to_expressions(const std::vector<lw_shared_ptr<column_specification>>& receivers,
                                                  const std::vector<expr::expression>& raws,
-                                                 database& db,
+                                                 data_dictionary::database db,
                                                  const sstring& keyspace,
                                                  prepare_context& ctx) const {
         std::vector<expr::expression> expressions;

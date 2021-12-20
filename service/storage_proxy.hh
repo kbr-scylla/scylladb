@@ -31,6 +31,7 @@
 #pragma once
 
 #include "database_fwd.hh"
+#include "data_dictionary/data_dictionary.hh"
 #include "message/messaging_service_fwd.hh"
 #include "query-request.hh"
 #include "query-result.hh"
@@ -462,6 +463,9 @@ public:
     const database& local_db() const noexcept {
         return _db.local();
     }
+
+    const data_dictionary::database data_dictionary() const;
+
     database& local_db() noexcept {
         return _db.local();
     }
