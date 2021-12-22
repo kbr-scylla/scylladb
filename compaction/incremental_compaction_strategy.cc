@@ -184,7 +184,7 @@ incremental_compaction_strategy::find_garbage_collection_job(const compaction::t
 }
 
 compaction_descriptor
-incremental_compaction_strategy::get_sstables_for_compaction(table_state& cf, std::vector<sstables::shared_sstable> candidates) {
+incremental_compaction_strategy::get_sstables_for_compaction(table_state& cf, strategy_control& control, std::vector<sstables::shared_sstable> candidates) {
     // make local copies so they can't be changed out from under us mid-method
     size_t min_threshold = cf.min_compaction_threshold();
     size_t max_threshold = cf.schema()->max_compaction_threshold();
@@ -203,7 +203,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(table_state& cf, st
 
     // The cross-tier behavior is only triggered once we're done with all the pending same-tier compaction to
     // increase overall efficiency.
-    if (cf.has_table_ongoing_compaction()) {
+    if (control.has_ongoing_compaction(cf)) {
         return sstables::compaction_descriptor();
     }
 

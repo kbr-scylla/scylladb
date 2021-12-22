@@ -598,7 +598,7 @@ private:
     // Caller needs to ensure that column_family remains live (FIXME: relax this).
     // The 'range' parameter must be live as long as the reader is used.
     // Mutations returned by the reader will all have given schema.
-    flat_mutation_reader make_sstable_reader(schema_ptr schema,
+    flat_mutation_reader_v2 make_sstable_reader(schema_ptr schema,
                                         reader_permit permit,
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
@@ -814,10 +814,9 @@ public:
 
     bool can_flush() const;
 
-    // FIXME: this is just an example, should be changed to something more
-    // general. compact_all_sstables() starts a compaction of all sstables.
-    // It doesn't flush the current memtable first. It's just a ad-hoc method,
-    // not a real compaction policy.
+    // Start a compaction of all sstables in a process known as major compaction
+    // Active memtable is flushed first to guarantee that data like tombstone,
+    // sitting in the memtable, will be compacted with shadowed data.
     future<> compact_all_sstables();
     // Compact all sstables provided in the vector.
     future<> compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata);

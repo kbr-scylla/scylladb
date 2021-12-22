@@ -207,6 +207,8 @@ public:
         const tracked_buffer& buffer() const {
             return _buffer;
         }
+
+        virtual flat_mutation_reader* get_original() { return nullptr; }
     public:
         impl(schema_ptr s, reader_permit permit) : _buffer(permit), _schema(std::move(s)), _permit(std::move(permit)) { }
         virtual ~impl() {}
@@ -444,6 +446,12 @@ private:
     friend class optimized_optional<flat_mutation_reader_v2>;
     void do_upgrade_schema(const schema_ptr&);
     static void on_close_error(std::unique_ptr<impl>, std::exception_ptr ep) noexcept;
+
+    flat_mutation_reader* get_original() {
+        return _impl->get_original();
+    }
+    friend flat_mutation_reader downgrade_to_v1(flat_mutation_reader_v2);
+    friend flat_mutation_reader_v2 upgrade_to_v2(flat_mutation_reader);
 public:
     // Documented in mutation_reader::forwarding.
     class partition_range_forwarding_tag;
@@ -782,6 +790,8 @@ flat_mutation_reader_v2 upgrade_to_v2(flat_mutation_reader);
 future<mutation_opt> read_mutation_from_flat_mutation_reader(flat_mutation_reader_v2&);
 
 flat_mutation_reader_v2 make_forwardable(flat_mutation_reader_v2 m);
+
+flat_mutation_reader_v2 make_empty_flat_reader_v2(schema_ptr s, reader_permit permit);
 
 flat_mutation_reader_v2
 make_flat_mutation_reader_from_fragments(schema_ptr, reader_permit, std::deque<mutation_fragment_v2>);

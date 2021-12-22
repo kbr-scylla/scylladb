@@ -60,7 +60,7 @@ public:
     , _backlog_tracker(std::make_unique<in_memory_backlog_tracker>())
     {}
 
-    compaction_descriptor get_sstables_for_compaction(table_state& cfs, std::vector<sstables::shared_sstable> candidates) override;
+    compaction_descriptor get_sstables_for_compaction(table_state& cfs, strategy_control& control, std::vector<sstables::shared_sstable> candidates) override;
 
     int64_t estimated_pending_compactions(table_state& cf) const override;
 
@@ -74,7 +74,7 @@ public:
 };
 
 inline compaction_descriptor
-in_memory_compaction_strategy::get_sstables_for_compaction(table_state& cfs, std::vector<sstables::shared_sstable> candidates) {
+in_memory_compaction_strategy::get_sstables_for_compaction(table_state& cfs, strategy_control& control, std::vector<sstables::shared_sstable> candidates) {
     // compact everything into one sstable
     if (candidates.size() > 1) {
         return sstables::compaction_descriptor(std::move(candidates), cfs.get_sstable_set(), service::get_local_compaction_priority());

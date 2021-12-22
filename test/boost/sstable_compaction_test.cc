@@ -181,6 +181,20 @@ static std::unique_ptr<table_state> make_table_state_for_test(column_family_for_
     return std::make_unique<table_state_for_test>(t, env);
 }
 
+class strategy_control_for_test : public strategy_control {
+    bool _has_ongoing_compaction;
+public:
+    explicit strategy_control_for_test(bool has_ongoing_compaction) noexcept : _has_ongoing_compaction(has_ongoing_compaction) {}
+
+    bool has_ongoing_compaction(table_state& table_s) const noexcept override {
+        return _has_ongoing_compaction;
+    }
+};
+
+static std::unique_ptr<strategy_control> make_strategy_control_for_test(bool has_ongoing_compaction) {
+    return std::make_unique<strategy_control_for_test>(has_ongoing_compaction);
+}
+
 SEASTAR_TEST_CASE(compaction_manager_basic_test) {
   return test_env::do_with_async([] (test_env& env) {
     BOOST_REQUIRE(smp::count == 1);
@@ -1645,22 +1659,26 @@ SEASTAR_TEST_CASE(time_window_strategy_correctness_test) {
         std::map<sstring, sstring> options;
         time_window_compaction_strategy twcs(options);
         std::map<api::timestamp_type, std::vector<shared_sstable>> buckets;
+        column_family_for_tests cf(env.manager(), s);
+        auto close_cf = deferred_stop(cf);
+        auto table_s = make_table_state_for_test(cf, env);
+        auto control = make_strategy_control_for_test(false);
 
         // We'll put 3 sstables into the newest bucket
         for (api::timestamp_type i = 0; i < 3; i++) {
             auto bound = time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), tstamp);
             buckets[bound].push_back(sstables[i]);
         }
-        sstables::size_tiered_compaction_strategy_options stcs_options;
+
         auto now = api::timestamp_clock::now().time_since_epoch().count();
-        auto new_bucket = twcs.newest_bucket(buckets, 4, 32, duration_cast<seconds>(hours(1)),
-            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now), stcs_options);
+        auto new_bucket = twcs.newest_bucket(*table_s, *control, buckets, 4, 32,
+            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now));
         // incoming bucket should not be accepted when it has below the min threshold SSTables
         BOOST_REQUIRE(new_bucket.empty());
 
         now = api::timestamp_clock::now().time_since_epoch().count();
-        new_bucket = twcs.newest_bucket(buckets, 2, 32, duration_cast<seconds>(hours(1)),
-            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now), stcs_options);
+        new_bucket = twcs.newest_bucket(*table_s, *control, buckets, 2, 32,
+            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now));
         // incoming bucket should be accepted when it is larger than the min threshold SSTables
         BOOST_REQUIRE(!new_bucket.empty());
 
@@ -1694,8 +1712,8 @@ SEASTAR_TEST_CASE(time_window_strategy_correctness_test) {
         }
 
         now = api::timestamp_clock::now().time_since_epoch().count();
-        new_bucket = twcs.newest_bucket(buckets, 4, 32, duration_cast<seconds>(hours(1)),
-            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now), stcs_options);
+        new_bucket = twcs.newest_bucket(*table_s, *control, buckets, 4, 32,
+            time_window_compaction_strategy::get_window_lower_bound(duration_cast<seconds>(hours(1)), now));
         // new bucket should be trimmed to max threshold of 32
         BOOST_REQUIRE(new_bucket.size() == size_t(32));
     });
@@ -1723,7 +1741,6 @@ SEASTAR_TEST_CASE(time_window_strategy_size_tiered_behavior_correctness) {
         };
 
         std::map<sstring, sstring> options;
-        sstables::size_tiered_compaction_strategy_options stcs_options;
         time_window_compaction_strategy twcs(options);
         std::map<api::timestamp_type, std::vector<shared_sstable>> buckets; // windows
         int min_threshold = 4;
@@ -1738,6 +1755,15 @@ SEASTAR_TEST_CASE(time_window_strategy_size_tiered_behavior_correctness) {
             buckets[bound].push_back(std::move(sst));
         };
 
+        column_family_for_tests cf(env.manager(), s);
+        auto close_cf = deferred_stop(cf);
+        auto major_compact_bucket = [&] (api::timestamp_type window_ts) {
+            auto bound = time_window_compaction_strategy::get_window_lower_bound(window_size, window_ts);
+            auto ret = compact_sstables(sstables::compaction_descriptor(std::move(buckets[bound]), cf->get_sstable_set(), default_priority_class()), *cf, sst_gen).get0();
+            BOOST_REQUIRE(ret.new_sstables.size() == 1);
+            buckets[bound] = std::move(ret.new_sstables);
+        };
+
         api::timestamp_type current_window_ts = api::timestamp_clock::now().time_since_epoch().count();
         api::timestamp_type past_window_ts = current_window_ts - duration_cast<microseconds>(seconds(2L * 3600L)).count();
 
@@ -1745,9 +1771,11 @@ SEASTAR_TEST_CASE(time_window_strategy_size_tiered_behavior_correctness) {
         add_new_sstable_to_bucket(0, past_window_ts);
 
         auto now = time_window_compaction_strategy::get_window_lower_bound(window_size, past_window_ts);
+        auto table_s = make_table_state_for_test(cf, env);
+        auto control = make_strategy_control_for_test(false);
 
         // past window cannot be compacted because it has a single SSTable
-        BOOST_REQUIRE(twcs.newest_bucket(buckets, min_threshold, max_threshold, window_size, now, stcs_options).size() == 0);
+        BOOST_REQUIRE(twcs.newest_bucket(*table_s, *control, buckets, min_threshold, max_threshold, now).size() == 0);
 
         // create min_threshold-1 sstables into current time window
         for (api::timestamp_type t = 0; t < min_threshold - 1; t++) {
@@ -1760,18 +1788,20 @@ SEASTAR_TEST_CASE(time_window_strategy_size_tiered_behavior_correctness) {
 
         // past window can now be compacted into a single SSTable because it was the previous current (active) window.
         // current window cannot be compacted because it has less than min_threshold SSTables
-        BOOST_REQUIRE(twcs.newest_bucket(buckets, min_threshold, max_threshold, window_size, now, stcs_options).size() == 2);
+        BOOST_REQUIRE(twcs.newest_bucket(*table_s, *control, buckets, min_threshold, max_threshold, now).size() == 2);
+
+        major_compact_bucket(past_window_ts);
 
         // now past window cannot be compacted again, because it was already compacted into a single SSTable, now it switches to STCS mode.
-        BOOST_REQUIRE(twcs.newest_bucket(buckets, min_threshold, max_threshold, window_size, now, stcs_options).size() == 0);
+        BOOST_REQUIRE(twcs.newest_bucket(*table_s, *control, buckets, min_threshold, max_threshold, now).size() == 0);
 
         // make past window contain more than min_threshold similar-sized SSTables, allowing it to be compacted again.
-        for (api::timestamp_type t = 2; t < min_threshold; t++) {
+        for (api::timestamp_type t = 1; t < min_threshold; t++) {
             add_new_sstable_to_bucket(t, past_window_ts);
         }
 
         // now past window can be compacted again because it switched to STCS mode and has more than min_threshold SSTables.
-        BOOST_REQUIRE(twcs.newest_bucket(buckets, min_threshold, max_threshold, window_size, now, stcs_options).size() == size_t(min_threshold));
+        BOOST_REQUIRE(twcs.newest_bucket(*table_s, *control, buckets, min_threshold, max_threshold, now).size() == size_t(min_threshold));
     });
 }
 
@@ -1851,7 +1881,8 @@ SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
         candidates.push_back(std::move(sst));
     }
     auto table_s = make_table_state_for_test(cf, env);
-    auto desc = cs.get_sstables_for_compaction(*table_s, std::move(candidates));
+    auto strategy_c = make_strategy_control_for_test(false);
+    auto desc = cs.get_sstables_for_compaction(*table_s, *strategy_c, std::move(candidates));
     BOOST_REQUIRE(desc.sstables.size() == size_t(max_threshold));
     return cf.stop_and_keep_alive();
   });
@@ -1921,13 +1952,14 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         // that's needed because sstable with expired data should be old enough.
         sstables::test(sst).set_data_file_write_time(db_clock::time_point::min());
         auto table_s = make_table_state_for_test(cf, env);
-        auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+        auto strategy_c = make_strategy_control_for_test(false);
+        auto descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
 
         cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, options);
         sst->set_sstable_level(1);
-        descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+        descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
         // make sure sstable picked for tombstone compaction removal won't be promoted or demoted.
@@ -1935,10 +1967,10 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
 
         // check tombstone compaction is disabled by default for DTCS
         cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::date_tiered, {});
-        descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+        descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 0);
         cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::date_tiered, options);
-        descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+        descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
 
@@ -1947,7 +1979,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             std::map<sstring, sstring> options;
             options.emplace("tombstone_threshold", "0.5f");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, options);
-            auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
         // sstable which was recently created won't be included due to min interval
@@ -1956,7 +1988,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             options.emplace("tombstone_compaction_interval", "3600");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, options);
             sstables::test(sst).set_data_file_write_time(db_clock::now());
-            auto descriptor = cs.get_sstables_for_compaction(*table_s, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(*table_s, *strategy_c, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
     });
@@ -2862,11 +2894,11 @@ SEASTAR_THREAD_TEST_CASE(test_scrub_segregate_stack) {
 
     testlog.info("Checking position monotonicity of re-combined stream");
     {
-        std::vector<flat_mutation_reader> readers;
+        std::vector<flat_mutation_reader_v2> readers;
         readers.reserve(segregated_fragment_streams.size());
 
         for (const auto& segregated_fragment_stream : segregated_fragment_streams) {
-            readers.emplace_back(make_flat_mutation_reader_from_fragments(schema, permit, copy_fragments(segregated_fragment_stream)));
+            readers.emplace_back(upgrade_to_v2(make_flat_mutation_reader_from_fragments(schema, permit, copy_fragments(segregated_fragment_stream))));
         }
 
         assert_that(make_combined_reader(schema, permit, std::move(readers))).has_monotonic_positions();
@@ -2874,11 +2906,11 @@ SEASTAR_THREAD_TEST_CASE(test_scrub_segregate_stack) {
 
     testlog.info("Checking content of re-combined stream");
     {
-        std::vector<flat_mutation_reader> readers;
+        std::vector<flat_mutation_reader_v2> readers;
         readers.reserve(segregated_fragment_streams.size());
 
         for (const auto& segregated_fragment_stream : segregated_fragment_streams) {
-            readers.emplace_back(make_flat_mutation_reader_from_fragments(schema, permit, copy_fragments(segregated_fragment_stream)));
+            readers.emplace_back(upgrade_to_v2(make_flat_mutation_reader_from_fragments(schema, permit, copy_fragments(segregated_fragment_stream))));
         }
 
         auto rd = assert_that(make_combined_reader(schema, permit, std::move(readers)));
@@ -3063,7 +3095,8 @@ SEASTAR_TEST_CASE(sstable_run_based_compaction_test) {
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
             auto input_ssts = std::vector<shared_sstable>(sstables.begin(), sstables.end());
             auto table_s = make_table_state_for_test(cf, env);
-            auto desc = cs.get_sstables_for_compaction(*table_s, std::move(input_ssts));
+            auto strategy_c = make_strategy_control_for_test(false);
+            auto desc = cs.get_sstables_for_compaction(*table_s, *strategy_c, std::move(input_ssts));
 
             // nothing to compact, move on.
             if (desc.sstables.empty()) {
@@ -4699,11 +4732,12 @@ SEASTAR_TEST_CASE(twcs_single_key_reader_through_compound_set_test) {
 }
 
 SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
-    return test_env::do_with([] (test_env& env) {
+    return test_env::do_with_async([] (test_env& env) {
         static constexpr uint64_t default_fragment_size = 1UL*1024UL*1024UL*1024UL;
 
         auto backlog = [&] (compaction_backlog_tracker backlog_tracker, uint64_t max_fragment_size) {
             column_family_for_tests cf(env.manager());
+            auto stop_cf = defer([&] { cf.stop().get(); });
 
             uint64_t current_sstable_size = default_fragment_size;
             uint64_t data_set_size = 0;
@@ -4733,6 +4767,53 @@ SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
 
         // don't expect ics and stcs to yield different backlogs for the same workload.
         BOOST_CHECK_CLOSE(ics_backlog, stcs_backlog, 0.0001);
-        return make_ready_future<>();
+    });
+}
+
+SEASTAR_TEST_CASE(test_major_does_not_miss_data_in_memtable) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto builder = schema_builder("tests", "test_major_does_not_miss_data_in_memtable")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("cl", int32_type, column_kind::clustering_key)
+                .with_column("value", int32_type);
+        auto s = builder.build();
+
+        auto tmp = tmpdir();
+        auto tokens = token_generation_for_shard(1, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+        auto pkey = partition_key::from_exploded(*s, {to_bytes(tokens[0].first)});
+
+        column_family_for_tests cf(env.manager(), s, tmp.path().string());
+        auto close_cf = deferred_stop(cf);
+        auto sst_gen = [&env, &cf, s, &tmp] () mutable {
+            return env.make_sstable(s, tmp.path().string(), column_family_test::calculate_generation_for_new_table(*cf),
+                sstables::get_highest_sstable_version(), big);
+        };
+
+        auto row_mut = [&] () {
+            static thread_local int32_t value = 1;
+            mutation m(s, pkey);
+            auto c_key = clustering_key::from_exploded(*s, {int32_type->decompose(value++)});
+            m.set_clustered_cell(c_key, bytes("value"), data_value(int32_t(value)), gc_clock::now().time_since_epoch().count());
+            return m;
+        }();
+        auto sst = make_sstable_containing(sst_gen, {std::move(row_mut)});
+        cf->add_sstable_and_update_cache(sst).get();
+        BOOST_REQUIRE(cf->get_sstables()->size() == 1);
+
+        auto deletion_mut = [&] () {
+            mutation m(s, pkey);
+            tombstone tomb(gc_clock::now().time_since_epoch().count(), gc_clock::now());
+            m.partition().apply(tomb);
+            return m;
+        }();
+        cf->apply(deletion_mut);
+
+        cf->compact_all_sstables().get();
+        BOOST_REQUIRE(cf->get_sstables()->size() == 1);
+        auto new_sst = *(cf->get_sstables()->begin());
+        BOOST_REQUIRE(new_sst->generation() != sst->generation());
+        assert_that(sstable_reader(new_sst, s, env.make_reader_permit()))
+                .produces(deletion_mut)
+                .produces_end_of_stream();
     });
 }

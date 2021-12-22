@@ -91,7 +91,7 @@ public:
 
     incremental_compaction_strategy(const std::map<sstring, sstring>& options);
 
-    virtual compaction_descriptor get_sstables_for_compaction(table_state& cf, std::vector<sstables::shared_sstable> candidates) override;
+    virtual compaction_descriptor get_sstables_for_compaction(table_state& cf, strategy_control& control, std::vector<sstables::shared_sstable> candidates) override;
 
     virtual compaction_descriptor get_major_compaction_job(table_state& cf, std::vector<sstables::shared_sstable> candidates) override;
 
