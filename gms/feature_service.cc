@@ -62,6 +62,9 @@ constexpr std::string_view features::ALTERNATOR_TTL = "ALTERNATOR_TTL";
 constexpr std::string_view features::RANGE_SCAN_DATA_VARIANT = "RANGE_SCAN_DATA_VARIANT";
 constexpr std::string_view features::CDC_GENERATIONS_V2 = "CDC_GENERATIONS_V2";
 constexpr std::string_view features::UDA = "UDA";
+constexpr std::string_view features::SEPARATE_PAGE_SIZE_AND_SAFETY_LIMIT = "SEPARATE_PAGE_SIZE_AND_SAFETY_LIMIT";
+constexpr std::string_view features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT = "SUPPORTS_RAFT_CLUSTER_MANAGEMENT";
+constexpr std::string_view features::USES_RAFT_CLUSTER_MANAGEMENT = "USES_RAFT_CLUSTER_MANAGEMENT";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 constexpr std::string_view features::WORKLOAD_PRIORITIZATION = "WORKLOAD_PRIORITIZATION";
 
@@ -89,8 +92,17 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _range_scan_data_variant(*this, features::RANGE_SCAN_DATA_VARIANT)
         , _cdc_generations_v2(*this, features::CDC_GENERATIONS_V2)
         , _uda(*this, features::UDA)
+        , _separate_page_size_and_safety_limit(*this, features::SEPARATE_PAGE_SIZE_AND_SAFETY_LIMIT)
+        , _supports_raft_cluster_mgmt(*this, features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT)
+        , _uses_raft_cluster_mgmt(*this, features::USES_RAFT_CLUSTER_MANAGEMENT)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
         , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION)
+        , _raft_support_listener(_supports_raft_cluster_mgmt.when_enabled([this] {
+            // When the cluster fully supports raft-based cluster management,
+            // we can re-enable support for the second gossip feature to trigger
+            // actual use of raft-based cluster management procedures.
+            support(features::USES_RAFT_CLUSTER_MANAGEMENT);
+        }))
 {}
 
 feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> disabled) {
@@ -116,6 +128,16 @@ feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> 
     }
     if (!cfg.check_experimental(db::experimental_features_t::ALTERNATOR_TTL)) {
         fcfg._disabled_features.insert(sstring(gms::features::ALTERNATOR_TTL));
+    }
+    if (!cfg.check_experimental(db::experimental_features_t::RAFT)) {
+        fcfg._disabled_features.insert(sstring(gms::features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT));
+        fcfg._disabled_features.insert(sstring(gms::features::USES_RAFT_CLUSTER_MANAGEMENT));
+    } else {
+        // Disable support for using raft cluster management so that it cannot
+        // be enabled by accident.
+        // This prevents the `USES_RAFT_CLUSTER_MANAGEMENT` feature from being
+        // advertised via gossip ahead of time.
+        fcfg._masked_features.insert(sstring(gms::features::USES_RAFT_CLUSTER_MANAGEMENT));
     }
 
     return fcfg;
@@ -195,6 +217,9 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::RANGE_SCAN_DATA_VARIANT,
         gms::features::CDC_GENERATIONS_V2,
         gms::features::UDA,
+        gms::features::SEPARATE_PAGE_SIZE_AND_SAFETY_LIMIT,
+        gms::features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT,
+        gms::features::USES_RAFT_CLUSTER_MANAGEMENT,
         gms::features::IN_MEMORY_TABLES,
         gms::features::WORKLOAD_PRIORITIZATION,
     };
@@ -303,6 +328,9 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_range_scan_data_variant),
         std::ref(_cdc_generations_v2),
         std::ref(_uda),
+        std::ref(_separate_page_size_and_safety_limit),
+        std::ref(_supports_raft_cluster_mgmt),
+        std::ref(_uses_raft_cluster_mgmt),
         std::ref(_in_memory_tables),
         std::ref(_workload_prioritization),
     })

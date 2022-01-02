@@ -1243,7 +1243,7 @@ future<> db::commitlog::segment_manager::replenish_reserve() {
         }
         try {
             gate::holder g(_gate);
-            auto guard = get_units(_reserve_recalculation_guard, 1);
+            auto guard = co_await get_units(_reserve_recalculation_guard, 1);
             if (_reserve_segments.full()) {
                 // can happen if we recalculate
                 continue;
@@ -1964,7 +1964,7 @@ future<> db::commitlog::segment_manager::recalculate_footprint() {
     try {
         co_await do_pending_deletes();
 
-        auto guard = get_units(_reserve_recalculation_guard, 1);
+        auto guard = co_await get_units(_reserve_recalculation_guard, 1);
         auto segments_copy = _segments;
         std::vector<sseg_ptr> reserves;
         std::vector<sstring> recycles;
