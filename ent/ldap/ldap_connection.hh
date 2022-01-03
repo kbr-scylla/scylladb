@@ -182,7 +182,16 @@ class ldap_reuser {
             return invoke(std::move(fn));
         } else {
             return _make_conn().then([this, fn = std::move(fn)] (conn_ptr&& conn) mutable {
-                _conn = std::move(conn);
+                if (_conn) {
+                    if (!_conn->is_live()) {
+                        reap(_conn);
+                    } else {
+                        reap(conn); // apparently lost the race
+                    }
+                }
+                if (!_conn) {
+                    _conn = std::move(conn);
+                }
                 _make_conn.clear(); // So _make_conn doesn't keep a shared-pointer copy that escapes reaping.
                 return invoke(std::move(fn));
             });
