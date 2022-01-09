@@ -11,7 +11,7 @@
 #include "commitlog.hh"
 #include "db/commitlog/commitlog.hh"
 #include "api/api-doc/commitlog.json.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include <vector>
 
 namespace api {
@@ -20,7 +20,7 @@ template<typename T>
 static auto acquire_cl_metric(http_context& ctx, std::function<T (db::commitlog*)> func) {
     typedef T ret_type;
 
-    return ctx.db.map_reduce0([func = std::move(func)](database& db) {
+    return ctx.db.map_reduce0([func = std::move(func)](replica::database& db) {
         if (db.commitlog() == nullptr) {
             return make_ready_future<ret_type>();
         }
@@ -36,7 +36,7 @@ void set_commitlog(http_context& ctx, routes& r) {
         auto res = make_shared<std::vector<sstring>>();
         return ctx.db.map_reduce([res](std::vector<sstring> names) {
             res->insert(res->end(), names.begin(), names.end());
-        }, [](database& db) {
+        }, [](replica::database& db) {
             if (db.commitlog() == nullptr) {
                 return make_ready_future<std::vector<sstring>>(std::vector<sstring>());
             }

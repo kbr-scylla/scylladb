@@ -154,7 +154,9 @@ enum class messaging_verb : int32_t {
     RAFT_MODIFY_CONFIG = 56,
     GROUP0_PEER_EXCHANGE = 57,
     GROUP0_MODIFY_CONFIG = 58,
-    LAST = 59,
+    REPAIR_UPDATE_SYSTEM_TABLE = 59,
+    REPAIR_FLUSH_HINTS_BATCHLOG = 60,
+    LAST = 61,
 };
 
 } // namespace netw
@@ -266,8 +268,8 @@ private:
     };
 private:
     config _cfg;
-    // map: Node broadcast address -> Node internal IP for communication within the same data center
-    std::unordered_map<gms::inet_address, gms::inet_address> _preferred_ip_cache;
+    // map: Node broadcast address -> Node internal IP, and the reversed mapping, for communication within the same data center
+    std::unordered_map<gms::inet_address, gms::inet_address> _preferred_ip_cache, _preferred_to_endpoint;
     std::unique_ptr<rpc_protocol_wrapper> _rpc;
     std::array<std::unique_ptr<rpc_protocol_server_wrapper>, 2> _server;
     ::shared_ptr<seastar::tls::server_credentials> _credentials;
@@ -304,6 +306,7 @@ public:
     gms::inet_address get_preferred_ip(gms::inet_address ep);
     void init_local_preferred_ip_cache(const std::unordered_map<gms::inet_address, gms::inet_address>& ips_cache);
     void cache_preferred_ip(gms::inet_address ep, gms::inet_address ip);
+    gms::inet_address get_public_endpoint_for(const gms::inet_address&) const;
 
     future<> unregister_handler(messaging_verb verb);
 

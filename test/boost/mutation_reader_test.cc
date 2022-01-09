@@ -41,7 +41,7 @@
 #include "cell_locking.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstable_set_impl.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "partition_slice_builder.hh"
 #include "schema_registry.hh"
 #include "service/priority_manager.hh"
@@ -1018,7 +1018,7 @@ sstables::shared_sstable create_sstable(sstables::test_env& env, schema_ptr s, s
 
 static mutation compacted(const mutation& m) {
     auto result = m;
-    result.partition().compact_for_compaction(*result.schema(), always_gc, gc_clock::now());
+    result.partition().compact_for_compaction(*result.schema(), always_gc, result.decorated_key(), gc_clock::now());
     return result;
 }
 
@@ -1260,7 +1260,7 @@ SEASTAR_THREAD_TEST_CASE(test_foreign_reader_as_mutation_source) {
                     streamed_mutation::forwarding fwd_sm,
                     mutation_reader::forwarding fwd_mr) {
                 auto remote_reader = env.db().invoke_on(remote_shard,
-                        [&, s = global_schema_ptr(s), fwd_sm, fwd_mr, trace_state = tracing::global_trace_state_ptr(trace_state)] (database& db) {
+                        [&, s = global_schema_ptr(s), fwd_sm, fwd_mr, trace_state = tracing::global_trace_state_ptr(trace_state)] (replica::database& db) {
                     return make_foreign(std::make_unique<flat_mutation_reader>(remote_mt->make_flat_reader(s.get(),
                             make_reader_permit(env),
                             range,
@@ -2699,7 +2699,8 @@ SEASTAR_THREAD_TEST_CASE(test_compacting_reader_as_mutation_source) {
                     streamed_mutation::forwarding fwd_sm,
                     mutation_reader::forwarding fwd_mr) mutable {
                 auto source = mt->make_flat_reader(s, std::move(permit), range, slice, pc, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr);
-                auto mr = make_compacting_reader(std::move(source), query_time, [] (const dht::decorated_key&) { return api::min_timestamp; });
+                auto mr = make_compacting_reader(std::move(source), query_time,
+                        [] (const dht::decorated_key&) { return api::min_timestamp; });
                 if (single_fragment_buffer) {
                     mr.set_max_buffer_size(1);
                 }
@@ -2750,7 +2751,8 @@ SEASTAR_THREAD_TEST_CASE(test_compacting_reader_next_partition) {
         }
 
         auto mr = make_compacting_reader(make_flat_mutation_reader_from_fragments(ss.schema(), permit, std::move(mfs)),
-                gc_clock::now(), [] (const dht::decorated_key&) { return api::min_timestamp; });
+                gc_clock::now(),
+                [] (const dht::decorated_key&) { return api::min_timestamp; });
         mr.set_max_buffer_size(buffer_size);
 
         return mr;

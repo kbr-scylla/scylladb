@@ -11,7 +11,7 @@
 #include "db/system_distributed_keyspace.hh"
 
 #include "cql3/untyped_result_set.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "db/consistency_level_type.hh"
 #include "db/system_keyspace.hh"
 #include "db/config.hh"
@@ -181,7 +181,7 @@ static std::vector<schema_ptr> ensured_tables() {
 }
 
 // Precondition: `ks_name` is either "system_distributed" or "system_distributed_everywhere".
-static void check_exists(std::string_view ks_name, std::string_view cf_name, const database& db) {
+static void check_exists(std::string_view ks_name, std::string_view cf_name, const replica::database& db) {
     if (!db.has_schema(ks_name, cf_name)) {
         on_internal_error(dlogger, format("expected {}.{} to exist but it doesn't", ks_name, cf_name));
     }
@@ -197,7 +197,7 @@ system_distributed_keyspace::system_distributed_keyspace(cql3::query_processor& 
         , _sp(sp) {
 }
 
-static future<> add_new_columns_if_missing(database& db, ::service::migration_manager& mm) noexcept {
+static future<> add_new_columns_if_missing(replica::database& db, ::service::migration_manager& mm) noexcept {
     static thread_local std::pair<std::string_view, data_type> new_columns[] {
         {"timeout", duration_type},
         {"workload_type", utf8_type}
@@ -443,7 +443,7 @@ system_distributed_keyspace::read_cdc_topology_description(
 }
 
 static future<utils::chunked_vector<mutation>> get_cdc_generation_mutations(
-        const database& db,
+        const replica::database& db,
         utils::UUID id,
         size_t num_replicas,
         size_t concurrency,
@@ -560,7 +560,7 @@ system_distributed_keyspace::read_cdc_generation(utils::UUID id) {
 }
 
 static future<std::vector<mutation>> get_cdc_streams_descriptions_v2_mutation(
-        const database& db,
+        const replica::database& db,
         db_clock::time_point time,
         const cdc::topology_description& desc) {
     auto s = db.find_schema(system_distributed_keyspace::NAME, system_distributed_keyspace::CDC_DESC_V2);

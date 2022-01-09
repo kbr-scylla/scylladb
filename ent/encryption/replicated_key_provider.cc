@@ -27,7 +27,7 @@
 #include "encryption.hh"
 #include "local_file_provider.hh"
 #include "symmetric_key.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/untyped_result_set.hh"
 #include "utils/UUID.hh"
@@ -170,9 +170,9 @@ future<::shared_ptr<cql3::untyped_result_set>> replicated_key_provider::query(ss
 }
 
 future<> replicated_key_provider::force_blocking_flush() {
-    return _ctxt.get_database().invoke_on_all([](database& db) {
+    return _ctxt.get_database().invoke_on_all([](replica::database& db) {
         // if (!Boolean.getBoolean("cassandra.unsafesystem"))
-        column_family& cf = db.find_column_family(KSNAME, TABLENAME);
+        replica::column_family& cf = db.find_column_family(KSNAME, TABLENAME);
         return cf.flush();
     });
 }
@@ -233,7 +233,7 @@ future<std::tuple<key_ptr, opt_bytes>> replicated_key_provider::key(const key_in
         if (_local_provider) {
             try {
                 std::rethrow_exception(ep);
-            } catch (no_such_keyspace&) {
+            } catch (replica::no_such_keyspace&) {
             } catch (exceptions::invalid_request_exception&) {
             } catch (...) {
                 throw;

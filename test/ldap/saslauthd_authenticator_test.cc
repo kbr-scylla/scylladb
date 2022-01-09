@@ -11,12 +11,15 @@
 #include <cstdlib>
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
+#include <seastar/core/seastar.hh>
+#include <seastar/net/api.hh>
 
 #include "auth/saslauthd_authenticator.hh"
 #include "db/config.hh"
 #include "test/ldap/ldap_common.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/exception_utils.hh"
+#include "seastarx.hh"
 
 const auto sockpath = std::getenv("SASLAUTHD_MUX_PATH");
 

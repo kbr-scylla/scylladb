@@ -28,7 +28,9 @@
 #include "schema.hh"
 #include "test/lib/eventually.hh"
 
+namespace replica {
 class database;
+}
 
 namespace db {
 class batchlog_manager;
@@ -84,7 +86,7 @@ class cql_test_config {
 public:
     seastar::shared_ptr<db::config> db_config;
     // Scheduling groups are overwritten unconditionally, see get_scheduling_groups().
-    std::optional<database_config> dbcfg;
+    std::optional<replica::database_config> dbcfg;
     std::set<sstring> disabled_features;
 
     cql_test_config();
@@ -138,11 +140,11 @@ public:
 
     virtual service::client_state& local_client_state() = 0;
 
-    virtual database& local_db() = 0;
+    virtual replica::database& local_db() = 0;
 
     virtual cql3::query_processor& local_qp() = 0;
 
-    virtual distributed<database>& db() = 0;
+    virtual distributed<replica::database>& db() = 0;
 
     virtual distributed<cql3::query_processor> & qp() = 0;
 

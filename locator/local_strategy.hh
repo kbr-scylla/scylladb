@@ -15,7 +15,7 @@
 #include <optional>
 #include <set>
 
-// forward declaration since database.hh includes this file
+// forward declaration since replica/database.hh includes this file
 class keyspace;
 
 namespace locator {

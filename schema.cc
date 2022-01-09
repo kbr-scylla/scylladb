@@ -25,12 +25,14 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "view_info.hh"
 #include "partition_slice_builder.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/token-sharding.hh"
 #include "cdc/cdc_extension.hh"
+#include "tombstone_gc_extension.hh"
 #include "db/paxos_grace_seconds_extension.hh"
 #include "utils/rjson.hh"
+#include "tombstone_gc_options.hh"
 
 constexpr int32_t schema::NAME_LENGTH;
 
@@ -518,6 +520,7 @@ bool operator==(const schema& x, const schema& y)
         && x._raw._compaction_strategy_options == y._raw._compaction_strategy_options
         && x._raw._compaction_enabled == y._raw._compaction_enabled
         && x.cdc_options() == y.cdc_options()
+        && x.tombstone_gc_options() == y.tombstone_gc_options()
         && x._raw._caching_options == y._raw._caching_options
         && x._raw._dropped_columns == y._raw._dropped_columns
         && x._raw._collections == y._raw._collections
@@ -743,16 +746,16 @@ static std::ostream& column_definition_as_cql_key(std::ostream& os, const column
     return os;
 }
 
-static bool is_global_index(database& db, const utils::UUID& id, const schema& s) {
+static bool is_global_index(replica::database& db, const utils::UUID& id, const schema& s) {
     return  db.find_column_family(id).get_index_manager().is_global_index(s);
 }
 
-static bool is_index(database& db, const utils::UUID& id, const schema& s) {
+static bool is_index(replica::database& db, const utils::UUID& id, const schema& s) {
     return  db.find_column_family(id).get_index_manager().is_index(s);
 }
 
 
-std::ostream& schema::describe(database& db, std::ostream& os) const {
+std::ostream& schema::describe(replica::database& db, std::ostream& os) const {
     os << "CREATE ";
     int n = 0;
 
@@ -1258,8 +1261,23 @@ const cdc::options& schema::cdc_options() const {
     return default_cdc_options;
 }
 
+const ::tombstone_gc_options& schema::tombstone_gc_options() const {
+    static const ::tombstone_gc_options default_tombstone_gc_options;
+    const auto& schema_extensions = _raw._extensions;
+
+    if (auto it = schema_extensions.find(tombstone_gc_extension::NAME); it != schema_extensions.end()) {
+        return dynamic_pointer_cast<tombstone_gc_extension>(it->second)->get_options();
+    }
+    return default_tombstone_gc_options;
+}
+
 schema_builder& schema_builder::with_cdc_options(const cdc::options& opts) {
     add_extension(cdc::cdc_extension::NAME, ::make_shared<cdc::cdc_extension>(opts));
+    return *this;
+}
+
+schema_builder& schema_builder::with_tombstone_gc_options(const tombstone_gc_options& opts) {
+    add_extension(tombstone_gc_extension::NAME, ::make_shared<tombstone_gc_extension>(opts));
     return *this;
 }
 

@@ -9,7 +9,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
-#include "database.hh"
+#include "replica/database.hh"
 #include "schema_builder.hh"
 #include "test/perf/perf.hh"
 #include <seastar/core/app-template.hh>

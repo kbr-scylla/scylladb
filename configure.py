@@ -561,8 +561,6 @@ raft_tests = set([
 apps = set([
     'scylla',
     'test/tools/cql_repl',
-    'tools/scylla-types',
-    'tools/scylla-sstable',
 ])
 
 tests = scylla_tests | perf_tests | raft_tests
@@ -660,9 +658,9 @@ scylla_raft_core = [
     'raft/log.cc',
 ]
 
-scylla_core = (['database.cc',
+scylla_core = (['replica/database.cc',
+                'replica/table.cc',
                 'absl-flat_hash_map.cc',
-                'table.cc',
                 'atomic_cell.cc',
                 'caching_options.cc',
                 'collection_mutation.cc',
@@ -990,6 +988,8 @@ scylla_core = (['database.cc',
                 'audit/audit_syslog_storage_helper.cc',
                 'range_tombstone.cc',
                 'range_tombstone_list.cc',
+                'tombstone_gc_options.cc',
+                'tombstone_gc.cc',
                 'utils/disk-error-handler.cc',
                 'duration.cc',
                 'vint-serialization.cc',
@@ -1159,12 +1159,11 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc']
 
+scylla_tools = ['tools/scylla-types.cc', 'tools/scylla-sstable.cc', 'tools/schema_loader.cc', 'tools/utils.cc']
+
 deps = {
-    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis,
+    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis + scylla_tools,
     'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
-    #FIXME: we don't need all of scylla_core here, only the types module, need to modularize scylla_core.
-    'tools/scylla-types': idls + ['tools/scylla-types.cc'] + scylla_core,
-    'tools/scylla-sstable': idls + ['tools/scylla-sstable.cc', 'tools/schema_loader.cc'] + scylla_core,
 }
 
 pure_boost_tests = set([
@@ -1352,7 +1351,8 @@ def clang_inline_threshold():
         return args.clang_inline_threshold
     elif platform.machine() == 'aarch64':
         # we see miscompiles with 1200 and above with format("{}", uuid)
-        return 600
+        # also coroutine miscompiles with 600
+        return 300
     else:
         return 2500
 
@@ -2056,17 +2056,17 @@ with open(buildfile_tmp, 'w') as f:
             f.write('build $builddir/{mode}/{hh}.o: checkhh.{mode} {hh} | $builddir/{mode}/gen/empty.cc || {gen_headers_dep}\n'.format(
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))
 
-        f.write('build $builddir/{mode}/seastar/libseastar.a: ninja | always\n'
+        f.write('build $builddir/{mode}/seastar/libseastar.a: ninja $builddir/{mode}/seastar/build.ninja | always\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
         f.write('  target = seastar\n'.format(**locals()))
-        f.write('build $builddir/{mode}/seastar/libseastar_testing.a: ninja | always\n'
+        f.write('build $builddir/{mode}/seastar/libseastar_testing.a: ninja $builddir/{mode}/seastar/build.ninja | always\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
         f.write('  target = seastar_testing\n'.format(**locals()))
-        f.write('build $builddir/{mode}/seastar/apps/iotune/iotune: ninja\n'
+        f.write('build $builddir/{mode}/seastar/apps/iotune/iotune: ninja $builddir/{mode}/seastar/build.ninja\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
@@ -2100,7 +2100,7 @@ with open(buildfile_tmp, 'w') as f:
         f.write('  pool = submodule_pool\n')
 
         for lib in abseil_libs:
-            f.write('build $builddir/{mode}/abseil/{lib}: ninja\n'.format(**locals()))
+            f.write('build $builddir/{mode}/abseil/{lib}: ninja $builddir/{mode}/abseil/build.ninja\n'.format(**locals()))
             f.write('  pool = submodule_pool\n')
             f.write('  subdir = $builddir/{mode}/abseil\n'.format(**locals()))
             f.write('  target = {lib}\n'.format(**locals()))
@@ -2200,7 +2200,7 @@ with open(buildfile_tmp, 'w') as f:
         rule configure
           command = {python} configure.py $configure_args
           generator = 1
-        build build.ninja: configure | configure.py SCYLLA-VERSION-GEN {args.seastar_path}/CMakeLists.txt
+        build build.ninja {build_ninja_list}: configure | configure.py SCYLLA-VERSION-GEN {args.seastar_path}/CMakeLists.txt
         rule cscope
             command = find -name '*.[chS]' -o -name "*.cc" -o -name "*.hh" | cscope -bq -i-
             description = CSCOPE
@@ -2214,7 +2214,7 @@ with open(buildfile_tmp, 'w') as f:
             description = List configured modes
         build mode_list: mode_list
         default {modes_list}
-        ''').format(modes_list=' '.join(default_modes), **globals()))
+        ''').format(modes_list=' '.join(default_modes), build_ninja_list=' '.join([f'build/{mode}/{dir}/build.ninja' for mode in build_modes for dir in ['seastar', 'abseil']]), **globals()))
     unit_test_list = set(test for test in build_artifacts if test in set(tests))
     f.write(textwrap.dedent('''\
         rule unit_test_list

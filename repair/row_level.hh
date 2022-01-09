@@ -19,11 +19,13 @@ class row_level_repair_gossip_helper;
 
 namespace service {
 class migration_manager;
+class storage_proxy;
 }
 
 namespace db {
 
 class system_distributed_keyspace;
+class batchlog_manager;
 
 }
 
@@ -31,17 +33,31 @@ namespace gms {
     class gossiper;
 }
 
+class repair_history {
+public:
+    // The key for the map is the table_id
+    std::unordered_map<utils::UUID, std::unordered_map<dht::token_range, size_t>> finished_ranges;
+    gc_clock::time_point repair_time = gc_clock::time_point::max();
+};
+
 class repair_service : public seastar::peering_sharded_service<repair_service> {
     distributed<gms::gossiper>& _gossiper;
     netw::messaging_service& _messaging;
-    sharded<database>& _db;
+    sharded<replica::database>& _db;
+    sharded<service::storage_proxy>& _sp;
+    sharded<db::batchlog_manager>& _bm;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
     sharded<db::view::view_update_generator>& _view_update_generator;
     service::migration_manager& _mm;
 
+    std::unordered_map<utils::UUID, repair_history> _finished_ranges_history;
+
     shared_ptr<row_level_repair_gossip_helper> _gossip_helper;
     std::unique_ptr<tracker> _tracker;
     bool _stopped = false;
+
+    size_t _max_repair_memory;
+    seastar::semaphore _memory_sem;
 
     future<> init_ms_handlers();
     future<> uninit_ms_handlers();
@@ -51,7 +67,9 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
 public:
     repair_service(distributed<gms::gossiper>& gossiper,
             netw::messaging_service& ms,
-            sharded<database>& db,
+            sharded<replica::database>& db,
+            sharded<service::storage_proxy>& sp,
+            sharded<db::batchlog_manager>& bm,
             sharded<db::system_distributed_keyspace>& sys_dist_ks,
             sharded<db::view::view_update_generator>& vug,
             service::migration_manager& mm, size_t max_repair_memory);
@@ -65,6 +83,10 @@ public:
     // quickly as possible (we do not wait for repairs to finish but rather
     // stop them abruptly).
     future<> shutdown();
+
+    future<std::optional<gc_clock::time_point>> update_history(utils::UUID repair_id, utils::UUID table_id, dht::token_range range, gc_clock::time_point repair_time);
+    future<> cleanup_history(utils::UUID repair_id);
+    future<> load_history();
 
     int do_repair_start(sstring keyspace, std::unordered_map<sstring, sstring> options_map);
 
@@ -90,13 +112,23 @@ private:
             streaming::stream_reason reason,
             std::optional<utils::UUID> ops_uuid);
 
+    future<repair_update_system_table_response> repair_update_system_table_handler(
+            gms::inet_address from,
+            repair_update_system_table_request req);
+
+    future<repair_flush_hints_batchlog_response> repair_flush_hints_batchlog_handler(
+            gms::inet_address from,
+            repair_flush_hints_batchlog_request req);
+
 public:
     netw::messaging_service& get_messaging() noexcept { return _messaging; }
-    sharded<database>& get_db() noexcept { return _db; }
+    sharded<replica::database>& get_db() noexcept { return _db; }
     service::migration_manager& get_migration_manager() noexcept { return _mm; }
     sharded<db::system_distributed_keyspace>& get_sys_dist_ks() noexcept { return _sys_dist_ks; }
     sharded<db::view::view_update_generator>& get_view_update_generator() noexcept { return _view_update_generator; }
     gms::gossiper& get_gossiper() noexcept { return _gossiper.local(); }
+    size_t max_repair_memory() const { return _max_repair_memory; }
+    seastar::semaphore& memory_sem() { return _memory_sem; }
 };
 
 class repair_info;

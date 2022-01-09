@@ -22,7 +22,7 @@
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/gate.hh>
 
-#include "database_fwd.hh"
+#include "replica/database_fwd.hh"
 #include "frozen_mutation.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
@@ -31,7 +31,10 @@
 
 class flat_mutation_reader;
 
+namespace replica {
 class database;
+}
+
 class repair_service;
 namespace db {
     namespace view {
@@ -91,19 +94,19 @@ enum class repair_status { RUNNING, SUCCESSFUL, FAILED };
 
 // repair_get_status() returns a future because it needs to run code on a
 // different CPU (cpu 0) and that might be a deferring operation.
-future<repair_status> repair_get_status(seastar::sharded<database>& db, int id);
+future<repair_status> repair_get_status(seastar::sharded<replica::database>& db, int id);
 
 // If the repair job is finished (SUCCESSFUL or FAILED), it returns immediately.
 // It blocks if the repair job is still RUNNING until timeout.
-future<repair_status> repair_await_completion(seastar::sharded<database>& db, int id, std::chrono::steady_clock::time_point timeout);
+future<repair_status> repair_await_completion(seastar::sharded<replica::database>& db, int id, std::chrono::steady_clock::time_point timeout);
 
 // returns a vector with the ids of the active repairs
-future<std::vector<int>> get_active_repairs(seastar::sharded<database>& db);
+future<std::vector<int>> get_active_repairs(seastar::sharded<replica::database>& db);
 
 void check_in_shutdown();
 
 // Abort all the repairs
-future<> repair_abort_all(seastar::sharded<database>& db);
+future<> repair_abort_all(seastar::sharded<replica::database>& db);
 
 enum class repair_checksum {
     legacy = 0,
@@ -157,7 +160,8 @@ public:
 
 class repair_info {
 public:
-    seastar::sharded<database>& db;
+    repair_service& rs;
+    seastar::sharded<replica::database>& db;
     seastar::sharded<netw::messaging_service>& messaging;
     sharded<db::system_distributed_keyspace>& sys_dist_ks;
     sharded<db::view::view_update_generator>& view_update_generator;
@@ -175,6 +179,7 @@ public:
     std::unordered_set<gms::inet_address> ignore_nodes;
     streaming::stream_reason reason;
     std::unordered_map<dht::token_range, repair_neighbors> neighbors;
+    size_t total_rf;
     uint64_t nr_ranges_finished = 0;
     uint64_t nr_ranges_total;
     size_t nr_failed_ranges = 0;
@@ -183,6 +188,7 @@ public:
     repair_stats _stats;
     std::unordered_set<sstring> dropped_tables;
     std::optional<utils::UUID> _ops_uuid;
+    bool _hints_batchlog_flushed = false;
 public:
     repair_info(repair_service& repair,
             const sstring& keyspace_,
@@ -193,7 +199,8 @@ public:
             const std::vector<sstring>& hosts_,
             const std::unordered_set<gms::inet_address>& ingore_nodes_,
             streaming::stream_reason reason_,
-            std::optional<utils::UUID> ops_uuid);
+            std::optional<utils::UUID> ops_uuid,
+            bool hints_batchlog_flushed);
     void check_failed_ranges();
     void abort();
     void check_in_abort();
@@ -207,6 +214,10 @@ public:
     const std::optional<utils::UUID>& ops_uuid() const {
         return _ops_uuid;
     };
+
+    bool hints_batchlog_flushed() const {
+        return _hints_batchlog_flushed;
+    }
 
     future<> repair_range(const dht::token_range& range);
 };
@@ -271,7 +282,7 @@ public:
     void abort_repair_node_ops(utils::UUID ops_uuid);
 };
 
-future<uint64_t> estimate_partitions(seastar::sharded<database>& db, const sstring& keyspace,
+future<uint64_t> estimate_partitions(seastar::sharded<replica::database>& db, const sstring& keyspace,
         const sstring& cf, const dht::token_range& range);
 
 // Represent a position of a mutation_fragment read from a flat mutation
@@ -478,6 +489,29 @@ struct node_ops_cmd_response {
         : ok(o)
         , pending_ops(std::move(pending)) {
     }
+};
+
+
+struct repair_update_system_table_request {
+    utils::UUID repair_uuid;
+    utils::UUID table_uuid;
+    sstring keyspace_name;
+    sstring table_name;
+    dht::token_range range;
+    gc_clock::time_point repair_time;
+};
+
+struct repair_update_system_table_response {
+};
+
+struct repair_flush_hints_batchlog_request {
+    utils::UUID repair_uuid;
+    std::list<gms::inet_address> target_nodes;
+    std::chrono::seconds hints_timeout;
+    std::chrono::seconds batchlog_timeout;
+};
+
+struct repair_flush_hints_batchlog_response {
 };
 
 namespace std {

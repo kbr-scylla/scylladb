@@ -22,7 +22,6 @@
 
 #include "common.hh"
 #include "cql3/query_processor.hh"
-#include "database.hh"
 #include "exceptions/exceptions.hh"
 #include "seastarx.hh"
 #include "utils/class_registrator.hh"

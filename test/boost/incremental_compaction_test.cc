@@ -19,7 +19,7 @@
 #include "sstables/sstables.hh"
 #include "compaction/incremental_compaction_strategy.hh"
 #include "schema.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "compaction/compaction_manager.hh"
 #include "mutation_reader.hh"
 #include "sstable_test.hh"
@@ -43,9 +43,9 @@ static flat_mutation_reader sstable_reader(reader_permit permit, shared_sstable 
 }
 
 class table_state_for_test : public table_state {
-    table* _t;
+    replica::table* _t;
 public:
-    explicit table_state_for_test(table& t)
+    explicit table_state_for_test(replica::table& t)
         : _t(&t)
     {
     }
@@ -61,8 +61,8 @@ public:
     const sstables::sstable_set& get_sstable_set() const override {
         return _t->get_sstable_set();
     }
-    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables) const override {
-        return sstables::get_fully_expired_sstables(*this, sstables, gc_clock::now() - schema()->gc_grace_seconds());
+    std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point compaction_time) const override {
+        return sstables::get_fully_expired_sstables(*this, sstables, compaction_time - schema()->gc_grace_seconds());
     }
 
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
@@ -85,7 +85,7 @@ public:
     }
 };
 
-static std::unique_ptr<table_state> make_table_state_for_test(column_family& t) {
+static std::unique_ptr<table_state> make_table_state_for_test(replica::column_family& t) {
     return std::make_unique<table_state_for_test>(t);
 }
 
@@ -122,7 +122,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
 
         auto cm = make_lw_shared<compaction_manager>();
         auto tracker = make_lw_shared<cache_tracker>();
-        auto cf = make_lw_shared<column_family>(s, column_family_test_config(env.manager(), env.semaphore()), column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.manager(), env.semaphore()), replica::column_family::no_commitlog(), *cm, cl_stats, *tracker);
         auto table_s = make_table_state_for_test(*cf);
         cf->mark_ready_for_writes();
         cf->start();
@@ -252,7 +252,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
         compaction_manager _cm;
         cell_locker_stats _cl_stats;
         cache_tracker _tracker;
-        lw_shared_ptr<column_family> _cf;
+        lw_shared_ptr<replica::column_family> _cf;
         incremental_compaction_strategy _ics;
         const unsigned min_threshold = 4;
         const size_t data_set_size = 1'000'000'000;
@@ -262,7 +262,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             options.emplace(sstring("space_amplification_goal"), sstring(std::to_string(space_amplification_goal)));
             return incremental_compaction_strategy(options);
         }
-        static column_family::config make_table_config(test_env& env) {
+        static replica::column_family::config make_table_config(test_env& env) {
             auto config = column_family_test_config(env.manager(), env.semaphore());
             config.compaction_enforce_min_threshold = true;
             return config;
@@ -270,7 +270,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
 
         sag_test(test_env& env, schema_ptr s, double space_amplification_goal)
             : _env(env)
-            , _cf(make_lw_shared<column_family>(s, make_table_config(_env), column_family::no_commitlog(), _cm, _cl_stats, _tracker))
+            , _cf(make_lw_shared<replica::column_family>(s, make_table_config(_env), replica::column_family::no_commitlog(), _cm, _cl_stats, _tracker))
             , _ics(make_ics(space_amplification_goal))
         {
         }

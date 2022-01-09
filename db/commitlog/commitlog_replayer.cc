@@ -39,7 +39,7 @@
 
 #include "commitlog.hh"
 #include "commitlog_replayer.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "sstables/sstables.hh"
 #include "db/system_keyspace.hh"
 #include "log.hh"
@@ -69,7 +69,7 @@ class db::commitlog_replayer::impl {
 
     friend class db::commitlog_replayer;
 public:
-    impl(seastar::sharded<database>& db);
+    impl(seastar::sharded<replica::database>& db);
 
     future<> init();
 
@@ -122,7 +122,7 @@ public:
         return j != i->second.end() ? j->second : replay_position();
     }
 
-    seastar::sharded<database>&
+    seastar::sharded<replica::database>&
         _db;
     shard_rpm_map
         _rpm;
@@ -130,7 +130,7 @@ public:
         _min_pos;
 };
 
-db::commitlog_replayer::impl::impl(seastar::sharded<database>& db)
+db::commitlog_replayer::impl::impl(seastar::sharded<replica::database>& db)
     : _db(db)
 {}
 
@@ -147,7 +147,7 @@ future<> db::commitlog_replayer::impl::init() {
                 }
             }
         }
-    }, [this](database& db) {
+    }, [this](replica::database& db) {
         return do_with(shard_rpm_map{}, [this, &db](shard_rpm_map& map) {
             return parallel_for_each(db.get_column_families(), [&map, &db](auto& cfp) {
                 auto uuid = cfp.first;
@@ -265,7 +265,7 @@ future<> db::commitlog_replayer::impl::process(stats* s, commitlog::buffer_and_r
         }
 
         auto shard = _db.local().shard_of(fm);
-        return _db.invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp, shard, s] (database& db) mutable -> future<> {
+        return _db.invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp, shard, s] (replica::database& db) mutable -> future<> {
             auto& fm = cer.mutation();
             // TODO: might need better verification that the deserialized mutation
             // is schema compatible. My guess is that just applying the mutation
@@ -310,7 +310,7 @@ future<> db::commitlog_replayer::impl::process(stats* s, commitlog::buffer_and_r
                 rlogger.warn("error replaying: {}", std::current_exception());
             }
         });
-    } catch (no_such_column_family&) {
+    } catch (replica::no_such_column_family&) {
         // No such CF now? Origin just ignores this.
     } catch (...) {
         s->invalid_mutations++;
@@ -321,7 +321,7 @@ future<> db::commitlog_replayer::impl::process(stats* s, commitlog::buffer_and_r
     return make_ready_future<>();
 }
 
-db::commitlog_replayer::commitlog_replayer(seastar::sharded<database>& db)
+db::commitlog_replayer::commitlog_replayer(seastar::sharded<replica::database>& db)
     : _impl(std::make_unique<impl>(db))
 {}
 
@@ -332,7 +332,7 @@ db::commitlog_replayer::commitlog_replayer(commitlog_replayer&& r) noexcept
 db::commitlog_replayer::~commitlog_replayer()
 {}
 
-future<db::commitlog_replayer> db::commitlog_replayer::create_replayer(seastar::sharded<database>& db) {
+future<db::commitlog_replayer> db::commitlog_replayer::create_replayer(seastar::sharded<replica::database>& db) {
     return do_with(commitlog_replayer(db), [](auto&& rp) {
         auto f = rp._impl->init();
         return f.then([rp = std::move(rp)]() mutable {

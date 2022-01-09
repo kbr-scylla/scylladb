@@ -166,7 +166,7 @@ int main(int ac, char ** av) {
         ("stay-alive", bpo::value<bool>()->default_value(false), "Do not kill the test server after the test")
         ("cpuid", bpo::value<uint32_t>()->default_value(0), "Server cpuid");
 
-    distributed<database> db;
+    distributed<replica::database> db;
     sharded<auth::service> auth_service;
     distributed<qos::service_level_controller> sl_controller;
 

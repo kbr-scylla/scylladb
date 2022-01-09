@@ -60,7 +60,7 @@ static seastar::logger logg{"encryption"};
 
 sharded<cql3::query_processor>* hack_query_processor_for_encryption;
 sharded<service::migration_manager>* hack_migration_manager_for_encryption;
-sharded<database>* hack_database_for_encryption;
+sharded<replica::database>* hack_database_for_encryption;
 sharded<service::storage_service>* hack_storage_service_for_encryption;
 
 namespace encryption {
@@ -338,7 +338,7 @@ public:
     distributed<service::storage_service>& get_storage_service() const override {
         return *hack_storage_service_for_encryption;
     }
-    distributed<database>& get_database() const override {
+    distributed<replica::database>& get_database() const override {
         return *hack_database_for_encryption;
     }
 

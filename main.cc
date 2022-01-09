@@ -13,7 +13,7 @@
 #include <seastar/util/closeable.hh>
 #include "utils/build_id.hh"
 #include "supervisor.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include <seastar/core/reactor.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/distributed.hh>
@@ -81,12 +81,14 @@
 #include "cdc/log.hh"
 #include "cdc/cdc_extension.hh"
 #include "cdc/generation_service.hh"
+#include "tombstone_gc_extension.hh"
 #include "alternator/tags_extension.hh"
 #include "db/paxos_grace_seconds_extension.hh"
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "service/storage_proxy.hh"
 #include "alternator/controller.hh"
 #include "alternator/ttl.hh"
+#include "tools/entry_point.hh"
 
 #include "service/raft/raft_group_registry.hh"
 
@@ -386,11 +388,11 @@ sharded<cql3::query_processor>* the_query_processor;
 sharded<qos::service_level_controller>* the_sl_controller;
 sharded<service::migration_manager>* the_migration_manager;
 sharded<service::storage_service>* the_storage_service;
-sharded<database>* the_database;
+sharded<replica::database>* the_database;
 sharded<streaming::stream_manager> *the_stream_manager;
 }
 
-int main(int ac, char** av) {
+static int scylla_main(int ac, char** av) {
     // Allow core dumps. The would be disabled by default if
     // CAP_SYS_NICE was added to the binary, as is suggested by the
     // epoll backend.
@@ -401,14 +403,23 @@ int main(int ac, char** av) {
     }
 
   try {
-    // early check to avoid triggering
-    if (!cpu_sanity()) {
-        _exit(71);
-    }
     runtime::init_uptime();
     std::setvbuf(stdout, nullptr, _IOLBF, 1000);
     app_template::config app_cfg;
     app_cfg.name = "Scylla";
+    app_cfg.description =
+R"(scylla - NoSQL data store using the seastar framework
+
+For more information, see https://github.com/scylladb/scylla.
+
+The scylla executable hosts tools in addition to the main scylla server, these
+can be invoked as: scylla {tool_name} [...]
+
+For a list of available tools, run: scylla --list-tools
+For more information about individual tools, run: scylla {tool_name} --help
+
+To start the scylla server proper, simply invoke as: scylla server (or just scylla).
+)";
     app_cfg.default_task_quota = 500us;
     app_cfg.auto_handle_sigint_sigterm = false;
     app_cfg.max_networking_aio_io_control_blocks = 50000;
@@ -418,6 +429,7 @@ int main(int ac, char** av) {
     ext->add_schema_extension<alternator::tags_extension>(alternator::tags_extension::NAME);
     ext->add_schema_extension<cdc::cdc_extension>(cdc::cdc_extension::NAME);
     ext->add_schema_extension<db::paxos_grace_seconds_extension>(db::paxos_grace_seconds_extension::NAME);
+    ext->add_schema_extension<tombstone_gc_extension>(tombstone_gc_extension::NAME);
 
     auto cfg = make_lw_shared<db::config>(ext);
     auto init = app.get_options_description().add_options();
@@ -425,6 +437,7 @@ int main(int ac, char** av) {
     init("version", bpo::bool_switch(), "print version number and exit");
     init("build-id", bpo::bool_switch(), "print build-id and exit");
     init("build-mode", bpo::bool_switch(), "print build mode and exit");
+    init("list-tools", bpo::bool_switch(), "list included tools and exit");
 
     bpo::options_description deprecated("Deprecated options - ignored");
     deprecated.add_options()
@@ -458,6 +471,13 @@ int main(int ac, char** av) {
         fmt::print("{}\n", scylla_build_mode());
         return 0;
     }
+    if (vm["list-tools"].as<bool>()) {
+        fmt::print(
+                "types - a command-line tool to examine values belonging to scylla types\n"
+                "sstable - a multifunctional command-line tool to examine the content of sstables\n"
+        );
+        return 0;
+    }
 
     print_starting_message(ac, av, parsed_opts);
 
@@ -465,8 +485,8 @@ int main(int ac, char** av) {
     sharded<locator::effective_replication_map_factory> erm_factory;
     sharded<service::migration_notifier> mm_notifier;
     sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
-    distributed<database> db;
-    extern sharded<database>* hack_database_for_encryption;
+    distributed<replica::database> db;
+    extern sharded<replica::database>* hack_database_for_encryption;
     hack_database_for_encryption = &db;
     seastar::sharded<service::cache_hitrate_calculator> cf_cache_hitrate_calculator;
     service::load_meter load_meter;
@@ -730,7 +750,7 @@ int main(int ac, char** av) {
             api::set_server_config(ctx, *cfg).get();
 
             // Note: changed from using a move here, because we want the config object intact.
-            database_config dbcfg;
+            replica::database_config dbcfg;
             dbcfg.compaction_scheduling_group = make_sched_group("compaction", 1000);
             dbcfg.memory_compaction_scheduling_group = make_sched_group("mem_compaction", 1000);
             dbcfg.streaming_scheduling_group = maintenance_scheduling_group;
@@ -884,14 +904,14 @@ int main(int ac, char** av) {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
                 // call stop on each db instance, but leave the shareded<database> pointers alive.
-                db.invoke_on_all(&database::stop).get();
+                db.invoke_on_all(&replica::database::stop).get();
             });
 
             // We need to init commitlog on shard0 before it is inited on other shards
             // because it obtains the list of pre-existing segments for replay, which must
             // not include reserve segments created by active commitlogs.
             db.local().init_commitlog().get();
-            db.invoke_on_all(&database::start, std::ref(sl_controller)).get();
+            db.invoke_on_all(&replica::database::start, std::ref(sl_controller)).get();
 
             // Initialization of a keyspace is done by shard 0 only. For system
             // keyspace, the procedure  will go through the hardcoded column
@@ -941,7 +961,7 @@ int main(int ac, char** av) {
             supervisor::notify("starting query processor");
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             debug::the_query_processor = &qp;
-            auto local_data_dict = seastar::sharded_parameter([] (const database& db) { return db.as_data_dictionary(); }, std::ref(db));
+            auto local_data_dict = seastar::sharded_parameter([] (const replica::database& db) { return db.as_data_dictionary(); }, std::ref(db));
             qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
@@ -999,7 +1019,7 @@ int main(int ac, char** av) {
                     auto rp = db::commitlog_replayer::create_replayer(db).get0();
                     rp.recover(paths, db::commitlog::descriptor::FILENAME_PREFIX).get();
                     supervisor::notify("replaying commit log - flushing memtables");
-                    db.invoke_on_all([] (database& db) {
+                    db.invoke_on_all([] (replica::database& db) {
                         return db.flush_all_memtables();
                     }).get();
                     supervisor::notify("replaying commit log - removing old commitlog segments");
@@ -1008,9 +1028,9 @@ int main(int ac, char** av) {
                 }
             }
 
-            db.invoke_on_all([] (database& db) {
+            db.invoke_on_all([] (replica::database& db) {
                 for (auto& x : db.get_column_families()) {
-                    table& t = *(x.second);
+                    replica::table& t = *(x.second);
                     t.enable_auto_compaction();
                 }
             }).get();
@@ -1026,9 +1046,9 @@ int main(int ac, char** av) {
             // group that was effectively used in the bulk of it (compaction). Soon it will become
             // streaming
 
-            db.invoke_on_all([&proxy] (database& db) {
+            db.invoke_on_all([&proxy] (replica::database& db) {
                 for (auto& x : db.get_column_families()) {
-                    column_family& cf = *(x.second);
+                    replica::column_family& cf = *(x.second);
                     cf.trigger_compaction();
                 }
             }).get();
@@ -1090,7 +1110,7 @@ int main(int ac, char** av) {
             // both)
             supervisor::notify("starting messaging service");
             auto max_memory_repair = memory::stats().total_memory() * 0.1;
-            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(mm), max_memory_repair).get();
+            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(proxy), std::ref(bm), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(mm), max_memory_repair).get();
             auto stop_repair_service = defer_verbose_shutdown("repair service", [&repair] {
                 repair.stop().get();
             });
@@ -1328,7 +1348,7 @@ int main(int ac, char** av) {
             // Truncate `clients' CF - this table should not persist between server restarts.
             clear_clientlist().get();
 
-            db.invoke_on_all([] (database& db) {
+            db.invoke_on_all([] (replica::database& db) {
                 db.revert_initial_system_read_concurrency_boost();
             }).get();
 
@@ -1467,4 +1487,43 @@ int main(int ac, char** av) {
       fmt::print(std::cerr, "FATAL: Exception during startup, aborting: {}\n", std::current_exception());
       return 7; // 1 has a special meaning for upstart
   }
+}
+
+int main(int ac, char** av) {
+    // early check to avoid triggering
+    if (!cpu_sanity()) {
+        _exit(71);
+    }
+
+    std::function<int(int, char**)> main_func;
+
+    std::string exec_name;
+    if (ac >= 2) {
+        exec_name = av[1];
+    }
+
+    bool recognized = true;
+    if (exec_name == "server") {
+        main_func = scylla_main;
+    } else if (exec_name == "types") {
+        main_func = tools::scylla_types_main;
+    } else if (exec_name == "sstable") {
+        main_func = tools::scylla_sstable_main;
+    } else if (exec_name[0] == '-') {
+        main_func = scylla_main;
+        recognized = false;
+    } else {
+        fmt::print("error: unrecognized first argument: expected it to be \"server\", a regular command-line argument or a valid tool name (see `scylla --list-tools`), but got {}\n", exec_name);
+        return 1;
+    }
+
+    if (recognized) {
+        // shift args to consume the recognized tool name
+        --ac;
+        for (int i = 1; i < ac; ++i) {
+            std::swap(av[i], av[i + 1]);
+        }
+    }
+
+    return main_func(ac, av);
 }

@@ -147,7 +147,7 @@ public:
             manager& _shard_manager;
             resource_manager& _resource_manager;
             service::storage_proxy& _proxy;
-            database& _db;
+            replica::database& _db;
             seastar::scheduling_group _hints_cpu_sched_group;
             gms::gossiper& _gossiper;
             seastar::shared_mutex& _file_update_mutex;
@@ -155,7 +155,7 @@ public:
             std::multimap<db::replay_position, lw_shared_ptr<std::optional<promise<>>>> _replay_waiters;
 
         public:
-            sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, database& local_db, gms::gossiper& local_gossiper) noexcept;
+            sender(end_point_hints_manager& parent, service::storage_proxy& local_storage_proxy, replica::database& local_db, gms::gossiper& local_gossiper) noexcept;
             ~sender();
 
             /// \brief A constructor that should be called from the copy/move-constructor of end_point_hints_manager.
@@ -519,7 +519,7 @@ private:
     shared_ptr<gms::gossiper> _gossiper_anchor;
     locator::snitch_ptr& _local_snitch_ptr;
     int64_t _max_hint_window_us = 0;
-    database& _local_db;
+    replica::database& _local_db;
 
     seastar::gate _draining_eps_gate; // gate used to control the progress of ep_managers stopping not in the context of manager::stop() call
 
@@ -532,7 +532,7 @@ private:
     seastar::named_semaphore _drain_lock = {1, named_semaphore_exception_factory{"drain lock"}};
 
 public:
-    manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<database>& db);
+    manager(sstring hints_directory, host_filter filter, int64_t max_hint_window_ms, resource_manager&res_manager, distributed<replica::database>& db);
     virtual ~manager();
     manager(manager&&) = delete;
     manager& operator=(manager&&) = delete;
@@ -735,7 +735,7 @@ private:
         return *_gossiper_anchor;
     }
 
-    database& local_db() noexcept {
+    replica::database& local_db() noexcept {
         return _local_db;
     }
 

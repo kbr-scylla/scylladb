@@ -21,7 +21,6 @@
 #include <system_error>
 #include "common.hh"
 #include "cql3/query_processor.hh"
-#include "database.hh"
 #include "db/config.hh"
 #include "log.hh"
 #include "seastarx.hh"

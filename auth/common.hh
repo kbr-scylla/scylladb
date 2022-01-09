@@ -29,7 +29,10 @@
 
 using namespace std::chrono_literals;
 
+namespace replica {
 class database;
+}
+
 class timeout_config;
 
 class database;
@@ -71,7 +74,7 @@ future<> create_metadata_table_if_missing(
         std::string_view cql,
         ::service::migration_manager&) noexcept;
 
-future<> wait_for_schema_agreement(::service::migration_manager&, const database&, seastar::abort_source&);
+future<> wait_for_schema_agreement(::service::migration_manager&, const replica::database&, seastar::abort_source&);
 
 ///
 /// Time-outs for internal, non-local CQL queries.

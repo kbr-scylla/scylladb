@@ -77,6 +77,8 @@ class mutation;
 class frozen_mutation;
 class reconcilable_result;
 
+class distributed_loader;
+
 namespace service {
 class storage_proxy;
 class storage_service;
@@ -120,7 +122,7 @@ class rp_handle;
 class data_listeners;
 class large_data_handler;
 
-future<> system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
+future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
 
 }
 
@@ -135,7 +137,10 @@ namespace qos {
 class mutation_reordered_with_truncate_exception : public std::exception {};
 
 using shared_memtable = lw_shared_ptr<memtable>;
+
 class memtable_list;
+class column_family_test;
+class database_test;
 
 // We could just add all memtables, regardless of types, to a single list, and
 // then filter them out when we read them. Here's why I have chosen not to do
@@ -166,7 +171,7 @@ private:
     dirty_memory_manager* _dirty_memory_manager;
     std::optional<shared_future<>> _flush_coalescing;
     seastar::scheduling_group _compaction_scheduling_group;
-    table_stats& _table_stats;
+    replica::table_stats& _table_stats;
 public:
     using iterator = decltype(_memtables)::iterator;
     using const_iterator = decltype(_memtables)::const_iterator;
@@ -175,7 +180,7 @@ public:
             seal_immediate_fn_type seal_immediate_fn,
             std::function<schema_ptr()> cs,
             dirty_memory_manager* dirty_memory_manager,
-            table_stats& table_stats,
+            replica::table_stats& table_stats,
             seastar::scheduling_group compaction_scheduling_group = seastar::current_scheduling_group())
         : _memtables({})
         , _seal_immediate_fn(seal_immediate_fn)
@@ -187,7 +192,7 @@ public:
     }
 
     memtable_list(std::function<schema_ptr()> cs, dirty_memory_manager* dirty_memory_manager,
-            table_stats& table_stats,
+            replica::table_stats& table_stats,
             seastar::scheduling_group compaction_scheduling_group = seastar::current_scheduling_group())
         : memtable_list({}, std::move(cs), dirty_memory_manager, table_stats, compaction_scheduling_group) {
     }
@@ -280,6 +285,8 @@ private:
 
 using sstable_list = sstables::sstable_list;
 
+namespace replica {
+
 // The CF has a "stats" structure. But we don't want all fields here,
 // since some of them are fairly complex for exporting to collectd. Also,
 // that structure matches what we export via the API, so better leave it
@@ -369,7 +376,7 @@ public:
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
-        ::cf_stats* cf_stats = nullptr;
+        replica::cf_stats* cf_stats = nullptr;
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
         seastar::scheduling_group compaction_scheduling_group;
@@ -894,7 +901,7 @@ public:
         return _view_stats;
     }
 
-    ::cf_stats* cf_stats() {
+    replica::cf_stats* cf_stats() {
         return _config.cf_stats;
     }
 
@@ -1054,9 +1061,9 @@ public:
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
     // Testing purposes.
-    friend class column_family_test;
+    friend class ::column_family_test;
 
-    friend class distributed_loader;
+    friend class ::distributed_loader;
 
 private:
     timer<> _off_strategy_trigger;
@@ -1088,7 +1095,7 @@ public:
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
-        ::cf_stats* cf_stats = nullptr;
+        replica::cf_stats* cf_stats = nullptr;
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
         seastar::scheduling_group compaction_scheduling_group;
@@ -1199,7 +1206,7 @@ struct string_pair_eq {
 //   use shard_of() for data
 
 class database : public qos::qos_configuration_change_subscriber {
-    friend class database_test;
+    friend class ::database_test;
 public:
     enum class table_kind {
         system,
@@ -1218,7 +1225,7 @@ public:
     };
 
 private:
-    ::cf_stats _cf_stats;
+    replica::cf_stats _cf_stats;
     static constexpr size_t max_count_concurrent_reads{100};
     size_t max_memory_concurrent_reads() { return _dbcfg.available_memory * 0.02; }
     // Assume a queued read takes up 1kB of memory, and allow 2% of memory to be filled up with such reads.
@@ -1615,13 +1622,15 @@ public:
     virtual future<> on_before_service_level_change(qos::service_level_options slo_before, qos::service_level_options slo_after, qos::service_level_info sl_info) override;
 };
 
-future<> start_large_data_handler(sharded<database>& db);
+} // namespace replica
+
+future<> start_large_data_handler(sharded<replica::database>& db);
 
 // Creates a streaming reader that reads from all shards.
 //
 // Shard readers are created via `table::make_streaming_reader()`.
 // Range generator must generate disjoint, monotonically increasing ranges.
-flat_mutation_reader make_multishard_streaming_reader(distributed<database>& db, schema_ptr schema, reader_permit permit,
+flat_mutation_reader make_multishard_streaming_reader(distributed<replica::database>& db, schema_ptr schema, reader_permit permit,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 bool is_internal_keyspace(std::string_view name);

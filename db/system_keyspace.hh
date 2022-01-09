@@ -111,7 +111,7 @@ class system_keyspace {
     static future<> force_blocking_flush(sstring cfname);
     static future<> build_dc_rack_info();
     static future<> build_bootstrap_info();
-    static future<> cache_truncation_record(distributed<database>& db);
+    static future<> cache_truncation_record(distributed<replica::database>& db);
     template <typename Value>
     static future<> update_cached_values(gms::inet_address ep, sstring column_name, Value value);
 public:
@@ -138,6 +138,7 @@ public:
     static constexpr auto RAFT = "raft";
     static constexpr auto RAFT_SNAPSHOTS = "raft_snapshots";
     static constexpr auto RAFT_CONFIG = "raft_config";
+    static constexpr auto REPAIR_HISTORY = "repair_history";
     static const char *const CLIENTS;
 
     struct v3 {
@@ -219,6 +220,7 @@ public:
     static schema_ptr built_indexes(); // TODO (from Cassandra): make private
     static schema_ptr raft();
     static schema_ptr raft_snapshots();
+    static schema_ptr repair_history();
 
     static table_schema_version generate_schema_version(utils::UUID table_id, uint16_t offset = 0);
 
@@ -227,7 +229,7 @@ public:
 
     static future<> init_local_cache();
     static future<> deinit_local_cache();
-    static future<> setup(distributed<database>& db,
+    static future<> setup(distributed<replica::database>& db,
                 distributed<cql3::query_processor>& qp,
                 sharded<netw::messaging_service>& ms);
     static future<> update_schema_version(utils::UUID version);
@@ -254,7 +256,7 @@ public:
     static future<std::optional<sstring>> get_scylla_local_param(const sstring& key);
 
     static std::vector<schema_ptr> all_tables(const db::config& cfg);
-    static future<> make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
+    static future<> make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
 
     /// overloads
 
@@ -312,7 +314,7 @@ public:
     typedef std::vector<db::replay_position> replay_positions;
 
     static future<> save_truncation_record(utils::UUID, db_clock::time_point truncated_at, db::replay_position);
-    static future<> save_truncation_record(const column_family&, db_clock::time_point truncated_at, db::replay_position);
+    static future<> save_truncation_record(const replica::column_family&, db_clock::time_point truncated_at, db::replay_position);
     static future<replay_positions> get_truncated_position(utils::UUID);
     static future<db::replay_position> get_truncated_position(utils::UUID, uint32_t shard);
     static future<db_clock::time_point> get_truncated_at(utils::UUID);
@@ -426,7 +428,7 @@ public:
     static future<> save_local_supported_features(const std::set<std::string_view>& feats);
 }; // class system_keyspace
 
-future<> system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g);
+future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g);
 extern const char *const system_keyspace_CLIENTS;
 
 } // namespace db

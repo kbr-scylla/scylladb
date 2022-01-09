@@ -15,6 +15,7 @@
 #include <seastar/core/abort_source.hh>
 #include "log.hh"
 #include "seastarx.hh"
+#include <boost/program_options.hpp>
 
 namespace db {
 class extensions;

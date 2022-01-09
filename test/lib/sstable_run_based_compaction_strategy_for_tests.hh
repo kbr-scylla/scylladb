@@ -13,7 +13,7 @@
 #include "compaction/compaction_strategy_impl.hh"
 #include "sstables/sstable_set.hh"
 #include "compaction/compaction.hh"
-#include "database.hh"
+#include "replica/database.hh"
 
 namespace sstables {
 

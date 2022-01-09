@@ -156,10 +156,12 @@ const std::vector<action_handler> action_handlers = {
 
 }
 
-int main(int argc, char** argv) {
+namespace tools {
+
+int scylla_types_main(int argc, char** argv) {
     namespace bpo = boost::program_options;
 
-    app_template::config app_cfg;
+    app_template::seastar_options app_cfg;
     app_cfg.name = "scylla-types";
 
     auto description_template =
@@ -191,6 +193,8 @@ $ scylla-types --print --prefix-compound -t TimeUUIDType -t Int32Type 0010d00819
 )";
     app_cfg.description = format(description_template, boost::algorithm::join(action_handlers | boost::adaptors::transformed(
                     [] (const action_handler& ah) { return format("* --{} - {}", ah.name(), ah.description()); } ), "\n"));
+
+    tools::utils::configure_tool_mode(app_cfg);
 
     app_template app(std::move(app_cfg));
 
@@ -243,3 +247,5 @@ $ scylla-types --print --prefix-compound -t TimeUUIDType -t Int32Type 0010d00819
         return make_ready_future<>();
     });
 }
+
+} // namespace tools

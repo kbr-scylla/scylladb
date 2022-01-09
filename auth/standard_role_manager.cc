@@ -29,7 +29,7 @@
 #include "exceptions/exceptions.hh"
 #include "log.hh"
 #include "utils/class_registrator.hh"
-#include "database.hh"
+#include "replica/database.hh"
 #include "db/config.hh"
 
 namespace auth {

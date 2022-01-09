@@ -8,7 +8,6 @@
 
 #include "sstables/sstables.hh"
 #include "sstables/sstable_set.hh"
-#include "database.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"
 #include "incremental_compaction_strategy.hh"

@@ -30,6 +30,7 @@
 #include "caching_options.hh"
 #include "column_computation.hh"
 #include "timestamp.hh"
+#include "tombstone_gc_options.hh"
 
 namespace dht {
 
@@ -42,7 +43,9 @@ namespace cdc {
 class options;
 }
 
+namespace replica {
 class database;
+}
 
 using column_count_type = uint32_t;
 
@@ -816,6 +819,8 @@ public:
 
     const cdc::options& cdc_options() const;
 
+    const ::tombstone_gc_options& tombstone_gc_options() const;
+
     const ::speculative_retry& speculative_retry() const {
         return _raw._speculative_retry;
     }
@@ -956,7 +961,7 @@ public:
      * Index or Local Index).
      *
      */
-    std::ostream& describe(database& db, std::ostream& os) const;
+    std::ostream& describe(replica::database& db, std::ostream& os) const;
     friend bool operator==(const schema&, const schema&);
     const column_mapping& get_column_mapping() const;
     friend class schema_registry_entry;

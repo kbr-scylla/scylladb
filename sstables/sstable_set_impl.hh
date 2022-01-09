@@ -37,7 +37,7 @@ public:
     virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const = 0;
 
     virtual flat_mutation_reader_v2 create_single_key_sstable_reader(
-        column_family*,
+        replica::column_family*,
         schema_ptr,
         reader_permit,
         utils::estimated_histogram&,
@@ -133,7 +133,7 @@ public:
         bool reversed) const;
 
     virtual flat_mutation_reader_v2 create_single_key_sstable_reader(
-        column_family*,
+        replica::column_family*,
         schema_ptr,
         reader_permit,
         utils::estimated_histogram&,
@@ -165,7 +165,7 @@ public:
     virtual std::unique_ptr<incremental_selector_impl> make_incremental_selector() const override;
 
     virtual flat_mutation_reader_v2 create_single_key_sstable_reader(
-            column_family*,
+            replica::column_family*,
             schema_ptr,
             reader_permit,
             utils::estimated_histogram&,

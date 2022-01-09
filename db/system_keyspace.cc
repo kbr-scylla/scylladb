@@ -277,6 +277,26 @@ schema_ptr system_keyspace::raft_config() {
     return schema;
 }
 
+schema_ptr system_keyspace::repair_history() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(NAME, REPAIR_HISTORY);
+        return schema_builder(NAME, REPAIR_HISTORY, std::optional(id))
+            .with_column("table_uuid", uuid_type, column_kind::partition_key)
+            // The time is repair start time
+            .with_column("repair_time", timestamp_type, column_kind::clustering_key)
+            .with_column("repair_uuid", uuid_type, column_kind::clustering_key)
+            // The token range is (range_start, range_end]
+            .with_column("range_start", long_type, column_kind::clustering_key)
+            .with_column("range_end", long_type, column_kind::clustering_key)
+            .with_column("keyspace_name", utf8_type, column_kind::static_column)
+            .with_column("table_name", utf8_type, column_kind::static_column)
+            .set_comment("Record repair history")
+            .with_version(generate_schema_version(id))
+            .build();
+    }();
+    return schema;
+}
+
 schema_ptr system_keyspace::built_indexes() {
     static thread_local auto built_indexes = [] {
         schema_builder builder(generate_legacy_id(NAME, BUILT_INDEXES), NAME, BUILT_INDEXES,
@@ -1343,7 +1363,7 @@ void system_keyspace::minimal_setup(distributed<cql3::query_processor>& qp) {
     qctx = std::make_unique<query_context>(qp);
 }
 
-future<> system_keyspace::setup(distributed<database>& db,
+future<> system_keyspace::setup(distributed<replica::database>& db,
                distributed<cql3::query_processor>& qp,
                sharded<netw::messaging_service>& ms) {
     const db::config& cfg = db.local().get_config();
@@ -1405,18 +1425,18 @@ future<truncation_record> system_keyspace::get_truncation_record(utils::UUID cf_
 }
 
 // Read system.truncate table and cache last truncation time in `table` object for each table on every shard
-future<> system_keyspace::cache_truncation_record(distributed<database>& db) {
+future<> system_keyspace::cache_truncation_record(distributed<replica::database>& db) {
     sstring req = format("SELECT DISTINCT table_uuid, truncated_at from system.{}", TRUNCATED);
     return qctx->qp().execute_internal(req).then([&db] (::shared_ptr<cql3::untyped_result_set> rs) {
         return parallel_for_each(rs->begin(), rs->end(), [&db] (const cql3::untyped_result_set_row& row) {
             auto table_uuid = row.get_as<utils::UUID>("table_uuid");
             auto ts = row.get_as<db_clock::time_point>("truncated_at");
 
-            return db.invoke_on_all([table_uuid, ts] (database& db) mutable {
+            return db.invoke_on_all([table_uuid, ts] (replica::database& db) mutable {
                 try {
-                    table& cf = db.find_column_family(table_uuid);
+                    replica::table& cf = db.find_column_family(table_uuid);
                     cf.cache_truncation_record(ts);
-                } catch (no_such_column_family&) {
+                } catch (replica::no_such_column_family&) {
                     slogger.debug("Skip caching truncation time for {} since the table is no longer present", table_uuid);
                 }
             });
@@ -1431,7 +1451,7 @@ future<> system_keyspace::save_truncation_record(utils::UUID id, db_clock::time_
     });
 }
 
-future<> system_keyspace::save_truncation_record(const column_family& cf, db_clock::time_point truncated_at, db::replay_position rp) {
+future<> system_keyspace::save_truncation_record(const replica::column_family& cf, db_clock::time_point truncated_at, db::replay_position rp) {
     return save_truncation_record(cf.schema()->id(), truncated_at, rp);
 }
 
@@ -1877,10 +1897,10 @@ public:
 
 class token_ring_table : public streaming_virtual_table {
 private:
-    database& _db;
+    replica::database& _db;
     service::storage_service& _ss;
 public:
-    token_ring_table(database& db, service::storage_service& ss)
+    token_ring_table(replica::database& db, service::storage_service& ss)
             : streaming_virtual_table(build_schema())
             , _db(db)
             , _ss(ss)
@@ -1967,9 +1987,9 @@ public:
 };
 
 class snapshots_table : public streaming_virtual_table {
-    distributed<database>& _db;
+    distributed<replica::database>& _db;
 public:
-    explicit snapshots_table(distributed<database>& db)
+    explicit snapshots_table(distributed<replica::database>& db)
             : streaming_virtual_table(build_schema())
             , _db(db)
     {
@@ -2020,7 +2040,7 @@ public:
             return less(l.key, r.key);
         });
 
-        using snapshots_by_tables_map = std::map<sstring, std::map<sstring, table::snapshot_details>>;
+        using snapshots_by_tables_map = std::map<sstring, std::map<sstring, replica::table::snapshot_details>>;
 
         class snapshot_reducer {
         private:
@@ -2051,14 +2071,14 @@ public:
         for (auto& ks_data : keyspace_names) {
             co_await result.emit_partition_start(ks_data.key);
 
-            const auto snapshots_by_tables = co_await _db.map_reduce(snapshot_reducer(), [ks_name = ks_data.name] (database& db) -> future<snapshots_by_tables_map> {
+            const auto snapshots_by_tables = co_await _db.map_reduce(snapshot_reducer(), [ks_name = ks_data.name] (replica::database& db) -> future<snapshots_by_tables_map> {
                 snapshots_by_tables_map snapshots_by_tables;
                 for (auto& [_, table] : db.get_column_families()) {
                     if (table->schema()->ks_name() != ks_name) {
                         continue;
                     }
                     const auto unordered_snapshots = co_await table->get_snapshot_details();
-                    snapshots_by_tables.emplace(table->schema()->cf_name(), std::map<sstring, table::snapshot_details>(unordered_snapshots.begin(), unordered_snapshots.end()));
+                    snapshots_by_tables.emplace(table->schema()->cf_name(), std::map<sstring, replica::table::snapshot_details>(unordered_snapshots.begin(), unordered_snapshots.end()));
                 }
                 co_return snapshots_by_tables;
             });
@@ -2140,7 +2160,7 @@ public:
 
 class runtime_info_table : public memtable_filling_virtual_table {
 private:
-    distributed<database>& _db;
+    distributed<replica::database>& _db;
     service::storage_service& _ss;
     std::optional<dht::decorated_key> _generic_key;
 
@@ -2189,7 +2209,7 @@ private:
     }
 
     template <typename T>
-    future<T> map_reduce_tables(std::function<T(table&)> map, std::function<T(T, T)> reduce = std::plus<T>{}) {
+    future<T> map_reduce_tables(std::function<T(replica::table&)> map, std::function<T(T, T)> reduce = std::plus<T>{}) {
         class shard_reducer {
             T _v{};
             std::function<T(T, T)> _reduce;
@@ -2201,7 +2221,7 @@ private:
             }
             T get() && { return std::move(_v); }
         };
-        co_return co_await _db.map_reduce(shard_reducer(reduce), [map, reduce] (database& db) {
+        co_return co_await _db.map_reduce(shard_reducer(reduce), [map, reduce] (replica::database& db) {
             T val = {};
             for (auto& [_, table] : db.get_column_families()) {
                val = reduce(val, map(*table));
@@ -2223,7 +2243,7 @@ private:
     }
 
 public:
-    explicit runtime_info_table(distributed<database>& db, service::storage_service& ss)
+    explicit runtime_info_table(distributed<replica::database>& db, service::storage_service& ss)
         : memtable_filling_virtual_table(build_schema())
         , _db(db)
         , _ss(ss) {
@@ -2249,7 +2269,7 @@ public:
             });
         });
         co_await add_partition(mutation_sink, "load", [this] () -> future<sstring> {
-            return map_reduce_tables<int64_t>([] (table& tbl) {
+            return map_reduce_tables<int64_t>([] (replica::table& tbl) {
                 return tbl.get_stats().live_disk_space_used;
             }).then([] (int64_t load) {
                 return format("{}", load);
@@ -2280,7 +2300,7 @@ public:
                 uint64_t entries = 0;
                 static stats reduce(stats a, stats b) { return stats{a.total + b.total, a.free + b.free, a.entries + b.entries}; }
             };
-            return map_reduce_tables<stats>([] (table& t) {
+            return map_reduce_tables<stats>([] (replica::table& t) {
                 const auto s = t.active_memtable().region().occupancy();
                 return stats{s.total_space(), s.free_space(), t.active_memtable().partition_count()};
             }, stats::reduce).then([] (stats s) {
@@ -2311,7 +2331,7 @@ public:
                         a.requests_moving_average + b.requests_moving_average};
                 }
             };
-            return _db.map_reduce0([] (database& db) {
+            return _db.map_reduce0([] (replica::database& db) {
                 stats res{};
                 auto occupancy = db.row_cache_tracker().region().occupancy();
                 res.total = occupancy.total_space();
@@ -2340,7 +2360,7 @@ public:
             });
         });
         co_await add_partition(mutation_sink, "incremental_backup_enabled", [this] () {
-            return _db.map_reduce0([] (database& db) {
+            return _db.map_reduce0([] (replica::database& db) {
                 return boost::algorithm::any_of(db.get_keyspaces(), [] (const auto& id_and_ks) {
                     return id_and_ks.second.incremental_backups_enabled();
                 });
@@ -2479,7 +2499,7 @@ public:
 // Map from table's schema ID to table itself. Helps avoiding accidental duplication.
 static thread_local std::map<utils::UUID, std::unique_ptr<virtual_table>> virtual_tables;
 
-void register_virtual_tables(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
+void register_virtual_tables(distributed<replica::database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
     auto add_table = [] (std::unique_ptr<virtual_table>&& tbl) {
         virtual_tables[tbl->schema()->id()] = std::move(tbl);
     };
@@ -2507,6 +2527,7 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
                     compactions_in_progress(), compaction_history(),
                     sstable_activity(), clients(), size_estimates(), large_partitions(), large_rows(), large_cells(),
                     scylla_local(), db::schema_tables::scylla_table_schema_history(),
+                    repair_history(),
                     v3::views_builds_in_progress(), v3::built_views(),
                     v3::scylla_views_builds_in_progress(),
                     v3::truncated(),
@@ -2530,7 +2551,7 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
     return r;
 }
 
-static void install_virtual_readers(database& db) {
+static void install_virtual_readers(replica::database& db) {
     db.find_column_family(system_keyspace::size_estimates()).set_virtual_reader(mutation_source(db::size_estimates::virtual_reader(db)));
     db.find_column_family(system_keyspace::v3::views_builds_in_progress()).set_virtual_reader(mutation_source(db::view::build_progress_virtual_reader(db)));
     db.find_column_family(system_keyspace::built_indexes()).set_virtual_reader(mutation_source(db::index::built_indexes_virtual_reader(db)));
@@ -2542,13 +2563,13 @@ static void install_virtual_readers(database& db) {
     }
 }
 
-static bool maybe_write_in_user_memory(schema_ptr s, database& db) {
+static bool maybe_write_in_user_memory(schema_ptr s, replica::database& db) {
     return (s.get() == system_keyspace::batchlog().get()) || (s.get() == system_keyspace::paxos().get())
             || s == system_keyspace::v3::scylla_views_builds_in_progress()
             || s == system_keyspace::raft();
 }
 
-future<> system_keyspace_make(distributed<database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
+future<> system_keyspace_make(distributed<replica::database>& dist_db, distributed<service::storage_service>& dist_ss, sharded<gms::gossiper>& dist_gossiper, db::config& cfg) {
     register_virtual_tables(dist_db, dist_ss, dist_gossiper, cfg);
 
     auto& db = dist_db.local();
@@ -2563,7 +2584,7 @@ future<> system_keyspace_make(distributed<database>& dist_db, distributed<servic
                     std::map<sstring, sstring>{},
                     durable
                     );
-            co_await db.create_keyspace(ksm, dist_ss.local().get_erm_factory(), true, database::system_keyspace::yes);
+            co_await db.create_keyspace(ksm, dist_ss.local().get_erm_factory(), true, replica::database::system_keyspace::yes);
         }
         auto& ks = db.find_keyspace(ks_name);
         auto cfg = ks.make_column_family_config(*table, db);
@@ -2579,7 +2600,7 @@ future<> system_keyspace_make(distributed<database>& dist_db, distributed<servic
     install_virtual_readers(db);
 }
 
-future<> system_keyspace::make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg) {
+future<> system_keyspace::make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg) {
     return system_keyspace_make(db, ss, g, cfg);
 }
 
@@ -2618,7 +2639,7 @@ system_keyspace::load_dc_rack_info() {
 
 future<foreign_ptr<lw_shared_ptr<reconcilable_result>>>
 system_keyspace::query_mutations(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const sstring& cf_name) {
-    database& db = proxy.local().get_db().local();
+    replica::database& db = proxy.local().get_db().local();
     schema_ptr schema = db.find_schema(ks_name, cf_name);
     auto slice = partition_slice_builder(*schema).build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.local().get_max_result_size(slice));
@@ -2628,7 +2649,7 @@ system_keyspace::query_mutations(distributed<service::storage_proxy>& proxy, con
 
 future<lw_shared_ptr<query::result_set>>
 system_keyspace::query(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const sstring& cf_name) {
-    database& db = proxy.local().get_db().local();
+    replica::database& db = proxy.local().get_db().local();
     schema_ptr schema = db.find_schema(ks_name, cf_name);
     auto slice = partition_slice_builder(*schema).build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), proxy.local().get_max_result_size(slice));
