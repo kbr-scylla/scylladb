@@ -77,9 +77,6 @@ public:
     sstables::sstable_writer_config configure_writer(sstring origin) const override {
         return _t->get_sstables_manager().configure_writer(std::move(origin));
     }
-    bool has_table_ongoing_compaction() const override {
-        return false;
-    }
     api::timestamp_type min_memtable_timestamp() const override {
         return api::max_timestamp;
     }

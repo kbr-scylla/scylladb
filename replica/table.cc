@@ -2419,10 +2419,6 @@ public:
     api::timestamp_type min_memtable_timestamp() const override {
         return _t.min_memtable_timestamp();
     }
-
-    bool has_table_ongoing_compaction() const override {
-        return _t._compaction_manager.has_table_ongoing_compaction(&_t);
-    }
 };
 
 compaction::table_state& table::as_table_state() const noexcept {

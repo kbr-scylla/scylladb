@@ -48,8 +48,6 @@ public:
     virtual reader_permit make_compaction_reader_permit() const = 0;
     virtual sstables::sstable_writer_config configure_writer(sstring origin) const = 0;
     virtual api::timestamp_type min_memtable_timestamp() const = 0;
-
-    virtual bool has_table_ongoing_compaction() const = 0;
 };
 
 }
