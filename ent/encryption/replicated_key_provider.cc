@@ -22,6 +22,7 @@
 #include <seastar/core/seastar.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/core/coroutine.hh>
 
 #include "replicated_key_provider.hh"
 #include "encryption.hh"
@@ -351,12 +352,11 @@ future<> replicated_key_provider::maybe_initialize_tables() {
     auto& db = _ctxt.get_database().local();
 
     if (db.has_schema(KSNAME, TABLENAME)) {
-        return db.find_keyspace(KSNAME).ensure_populated().then([this] {
-            _initialized = true;
-        });
+        co_await db.find_keyspace(KSNAME).ensure_populated();
+        _initialized = true;
+        co_return;
     }
 
-    auto f = make_ready_future();
     auto& mm = _ctxt.get_migration_manager().local();
     static auto ignore_existing = [] (seastar::noncopyable_function<future<>()> func) {
         return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
@@ -364,31 +364,26 @@ future<> replicated_key_provider::maybe_initialize_tables() {
     log.debug("Creating keyspace and table");
     if (!db.has_keyspace(KSNAME)) {
 
-        f = ignore_existing([this, &mm] { // Create the keyspace if not exists
+        co_await ignore_existing([this, &mm] () -> future<> { // Create the keyspace if not exists
             auto ksm = keyspace_metadata::new_keyspace(
                     KSNAME,
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true);
-            return mm.announce_new_keyspace(ksm, api::min_timestamp);
+            co_await mm.announce_new_keyspace(ksm, api::min_timestamp);
         });
 
     }
-    f = f.then([this, &mm] { // Then create the table
-        return ignore_existing([this, &mm] {
-            return mm.announce_new_column_family(encrypted_keys_table(), api::min_timestamp);
-        });
-    }).then([&] { // Then do some final stuff and mark this object as initialized
-        auto& ks = db.find_keyspace(KSNAME);
-        auto& rs = ks.get_replication_strategy();
-        // should perhaps check name also..
-        if (rs.get_type() != locator::replication_strategy_type::everywhere_topology) {
-            // TODO: reset to everywhere + repair.
-        }
-        _initialized = true;
+    co_await ignore_existing([this, &mm] () -> future<> {
+        co_await mm.announce_new_column_family(encrypted_keys_table(), api::min_timestamp);
     });
-
-    return f;
+    auto& ks = db.find_keyspace(KSNAME);
+    auto& rs = ks.get_replication_strategy();
+    // should perhaps check name also..
+    if (rs.get_type() != locator::replication_strategy_type::everywhere_topology) {
+        // TODO: reset to everywhere + repair.
+    }
+    _initialized = true;
 }
 
 const size_t replicated_key_provider::header_size;
