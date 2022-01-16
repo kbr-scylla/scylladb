@@ -18,6 +18,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/seastar.hh>
 #include "utils/div_ceil.hh"
+#include "lister.hh"
 
 namespace db {
 namespace hints {

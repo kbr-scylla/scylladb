@@ -49,7 +49,7 @@
 #include "unit_test_service_levels_accessor.hh"
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
-#include "distributed_loader.hh"
+#include "replica/distributed_loader.hh"
 // TODO: remove (#293)
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
@@ -274,7 +274,7 @@ public:
         schema_builder builder(make_lw_shared<schema>(schema_maker(ks_name)));
         builder.set_uuid(id);
         auto s = builder.build(schema_builder::compact_storage::no);
-        return _mm.local().announce_new_column_family(s);
+        co_return co_await _mm.local().announce(co_await _mm.local().prepare_new_column_family_announcement(s));
     }
 
     virtual future<> require_keyspace_exists(const sstring& ks_name) override {
@@ -662,14 +662,14 @@ public:
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
-            distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
+            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
 
             auto& ks = db.local().find_keyspace(db::system_keyspace::NAME);
             parallel_for_each(ks.metadata()->cf_meta_data(), [&ks] (auto& pair) {
                 auto cfm = pair.second;
                 return ks.make_directory_for_column_family(cfm->cf_name(), cfm->id());
             }).get();
-            distributed_loader::init_non_system_keyspaces(db, proxy).get();
+            replica::distributed_loader::init_non_system_keyspaces(db, proxy).get();
 
             db.invoke_on_all([] (replica::database& db) {
                 for (auto& x : db.get_column_families()) {

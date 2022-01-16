@@ -382,7 +382,7 @@ bool migration_manager::should_pull_schema_from(const gms::inet_address& endpoin
 future<> migration_notifier::create_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
     return seastar::async([this, ksm] {
         const auto& name = ksm->name();
-        _listeners.for_each([&name] (migration_listener* listener) {
+        _listeners.thread_for_each([&name] (migration_listener* listener) {
             try {
                 listener->on_create_keyspace(name);
             } catch (...) {
@@ -396,7 +396,7 @@ future<> migration_notifier::create_column_family(const schema_ptr& cfm) {
     return seastar::async([this, cfm] {
         const auto& ks_name = cfm->ks_name();
         const auto& cf_name = cfm->cf_name();
-        _listeners.for_each([&ks_name, &cf_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &cf_name] (migration_listener* listener) {
             try {
                 listener->on_create_column_family(ks_name, cf_name);
             } catch (...) {
@@ -410,7 +410,7 @@ future<> migration_notifier::create_user_type(const user_type& type) {
     return seastar::async([this, type] {
         const auto& ks_name = type->_keyspace;
         const auto& type_name = type->get_name_as_string();
-        _listeners.for_each([&ks_name, &type_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &type_name] (migration_listener* listener) {
             try {
                 listener->on_create_user_type(ks_name, type_name);
             } catch (...) {
@@ -424,7 +424,7 @@ future<> migration_notifier::create_view(const view_ptr& view) {
     return seastar::async([this, view] {
         const auto& ks_name = view->ks_name();
         const auto& view_name = view->cf_name();
-        _listeners.for_each([&ks_name, &view_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &view_name] (migration_listener* listener) {
             try {
                 listener->on_create_view(ks_name, view_name);
             } catch (...) {
@@ -451,7 +451,7 @@ public void notifyCreateAggregate(UDAggregate udf)
 future<> migration_notifier::update_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
     return seastar::async([this, ksm] {
         const auto& name = ksm->name();
-        _listeners.for_each([&name] (migration_listener* listener) {
+        _listeners.thread_for_each([&name] (migration_listener* listener) {
             try {
                 listener->on_update_keyspace(name);
             } catch (...) {
@@ -465,7 +465,7 @@ future<> migration_notifier::update_column_family(const schema_ptr& cfm, bool co
     return seastar::async([this, cfm, columns_changed] {
         const auto& ks_name = cfm->ks_name();
         const auto& cf_name = cfm->cf_name();
-        _listeners.for_each([&ks_name, &cf_name, columns_changed] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &cf_name, columns_changed] (migration_listener* listener) {
             try {
                 listener->on_update_column_family(ks_name, cf_name, columns_changed);
             } catch (...) {
@@ -479,7 +479,7 @@ future<> migration_notifier::update_user_type(const user_type& type) {
     return seastar::async([this, type] {
         const auto& ks_name = type->_keyspace;
         const auto& type_name = type->get_name_as_string();
-        _listeners.for_each([&ks_name, &type_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &type_name] (migration_listener* listener) {
             try {
                 listener->on_update_user_type(ks_name, type_name);
             } catch (...) {
@@ -493,7 +493,7 @@ future<> migration_notifier::update_view(const view_ptr& view, bool columns_chan
     return seastar::async([this, view, columns_changed] {
         const auto& ks_name = view->ks_name();
         const auto& view_name = view->cf_name();
-        _listeners.for_each([&ks_name, &view_name, columns_changed] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &view_name, columns_changed] (migration_listener* listener) {
             try {
                 listener->on_update_view(ks_name, view_name, columns_changed);
             } catch (...) {
@@ -519,7 +519,7 @@ public void notifyUpdateAggregate(UDAggregate udf)
 
 future<> migration_notifier::drop_keyspace(const sstring& ks_name) {
     return seastar::async([this, ks_name] {
-        _listeners.for_each([&ks_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name] (migration_listener* listener) {
             try {
                 listener->on_drop_keyspace(ks_name);
             } catch (...) {
@@ -533,7 +533,7 @@ future<> migration_notifier::drop_column_family(const schema_ptr& cfm) {
     return seastar::async([this, cfm] {
         const auto& cf_name = cfm->cf_name();
         const auto& ks_name = cfm->ks_name();
-        _listeners.for_each([&ks_name, &cf_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &cf_name] (migration_listener* listener) {
             try {
                 listener->on_drop_column_family(ks_name, cf_name);
             } catch (...) {
@@ -547,7 +547,7 @@ future<> migration_notifier::drop_user_type(const user_type& type) {
     return seastar::async([this, type] {
         auto&& ks_name = type->_keyspace;
         auto&& type_name = type->get_name_as_string();
-        _listeners.for_each([&ks_name, &type_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &type_name] (migration_listener* listener) {
             try {
                 listener->on_drop_user_type(ks_name, type_name);
             } catch (...) {
@@ -561,7 +561,7 @@ future<> migration_notifier::drop_view(const view_ptr& view) {
     return seastar::async([this, view] {
         auto&& ks_name = view->ks_name();
         auto&& view_name = view->cf_name();
-        _listeners.for_each([&ks_name, &view_name] (migration_listener* listener) {
+        _listeners.thread_for_each([&ks_name, &view_name] (migration_listener* listener) {
             try {
                 listener->on_drop_view(ks_name, view_name);
             } catch (...) {
@@ -573,7 +573,7 @@ future<> migration_notifier::drop_view(const view_ptr& view) {
 
 void migration_notifier::before_create_column_family(const schema& schema,
         std::vector<mutation>& mutations, api::timestamp_type timestamp) {
-    _listeners.for_each([&mutations, &schema, timestamp] (migration_listener* listener) {
+    _listeners.thread_for_each([&mutations, &schema, timestamp] (migration_listener* listener) {
         // allow exceptions. so a listener can effectively kill a create-table
         listener->on_before_create_column_family(schema, mutations, timestamp);
     });
@@ -581,7 +581,7 @@ void migration_notifier::before_create_column_family(const schema& schema,
 
 void migration_notifier::before_update_column_family(const schema& new_schema,
         const schema& old_schema, std::vector<mutation>& mutations, api::timestamp_type ts) {
-    _listeners.for_each([&mutations, &new_schema, &old_schema, ts] (migration_listener* listener) {
+    _listeners.thread_for_each([&mutations, &new_schema, &old_schema, ts] (migration_listener* listener) {
         // allow exceptions. so a listener can effectively kill an update-column
         listener->on_before_update_column_family(new_schema, old_schema, mutations, ts);
     });
@@ -589,7 +589,7 @@ void migration_notifier::before_update_column_family(const schema& new_schema,
 
 void migration_notifier::before_drop_column_family(const schema& schema,
         std::vector<mutation>& mutations, api::timestamp_type ts) {
-    _listeners.for_each([&mutations, &schema, ts] (migration_listener* listener) {
+    _listeners.thread_for_each([&mutations, &schema, ts] (migration_listener* listener) {
         // allow exceptions. so a listener can effectively kill a drop-column
         listener->on_before_drop_column_family(schema, mutations, ts);
     });
@@ -619,37 +619,19 @@ std::vector<mutation> migration_manager::prepare_keyspace_update_announcement(lw
     return db::schema_tables::make_create_keyspace_mutations(ksm, api::new_timestamp());
 }
 
-future<> migration_manager::announce_keyspace_update(lw_shared_ptr<keyspace_metadata> ksm) {
-    return announce(prepare_keyspace_update_announcement(std::move(ksm)));
-}
-
-future<>migration_manager::announce_new_keyspace(lw_shared_ptr<keyspace_metadata> ksm)
-{
-    return announce_new_keyspace(ksm, api::new_timestamp());
-}
-
-std::vector<mutation> migration_manager::prepare_new_keyspace_announcement(lw_shared_ptr<keyspace_metadata> ksm, api::timestamp_type timestamp) {
+std::vector<mutation> migration_manager::prepare_new_keyspace_announcement(lw_shared_ptr<keyspace_metadata> ksm) {
     auto& proxy = _storage_proxy;
     auto& db = proxy.get_db().local();
 
     db.validate_new_keyspace(*ksm);
     mlogger.info("Create new Keyspace: {}", ksm);
-    return db::schema_tables::make_create_keyspace_mutations(ksm, timestamp);
-}
-
-future<> migration_manager::announce_new_keyspace(lw_shared_ptr<keyspace_metadata> ksm, api::timestamp_type timestamp) {
-    return announce(prepare_new_keyspace_announcement(std::move(ksm), timestamp));
+    return db::schema_tables::make_create_keyspace_mutations(ksm, api::new_timestamp());
 }
 
 future<> migration_manager::validate(schema_ptr schema) {
     return do_for_each(schema->extensions(), [schema](auto & p) {
         return p.second->validate(*schema);
     });
-}
-
-future<> migration_manager::announce_new_column_family(schema_ptr cfm)
-{
-    return announce_new_column_family(std::move(cfm), api::new_timestamp());
 }
 
 future<std::vector<mutation>> migration_manager::prepare_new_column_family_announcement(schema_ptr cfm)
@@ -668,10 +650,6 @@ future<std::vector<mutation>> migration_manager::include_keyspace(
     mutation m = co_await db::schema_tables::read_keyspace_mutation(_storage_proxy.container(), keyspace.name());
     mutations.push_back(std::move(m));
     co_return std::move(mutations);
-}
-
-future<> migration_manager::announce_new_column_family(schema_ptr cfm, api::timestamp_type timestamp) {
-    co_await announce(co_await prepare_new_column_family_announcement(std::move(cfm), timestamp));
 }
 
 future<std::vector<mutation>> migration_manager::prepare_new_column_family_announcement(schema_ptr cfm, api::timestamp_type timestamp) {
@@ -735,10 +713,6 @@ future<std::vector<mutation>> migration_manager::prepare_column_family_update_an
         co_return coroutine::make_exception(exceptions::configuration_exception(format("Cannot update non existing table '{}' in keyspace '{}'.",
                                                          cfm->cf_name(), cfm->ks_name())));
     }
-}
-
-future<> migration_manager::announce_column_family_update(schema_ptr cfm, bool from_thrift, std::optional<api::timestamp_type> ts_opt) {
-    co_return co_await announce(co_await prepare_column_family_update_announcement(std::move(cfm), from_thrift, {}, ts_opt));
 }
 
 future<std::vector<mutation>> migration_manager::do_prepare_new_type_announcement(user_type new_type) {
@@ -835,10 +809,6 @@ std::vector<mutation> migration_manager::prepare_keyspace_drop_announcement(cons
     return db::schema_tables::make_drop_keyspace_mutations(keyspace.metadata(), api::new_timestamp());
 }
 
-future<> migration_manager::announce_keyspace_drop(const sstring& ks_name) {
-    return announce(prepare_keyspace_drop_announcement(ks_name));
-}
-
 future<std::vector<mutation>> migration_manager::prepare_column_family_drop_announcement(const sstring& ks_name,
                     const sstring& cf_name, drop_views drop_views) {
     try {
@@ -889,12 +859,6 @@ future<std::vector<mutation>> migration_manager::prepare_column_family_drop_anno
     }
 }
 
-future<> migration_manager::announce_column_family_drop(const sstring& ks_name,
-                                                        const sstring& cf_name,
-                                                        drop_views drop_views) {
-    co_return co_await announce(co_await prepare_column_family_drop_announcement(ks_name, cf_name, drop_views));
-}
-
 future<std::vector<mutation>> migration_manager::prepare_type_drop_announcement(user_type dropped_type) {
     auto& db = _storage_proxy.get_db().local();
     auto&& keyspace = db.find_keyspace(dropped_type->_keyspace);
@@ -921,10 +885,6 @@ future<std::vector<mutation>> migration_manager::prepare_new_view_announcement(v
     } catch (const replica::no_such_keyspace& e) {
         co_return coroutine::make_exception(exceptions::configuration_exception(format("Cannot add view '{}' to non existing keyspace '{}'.", view->cf_name(), view->ks_name())));
     }
-}
-
-future<> migration_manager::announce_new_view(view_ptr view) {
-    co_return co_await announce(co_await prepare_new_view_announcement(std::move(view)));
 }
 
 future<std::vector<mutation>> migration_manager::prepare_view_update_announcement(view_ptr view) {
@@ -990,21 +950,19 @@ future<> migration_manager::push_schema_mutation(const gms::inet_address& endpoi
 // Returns a future on the local application of the schema
 future<> migration_manager::announce(std::vector<mutation> schema) {
     if (_raft_gr.is_enabled()) {
+        assert(this_shard_id() == 0);
         auto schema_features = _feat.cluster_schema_features();
         auto adjusted_schema = db::schema_tables::adjust_schema_for_schema_features(schema, schema_features);
-        auto func = [&adjusted_schema] (migration_manager& mm) -> future<> {
-            raft::command cmd;
-            ser::serialize(cmd, std::vector<canonical_mutation>(adjusted_schema.begin(), adjusted_schema.end()));
-            // todo: add schema version into command, to apply
-            // only on condition the version is the same.
-            // qqq: what happens if there is a command in between?
-            // there is a new schema version, apply skipped, but
-            // we don't get a proper error.
-            co_return co_await mm._raft_gr.group0().add_entry(std::move(cmd), raft::wait_type::applied);
-            // TODO: return "retry" error if apply is a no-op - check
-            // new schema version
-        };
-        co_return co_await container().invoke_on(0, func);
+        raft::command cmd;
+        ser::serialize(cmd, std::vector<canonical_mutation>(adjusted_schema.begin(), adjusted_schema.end()));
+        // todo: add schema version into command, to apply
+        // only on condition the version is the same.
+        // qqq: what happens if there is a command in between?
+        // there is a new schema version, apply skipped, but
+        // we don't get a proper error.
+        co_return co_await _raft_gr.group0().add_entry(std::move(cmd), raft::wait_type::applied);
+        // TODO: return "retry" error if apply is a no-op - check
+        // new schema version
     } else {
         auto f = db::schema_tables::merge_schema(_storage_proxy.container(), _feat, schema);
 
@@ -1029,9 +987,8 @@ future<> migration_manager::announce(std::vector<mutation> schema) {
 
 future<> migration_manager::schema_read_barrier() {
     if (_raft_gr.is_enabled()) {
-        return container().invoke_on(0, [] (migration_manager& mm) {
-            return mm._raft_gr.group0().read_barrier();
-        });
+        assert(this_shard_id() == 0);
+        return _raft_gr.group0().read_barrier();
     }
     return make_ready_future();
 }
@@ -1230,25 +1187,28 @@ future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_ver
     return db::schema_tables::get_column_mapping(table_id, v);
 }
 
-void migration_manager::on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) {
+future<> migration_manager::on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) {
     schedule_schema_pull(endpoint, ep_state);
+    return make_ready_future();
 }
 
-void migration_manager::on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value) {
+future<> migration_manager::on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value) {
     if (state == gms::application_state::SCHEMA) {
         auto* ep_state = _gossiper.get_endpoint_state_for_endpoint_ptr(endpoint);
         if (!ep_state || _gossiper.is_dead_state(*ep_state)) {
             mlogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
-            return;
+            return make_ready_future();
         }
         if (_storage_proxy.get_token_metadata_ptr()->is_member(endpoint)) {
             schedule_schema_pull(endpoint, *ep_state);
         }
     }
+    return make_ready_future();
 }
 
-void migration_manager::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
+future<> migration_manager::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
     schedule_schema_pull(endpoint, state);
+    return make_ready_future();
 }
 
 }

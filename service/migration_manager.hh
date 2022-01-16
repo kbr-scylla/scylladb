@@ -118,25 +118,17 @@ public:
     bool should_pull_schema_from(const gms::inet_address& endpoint);
     bool has_compatible_schema_tables_version(const gms::inet_address& endpoint);
 
-    future<> announce_keyspace_update(lw_shared_ptr<keyspace_metadata> ksm);
     std::vector<mutation> prepare_keyspace_update_announcement(lw_shared_ptr<keyspace_metadata> ksm);
 
-    future<> announce_new_keyspace(lw_shared_ptr<keyspace_metadata> ksm);
-
-    future<> announce_new_keyspace(lw_shared_ptr<keyspace_metadata> ksm, api::timestamp_type timestamp);
-
-    std::vector<mutation> prepare_new_keyspace_announcement(lw_shared_ptr<keyspace_metadata> ksm, api::timestamp_type timestamp);
+    std::vector<mutation> prepare_new_keyspace_announcement(lw_shared_ptr<keyspace_metadata> ksm);
 
 
     // The timestamp parameter can be used to ensure that all nodes update their internal tables' schemas
     // with identical timestamps, which can prevent an undeeded schema exchange
-    future<> announce_column_family_update(schema_ptr cfm, bool from_thrift, std::optional<api::timestamp_type> timestamp);
     future<std::vector<mutation>> prepare_column_family_update_announcement(schema_ptr cfm, bool from_thrift, std::vector<view_ptr> view_updates, std::optional<api::timestamp_type> ts_opt);
 
-    future<> announce_new_column_family(schema_ptr cfm);
     future<std::vector<mutation>> prepare_new_column_family_announcement(schema_ptr cfm);
 
-    future<> announce_new_column_family(schema_ptr cfm, api::timestamp_type timestamp);
     future<std::vector<mutation>> prepare_new_column_family_announcement(schema_ptr cfm, api::timestamp_type timestamp);
 
     future<std::vector<mutation>> prepare_new_type_announcement(user_type new_type);
@@ -151,17 +143,14 @@ public:
 
     future<std::vector<mutation>> prepare_update_type_announcement(user_type updated_type);
 
-    future<> announce_keyspace_drop(const sstring& ks_name);
     std::vector<mutation> prepare_keyspace_drop_announcement(const sstring& ks_name);
 
     class drop_views_tag;
     using drop_views = bool_class<drop_views_tag>;
-    future<> announce_column_family_drop(const sstring& ks_name, const sstring& cf_name, drop_views drop_views = drop_views::no);
     future<std::vector<mutation>> prepare_column_family_drop_announcement(const sstring& ks_name, const sstring& cf_name, drop_views drop_views = drop_views::no);
 
     future<std::vector<mutation>> prepare_type_drop_announcement(user_type dropped_type);
 
-    future<> announce_new_view(view_ptr view);
     future<std::vector<mutation>> prepare_new_view_announcement(view_ptr view);
 
     future<std::vector<mutation>> prepare_view_update_announcement(view_ptr view);
@@ -226,13 +215,13 @@ public:
     future<schema_ptr> get_schema_for_write(table_schema_version, netw::msg_addr from, netw::messaging_service& ms);
 
 private:
-    virtual void on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) override;
-    virtual void on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value) override;
-    virtual void on_alive(gms::inet_address endpoint, gms::endpoint_state state) override;
-    virtual void on_dead(gms::inet_address endpoint, gms::endpoint_state state) override {}
-    virtual void on_remove(gms::inet_address endpoint) override {}
-    virtual void on_restart(gms::inet_address endpoint, gms::endpoint_state state) override {}
-    virtual void before_change(gms::inet_address endpoint, gms::endpoint_state current_state, gms::application_state new_statekey, const gms::versioned_value& newvalue) override {}
+    virtual future<> on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) override;
+    virtual future<> on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value) override;
+    virtual future<> on_alive(gms::inet_address endpoint, gms::endpoint_state state) override;
+    virtual future<> on_dead(gms::inet_address endpoint, gms::endpoint_state state) override { return make_ready_future(); }
+    virtual future<> on_remove(gms::inet_address endpoint) override { return make_ready_future(); }
+    virtual future<> on_restart(gms::inet_address endpoint, gms::endpoint_state state) override { return make_ready_future(); }
+    virtual future<> before_change(gms::inet_address endpoint, gms::endpoint_state current_state, gms::application_state new_statekey, const gms::versioned_value& newvalue) override { return make_ready_future(); }
 };
 
 future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_version v);

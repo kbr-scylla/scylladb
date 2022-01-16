@@ -62,6 +62,16 @@ public:
     explicit make_jsonable(rjson::value&& value);
     std::string to_json() const override;
 };
+
+/**
+ * Make return type for serializing the object "streamed",
+ * i.e. direct to HTTP output stream. Note: only useful for
+ * (very) large objects as there are overhead issues with this
+ * as well, but for massive lists of return objects this can
+ * help avoid large allocations/many re-allocs
+ */ 
+json::json_return_type make_streamed(rjson::value&&);
+
 struct json_string : public json::jsonable {
     std::string _value;
 public:
@@ -187,8 +197,6 @@ public:
     future<> start();
     future<> stop() { return make_ready_future<>(); }
 
-    future<> create_keyspace(std::string_view keyspace_name);
-
     static sstring table_name(const schema&);
     static db::timeout_clock::time_point default_timeout();
     static void set_default_timeout(db::timeout_clock::duration timeout);
@@ -218,9 +226,9 @@ public:
         rjson::value&,
         bool = false);
 
-    void add_stream_options(const rjson::value& stream_spec, schema_builder&) const;
-    void supplement_table_info(rjson::value& descr, const schema& schema) const;
-    void supplement_table_stream_info(rjson::value& descr, const schema& schema) const;
+    static void add_stream_options(const rjson::value& stream_spec, schema_builder&, service::storage_proxy& sp);
+    static void supplement_table_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp);
+    static void supplement_table_stream_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp);
 };
 
 }

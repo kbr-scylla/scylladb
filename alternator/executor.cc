@@ -50,10 +50,13 @@
 #include <boost/range/algorithm/find_end.hpp>
 #include "service/storage_proxy.hh"
 #include "gms/gossiper.hh"
+#include "schema_registry.hh"
 
 logging::logger elogger("alternator-executor");
 
 namespace alternator {
+
+static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper);
 
 static map_type attrs_type() {
     static thread_local auto t = map_type_impl::get_instance(utf8_type, bytes_type, true);
@@ -73,6 +76,31 @@ std::string make_jsonable::to_json() const {
     return rjson::print(_value);
 }
 
+json::json_return_type make_streamed(rjson::value&& value) {
+    // CMH. json::json_return_type uses std::function, not noncopyable_function. 
+    // Need to make a copyable version of value. Gah.
+    auto rs = make_shared<rjson::value>(std::move(value));
+    std::function<future<>(output_stream<char>&&)> func = [rs](output_stream<char>&& os) mutable -> future<> {
+        // move objects to coroutine frame.
+        auto los = std::move(os);
+        auto lrs = std::move(rs);
+        try {
+            co_await rjson::print(*lrs, los);
+            co_await los.flush();
+            co_await los.close();
+        } catch (...) {
+            // at this point, we cannot really do anything. HTTP headers and return code are
+            // already written, and quite potentially a portion of the content data.
+            // just log + rethrow. It is probably better the HTTP server closes connection
+            // abruptly or something...
+            elogger.error("Unhandled exception in data streaming: {}", std::current_exception());
+            throw;
+        }
+        co_return;
+    };
+    return func;
+}
+
 json_string::json_string(std::string&& value)
     : _value(std::move(value))
 {}
@@ -80,13 +108,13 @@ std::string json_string::to_json() const {
     return _value;
 }
 
-void executor::supplement_table_info(rjson::value& descr, const schema& schema) const {
+void executor::supplement_table_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp) {
     rjson::add(descr, "CreationDateTime", rjson::value(std::chrono::duration_cast<std::chrono::seconds>(gc_clock::now().time_since_epoch()).count()));
     rjson::add(descr, "TableStatus", "ACTIVE");
     auto schema_id_str = schema.id().to_sstring();
     rjson::add(descr, "TableId", rjson::from_string(schema_id_str));
 
-    executor::supplement_table_stream_info(descr, schema);
+    executor::supplement_table_stream_info(descr, schema, sp);
 }
 
 // We would have liked to support table names up to 255 bytes, like DynamoDB.
@@ -447,7 +475,7 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
     }
     rjson::add(table_description, "AttributeDefinitions", std::move(attribute_definitions));
 
-    supplement_table_stream_info(table_description, *schema);
+    supplement_table_stream_info(table_description, *schema, _proxy);
     
     // FIXME: still missing some response fields (issue #5026)
 
@@ -464,23 +492,31 @@ future<executor::request_return_type> executor::delete_table(client_state& clien
     std::string table_name = get_table_name(request);
     std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     tracing::add_table_name(trace_state, keyspace_name, table_name);
+    auto& p = _proxy.container();
 
-    if (!_proxy.get_db().local().has_schema(keyspace_name, table_name)) {
-        return make_ready_future<request_return_type>(api_error::resource_not_found(
-                format("Requested resource not found: Table: {} not found", table_name)));
-    }
-    return _mm.announce_column_family_drop(keyspace_name, table_name, service::migration_manager::drop_views::yes).then([this, keyspace_name] {
-        return _mm.announce_keyspace_drop(keyspace_name);
-    }).then([table_name = std::move(table_name)] {
-        // FIXME: need more attributes?
-        rjson::value table_description = rjson::empty_object();
-        rjson::add(table_description, "TableName", rjson::from_string(table_name));
-        rjson::add(table_description, "TableStatus", "DELETING");
-        rjson::value response = rjson::empty_object();
-        rjson::add(response, "TableDescription", std::move(table_description));
-        elogger.trace("returning {}", response);
-        return make_ready_future<executor::request_return_type>(make_jsonable(std::move(response)));
+    co_await _mm.container().invoke_on(0, [&] (service::migration_manager& mm) -> future<> {
+        co_await mm.schema_read_barrier();
+
+        if (!p.local().get_db().local().has_schema(keyspace_name, table_name)) {
+            throw api_error::resource_not_found(format("Requested resource not found: Table: {} not found", table_name));
+        }
+
+        auto m = co_await mm.prepare_column_family_drop_announcement(keyspace_name, table_name, service::migration_manager::drop_views::yes);
+        auto m2 = mm.prepare_keyspace_drop_announcement(keyspace_name);
+
+        std::move(m2.begin(), m2.end(), std::back_inserter(m));
+
+        co_await mm.announce(std::move(m));
     });
+
+    // FIXME: need more attributes?
+    rjson::value table_description = rjson::empty_object();
+    rjson::add(table_description, "TableName", rjson::from_string(table_name));
+    rjson::add(table_description, "TableStatus", "DELETING");
+    rjson::value response = rjson::empty_object();
+    rjson::add(response, "TableDescription", std::move(table_description));
+    elogger.trace("returning {}", response);
+    co_return make_jsonable(std::move(response));
 }
 
 static data_type parse_key_type(const std::string& type) {
@@ -714,9 +750,16 @@ static void update_tags_map(const rjson::value& tags, std::map<sstring, sstring>
 // to races during concurrent updates of the same table. Once Scylla schema updates
 // are fixed, this issue will automatically get fixed as well.
 future<> update_tags(service::migration_manager& mm, schema_ptr schema, std::map<sstring, sstring>&& tags_map) {
-    schema_builder builder(schema);
-    builder.add_extension(tags_extension::NAME, ::make_shared<tags_extension>(std::move(tags_map)));
-    return mm.announce_column_family_update(builder.build(), false, std::nullopt);
+    co_await mm.container().invoke_on(0, [s = global_schema_ptr(std::move(schema)), tags_map = std::move(tags_map)] (service::migration_manager& mm) -> future<> {
+        co_await mm.schema_read_barrier();
+
+        schema_builder builder(s);
+        builder.add_extension(tags_extension::NAME, ::make_shared<tags_extension>(tags_map));
+
+        auto m = co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), std::nullopt);
+
+        co_await mm.announce(std::move(m));
+    });
 }
 
 future<executor::request_return_type> executor::tag_resource(client_state& client_state, service_permit permit, rjson::value request) {
@@ -811,13 +854,12 @@ static void verify_billing_mode(const rjson::value& request) {
     }
 }
 
-future<executor::request_return_type> executor::create_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
-    _stats.api_operations.create_table++;
-    elogger.trace("Creating table {}", request);
+static future<executor::request_return_type> create_table_on_shard0(tracing::trace_state_ptr trace_state, rjson::value request, service::storage_proxy& sp, service::migration_manager& mm, gms::gossiper& gossiper) {
+    assert(this_shard_id() == 0);
+
     std::string table_name = get_table_name(request);
-    if (table_name.find(INTERNAL_TABLE_PREFIX) == 0) {
-        return make_ready_future<request_return_type>(api_error::validation(
-                format("Prefix {} is reserved for accessing internal tables", INTERNAL_TABLE_PREFIX)));
+    if (table_name.find(executor::INTERNAL_TABLE_PREFIX) == 0) {
+        co_return api_error::validation(format("Prefix {} is reserved for accessing internal tables", executor::INTERNAL_TABLE_PREFIX));
     }
     std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     const rjson::value& attribute_definitions = request["AttributeDefinitions"];
@@ -830,9 +872,11 @@ future<executor::request_return_type> executor::create_table(client_state& clien
     if (!range_key.empty()) {
         add_column(builder, range_key, attribute_definitions, column_kind::clustering_key);
     }
-    builder.with_column(bytes(ATTRS_COLUMN_NAME), attrs_type(), column_kind::regular_column);
+    builder.with_column(bytes(executor::ATTRS_COLUMN_NAME), attrs_type(), column_kind::regular_column);
 
     verify_billing_mode(request);
+
+    co_await mm.schema_read_barrier();
 
     schema_ptr partial_schema = builder.build();
 
@@ -844,12 +888,12 @@ future<executor::request_return_type> executor::create_table(client_state& clien
     std::vector<sstring> where_clauses;
     if (gsi) {
         if (!gsi->IsArray()) {
-            return make_ready_future<request_return_type>(api_error::validation("GlobalSecondaryIndexes must be an array."));
+            co_return api_error::validation("GlobalSecondaryIndexes must be an array.");
         }
         for (const rjson::value& g : gsi->GetArray()) {
             const rjson::value* index_name = rjson::find(g, "IndexName");
             if (!index_name || !index_name->IsString()) {
-                return make_ready_future<request_return_type>(api_error::validation("GlobalSecondaryIndexes IndexName must be a string."));
+                co_return api_error::validation("GlobalSecondaryIndexes IndexName must be a string.");
             }
             std::string vname(view_name(table_name, index_name->GetString()));
             elogger.trace("Adding GSI {}", index_name->GetString());
@@ -907,23 +951,21 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             std::string vname(lsi_name(table_name, index_name->GetString()));
             elogger.trace("Adding LSI {}", index_name->GetString());
             if (range_key.empty()) {
-                return make_ready_future<request_return_type>(api_error::validation(
-                        "LocalSecondaryIndex requires that the base table have a range key"));
+                co_return api_error::validation("LocalSecondaryIndex requires that the base table have a range key");
             }
             // FIXME: read and handle "Projection" parameter. This will
             // require the MV code to copy just parts of the attrs map.
             schema_builder view_builder(keyspace_name, vname);
             auto [view_hash_key, view_range_key] = parse_key_schema(l);
             if (view_hash_key != hash_key) {
-                return make_ready_future<request_return_type>(api_error::validation(
-                        "LocalSecondaryIndex hash key must match the base table hash key"));
+                co_return api_error::validation("LocalSecondaryIndex hash key must match the base table hash key");
             }
             add_column(view_builder, view_hash_key, attribute_definitions, column_kind::partition_key);
             if (view_range_key.empty()) {
-                return make_ready_future<request_return_type>(api_error::validation("LocalSecondaryIndex must specify a sort key"));
+                co_return api_error::validation("LocalSecondaryIndex must specify a sort key");
             }
             if (view_range_key == hash_key) {
-                return make_ready_future<request_return_type>(api_error::validation("LocalSecondaryIndex sort key cannot be the same as hash key"));
+                co_return api_error::validation("LocalSecondaryIndex sort key cannot be the same as hash key");
               }
             if (view_range_key != range_key) {
                 add_column(builder, view_range_key, attribute_definitions, column_kind::regular_column);
@@ -935,7 +977,7 @@ future<executor::request_return_type> executor::create_table(client_state& clien
             if  (!range_key.empty() && view_range_key != range_key) {
                 add_column(view_builder, range_key, attribute_definitions, column_kind::clustering_key);
             }
-            view_builder.with_column(bytes(ATTRS_COLUMN_NAME), attrs_type(), column_kind::regular_column);
+            view_builder.with_column(bytes(executor::ATTRS_COLUMN_NAME), attrs_type(), column_kind::regular_column);
             // Note above we don't need to add virtual columns, as all
             // base columns were copied to view. TODO: reconsider the need
             // for virtual columns when we support Projection.
@@ -955,17 +997,17 @@ future<executor::request_return_type> executor::create_table(client_state& clien
     if (sse_specification && sse_specification->IsObject()) {
         rjson::value* enabled = rjson::find(*sse_specification, "Enabled");
         if (!enabled || !enabled->IsBool()) {
-            return make_ready_future<request_return_type>(api_error("ValidationException", "SSESpecification needs boolean Enabled"));
+            co_return api_error("ValidationException", "SSESpecification needs boolean Enabled");
         }
         if (enabled->GetBool()) {
             // TODO: full support for SSESpecification
-            return make_ready_future<request_return_type>(api_error("ValidationException", "SSESpecification: configuring encryption-at-rest is not yet supported."));
+            co_return api_error("ValidationException", "SSESpecification: configuring encryption-at-rest is not yet supported.");
         }
     }
 
     rjson::value* stream_specification = rjson::find(request, "StreamSpecification");
     if (stream_specification && stream_specification->IsObject()) {
-        add_stream_options(*stream_specification, builder);
+        executor::add_stream_options(*stream_specification, builder, sp);
     }
 
     // Parse the "Tags" parameter early, so we can avoid creating the table
@@ -994,52 +1036,58 @@ future<executor::request_return_type> executor::create_table(client_state& clien
         ++where_clause_it;
     }
 
-    return create_keyspace(keyspace_name).handle_exception_type([] (exceptions::already_exists_exception&) {
-            // Ignore the fact that the keyspace may already exist. See discussion in #6340
-        }).then([this, table_name, request = std::move(request), schema, view_builders = std::move(view_builders), tags_map = std::move(tags_map)] () mutable {
-        return futurize_invoke([&] { return _mm.announce_new_column_family(schema); }).then([this, table_info = std::move(request), schema, view_builders = std::move(view_builders), tags_map = std::move(tags_map)] () mutable {
-            return parallel_for_each(std::move(view_builders), [this, schema] (schema_builder builder) {
-                return _mm.announce_new_view(view_ptr(builder.build()));
-            }).then([this, table_info = std::move(table_info), schema, tags_map = std::move(tags_map)] () mutable {
-                future<> f = make_ready_future<>();
-                if (!tags_map.empty()) {
-                    f = update_tags(_mm, schema, std::move(tags_map));
-                }
-                return f.then([this] {
-                    return wait_for_schema_agreement(_mm, db::timeout_clock::now() + 10s);
-                }).then([this, table_info = std::move(table_info), schema] () mutable {
-                    rjson::value status = rjson::empty_object();
-                    supplement_table_info(table_info, *schema);
-                    rjson::add(status, "TableDescription", std::move(table_info));
-                    return make_ready_future<executor::request_return_type>(make_jsonable(std::move(status)));
-                });
-            });
-        }).handle_exception_type([table_name = std::move(table_name)] (exceptions::already_exists_exception&) {
-            return make_exception_future<executor::request_return_type>(
-                    api_error::resource_in_use(format("Table {} already exists", table_name)));
+    try {
+        co_await mm.announce(co_await create_keyspace(keyspace_name, mm, gossiper));
+    } catch (exceptions::already_exists_exception&) {
+        // Ignore the fact that the keyspace may already exist. See discussion in #6340
+    }
+
+    try {
+        // The code should be rewritten in a way that allows creating mutations
+        // for all the changes in a single mutation array before announcing.
+        // See https://github.com/scylladb/scylla/issues/9868
+        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(schema));
+
+        std::vector<mutation> m;
+
+        co_await parallel_for_each(std::move(view_builders), [&mm, schema, &m] (schema_builder builder) -> future<> {
+            auto vm = co_await mm.prepare_new_view_announcement(view_ptr(builder.build()));
+            std::move(vm.begin(), vm.end(), std::back_inserter(m));
         });
+
+        co_await mm.announce(std::move(m));
+
+        if (!tags_map.empty()) {
+            schema_builder builder(schema);
+            builder.add_extension(tags_extension::NAME, ::make_shared<tags_extension>(tags_map));
+
+            co_await mm.announce(co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), std::nullopt));
+        }
+
+        co_await wait_for_schema_agreement(mm, db::timeout_clock::now() + 10s);
+
+        rjson::value status = rjson::empty_object();
+        executor::supplement_table_info(request, *schema, sp);
+        rjson::add(status, "TableDescription", std::move(request));
+        co_return make_jsonable(std::move(status));
+    } catch(exceptions::already_exists_exception&) {
+        co_return api_error::resource_in_use(format("Table {} already exists", table_name));
+    }
+}
+
+future<executor::request_return_type> executor::create_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
+    _stats.api_operations.create_table++;
+    elogger.trace("Creating table {}", request);
+
+    co_return co_await _mm.container().invoke_on(0, [&, tr = tracing::global_trace_state_ptr(trace_state), request = std::move(request), &sp = _proxy.container(), &g = _gossiper.container()]
+                                        (service::migration_manager& mm) mutable -> future<executor::request_return_type> {
+        co_return co_await create_table_on_shard0(tr, std::move(request), sp.local(), mm, g.local());
     });
 }
 
 future<executor::request_return_type> executor::update_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     _stats.api_operations.update_table++;
     elogger.trace("Updating table {}", request);
-
-    schema_ptr tab = get_table(_proxy, request);
-    // the ugly but harmless conversion to string_view here is because
-    // Seastar's sstring is missing a find(std::string_view) :-()
-    if (std::string_view(tab->cf_name()).find(INTERNAL_TABLE_PREFIX) == 0) {
-        return make_ready_future<request_return_type>(api_error::validation(
-                format("Prefix {} is reserved for accessing internal tables", INTERNAL_TABLE_PREFIX)));
-    }
-    tracing::add_table_name(trace_state, tab->ks_name(), tab->cf_name());
-
-    schema_builder builder(tab);
-
-    rjson::value* stream_specification = rjson::find(request, "StreamSpecification");
-    if (stream_specification && stream_specification->IsObject()) {
-        add_stream_options(*stream_specification, builder);
-    }
 
     static const std::vector<sstring> unsupported = {
         "AttributeDefinitions", 
@@ -1051,7 +1099,7 @@ future<executor::request_return_type> executor::update_table(client_state& clien
 
     for (auto& s : unsupported) {
         if (rjson::find(request, s)) {
-            throw api_error::validation(s + " not supported");
+            co_return coroutine::make_exception(api_error::validation(s + " not supported"));
         }
     }
 
@@ -1059,15 +1107,39 @@ future<executor::request_return_type> executor::update_table(client_state& clien
         verify_billing_mode(request);
     }
 
-    auto schema = builder.build();
+    co_return co_await _mm.container().invoke_on(0, [&p = _proxy.container(), request = std::move(request), gt = tracing::global_trace_state_ptr(std::move(trace_state))]
+                                                (service::migration_manager& mm) mutable -> future<executor::request_return_type> {
+        co_await mm.schema_read_barrier();
 
-    return _mm.announce_column_family_update(schema, false, std::nullopt).then([this] {
-        return wait_for_schema_agreement(_mm, db::timeout_clock::now() + 10s);
-    }).then([this, table_info = std::move(request), schema] () mutable {
+        schema_ptr tab = get_table(p.local(), request);
+
+        tracing::add_table_name(gt, tab->ks_name(), tab->cf_name());
+
+        // the ugly but harmless conversion to string_view here is because
+        // Seastar's sstring is missing a find(std::string_view) :-()
+        if (std::string_view(tab->cf_name()).find(INTERNAL_TABLE_PREFIX) == 0) {
+            co_return coroutine::make_exception(api_error::validation(format("Prefix {} is reserved for accessing internal tables", INTERNAL_TABLE_PREFIX)));
+        }
+
+        schema_builder builder(tab);
+
+        rjson::value* stream_specification = rjson::find(request, "StreamSpecification");
+        if (stream_specification && stream_specification->IsObject()) {
+            add_stream_options(*stream_specification, builder, p.local());
+        }
+
+        auto schema = builder.build();
+
+        auto m = co_await mm.prepare_column_family_update_announcement(schema, false,  std::vector<view_ptr>(), std::nullopt);
+
+        co_await mm.announce(std::move(m));
+
+        co_await wait_for_schema_agreement(mm, db::timeout_clock::now() + 10s);
+
         rjson::value status = rjson::empty_object();
-        supplement_table_info(table_info, *schema);
-        rjson::add(status, "TableDescription", std::move(table_info));
-        return make_ready_future<executor::request_return_type>(make_jsonable(std::move(status)));
+        supplement_table_info(request, *schema, p.local());
+        rjson::add(status, "TableDescription", std::move(request));
+        co_return make_jsonable(std::move(status));
     });
 }
 
@@ -2926,6 +2998,69 @@ future<executor::request_return_type> executor::get_item(client_state& client_st
     });
 }
 
+// is_big() checks approximately if the given JSON value is "bigger" than
+// the given big_size number of bytes. The goal is to *quickly* detect
+// oversized JSON that, for example, is too large to be serialized to a
+// contiguous string - we don't need an accurate size for that. Moreover,
+// as soon as we detect that the JSON is indeed "big", we can return true
+// and don't need to continue calculating its exact size.
+// For simplicity, we use a recursive implementation. This is fine because
+// Alternator limits the depth of JSONs it reads from inputs, and doesn't
+// add more than a couple of levels in its own output construction.
+
+static void check_big_object(const rjson::value& val, int& size_left);
+static void check_big_array(const rjson::value& val, int& size_left);
+
+static bool is_big(const rjson::value& val, int big_size = 100'000) {
+    if (val.IsString()) {
+        return val.GetStringLength() > big_size;
+    } else if (val.IsObject()) {
+        check_big_object(val, big_size);
+        return big_size < 0;
+    } else if (val.IsArray()) {
+        check_big_array(val, big_size);
+        return big_size < 0;
+    }
+    return false;
+}
+
+static void check_big_array(const rjson::value& val, int& size_left) {
+    // Assume a fixed size of 10 bytes for each number, boolean, etc., or
+    // beginning of a sub-object. This doesn't have to be accurate.
+    size_left -= 10 * val.Size();
+    for (const auto& v : val.GetArray()) {
+        if (size_left < 0) {
+            return;
+        }
+        // Note that we avoid recursive calls for the leaves (anything except
+        // array or object) because usually those greatly outnumber the trunk.
+        if (v.IsString()) {
+            size_left -= v.GetStringLength();
+        } else if (v.IsObject()) {
+            check_big_object(v, size_left);
+        } else if (v.IsArray()) {
+            check_big_array(v, size_left);
+        }
+    }
+}
+
+static void check_big_object(const rjson::value& val, int& size_left) {
+    size_left -= 10 * val.MemberCount();
+    for (const auto& m : val.GetObject()) {
+        if (size_left < 0) {
+            return;
+        }
+        size_left -= m.name.GetStringLength();
+        if (m.value.IsString()) {
+            size_left -= m.value.GetStringLength();
+        } else if (m.value.IsObject()) {
+            check_big_object(m.value, size_left);
+        } else if (m.value.IsArray()) {
+            check_big_array(m.value, size_left);
+        }
+    }
+}
+
 future<executor::request_return_type> executor::batch_get_item(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
     // FIXME: In this implementation, an unbounded batch size can cause
     // unbounded response JSON object to be buffered in memory, unbounded
@@ -3014,7 +3149,11 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
                 rjson::push_back(response["Responses"][std::get<0>(t)], std::move(*std::get<1>(t)));
             }
         }
-        return make_ready_future<executor::request_return_type>(make_jsonable(std::move(response)));
+        if (is_big(response)) {
+            return make_ready_future<executor::request_return_type>(make_streamed(std::move(response)));
+        } else {
+            return make_ready_future<executor::request_return_type>(make_jsonable(std::move(response)));
+        }
     });
 }
 
@@ -3262,16 +3401,17 @@ public:
     }
 };
 
-static rjson::value describe_items(schema_ptr schema, const query::partition_slice& slice, const cql3::selection::selection& selection, std::unique_ptr<cql3::result_set> result_set, attrs_to_get&& attrs_to_get, filter&& filter) {
+static std::tuple<rjson::value, size_t> describe_items(schema_ptr schema, const query::partition_slice& slice, const cql3::selection::selection& selection, std::unique_ptr<cql3::result_set> result_set, attrs_to_get&& attrs_to_get, filter&& filter) {
     describe_items_visitor visitor(selection.get_columns(), attrs_to_get, filter);
     result_set->visit(visitor);
     auto scanned_count = visitor.get_scanned_count();
     rjson::value items = std::move(visitor).get_items();
     rjson::value items_descr = rjson::empty_object();
-    rjson::add(items_descr, "Count", rjson::value(items.Size()));
+    auto size = items.Size();
+    rjson::add(items_descr, "Count", rjson::value(size));
     rjson::add(items_descr, "ScannedCount", rjson::value(scanned_count));
     rjson::add(items_descr, "Items", std::move(items));
-    return items_descr;
+    return {std::move(items_descr), size};
 }
 
 static rjson::value encode_paging_state(const schema& schema, const service::pager::paging_state& paging_state) {
@@ -3341,7 +3481,7 @@ static future<executor::request_return_type> do_query(service::storage_proxy& pr
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto query_options = std::make_unique<cql3::query_options>(cl, std::vector<cql3::raw_value>{});
     query_options = std::make_unique<cql3::query_options>(std::move(query_options), std::move(paging_state));
-    auto p = service::pager::query_pagers::pager(schema, selection, *query_state_ptr, *query_options, command, std::move(partition_ranges), nullptr);
+    auto p = service::pager::query_pagers::pager(proxy, schema, selection, *query_state_ptr, *query_options, command, std::move(partition_ranges), nullptr);
 
     return p->fetch_page(limit, gc_clock::now(), executor::default_timeout()).then(
             [p = std::move(p), schema, cql_stats, partition_slice = std::move(partition_slice),
@@ -3354,14 +3494,18 @@ static future<executor::request_return_type> do_query(service::storage_proxy& pr
         }
         auto paging_state = rs->get_metadata().paging_state();
         bool has_filter = filter;
-        auto items = describe_items(schema, partition_slice, *selection, std::move(rs), std::move(attrs_to_get), std::move(filter));
+        auto [items, size] = describe_items(schema, partition_slice, *selection, std::move(rs), std::move(attrs_to_get), std::move(filter));
         if (paging_state) {
             rjson::add(items, "LastEvaluatedKey", encode_paging_state(*schema, *paging_state));
         }
         if (has_filter){
             cql_stats.filtered_rows_read_total += p->stats().rows_read_total;
             // update our "filtered_row_matched_total" for all the rows matched, despited the filter
-            cql_stats.filtered_rows_matched_total += items["Items"].Size();
+            cql_stats.filtered_rows_matched_total += size;
+        }
+        // TODO: better threshold
+        if (size > 10) {
+            return make_ready_future<executor::request_return_type>(make_streamed(std::move(items)));
         }
         return make_ready_future<executor::request_return_type>(make_jsonable(std::move(items)));
     });
@@ -4028,19 +4172,19 @@ static std::map<sstring, sstring> get_network_topology_options(gms::gossiper& go
 // of nodes in the cluster: A cluster with 3 or more live nodes, gets RF=3.
 // A smaller cluster (presumably, a test only), gets RF=1. The user may
 // manually create the keyspace to override this predefined behavior.
-future<> executor::create_keyspace(std::string_view keyspace_name) {
+static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper) {
     sstring keyspace_name_str(keyspace_name);
-    return gms::get_all_endpoint_count(_gossiper).then([this, keyspace_name_str = std::move(keyspace_name_str)] (int endpoint_count) {
-        int rf = 3;
-        if (endpoint_count < rf) {
-            rf = 1;
-            elogger.warn("Creating keyspace '{}' for Alternator with unsafe RF={} because cluster only has {} nodes.",
-                    keyspace_name_str, rf, endpoint_count);
-        }
-        auto opts = get_network_topology_options(_gossiper, rf);
-        auto ksm = keyspace_metadata::new_keyspace(keyspace_name_str, "org.apache.cassandra.locator.NetworkTopologyStrategy", std::move(opts), true);
-        return _mm.announce_new_keyspace(ksm, api::new_timestamp());
-    });
+    int endpoint_count = co_await gms::get_all_endpoint_count(gossiper);
+    int rf = 3;
+    if (endpoint_count < rf) {
+        rf = 1;
+        elogger.warn("Creating keyspace '{}' for Alternator with unsafe RF={} because cluster only has {} nodes.",
+                keyspace_name_str, rf, endpoint_count);
+    }
+    auto opts = get_network_topology_options(gossiper, rf);
+    auto ksm = keyspace_metadata::new_keyspace(keyspace_name_str, "org.apache.cassandra.locator.NetworkTopologyStrategy", std::move(opts), true);
+
+    co_return mm.prepare_new_keyspace_announcement(ksm);
 }
 
 future<> executor::start() {

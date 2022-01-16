@@ -403,13 +403,13 @@ public:
                     {},
                     mutation_reader::forwarding::no);
         } else {
-            _reader = make_multishard_streaming_reader(db, _schema, _permit, [this] {
+            _reader = downgrade_to_v1(make_multishard_streaming_reader(db, _schema, _permit, [this] {
                 auto shard_range = _sharder.next();
                 if (shard_range) {
                     return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
                 }
                 return std::optional<dht::partition_range>();
-            });
+            }));
         }
     }
 
@@ -2629,7 +2629,7 @@ private:
 
     // Step A: Negotiate sync boundary to use
     op_status negotiate_sync_boundary(repair_meta& master) {
-        check_in_shutdown();
+        _ri.check_in_shutdown();
         _ri.check_in_abort();
         _sync_boundaries.clear();
         _combined_hashes.clear();
@@ -2689,7 +2689,7 @@ private:
 
     // Step B: Get missing rows from peer nodes so that local node contains all the rows
     op_status get_missing_rows_from_follower_nodes(repair_meta& master) {
-        check_in_shutdown();
+        _ri.check_in_shutdown();
         _ri.check_in_abort();
         // `combined_hashes` contains the combined hashes for the
         // `_working_row_buf`. Like `_row_buf`, `_working_row_buf` contains
@@ -2821,7 +2821,7 @@ private:
     void send_missing_rows_to_follower_nodes(repair_meta& master) {
         // At this time, repair master contains all the rows between (_last_sync_boundary, _current_sync_boundary]
         // So we can figure out which rows peer node are missing and send the missing rows to them
-        check_in_shutdown();
+        _ri.check_in_shutdown();
         _ri.check_in_abort();
         repair_hash_set local_row_hash_sets = master.working_row_hashes().get0();
         auto sz = _all_live_peer_nodes.size();
@@ -2891,7 +2891,7 @@ private:
 public:
     future<> run() {
         return seastar::async([this] {
-            check_in_shutdown();
+            _ri.check_in_shutdown();
             _ri.check_in_abort();
             auto repair_meta_id = repair_meta::get_next_repair_meta_id().get0();
             auto algorithm = get_common_diff_detect_algorithm(_ri.messaging.local(), _all_live_peer_nodes);
@@ -3038,48 +3038,53 @@ future<> shutdown_all_row_level_repair() {
 }
 
 class row_level_repair_gossip_helper : public gms::i_endpoint_state_change_subscriber {
-    void remove_row_level_repair(gms::inet_address node) {
+    future<> remove_row_level_repair(gms::inet_address node) {
         rlogger.debug("Started to remove row level repair on all shards for node {}", node);
-        smp::invoke_on_all([node] {
-            return repair_meta::remove_repair_meta(node);
-        }).then([node] {
+        try {
+            co_await smp::invoke_on_all([node] {
+                return repair_meta::remove_repair_meta(node);
+            });
             rlogger.debug("Finished to remove row level repair on all shards for node {}", node);
-        }).handle_exception([node] (std::exception_ptr ep) {
-            rlogger.warn("Failed to remove row level repair for node {}: {}", node, ep);
-        }).get();
+        } catch(...) {
+            rlogger.warn("Failed to remove row level repair for node {}: {}", node, std::current_exception());
+        }
     }
-    virtual void on_join(
+    virtual future<> on_join(
             gms::inet_address endpoint,
             gms::endpoint_state ep_state) override {
+        return make_ready_future();
     }
-    virtual void before_change(
+    virtual future<> before_change(
             gms::inet_address endpoint,
             gms::endpoint_state current_state,
             gms::application_state new_state_key,
             const gms::versioned_value& new_value) override {
+        return make_ready_future();
     }
-    virtual void on_change(
+    virtual future<> on_change(
             gms::inet_address endpoint,
             gms::application_state state,
             const gms::versioned_value& value) override {
+        return make_ready_future();
     }
-    virtual void on_alive(
+    virtual future<> on_alive(
             gms::inet_address endpoint,
             gms::endpoint_state state) override {
+        return make_ready_future();
     }
-    virtual void on_dead(
+    virtual future<> on_dead(
             gms::inet_address endpoint,
             gms::endpoint_state state) override {
-        remove_row_level_repair(endpoint);
+        return remove_row_level_repair(endpoint);
     }
-    virtual void on_remove(
+    virtual future<> on_remove(
             gms::inet_address endpoint) override {
-        remove_row_level_repair(endpoint);
+        return remove_row_level_repair(endpoint);
     }
-    virtual void on_restart(
+    virtual future<> on_restart(
             gms::inet_address endpoint,
             gms::endpoint_state ep_state) override {
-        remove_row_level_repair(endpoint);
+        return remove_row_level_repair(endpoint);
     }
 };
 
@@ -3100,19 +3105,19 @@ repair_service::repair_service(distributed<gms::gossiper>& gossiper,
     , _sys_dist_ks(sys_dist_ks)
     , _view_update_generator(vug)
     , _mm(mm)
+    , _tracker(max_repair_memory)
+    , _node_ops_metrics(_tracker)
     , _max_repair_memory(max_repair_memory)
     , _memory_sem(max_repair_memory)
 {
     if (this_shard_id() == 0) {
         _gossip_helper = make_shared<row_level_repair_gossip_helper>();
-        _tracker = std::make_unique<tracker>(smp::count, max_repair_memory);
         _gossiper.local().register_(_gossip_helper);
     }
 }
 
 future<> repair_service::start() {
     co_await load_history();
-    co_await init_metrics();
     co_await init_ms_handlers();
 }
 

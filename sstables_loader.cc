@@ -22,7 +22,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/rpc/rpc.hh>
 #include "sstables_loader.hh"
-#include "distributed_loader.hh"
+#include "replica/distributed_loader.hh"
 #include "replica/database.hh"
 #include "sstables/sstables.hh"
 #include "gms/inet_address.hh"
@@ -163,7 +163,7 @@ future<> sstables_loader::load_and_stream(sstring ks_name, sstring cf_name,
         size_t num_bytes_read = 0;
         nr_sst_current += sst_processed.size();
         auto permit = co_await _db.local().obtain_reader_permit(table, "sstables_loader::load_and_stream()", db::no_timeout);
-        auto reader = table.make_streaming_reader(s, std::move(permit), full_partition_range, sst_set);
+        auto reader = downgrade_to_v1(table.make_streaming_reader(s, std::move(permit), full_partition_range, sst_set));
         std::exception_ptr eptr;
         bool failed = false;
         try {
@@ -262,12 +262,12 @@ future<> sstables_loader::load_new_sstables(sstring ks_name, sstring cf_name,
         if (load_and_stream) {
             utils::UUID table_id;
             std::vector<std::vector<sstables::shared_sstable>> sstables_on_shards;
-            std::tie(table_id, sstables_on_shards) = co_await distributed_loader::get_sstables_from_upload_dir(_db, ks_name, cf_name);
+            std::tie(table_id, sstables_on_shards) = co_await replica::distributed_loader::get_sstables_from_upload_dir(_db, ks_name, cf_name);
             co_await container().invoke_on_all([&sstables_on_shards, ks_name, cf_name, table_id, primary_replica_only] (sstables_loader& loader) mutable -> future<> {
                 co_await loader.load_and_stream(ks_name, cf_name, table_id, std::move(sstables_on_shards[this_shard_id()]), primary_replica_only);
             });
         } else {
-            co_await distributed_loader::process_upload_dir(_db, _sys_dist_ks, _view_update_generator, ks_name, cf_name);
+            co_await replica::distributed_loader::process_upload_dir(_db, _sys_dist_ks, _view_update_generator, ks_name, cf_name);
         }
     } catch (...) {
         llog.warn("Done loading new SSTables for keyspace={}, table={}, load_and_stream={}, primary_replica_only={}, status=failed: {}",

@@ -40,6 +40,7 @@
 #include "gms/gossiper.hh"
 #include "db/config.hh"
 #include "db/commitlog/commitlog.hh"
+#include "lister.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
@@ -131,18 +132,28 @@ table::find_row(schema_ptr s, reader_permit permit, const dht::decorated_key& pa
     });
 }
 
-flat_mutation_reader
-table::make_reader(schema_ptr s,
+flat_mutation_reader_v2
+table::make_reader_v2(schema_ptr s,
                            reader_permit permit,
                            const dht::partition_range& range,
-                           const query::partition_slice& slice,
+                           const query::partition_slice& query_slice,
                            const io_priority_class& pc,
                            tracing::trace_state_ptr trace_state,
                            streamed_mutation::forwarding fwd,
                            mutation_reader::forwarding fwd_mr) const {
     if (_virtual_reader) [[unlikely]] {
-        return (*_virtual_reader).make_reader(s, std::move(permit), range, slice, pc, trace_state, fwd, fwd_mr);
+        return (*_virtual_reader).make_reader_v2(s, std::move(permit), range, query_slice, pc, trace_state, fwd, fwd_mr);
     }
+
+    bool reversed = query_slice.is_reversed();
+    std::unique_ptr<query::partition_slice> unreversed_slice;
+    if (reversed && !_config.enable_optimized_reversed_reads()) [[unlikely]] {
+        // Make the code below perform a forward query. We'll wrap the result into `make_reversing_reader` at the end.
+        reversed = false;
+        s = s->make_reversed();
+        unreversed_slice = std::make_unique<query::partition_slice>(query::half_reverse_slice(*s, query_slice));
+    }
+    auto& slice = unreversed_slice ? *unreversed_slice : query_slice;
 
     std::vector<flat_mutation_reader_v2> readers;
     readers.reserve(_memtables->size() + 1);
@@ -172,33 +183,43 @@ table::make_reader(schema_ptr s,
     }
 
     const auto bypass_cache = slice.options.contains(query::partition_slice::option::bypass_cache);
-    const auto reversed = slice.is_reversed();
     if (cache_enabled() && !bypass_cache && !(reversed && _config.reversed_reads_auto_bypass_cache())) {
-        // There are two supported methods of performing reversed queries now.
-        // In the old 'inefficient' method the cache/sstable performs a forward query and we wrap the reader in
-        // `make_reversing_reader` which fetches entire partitions in memory and reverses them; this method
-        // uses unbounded memory.
-        // There's also a new method where the sstable performs the query directly in reverse, which has bounded
-        // memory usage. However, for this method the cache must currently be disabled since fast forwarding
-        // is not yet supported by sstables in reverse mode and the cache algorithms do not handle reverse results
-        // yet.
-        // When the user explicitly bypasses the cache in a query, the new method is automatically used.
-        // Otherwise, we will use the old method with cache enabled, unless the `reversed_reads_auto_bypass_cache`
-        // option is set - which will automatically bypass the cache for reversed queries.
-        // FIXME: remove this workaround (and the `reversed_reads_auto_bypass_cache` option) after:
-        // - support for reversed reads is implemented in the cache,
-        // - fast forwarding is implemented in reversed sstable readers.
         readers.emplace_back(upgrade_to_v2(_cache.make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr)));
     } else {
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
 
-    auto comb_reader = downgrade_to_v1(make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr));
+    auto rd = make_combined_reader(s, permit, std::move(readers), fwd, fwd_mr);
+
+    flat_mutation_reader_opt rd_v1;
     if (_config.data_listeners && !_config.data_listeners->empty()) {
-        return _config.data_listeners->on_read(s, range, slice, std::move(comb_reader));
-    } else {
-        return comb_reader;
+        rd_v1 = _config.data_listeners->on_read(s, range, slice, downgrade_to_v1(std::move(rd)));
     }
+
+    if (unreversed_slice) [[unlikely]] {
+        if (!rd_v1) {
+            rd_v1 = downgrade_to_v1(std::move(rd));
+        }
+        rd_v1 = make_reversing_reader(std::move(*rd_v1), permit.max_result_size(), std::move(unreversed_slice));
+    }
+
+    if (rd_v1) {
+        return upgrade_to_v2(std::move(*rd_v1));
+    }
+
+    return rd;
+}
+
+flat_mutation_reader
+table::make_reader(schema_ptr s,
+                           reader_permit permit,
+                           const dht::partition_range& range,
+                           const query::partition_slice& slice,
+                           const io_priority_class& pc,
+                           tracing::trace_state_ptr trace_state,
+                           streamed_mutation::forwarding fwd,
+                           mutation_reader::forwarding fwd_mr) const {
+    return downgrade_to_v1(make_reader_v2(std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
 }
 
 sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<sstring> subdir) {
@@ -215,7 +236,7 @@ sstables::shared_sstable table::make_streaming_staging_sstable() {
     return make_streaming_sstable_for_write(sstables::staging_dir);
 }
 
-flat_mutation_reader
+flat_mutation_reader_v2
 table::make_streaming_reader(schema_ptr s, reader_permit permit,
                            const dht::partition_range_vector& ranges) const {
     auto& slice = s->full_slice();
@@ -229,13 +250,13 @@ table::make_streaming_reader(schema_ptr s, reader_permit permit,
             readers.emplace_back(upgrade_to_v2(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr)));
         }
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
-        return downgrade_to_v1(make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr));
+        return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
     });
 
     return make_flat_multi_range_reader(s, std::move(permit), std::move(source), ranges, slice, pc, nullptr, mutation_reader::forwarding::no);
 }
 
-flat_mutation_reader table::make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
+flat_mutation_reader_v2 table::make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
         const query::partition_slice& slice, mutation_reader::forwarding fwd_mr) const {
     const auto& pc = service::get_local_streaming_priority();
     auto trace_state = tracing::trace_state_ptr();
@@ -247,18 +268,18 @@ flat_mutation_reader table::make_streaming_reader(schema_ptr schema, reader_perm
         readers.emplace_back(upgrade_to_v2(mt->make_flat_reader(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr)));
     }
     readers.emplace_back(make_sstable_reader(schema, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
-    return downgrade_to_v1(make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr));
+    return make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
-flat_mutation_reader table::make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
+flat_mutation_reader_v2 table::make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
         lw_shared_ptr<sstables::sstable_set> sstables) const {
     auto& slice = schema->full_slice();
     const auto& pc = service::get_local_streaming_priority();
     auto trace_state = tracing::trace_state_ptr();
     const auto fwd = streamed_mutation::forwarding::no;
     const auto fwd_mr = mutation_reader::forwarding::no;
-    return downgrade_to_v1(sstables->make_range_sstable_reader(std::move(schema), std::move(permit), range, slice, pc,
-            std::move(trace_state), fwd, fwd_mr));
+    return sstables->make_range_sstable_reader(std::move(schema), std::move(permit), range, slice, pc,
+            std::move(trace_state), fwd, fwd_mr);
 }
 
 future<std::vector<locked_cell>> table::lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout) {
@@ -618,7 +639,7 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
         metadata.max_timestamp = old->get_max_timestamp();
         auto estimated_partitions = _compaction_strategy.adjust_partition_estimate(metadata, old->partition_count());
 
-        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader reader) mutable -> future<> {
+        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader_v2 reader) mutable -> future<> {
             auto&& priority = service::get_local_memtable_flush_priority();
             sstables::sstable_writer_config cfg = get_sstables_manager().configure_writer("memtable");
             cfg.backup = incremental_backups_enabled();
@@ -630,7 +651,7 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             auto monitor = database_sstable_write_monitor(permit, newtab, _compaction_strategy,
                 old->get_max_timestamp());
 
-            co_return co_await write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg, priority);
+            co_return co_await write_memtable_to_sstable(downgrade_to_v1(std::move(reader)), *old, newtab, estimated_partitions, monitor, cfg, priority);
         });
 
         flat_mutation_reader reader = old->make_flush_reader(
@@ -652,7 +673,7 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
             co_return stop_iteration::yes;
         }
 
-        auto f = consumer(std::move(reader));
+        auto f = consumer(upgrade_to_v2(std::move(reader)));
 
         // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
         // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
@@ -1232,6 +1253,8 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     }
     set_metrics();
     _compaction_manager.add(this);
+
+    update_optimized_twcs_queries_flag();
 }
 
 partition_presence_checker
@@ -1609,7 +1632,18 @@ void table::set_schema(schema_ptr s) {
     }
 
     set_compaction_strategy(_schema->compaction_strategy());
+    update_optimized_twcs_queries_flag();
     trigger_compaction();
+}
+
+void table::update_optimized_twcs_queries_flag() {
+    auto& opts = _schema->compaction_strategy_options();
+    auto it = opts.find("enable_optimized_twcs_queries");
+    if (it != opts.end() && it->second == "false") {
+        _config.enable_optimized_twcs_queries = false;
+    } else {
+        _config.enable_optimized_twcs_queries = true;
+    }
 }
 
 static std::vector<view_ptr>::iterator find_view(std::vector<view_ptr>& views, const view_ptr& v) {
@@ -2151,7 +2185,7 @@ table::as_mutation_source() const {
                                    tracing::trace_state_ptr trace_state,
                                    streamed_mutation::forwarding fwd,
                                    mutation_reader::forwarding fwd_mr) {
-        return this->make_reader(std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+        return this->make_reader_v2(std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
     });
 }
 

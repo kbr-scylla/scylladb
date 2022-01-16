@@ -37,7 +37,7 @@
 #include "service/storage_service.hh"
 #include "service/migration_manager.hh"
 #include "compaction/compaction_manager.hh"
-#include "distributed_loader.hh"
+#include "replica/distributed_loader.hh"
 #include "schema_builder.hh"
 #include "db/system_keyspace.hh"
 #include "locator/everywhere_replication_strategy.hh"
@@ -370,12 +370,12 @@ future<> replicated_key_provider::maybe_initialize_tables() {
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true);
-            co_await mm.announce_new_keyspace(ksm, api::min_timestamp);
+            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm));
         });
 
     }
     co_await ignore_existing([this, &mm] () -> future<> {
-        co_await mm.announce_new_column_family(encrypted_keys_table(), api::min_timestamp);
+        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(encrypted_keys_table()));
     });
     auto& ks = db.find_keyspace(KSNAME);
     auto& rs = ks.get_replication_strategy();
@@ -421,7 +421,7 @@ shared_ptr<key_provider> replicated_key_provider_factory::get_provider(encryptio
 }
 
 void replicated_key_provider_factory::init() {
-    distributed_loader::mark_keyspace_as_load_prio(KSNAME);
+    replica::distributed_loader::mark_keyspace_as_load_prio(KSNAME);
 }
 
 }

@@ -41,9 +41,13 @@ static const std::unordered_set<std::string_view> system_keyspaces = {
 static std::unordered_set<sstring> load_prio_keyspaces;
 static bool population_started = false;
 
+namespace replica {
+
 void distributed_loader::mark_keyspace_as_load_prio(const sstring& ks) {
     assert(!population_started);
     load_prio_keyspaces.insert(ks);
+}
+
 }
 
 bool is_system_keyspace(std::string_view name) {
@@ -62,6 +66,8 @@ static const std::unordered_set<std::string_view> internal_keyspaces = {
 bool is_internal_keyspace(std::string_view name) {
     return internal_keyspaces.contains(name);
 }
+
+namespace replica {
 
 static io_error_handler error_handler_for_upload_dir() {
     return [] (std::exception_ptr eptr) {
@@ -692,3 +698,4 @@ future<> distributed_loader::init_non_system_keyspaces(distributed<replica::data
     });
 }
 
+}

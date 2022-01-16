@@ -77,8 +77,6 @@ class mutation;
 class frozen_mutation;
 class reconcilable_result;
 
-class distributed_loader;
-
 namespace service {
 class storage_proxy;
 class storage_service;
@@ -287,6 +285,8 @@ using sstable_list = sstables::sstable_list;
 
 namespace replica {
 
+class distributed_loader;
+
 // The CF has a "stats" structure. But we don't want all fields here,
 // since some of them are fairly complex for exporting to collectd. Also,
 // that structure matches what we export via the API, so better leave it
@@ -390,7 +390,10 @@ public:
         db::data_listeners* data_listeners = nullptr;
         // Not really table-specific (it's a global configuration parameter), but stored here
         // for easy access from `table` member functions:
-        utils::updateable_value<bool> reversed_reads_auto_bypass_cache{true};
+        utils::updateable_value<bool> reversed_reads_auto_bypass_cache{false};
+        utils::updateable_value<bool> enable_optimized_reversed_reads{true};
+        // Can be updated by a schema change:
+        bool enable_optimized_twcs_queries{true};
     };
     struct no_commitlog {};
 
@@ -597,6 +600,9 @@ private:
     void on_compaction_completion(sstables::compaction_completion_desc& desc);
 
     void rebuild_statistics();
+
+    // Called on schema change.
+    void update_optimized_twcs_queries_flag();
 private:
     mutation_source_opt _virtual_reader;
     std::optional<noncopyable_function<future<>(const frozen_mutation&)>> _virtual_writer;
@@ -667,6 +673,14 @@ public:
     // Mutations returned by the reader will all have given schema.
     // If I/O needs to be issued to read anything in the specified range, the operations
     // will be scheduled under the priority class given by pc.
+    flat_mutation_reader_v2 make_reader_v2(schema_ptr schema,
+            reader_permit permit,
+            const dht::partition_range& range,
+            const query::partition_slice& slice,
+            const io_priority_class& pc = default_priority_class(),
+            tracing::trace_state_ptr trace_state = nullptr,
+            streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+            mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
     flat_mutation_reader make_reader(schema_ptr schema,
             reader_permit permit,
             const dht::partition_range& range,
@@ -695,20 +709,20 @@ public:
     //    reader and a _bounded_ amount of writes which arrive later.
     //  - Does not populate the cache
     // Requires ranges to be sorted and disjoint.
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit,
+    flat_mutation_reader_v2 make_streaming_reader(schema_ptr schema, reader_permit permit,
             const dht::partition_range_vector& ranges) const;
 
     // Single range overload.
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
+    flat_mutation_reader_v2 make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
             const query::partition_slice& slice,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::no) const;
 
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range) {
+    flat_mutation_reader_v2 make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range) {
         return make_streaming_reader(std::move(schema), std::move(permit), range, schema->full_slice());
     }
 
     // Stream reader from the given sstables
-    flat_mutation_reader make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
+    flat_mutation_reader_v2 make_streaming_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range,
             lw_shared_ptr<sstables::sstable_set> sstables) const;
 
     sstables::shared_sstable make_streaming_sstable_for_write(std::optional<sstring> subdir = {});
@@ -1063,7 +1077,7 @@ public:
     // Testing purposes.
     friend class ::column_family_test;
 
-    friend class ::distributed_loader;
+    friend class distributed_loader;
 
 private:
     timer<> _off_strategy_trigger;
@@ -1356,7 +1370,6 @@ private:
 
     friend class db_apply_executor;
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
-    future<> apply_with_commitlog(schema_ptr, column_family&, utils::UUID, const frozen_mutation&, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
@@ -1630,7 +1643,7 @@ future<> start_large_data_handler(sharded<replica::database>& db);
 //
 // Shard readers are created via `table::make_streaming_reader()`.
 // Range generator must generate disjoint, monotonically increasing ranges.
-flat_mutation_reader make_multishard_streaming_reader(distributed<replica::database>& db, schema_ptr schema, reader_permit permit,
+flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db, schema_ptr schema, reader_permit permit,
         std::function<std::optional<dht::partition_range>()> range_generator);
 
 bool is_internal_keyspace(std::string_view name);

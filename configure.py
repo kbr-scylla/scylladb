@@ -151,7 +151,8 @@ def ensure_tmp_dir_exists():
 def try_compile_and_link(compiler, source='', flags=[], verbose=False):
     ensure_tmp_dir_exists()
     with tempfile.NamedTemporaryFile() as sfile:
-        ofile = tempfile.mktemp()
+        ofd, ofile = tempfile.mkstemp()
+        os.close(ofd)
         try:
             sfile.file.write(bytes(source, 'utf-8'))
             sfile.file.flush()
@@ -501,6 +502,7 @@ scylla_tests = set([
     'test/boost/reader_concurrency_semaphore_test',
     'test/boost/service_level_controller_test',
     'test/boost/schema_loader_test',
+    'test/boost/lister_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -660,6 +662,7 @@ scylla_raft_core = [
 
 scylla_core = (['replica/database.cc',
                 'replica/table.cc',
+                'replica/distributed_loader.cc',
                 'absl-flat_hash_map.cc',
                 'atomic_cell.cc',
                 'caching_options.cc',
@@ -1010,7 +1013,6 @@ scylla_core = (['replica/database.cc',
                 'mirror-file-impl.cc',
                 'multishard_mutation_query.cc',
                 'reader_concurrency_semaphore.cc',
-                'distributed_loader.cc',
                 'sstables_loader.cc',
                 'utils/utf8.cc',
                 'utils/ascii.cc',
@@ -1134,6 +1136,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/raft.idl.hh',
         'idl/group0.idl.hh',
         'idl/hinted_handoff.idl.hh',
+        'idl/storage_proxy.idl.hh',
         ]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])

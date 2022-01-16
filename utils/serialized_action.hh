@@ -56,7 +56,7 @@ public:
         // run in background, synchronize using `ret`
         (void)_sem.wait().then([this, later] () mutable {
             if (later) {
-                return seastar::later().then([this] () mutable {
+                return seastar::yield().then([this] () mutable {
                     return do_trigger();
                 });
             }

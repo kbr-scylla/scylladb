@@ -8,6 +8,7 @@
  * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
  */
 
+#include <seastar/core/coroutine.hh>
 #include "auth/service.hh"
 
 #include <algorithm>
@@ -29,6 +30,7 @@
 #include "utils/class_registrator.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "data_dictionary/keyspace_metadata.hh"
+#include "mutation.hh"
 
 namespace auth {
 
@@ -130,23 +132,24 @@ service::service(
 }
 
 future<> service::create_keyspace_if_missing(::service::migration_manager& mm) const {
+    assert(this_shard_id() == 0); // once_among_shards makes sure a function is executed on shard 0 only
     auto db = _qp.db();
 
     if (!db.has_keyspace(meta::AUTH_KS)) {
-        locator::replication_strategy_config_options opts{{"replication_factor", "1"}};
+        co_await mm.schema_read_barrier();
 
-        auto ksm = data_dictionary::keyspace_metadata::new_keyspace(
-                meta::AUTH_KS,
-                "org.apache.cassandra.locator.SimpleStrategy",
-                opts,
-                true);
+        if (!db.has_keyspace(meta::AUTH_KS)) {
+            locator::replication_strategy_config_options opts{{"replication_factor", "1"}};
 
-        // We use min_timestamp so that default keyspace metadata will loose with any manual adjustments.
-        // See issue #2129.
-        return mm.announce_new_keyspace(ksm, api::min_timestamp);
+            auto ksm = data_dictionary::keyspace_metadata::new_keyspace(
+                    meta::AUTH_KS,
+                    "org.apache.cassandra.locator.SimpleStrategy",
+                    opts,
+                    true);
+
+            co_return co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm));
+        }
     }
-
-    return make_ready_future<>();
 }
 
 future<> service::start(::service::migration_manager& mm) {

@@ -291,7 +291,7 @@ future<>  service_level_controller::notify_service_level_added(sstring name, ser
             .sg = sl_data.sg,
             .pc = sl_data.pc
         };
-        _subscribers.for_each([name, sl_data, sl_info] (qos_configuration_change_subscriber* subscriber) {
+        _subscribers.thread_for_each([name, sl_data, sl_info] (qos_configuration_change_subscriber* subscriber) {
             try {
                 subscriber->on_before_service_level_add(sl_data.slo, sl_info).get();
             } catch (...) {
@@ -320,7 +320,7 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
                 .sg = sl_it->second.sg,
                 .pc = sl_it->second.pc
             };
-            _subscribers.for_each([name, slo_before, slo, sl_info] (qos_configuration_change_subscriber* subscriber) {
+            _subscribers.thread_for_each([name, slo_before, slo, sl_info] (qos_configuration_change_subscriber* subscriber) {
                 try {
                     subscriber->on_before_service_level_change(slo_before, slo, sl_info).get();
                 } catch (...) {
@@ -368,7 +368,7 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         };
         _service_levels_db.erase(sl_it);
         return seastar::async( [this, name, sl_info] {
-            _subscribers.for_each([name, sl_info] (qos_configuration_change_subscriber* subscriber) {
+            _subscribers.thread_for_each([name, sl_info] (qos_configuration_change_subscriber* subscriber) {
                 try {
                     subscriber->on_after_service_level_remove(sl_info).get();
                 } catch (...) {
