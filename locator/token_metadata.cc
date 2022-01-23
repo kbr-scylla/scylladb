@@ -79,7 +79,6 @@ public:
     token_metadata_impl(const token_metadata_impl&) = default;
     token_metadata_impl(token_metadata_impl&&) noexcept = default;
     const std::vector<token>& sorted_tokens() const;
-    future<> update_normal_token(token token, inet_address endpoint);
     future<> update_normal_tokens(std::unordered_set<token> tokens, inet_address endpoint);
     future<> update_normal_tokens(const std::unordered_map<inet_address, std::unordered_set<token>>& endpoint_tokens);
     const token& first_token(const token& start) const;
@@ -415,13 +414,6 @@ std::vector<token> token_metadata_impl::get_tokens(const inet_address& addr) con
     std::sort(res.begin(), res.end());
     return res;
 }
-/**
- * Update token map with a single token/endpoint pair in normal state.
- */
-future<> token_metadata_impl::update_normal_token(token t, inet_address endpoint)
-{
-    return update_normal_tokens(std::unordered_set<token>({t}), endpoint);
-}
 
 future<> token_metadata_impl::update_normal_tokens(std::unordered_set<token> tokens, inet_address endpoint) {
     if (tokens.empty()) {
@@ -439,7 +431,7 @@ future<> token_metadata_impl::update_normal_tokens(const std::unordered_map<inet
     bool should_sort_tokens = false;
     for (auto&& i : endpoint_tokens) {
         inet_address endpoint = i.first;
-        const auto& tokens = i.second;
+        auto tokens = i.second;
 
         if (tokens.empty()) {
             auto msg = format("tokens is empty in update_normal_tokens");
@@ -447,15 +439,28 @@ future<> token_metadata_impl::update_normal_tokens(const std::unordered_map<inet
             throw std::runtime_error(msg);
         }
 
+        // Phase 1: erase all tokens previously owned by the endpoint.
         for(auto it = _token_to_endpoint_map.begin(), ite = _token_to_endpoint_map.end(); it != ite;) {
             co_await coroutine::maybe_yield();
             if(it->second == endpoint) {
-                it = _token_to_endpoint_map.erase(it);
-            } else {
-                ++it;
+                auto tokit = tokens.find(it->first);
+                if (tokit == tokens.end()) {
+                    // token no longer owned by endpoint
+                    it = _token_to_endpoint_map.erase(it);
+                    continue;
+                }
+                // token ownership did not change,
+                // no further update needed for it.
+                tokens.erase(tokit);
             }
+            ++it;
         }
 
+        // Phase 2:
+        // a. Add the endpoint to _topology if needed.
+        // b. update pending _bootstrap_tokens and _leaving_endpoints
+        // c. update _token_to_endpoint_map with the new endpoint->token mappings
+        //    - set `should_sort_tokens` if new tokens were added
         _topology.add_endpoint(endpoint);
         remove_by_value(_bootstrap_tokens, endpoint);
         _leaving_endpoints.erase(endpoint);
@@ -472,6 +477,8 @@ future<> token_metadata_impl::update_normal_tokens(const std::unordered_map<inet
         }
     }
 
+    // New tokens were added to _token_to_endpoint_map
+    // so re-sort all tokens.
     if (should_sort_tokens) {
         sort_tokens();
     }
@@ -980,11 +987,6 @@ token_metadata& token_metadata::token_metadata::operator=(token_metadata&&) noex
 const std::vector<token>&
 token_metadata::sorted_tokens() const {
     return _impl->sorted_tokens();
-}
-
-future<>
-token_metadata::update_normal_token(token token, inet_address endpoint) {
-    return _impl->update_normal_token(token, endpoint);
 }
 
 future<>

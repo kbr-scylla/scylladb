@@ -403,6 +403,10 @@ public:
                     {},
                     mutation_reader::forwarding::no);
         } else {
+            // We can't have two permits with count resource for 1 repair.
+            // So we release the one on _permit so the only one is the one the
+            // shard reader will obtain.
+            _permit.release_base_resources();
             _reader = downgrade_to_v1(make_multishard_streaming_reader(db, _schema, _permit, [this] {
                 auto shard_range = _sharder.next();
                 if (shard_range) {
@@ -537,7 +541,7 @@ public:
         _mq = std::move(queue_handle);
         auto writer = shared_from_this();
         _writer_done = mutation_writer::distribute_reader_and_consume_on_shards(_schema, std::move(queue_reader),
-                streaming::make_streaming_consumer("repair", db, sys_dist_ks, view_update_gen, _estimated_partitions, _reason, is_offstrategy_supported(_reason)),
+                streaming::make_streaming_consumer(sstables::repair_origin, db, sys_dist_ks, view_update_gen, _estimated_partitions, _reason, is_offstrategy_supported(_reason)),
         t.stream_in_progress()).then([writer] (uint64_t partitions) {
             rlogger.debug("repair_writer: keyspace={}, table={}, managed to write partitions={} to sstable",
                 writer->_schema->ks_name(), writer->_schema->cf_name(), partitions);

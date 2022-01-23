@@ -2080,12 +2080,6 @@ public:
 };
 
 future<> shard_reader::close() noexcept {
-    // Nothing to do if there was no reader created, nor is there a background
-    // read ahead in progress which will create one.
-    if (!_reader && !_read_ahead) {
-        co_return;
-    }
-
     if (_read_ahead) {
         try {
             co_await *std::exchange(_read_ahead, std::nullopt);
@@ -2096,6 +2090,10 @@ future<> shard_reader::close() noexcept {
 
     try {
         co_await smp::submit_to(_shard, [this] {
+            if (!_reader) {
+                return make_ready_future<>();
+            }
+
             auto irh = std::move(*_reader).inactive_read_handle();
             return with_closeable(flat_mutation_reader(_reader.release()), [this] (flat_mutation_reader& reader) mutable {
                 auto permit = reader.permit();
@@ -2315,12 +2313,6 @@ public:
 };
 
 future<> shard_reader_v2::close() noexcept {
-    // Nothing to do if there was no reader created, nor is there a background
-    // read ahead in progress which will create one.
-    if (!_reader && !_read_ahead) {
-        co_return;
-    }
-
     if (_read_ahead) {
         try {
             co_await *std::exchange(_read_ahead, std::nullopt);
@@ -2331,6 +2323,10 @@ future<> shard_reader_v2::close() noexcept {
 
     try {
         co_await smp::submit_to(_shard, [this] {
+            if (!_reader) {
+                return make_ready_future<>();
+            }
+
             auto irh = std::move(*_reader).inactive_read_handle();
             return with_closeable(flat_mutation_reader_v2(_reader.release()), [this] (flat_mutation_reader_v2& reader) mutable {
                 auto permit = reader.permit();

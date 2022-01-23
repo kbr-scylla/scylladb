@@ -383,7 +383,8 @@ class RpcVerbParam(ASTBase):
     If the [[unique_ptr]] attribute is specified then handler function signature for an RPC verb will contain this
     argument as an `foreign_ptr<unique_ptr<>>`
     If the [[lw_shared_ptr]] attribute is specified then handler function signature for an RPC verb will contain this
-    argument as an `foreign_ptr<lw_shared_ptr<>>`"""
+    argument as an `foreign_ptr<lw_shared_ptr<>>`
+    If the [[ref]] attribute is specified the send function signature will contain this type as const reference"""
     def __init__(self, type, name, attributes=Attributes()):
         self.type = type
         self.name = name
@@ -600,12 +601,6 @@ def template_type_parse_action(tokens):
     return TemplateType(name=tokens['template_name'], template_parameters=tokens["template_parameters"].asList())
 
 
-# Will be used after parsing is complete to determine which local types
-# have usages with `const` specifiers: depending on that we should generate
-# a serializer specialization for `const` type too.
-types_with_const_appearances = set()
-
-
 def type_parse_action(tokens):
     if len(tokens) == 1:
         return tokens[0]
@@ -614,7 +609,6 @@ def type_parse_action(tokens):
     # NOTE: template types cannot have `const` modifier at the moment,
     # this wouldn't parse.
     tokens[1].is_const = True
-    types_with_const_appearances.add(tokens[1].name)
     return tokens[1]
 
 
@@ -799,8 +793,7 @@ struct serializer<{name}> {{
 }};
 """)
 
-    if name in types_with_const_appearances:
-        fprintln(hout, f"""
+    fprintln(hout, f"""
 template <{template_param}>
 struct serializer<const {name}> : public serializer<{name}>
 {{}};

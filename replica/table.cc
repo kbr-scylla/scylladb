@@ -44,6 +44,7 @@
 
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
+#include "utils/error_injection.hh"
 
 namespace replica {
 
@@ -191,20 +192,12 @@ table::make_reader_v2(schema_ptr s,
 
     auto rd = make_combined_reader(s, permit, std::move(readers), fwd, fwd_mr);
 
-    flat_mutation_reader_opt rd_v1;
     if (_config.data_listeners && !_config.data_listeners->empty()) {
-        rd_v1 = _config.data_listeners->on_read(s, range, slice, downgrade_to_v1(std::move(rd)));
+        rd = _config.data_listeners->on_read(s, range, slice, std::move(rd));
     }
 
     if (unreversed_slice) [[unlikely]] {
-        if (!rd_v1) {
-            rd_v1 = downgrade_to_v1(std::move(rd));
-        }
-        rd_v1 = make_reversing_reader(std::move(*rd_v1), permit.max_result_size(), std::move(unreversed_slice));
-    }
-
-    if (rd_v1) {
-        return upgrade_to_v2(std::move(*rd_v1));
+        return upgrade_to_v2(make_reversing_reader(downgrade_to_v1(std::move(rd)), permit.max_result_size(), std::move(unreversed_slice)));
     }
 
     return rd;
@@ -569,6 +562,11 @@ table::seal_active_memtable(flush_permit&& permit) {
         tlogger.debug("Memtable is empty");
         return _flush_barrier.advance_and_await();
     }
+
+    utils::get_local_injector().inject("table_seal_active_memtable_pre_flush", []() {
+        throw std::bad_alloc();
+    });
+
     _memtables->add_memtable();
     _stats.memtable_switch_count++;
     // This will set evictable occupancy of the old memtable region to zero, so that
@@ -1034,7 +1032,9 @@ void table::trigger_offstrategy_compaction() {
     // If the user calls trigger_offstrategy_compaction() to trigger
     // off-strategy explicitly, cancel the timeout based automatic trigger.
     _off_strategy_trigger.cancel();
-    _compaction_manager.submit_offstrategy(this);
+    if (!_maintenance_sstables->all()->empty()) {
+        _compaction_manager.submit_offstrategy(this);
+    }
 }
 
 future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
@@ -1056,7 +1056,8 @@ future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
 
     const auto old_sstables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_maintenance_sstables->all());
     std::vector<sstables::shared_sstable> reshape_candidates = old_sstables;
-    std::vector<sstables::shared_sstable> new_unused_sstables, sstables_to_remove;
+    std::vector<sstables::shared_sstable> sstables_to_remove;
+    std::unordered_set<sstables::shared_sstable> new_unused_sstables;
 
     auto cleanup_new_unused_sstables_on_failure = defer([&new_unused_sstables] {
         for (auto& sst : new_unused_sstables) {
@@ -1075,7 +1076,7 @@ future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
 
         desc.creator = [this, &new_unused_sstables] (shard_id dummy) {
             auto sst = make_sstable();
-            new_unused_sstables.push_back(sst);
+            new_unused_sstables.insert(sst);
             return sst;
         };
         auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.sstables);
@@ -1086,7 +1087,20 @@ future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
         auto it = boost::remove_if(reshape_candidates, [&] (auto& s) { return input.contains(s); });
         reshape_candidates.erase(it, reshape_candidates.end());
         std::move(ret.new_sstables.begin(), ret.new_sstables.end(), std::back_inserter(reshape_candidates));
-        std::move(input.begin(), input.end(), std::back_inserter(sstables_to_remove));
+
+        // If compaction strategy is unable to reshape input data in a single round, it may happen that a SSTable A
+        // created in round 1 will be compacted in a next round producing SSTable B. As SSTable A is no longer needed,
+        // it can be removed immediately. Let's remove all such SSTables immediately to reduce off-strategy space requirement.
+        // Input SSTables from maintenance set can only be removed later, as SSTable sets are only updated on completion.
+        auto can_remove_now = [&] (const sstables::shared_sstable& s) { return new_unused_sstables.contains(s); };
+        for (auto&& sst : input) {
+            if (can_remove_now(sst)) {
+                co_await sst->unlink();
+                new_unused_sstables.erase(std::move(sst));
+            } else {
+                sstables_to_remove.push_back(std::move(sst));
+            }
+        }
     }
 
     cleanup_new_unused_sstables_on_failure.cancel();
@@ -1448,14 +1462,16 @@ future<> table::snapshot(database& db, sstring name, bool skip_flush) {
                                 tlogger.error("Failed writing schema file in snapshot in {} with exception {}", jsondir, ptr);
                                 return make_ready_future<>();
                             }).finally([&jsondir, snapshot] () mutable {
-                                return seal_snapshot(jsondir).then([snapshot] {
+                                return seal_snapshot(jsondir).handle_exception([&jsondir] (std::exception_ptr ex) {
+                                    tlogger.error("Failed to seal snapshot in {}: {}. Ignored.", jsondir, ex);
+                                }).then([snapshot] {
                                     snapshot->manifest_write.signal(smp::count);
                                     return make_ready_future<>();
                                 });
                             });
                         });
                     }
-                    return my_work.then([snapshot] {
+                    return my_work.finally([snapshot] {
                         return snapshot->manifest_write.wait(1);
                     }).then([snapshot] {});
                 });
