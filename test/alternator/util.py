@@ -8,14 +8,27 @@ import string
 import random
 import collections
 import time
+import re
+import requests
+import pytest
 from contextlib import contextmanager
 from botocore.hooks import HierarchicalEmitter
 
+# The "pytest-randomly" pytest plugins modifies the default "random" to repeat
+# the same pseudo-random sequence (with the same seed) in each separate test.
+# But we currently rely on random_string() at al. to return unique keys that
+# can be used in different tests to create different items in the same table.
+# Until we stop relying on randomness for unique keys (see issue #9988), we
+# need to continue the same random sequence for all tests, so let's undo what
+# pytest-randomly does by explicitly sharing the same random sequence (which
+# we'll call here "global_random") for all tests.
+global_random = random.Random()
+
 def random_string(length=10, chars=string.ascii_uppercase + string.digits):
-    return ''.join(random.choice(chars) for x in range(length))
+    return ''.join(global_random.choice(chars) for x in range(length))
 
 def random_bytes(length=10):
-    return bytearray(random.getrandbits(8) for _ in range(length))
+    return bytearray(global_random.getrandbits(8) for _ in range(length))
 
 # Utility functions for scan and query into an array of items, reading
 # the full (possibly requiring multiple requests to read successive pages).
@@ -202,3 +215,25 @@ def client_no_transform(client):
 
 def is_aws(dynamodb):
     return dynamodb.meta.client._endpoint.host.endswith('.amazonaws.com')
+
+# Tries to inject an error via Scylla REST API. It only works on Scylla,
+# and only in specific build modes (dev, debug, sanitize), so this function
+# will trigger a test to be skipped if it cannot be executed.
+@contextmanager
+def scylla_inject_error(dynamodb, err, one_shot=False):
+    if dynamodb.meta.client._endpoint.host.endswith('.amazonaws.com'):
+        pytest.skip("Error injection not enabled on AWS")
+    url = dynamodb.meta.client._endpoint.host
+    # The REST API is on port 10000, and always http, not https.
+    url = re.sub(r':[0-9]+(/|$)', ':10000', url)
+    url = re.sub(r'^https:', 'http:', url)
+    response = requests.post(f'{url}/v2/error_injection/injection/{err}?one_shot={one_shot}')
+    response = requests.get(f'{url}/v2/error_injection/injection')
+    print("Enabled error injections:", response.content.decode('utf-8'))
+    if response.content.decode('utf-8') == "[]":
+        pytest.skip("Error injection not enabled in Scylla - try compiling in dev/debug/sanitize mode")
+    try:
+        yield
+    finally:
+        print("Disabling error injection", err)
+        response = requests.delete(f'{url}/v2/error_injection/injection/{err}')

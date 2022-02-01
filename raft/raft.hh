@@ -63,6 +63,8 @@ struct server_address {
     bool operator<(const server_address& rhs) const {
         return id < rhs.id;
     }
+
+    friend std::ostream& operator<<(std::ostream&, const server_address&);
 };
 
 } // end of namespace raft
@@ -105,7 +107,7 @@ struct configuration {
         }
     }
 
-    configuration(server_address_set current_arg = {}, server_address_set previous_arg = {})
+    explicit configuration(server_address_set current_arg = {}, server_address_set previous_arg = {})
         : current(std::move(current_arg)), previous(std::move(previous_arg)) {
             if (current.count(server_address{server_id()}) || previous.count(server_address{server_id()})) {
                 throw std::invalid_argument("raft::configuration: id zero is not supported");
@@ -195,6 +197,8 @@ struct configuration {
         assert(is_joint());
         previous.clear();
     }
+
+    friend std::ostream& operator<<(std::ostream&, const configuration&);
 };
 
 struct log_entry {
@@ -270,7 +274,7 @@ struct snapshot_descriptor {
     index_t idx = index_t(0);
     term_t term = term_t(0);
     // The committed configuration in the snapshot
-    configuration config;
+    configuration config{};
     // Id of the snapshot.
     snapshot_id id;
 };
@@ -540,6 +544,9 @@ public:
     // aborted and waiting for all the rest to complete any
     // unfinished send operation may return an error after this
     // function is called.
+    //
+    // The implementation must ensure that `_client->apply_snapshot(...)` is not called
+    // after `abort()` is called (even before `abort()` future resolves).
     virtual future<> abort() = 0;
 private:
     friend rpc_server;
@@ -580,6 +587,7 @@ public:
 
     // An endpoint on the leader to change configuration,
     // as requested by a remote follower.
+    // If the future resolves successfully, a dummy entry was committed after the configuration change.
     virtual future<add_entry_reply> execute_modify_config(server_id from,
         std::vector<server_address> add,
         std::vector<server_id> del) = 0;
@@ -605,6 +613,17 @@ public:
     // Called during Raft server initialization only, is not run
     // in parallel with store.
     virtual future<std::pair<term_t, server_id>> load_term_and_vote() = 0;
+
+    // Persist given commit index.
+    // Cannot be called conccurrently with itself.
+    // Persisting a commit index is optional.
+    virtual future<> store_commit_idx(index_t idx) = 0;
+
+    // Load persisted commit index.
+    // Called during Raft server initialization only, is not run
+    // in parallel with store. If no commit index was storred zero
+    // will be returned.
+    virtual future<index_t> load_commit_idx() = 0;
 
     // Persist given snapshot and drop all but 'preserve_log_entries'
     // entries from the Raft log starting from the beginning.

@@ -220,7 +220,7 @@ static bool has_missing_columns(data_dictionary::database db) noexcept {
     return false;
 }
 
-static future<> add_new_columns_if_missing(replica::database& db, ::service::migration_manager& mm) noexcept {
+static future<> add_new_columns_if_missing(replica::database& db, ::service::migration_manager& mm, ::service::group0_guard group0_guard) noexcept {
     assert(this_shard_id() == 0);
     try {
         auto schema = db.find_schema(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS);
@@ -238,10 +238,14 @@ static future<> add_new_columns_if_missing(replica::database& db, ::service::mig
         if (updated) {
             schema_ptr table = b.build();
             try {
-                co_return co_await mm.announce(co_await mm.prepare_column_family_update_announcement(table, false, std::vector<view_ptr>(), api::timestamp_type(1)));
+                auto ts = group0_guard.write_timestamp();
+                co_return co_await mm.announce(co_await mm.prepare_column_family_update_announcement(table, false, std::vector<view_ptr>(), ts),
+                        std::move(group0_guard), "Add new columns to system_distributed.service_levels");
             } catch (...) {}
         }
     } catch (...) {
+        // FIXME: do we really want to allow the node to boot if the table fails to update?
+        // Will this not prevent other components from working correctly?
         dlogger.warn("Failed to update options column in the role attributes table: {}", std::current_exception());
     }
 }
@@ -256,8 +260,11 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
         return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
     };
 
+    // FIXME: fix this code to `announce` once
+
     if (!_sp.get_db().local().has_keyspace(NAME)) {
-        co_await _mm.schema_read_barrier();
+        auto group0_guard = co_await _mm.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
 
         try {
             auto ksm = keyspace_metadata::new_keyspace(
@@ -265,14 +272,16 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "org.apache.cassandra.locator.SimpleStrategy",
                     {{"replication_factor", "3"}},
                     true /* durable_writes */);
-            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm));
+            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard),
+                    "Create system_distributed keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
         dlogger.info("{} keyspase is already present. Not creating", NAME);
     }
 
     if (!_sp.get_db().local().has_keyspace(NAME_EVERYWHERE)) {
-        co_await _mm.schema_read_barrier();
+        auto group0_guard = co_await _mm.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
 
         try {
             auto ksm = keyspace_metadata::new_keyspace(
@@ -280,7 +289,8 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true /* durable_writes */);
-            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm));
+            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard),
+                    "Create system_distributed_everywhere keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
         dlogger.info("{} keyspase is already present. Not creating", NAME_EVERYWHERE);
@@ -291,12 +301,13 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
     });
 
     if (!exist) {
-        co_await _mm.schema_read_barrier();
+        auto group0_guard = co_await _mm.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
 
         auto m = co_await map_reduce(ensured_tables(),
-        /* Mapper */ [this] (auto&& table) -> future<std::vector<mutation>> {
+        /* Mapper */ [this, ts] (auto&& table) -> future<std::vector<mutation>> {
             try {
-                co_return co_await _mm.prepare_new_column_family_announcement(std::move(table), api::min_timestamp);
+                co_return co_await _mm.prepare_new_column_family_announcement(std::move(table), ts);
             } catch (exceptions::already_exists_exception&) {
                 co_return std::vector<mutation>();
             }
@@ -306,15 +317,16 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
             std::move(m2.begin(), m2.end(), std::back_inserter(m1));
             return m1;
         });
-        co_await _mm.announce(std::move(m));
+        co_await _mm.announce(std::move(m), std::move(group0_guard),
+                "Create system_distributed(_everywhere) tables");
     } else {
         dlogger.info("All tables are present on start");
     }
 
     _started = true;
     if (has_missing_columns(_qp.db())) {
-        co_await _mm.schema_read_barrier();
-        co_await add_new_columns_if_missing(_qp.db().real_database(), _mm);
+        auto group0_guard = co_await _mm.start_group0_operation();
+        co_await add_new_columns_if_missing(_qp.db().real_database(), _mm, std::move(group0_guard));
     } else {
         dlogger.info("All schemas are uptodate on start");
     }

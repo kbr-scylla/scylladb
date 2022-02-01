@@ -1584,7 +1584,6 @@ public:
         return _dirty_memory_manager.region_group();
     }
 
-    std::unordered_set<sstring> get_initial_tokens();
     std::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
 

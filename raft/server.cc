@@ -60,11 +60,11 @@ public:
     future<add_entry_reply> execute_add_entry(server_id from, command cmd) override;
     future<add_entry_reply> execute_modify_config(server_id from,
         std::vector<server_address> add, std::vector<server_id> del) override;
+    future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) override;
 
 
     // server interface
     future<> add_entry(command command, wait_type type) override;
-    future<snapshot_reply> apply_snapshot(server_id from, install_snapshot snp) override;
     future<> set_configuration(server_address_set c_new) override;
     raft::configuration get_configuration() const override;
     future<> start() override;
@@ -99,6 +99,12 @@ private:
     index_t _applied_idx;
     std::list<active_read> _reads;
     std::multimap<index_t, promise<>> _awaited_indexes;
+
+    // Set to true when abort() is called
+    bool _aborted = false;
+
+    // Signaled when apply index is changed
+    condition_variable _applied_index_changed;
 
     struct stop_apply_fiber{}; // exception to send when apply fiber is needs to be stopepd
     queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>> _apply_entries = queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>>(10);
@@ -277,9 +283,13 @@ future<> server_impl::start() {
     auto snapshot  = co_await _persistence->load_snapshot_descriptor();
     auto log_entries = co_await _persistence->load_log();
     auto log = raft::log(snapshot, std::move(log_entries));
+    auto commit_idx = co_await _persistence->load_commit_idx();
     raft::configuration rpc_config = log.get_configuration();
     index_t stable_idx = log.stable_idx();
-    _fsm = std::make_unique<fsm>(_id, term, vote, std::move(log), *_failure_detector,
+    if (commit_idx > stable_idx) {
+        on_internal_error(logger, "Raft init failed: commited index cannot be larger then persisted one");
+    }
+    _fsm = std::make_unique<fsm>(_id, term, vote, std::move(log), commit_idx, *_failure_detector,
                                  fsm_config {
                                      .append_request_threshold = _config.append_request_threshold,
                                      .max_log_size = _config.max_log_size,
@@ -309,6 +319,12 @@ future<> server_impl::start() {
     _io_status = io_fiber(stable_idx);
     // start fiber to apply committed entries
     _applier_status = applier_fiber();
+
+    // Wait for all committed entries to be applied before returning
+    // to make sure that the user's state machine is up-to-date.
+    while (_applied_idx < commit_idx) {
+        co_await _applied_index_changed.wait();
+    }
 
     co_return;
 }
@@ -340,6 +356,11 @@ future<> server_impl::wait_for_entry(entry_id eid, wait_type type) {
             throw dropped_entry();
         }
     }
+
+    if (_aborted) {
+        throw stopped_error();
+    }
+
     auto& container = type == wait_type::committed ? _awaited_commits : _awaited_applies;
     logger.trace("[{}] waiting for entry {}.{}", id(), eid.term, eid.idx);
 
@@ -445,7 +466,7 @@ future<> server_impl::add_entry(command command, wait_type type) {
                     // retry and forward it.
                     return execute_add_entry(leader, command);
                 } else {
-                    logger.trace("[{}] forwarding the entry to {}", leader, id());
+                    logger.trace("[{}] forwarding the entry to {}", id(), leader);
                     return _rpc->send_add_entry(leader, command);
                 }
             }();
@@ -480,10 +501,12 @@ future<add_entry_reply> server_impl::execute_modify_config(server_id from,
             cfg.erase(server_address{.id = to_remove});
         }
         co_await enter_joint_configuration(cfg);
-        // Wait for transition joint->non-joint outside on the
-        // client.
         const log_entry& e = _fsm->add_entry(log_entry::dummy());
-        co_return add_entry_reply{entry_id{.term = e.term, .idx = e.idx}};
+        auto eid = entry_id{.term = e.term, .idx = e.idx};
+        co_await wait_for_entry(eid, wait_type::committed);
+        // `modify_config` doesn't actually need the entry id for anything
+        // but we reuse the `add_entry` RPC verb which requires it.
+        co_return add_entry_reply{eid};
 
     } catch (raft::error& e) {
         if (is_uncertainty(e)) {
@@ -506,7 +529,7 @@ future<> server_impl::modify_config(std::vector<server_address> add, std::vector
         }
         auto reply = co_await execute_modify_config(leader, std::move(add), std::move(del));
         if (std::holds_alternative<raft::entry_id>(reply)) {
-            co_return co_await wait_for_entry(std::get<raft::entry_id>(reply), wait_type::committed);
+            co_return;
         }
         throw raft::not_a_leader{_fsm->current_leader()};
     }
@@ -526,7 +549,10 @@ future<> server_impl::modify_config(std::vector<server_address> add, std::vector
                 }
             }();
             if (std::holds_alternative<raft::entry_id>(reply)) {
-                co_return co_await wait_for_entry(std::get<raft::entry_id>(reply), wait_type::committed);
+                // Do not wait for the entry locally. The reply means that the leader committed it,
+                // and there is no reason to wait for our local commit index to match.
+                // See also #9981.
+                co_return;
             }
             leader = std::get<raft::not_a_leader>(reply).leader;
         }
@@ -796,6 +822,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
 
             // Process committed entries.
             if (batch.committed.size()) {
+                co_await _persistence->store_commit_idx(batch.committed.back()->idx);
                 _stats.queue_entries_for_apply += batch.committed.size();
                 co_await _apply_entries.push_eventually(std::move(batch.committed));
             }
@@ -931,6 +958,7 @@ future<> server_impl::applier_fiber() {
                 }
 
                _applied_idx = last_idx;
+               _applied_index_changed.broadcast();
                notify_waiters(_awaited_applies, batch);
 
                // It may happen that _fsm has already applied a later snapshot (from remote) that we didn't yet 'observe'
@@ -962,6 +990,7 @@ future<> server_impl::applier_fiber() {
                 co_await _state_machine->load_snapshot(snp.id);
                 drop_waiters(snp.idx);
                 _applied_idx = snp.idx;
+                _applied_index_changed.broadcast();
                 _stats.sm_load_snapshot++;
             }
             signal_applied();
@@ -1067,14 +1096,28 @@ void server_impl::abort_snapshot_transfers() {
 }
 
 future<> server_impl::abort() {
+    _aborted = true;
     logger.trace("[{}]: abort() called", _id);
     _fsm->stop();
-    _apply_entries.abort(std::make_exception_ptr(stop_apply_fiber()));
 
     // IO and applier fibers may update waiters and start new snapshot
-    // transfers, so abort() them first
-    co_await seastar::when_all_succeed(std::move(_io_status), std::move(_applier_status),
-                        _rpc->abort(), _state_machine->abort(), _persistence->abort()).discard_result();
+    // transfers, so abort them first
+    _apply_entries.abort(std::make_exception_ptr(stop_apply_fiber()));
+    co_await seastar::when_all_succeed(std::move(_io_status), std::move(_applier_status)).discard_result();
+
+    // Start RPC abort before aborting snapshot applications.
+    // After calling `_rpc->abort()` no new applications should be started (see `rpc::abort()` comment).
+    auto abort_rpc = _rpc->abort();
+    auto abort_sm = _state_machine->abort();
+    auto abort_persistence = _persistence->abort();
+
+    // Abort snapshot applications before waiting for `abort_rpc`,
+    // since the RPC implementation may wait for snapshot applications to finish.
+    for (auto&& [_, f] : _snapshot_application_done) {
+        f.set_exception(std::runtime_error("Snapshot application aborted"));
+    }
+
+    co_await seastar::when_all_succeed(std::move(abort_rpc), std::move(abort_sm), std::move(abort_persistence)).discard_result();
 
     for (auto& ac: _awaited_commits) {
         ac.second.done.set_exception(stopped_error());
@@ -1099,10 +1142,6 @@ future<> server_impl::abort() {
         i.second.set_exception(stopped_error());
     }
     _awaited_indexes.clear();
-
-    for (auto&& [_, f] : _snapshot_application_done) {
-        f.set_exception(std::runtime_error("Snapshot application aborted"));
-    }
 
     abort_snapshot_transfers();
 

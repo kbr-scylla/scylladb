@@ -23,10 +23,11 @@
 #include "transport/server.hh"
 #include "db/system_keyspace.hh"
 #include "schema.hh"
-#include "replica/database.hh"
 #include "gms/gossiper.hh"
 #include <seastar/core/print.hh>
 #include "db/config.hh"
+#include "data_dictionary/keyspace_metadata.hh"
+#include <boost/algorithm/cxx11/all_of.hpp>
 
 using namespace seastar;
 
@@ -138,65 +139,106 @@ schema_ptr zsets_schema(sstring ks_name) {
     return builder.build(schema_builder::compact_storage::yes);
 }
 
-future<> create_keyspace_if_not_exists_impl(seastar::sharded<service::storage_proxy>& proxy, seastar::sharded<service::migration_manager>& mm, db::config& config, int default_replication_factor) {
+future<> create_keyspace_if_not_exists_impl(seastar::sharded<service::storage_proxy>& proxy, data_dictionary::database db, seastar::sharded<service::migration_manager>& mm, db::config& config, int default_replication_factor) {
     assert(this_shard_id() == 0);
     auto keyspace_replication_strategy_options = config.redis_keyspace_replication_strategy_options();
     if (!keyspace_replication_strategy_options.contains("class")) {
         keyspace_replication_strategy_options["class"] = "SimpleStrategy";
         keyspace_replication_strategy_options["replication_factor"] = fmt::format("{}", default_replication_factor);
     }
-    auto keyspace_gen = [&proxy, &mm, &config, keyspace_replication_strategy_options = std::move(keyspace_replication_strategy_options)]  (sstring name) -> future<> {
-        auto& mml = mm.local();
-        auto& proxyl = proxy.local();
-        if (proxyl.get_db().local().has_keyspace(name)) {
-            co_return;
-        }
-        auto attrs = make_shared<cql3::statements::ks_prop_defs>();
-        attrs->add_property(cql3::statements::ks_prop_defs::KW_DURABLE_WRITES, "true");
-        std::map<sstring, sstring> replication_properties;
-        for (auto&& option : keyspace_replication_strategy_options) {
-            replication_properties.emplace(option.first, option.second);
-        }
-        attrs->add_property(cql3::statements::ks_prop_defs::KW_REPLICATION, replication_properties); 
-        attrs->validate();
-        const auto& tm = *proxyl.get_token_metadata_ptr();
-        co_return co_await mml.announce(mml.prepare_new_keyspace_announcement(attrs->as_ks_metadata(name, tm)));
+
+    struct table {
+        const char* name;
+        std::function<schema_ptr(sstring)> schema;
     };
-    auto table_gen = [&proxy, &mm] (sstring ks_name, sstring cf_name, schema_ptr schema) -> future<> {
-        auto& mml= mm.local();
-        auto& proxyl = proxy.local();
-        if (proxyl.get_db().local().has_schema(ks_name, cf_name)) {
+
+    static std::array tables{table{redis::STRINGs, strings_schema},
+                             table{redis::LISTs, lists_schema},
+                             table{redis::SETs, sets_schema},
+                             table{redis::HASHes, hashes_schema},
+                             table{redis::ZSETs, zsets_schema}};
+
+    auto ks_names = boost::copy_range<std::vector<sstring>>(
+            boost::irange<unsigned>(0, config.redis_database_count()) |
+            boost::adaptors::transformed([] (unsigned i) { return fmt::format("REDIS_{}", i); }));
+
+    bool schema_ok = boost::algorithm::all_of(ks_names, [&] (auto& ks_name) {
+        auto check = [&] (table t) {
+            return db.has_schema(ks_name, t.name);
+        };
+        return db.has_keyspace(ks_name) && boost::algorithm::all_of(tables, check);
+    });
+
+    if (schema_ok) {
+        logger.info("Redis schema is already up-to-date");
+        co_return; // if schema is created already do nothing
+    }
+
+    // FIXME: fix this code to `announce` once
+
+    auto& mml = mm.local();
+    auto tm = proxy.local().get_token_metadata_ptr();
+
+    {
+        auto group0_guard = co_await mml.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
+        std::vector<mutation> ks_mutations;
+        for (auto& ks_name: ks_names) {
+            if (db.has_keyspace(ks_name)) {
+                continue;
+            }
+
+            cql3::statements::ks_prop_defs attrs;
+            attrs.add_property(cql3::statements::ks_prop_defs::KW_DURABLE_WRITES, "true");
+            std::map<sstring, sstring> replication_properties;
+            for (auto&& option : keyspace_replication_strategy_options) {
+                replication_properties.emplace(option.first, option.second);
+            }
+            attrs.add_property(cql3::statements::ks_prop_defs::KW_REPLICATION, replication_properties);
+            attrs.validate();
+
+            auto muts = mml.prepare_new_keyspace_announcement(attrs.as_ks_metadata(ks_name, *tm), ts);
+            std::move(muts.begin(), muts.end(), std::back_inserter(ks_mutations));
+        }
+
+        if (!ks_mutations.empty()) {
+            co_await mml.announce(std::move(ks_mutations), std::move(group0_guard));
+        }
+    }
+
+    auto group0_guard = co_await mml.start_group0_operation();
+    std::vector<mutation> table_mutations;
+    auto table_gen = std::bind_front(
+            [] (data_dictionary::database db, service::migration_manager& mml, std::vector<mutation>& table_mutations,
+                api::timestamp_type ts, sstring ks_name, sstring cf_name, schema_ptr schema) -> future<> {
+        if (db.has_schema(ks_name, cf_name)) {
             co_return;
         }
         logger.info("Create keyspace: {}, table: {} for redis.", ks_name, cf_name);
-        co_return co_await mml.announce(co_await mml.prepare_new_column_family_announcement(schema));
-    };
+        auto muts = co_await mml.prepare_new_column_family_announcement(schema, ts);
+        std::move(muts.begin(), muts.end(), std::back_inserter(table_mutations));
+    }, db, std::ref(mml), std::ref(table_mutations), group0_guard.write_timestamp());
 
-    co_await mm.local().schema_read_barrier();
+    co_await parallel_for_each(ks_names, [table_gen = std::move(table_gen)] (const sstring& ks_name) mutable {
+        return parallel_for_each(tables, [ks_name, table_gen = std::move(table_gen)] (table t) {
+            return table_gen(ks_name, t.name, t.schema(ks_name));
+        }).discard_result();
+    });
 
     // create default databases for redis.
-    co_return co_await parallel_for_each(boost::irange<unsigned>(0, config.redis_database_count()), [keyspace_gen = std::move(keyspace_gen), table_gen = std::move(table_gen)] (auto c) {
-        auto ks_name = fmt::format("REDIS_{}", c);
-        return keyspace_gen(ks_name).then([ks_name, table_gen] {
-            return when_all_succeed(
-                table_gen(ks_name, redis::STRINGs, strings_schema(ks_name)),
-                table_gen(ks_name, redis::LISTs, lists_schema(ks_name)),
-                table_gen(ks_name, redis::SETs, sets_schema(ks_name)),
-                table_gen(ks_name, redis::HASHes, hashes_schema(ks_name)),
-                table_gen(ks_name, redis::ZSETs, zsets_schema(ks_name))
-            ).discard_result();
-        });
-    });
+    if (!table_mutations.empty()) {
+        co_await mml.announce(std::move(table_mutations), std::move(group0_guard));
+    }
 }
 
-future<> maybe_create_keyspace(seastar::sharded<service::storage_proxy>& proxy, seastar::sharded<service::migration_manager>& mm, db::config& config, sharded<gms::gossiper>& gossiper) {
-    return gms::get_up_endpoint_count(gossiper.local()).then([&proxy, &mm, &config] (auto live_endpoint_count) {
+future<> maybe_create_keyspace(seastar::sharded<service::storage_proxy>& proxy, data_dictionary::database db, seastar::sharded<service::migration_manager>& mm, db::config& config, sharded<gms::gossiper>& gossiper) {
+    return gms::get_up_endpoint_count(gossiper.local()).then([&proxy, db, &mm, &config] (auto live_endpoint_count) {
         int replication_factor = 3;
         if (live_endpoint_count < replication_factor) {
             replication_factor = 1;
             logger.warn("Creating keyspace for redis with unsafe, live endpoint nodes count: {}.", live_endpoint_count);
         }
-        return create_keyspace_if_not_exists_impl(proxy, mm, config, replication_factor);
+        return create_keyspace_if_not_exists_impl(proxy, db, mm, config, replication_factor);
     });
 }
 

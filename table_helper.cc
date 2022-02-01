@@ -34,7 +34,8 @@ future<> table_helper::setup_table(cql3::query_processor& qp, const sstring& cre
 
     auto& mm = qp.get_migration_manager();
 
-    co_await mm.schema_read_barrier();
+    auto group0_guard = co_await mm.start_group0_operation();
+    auto ts = group0_guard.write_timestamp();
 
     if (db.has_schema(schema->ks_name(), schema->cf_name())) { // re-check after read barrier
         co_return;
@@ -53,7 +54,7 @@ future<> table_helper::setup_table(cql3::query_processor& qp, const sstring& cre
     // The important thing is that it will converge eventually (some traces may
     // be lost in a process but that's ok).
     try {
-        co_return co_await mm.announce(co_await mm.prepare_new_column_family_announcement(b.build()));
+        co_return co_await mm.announce(co_await mm.prepare_new_column_family_announcement(b.build(), ts), std::move(group0_guard));
     } catch (...) {}
 }
 
@@ -121,6 +122,8 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, std::string_vie
         co_return;
     }
 
+    // FIXME: call `announce` once (collapse the calls here and in `setup_table`)
+
     if (std::any_of(tables.begin(), tables.end(), [&] (table_helper* t) { return t->_keyspace != keyspace_name; })) {
         throw std::invalid_argument("setup_keyspace called with table_helper for different keyspace");
     }
@@ -129,14 +132,14 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, std::string_vie
     auto& mm = qp.get_migration_manager();
 
     if (!db.has_keyspace(keyspace_name)) {
-        co_await mm.schema_read_barrier();
+        auto group0_guard = co_await mm.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
 
-        // Create a keyspace
         if (!db.has_keyspace(keyspace_name)) {
             std::map<sstring, sstring> opts;
             opts["replication_factor"] = replication_factor;
             auto ksm = keyspace_metadata::new_keyspace(keyspace_name, "org.apache.cassandra.locator.SimpleStrategy", std::move(opts), true);
-            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm));
+            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard));
         }
     }
 

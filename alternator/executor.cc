@@ -14,9 +14,9 @@
 #include "alternator/executor.hh"
 #include "log.hh"
 #include "schema_builder.hh"
+#include "data_dictionary/keyspace_metadata.hh"
 #include "exceptions/exceptions.hh"
 #include "timestamp.hh"
-#include "replica/database.hh"
 #include "types/map.hh"
 #include "schema.hh"
 #include "query-request.hh"
@@ -49,12 +49,13 @@
 #include "service/storage_proxy.hh"
 #include "gms/gossiper.hh"
 #include "schema_registry.hh"
+#include "utils/error_injection.hh"
 
 logging::logger elogger("alternator-executor");
 
 namespace alternator {
 
-static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper);
+static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper, api::timestamp_type);
 
 static map_type attrs_type() {
     static thread_local auto t = map_type_impl::get_instance(utf8_type, bytes_type, true);
@@ -209,8 +210,8 @@ schema_ptr executor::find_table(service::storage_proxy& proxy, const rjson::valu
         return nullptr;
     }
     try {
-        return proxy.get_db().local().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + sstring(*table_name), *table_name);
-    } catch(replica::no_such_column_family&) {
+        return proxy.data_dictionary().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + sstring(*table_name), *table_name);
+    } catch(data_dictionary::no_such_column_family&) {
         throw api_error::resource_not_found(
                 format("Requested resource not found: Table: {} not found", *table_name));
     }
@@ -226,7 +227,7 @@ schema_ptr get_table(service::storage_proxy& proxy, const rjson::value& request)
     return schema;
 }
 
-static std::tuple<bool, std::string_view, std::string_view> try_get_internal_table(std::string_view table_name) {
+static std::tuple<bool, std::string_view, std::string_view> try_get_internal_table(data_dictionary::database db, std::string_view table_name) {
     size_t it = table_name.find(executor::INTERNAL_TABLE_PREFIX);
     if (it != 0) {
         return {false, "", ""};
@@ -239,7 +240,8 @@ static std::tuple<bool, std::string_view, std::string_view> try_get_internal_tab
     std::string_view ks_name = table_name.substr(0, delim);
     table_name.remove_prefix(ks_name.size() + 1);
     // Only internal keyspaces can be accessed to avoid leakage
-    if (!is_internal_keyspace(ks_name)) {
+    auto ks = db.try_find_keyspace(ks_name);
+    if (!ks || !ks->is_internal()) {
         return {false, "", ""};
     }
     return {true, ks_name, table_name};
@@ -255,11 +257,11 @@ get_table_or_view(service::storage_proxy& proxy, const rjson::value& request) {
     table_or_view_type type = table_or_view_type::base;
     std::string table_name = get_table_name(request);
 
-    auto [is_internal_table, internal_ks_name, internal_table_name] = try_get_internal_table(table_name);
+    auto [is_internal_table, internal_ks_name, internal_table_name] = try_get_internal_table(proxy.data_dictionary(), table_name);
     if (is_internal_table) {
         try {
-            return { proxy.get_db().local().find_schema(sstring(internal_ks_name), sstring(internal_table_name)), type };
-        } catch (replica::no_such_column_family&) {
+            return { proxy.data_dictionary().find_schema(sstring(internal_ks_name), sstring(internal_table_name)), type };
+        } catch (data_dictionary::no_such_column_family&) {
             throw api_error::resource_not_found(
                 format("Requested resource not found: Internal table: {}.{} not found", internal_ks_name, internal_table_name));
         }
@@ -278,20 +280,20 @@ get_table_or_view(service::storage_proxy& proxy, const rjson::value& request) {
                     format("Non-string IndexName '{}'", index_name->GetString()));
         }
         // If no tables for global indexes were found, the index may be local
-        if (!proxy.get_db().local().has_schema(keyspace_name, table_name)) {
+        if (!proxy.data_dictionary().has_schema(keyspace_name, table_name)) {
             type = table_or_view_type::lsi;
             table_name = lsi_name(orig_table_name, index_name->GetString());
         }
     }
 
     try {
-        return { proxy.get_db().local().find_schema(keyspace_name, table_name), type };
-    } catch(replica::no_such_column_family&) {
+        return { proxy.data_dictionary().find_schema(keyspace_name, table_name), type };
+    } catch(data_dictionary::no_such_column_family&) {
         if (index_name) {
             // DynamoDB returns a different error depending on whether the
             // base table doesn't exist (ResourceNotFoundException) or it
             // does exist but the index does not (ValidationException).
-            if (proxy.get_db().local().has_schema(keyspace_name, orig_table_name)) {
+            if (proxy.data_dictionary().has_schema(keyspace_name, orig_table_name)) {
                 throw api_error::validation(
                     format("Requested resource not found: Index '{}' for table '{}'", index_name->GetString(), orig_table_name));
             } else {
@@ -435,7 +437,7 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
     // Add base table's KeySchema and collect types for AttributeDefinitions:
     describe_key_schema(table_description, *schema, key_attribute_types);
 
-    replica::table& t = _proxy.get_db().local().find_column_family(schema);
+    data_dictionary::table t = _proxy.data_dictionary().find_column_family(schema);
     if (!t.views().empty()) {
         rjson::value gsi_array = rjson::empty_array();
         rjson::value lsi_array = rjson::empty_array();
@@ -493,18 +495,18 @@ future<executor::request_return_type> executor::delete_table(client_state& clien
     auto& p = _proxy.container();
 
     co_await _mm.container().invoke_on(0, [&] (service::migration_manager& mm) -> future<> {
-        co_await mm.schema_read_barrier();
+        auto group0_guard = co_await mm.start_group0_operation();
 
-        if (!p.local().get_db().local().has_schema(keyspace_name, table_name)) {
+        if (!p.local().data_dictionary().has_schema(keyspace_name, table_name)) {
             throw api_error::resource_not_found(format("Requested resource not found: Table: {} not found", table_name));
         }
 
-        auto m = co_await mm.prepare_column_family_drop_announcement(keyspace_name, table_name, service::migration_manager::drop_views::yes);
-        auto m2 = mm.prepare_keyspace_drop_announcement(keyspace_name);
+        auto m = co_await mm.prepare_column_family_drop_announcement(keyspace_name, table_name, group0_guard.write_timestamp(), service::migration_manager::drop_views::yes);
+        auto m2 = mm.prepare_keyspace_drop_announcement(keyspace_name, group0_guard.write_timestamp());
 
         std::move(m2.begin(), m2.end(), std::back_inserter(m));
 
-        co_await mm.announce(std::move(m));
+        co_await mm.announce(std::move(m), std::move(group0_guard));
     });
 
     // FIXME: need more attributes?
@@ -614,8 +616,8 @@ static schema_ptr get_table_from_arn(service::storage_proxy& proxy, std::string_
         size_t table_start = arn.find_last_of('/');
         std::string_view table_name = arn.substr(table_start + 1);
         // FIXME: remove sstring creation once find_schema gains a view-based interface
-        return proxy.get_db().local().find_schema(sstring(keyspace_name), sstring(table_name));
-    } catch (const replica::no_such_column_family& e) {
+        return proxy.data_dictionary().find_schema(sstring(keyspace_name), sstring(table_name));
+    } catch (const data_dictionary::no_such_column_family& e) {
         throw api_error::access_denied("Incorrect resource identifier");
     } catch (const std::out_of_range& e) {
         throw api_error::access_denied("Incorrect resource identifier");
@@ -749,14 +751,14 @@ static void update_tags_map(const rjson::value& tags, std::map<sstring, sstring>
 // are fixed, this issue will automatically get fixed as well.
 future<> update_tags(service::migration_manager& mm, schema_ptr schema, std::map<sstring, sstring>&& tags_map) {
     co_await mm.container().invoke_on(0, [s = global_schema_ptr(std::move(schema)), tags_map = std::move(tags_map)] (service::migration_manager& mm) -> future<> {
-        co_await mm.schema_read_barrier();
+        auto group0_guard = co_await mm.start_group0_operation();
 
         schema_builder builder(s);
         builder.add_extension(tags_extension::NAME, ::make_shared<tags_extension>(tags_map));
 
-        auto m = co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), std::nullopt);
+        auto m = co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), group0_guard.write_timestamp());
 
-        co_await mm.announce(std::move(m));
+        co_await mm.announce(std::move(m), std::move(group0_guard));
     });
 }
 
@@ -873,8 +875,6 @@ static future<executor::request_return_type> create_table_on_shard0(tracing::tra
     builder.with_column(bytes(executor::ATTRS_COLUMN_NAME), attrs_type(), column_kind::regular_column);
 
     verify_billing_mode(request);
-
-    co_await mm.schema_read_barrier();
 
     schema_ptr partial_schema = builder.build();
 
@@ -1035,7 +1035,9 @@ static future<executor::request_return_type> create_table_on_shard0(tracing::tra
     }
 
     try {
-        co_await mm.announce(co_await create_keyspace(keyspace_name, mm, gossiper));
+        auto group0_guard_ks = co_await mm.start_group0_operation();
+        auto ts = group0_guard_ks.write_timestamp();
+        co_await mm.announce(co_await create_keyspace(keyspace_name, mm, gossiper, ts), std::move(group0_guard_ks));
     } catch (exceptions::already_exists_exception&) {
         // Ignore the fact that the keyspace may already exist. See discussion in #6340
     }
@@ -1044,22 +1046,32 @@ static future<executor::request_return_type> create_table_on_shard0(tracing::tra
         // The code should be rewritten in a way that allows creating mutations
         // for all the changes in a single mutation array before announcing.
         // See https://github.com/scylladb/scylla/issues/9868
-        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(schema));
+        {
+            auto group0_guard_cf = co_await mm.start_group0_operation();
+            auto ts = group0_guard_cf.write_timestamp();
+            co_await mm.announce(co_await mm.prepare_new_column_family_announcement(schema, ts), std::move(group0_guard_cf));
+        }
 
-        std::vector<mutation> m;
+        {
+            std::vector<mutation> m;
+            auto group0_guard_views = co_await mm.start_group0_operation();
+            auto ts = group0_guard_views.write_timestamp();
+            co_await parallel_for_each(std::move(view_builders), [&mm, schema, &m, ts] (schema_builder builder) -> future<> {
+                auto vm = co_await mm.prepare_new_view_announcement(view_ptr(builder.build()), ts);
+                std::move(vm.begin(), vm.end(), std::back_inserter(m));
+            });
 
-        co_await parallel_for_each(std::move(view_builders), [&mm, schema, &m] (schema_builder builder) -> future<> {
-            auto vm = co_await mm.prepare_new_view_announcement(view_ptr(builder.build()));
-            std::move(vm.begin(), vm.end(), std::back_inserter(m));
-        });
-
-        co_await mm.announce(std::move(m));
+            co_await mm.announce(std::move(m), std::move(group0_guard_views));
+        }
 
         if (!tags_map.empty()) {
+            auto group0_guard_tags = co_await mm.start_group0_operation();
+            auto ts = group0_guard_tags.write_timestamp();
+
             schema_builder builder(schema);
             builder.add_extension(tags_extension::NAME, ::make_shared<tags_extension>(tags_map));
 
-            co_await mm.announce(co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), std::nullopt));
+            co_await mm.announce(co_await mm.prepare_column_family_update_announcement(builder.build(), false, std::vector<view_ptr>(), ts), std::move(group0_guard_tags));
         }
 
         co_await wait_for_schema_agreement(mm, db::timeout_clock::now() + 10s);
@@ -1107,7 +1119,7 @@ future<executor::request_return_type> executor::update_table(client_state& clien
 
     co_return co_await _mm.container().invoke_on(0, [&p = _proxy.container(), request = std::move(request), gt = tracing::global_trace_state_ptr(std::move(trace_state))]
                                                 (service::migration_manager& mm) mutable -> future<executor::request_return_type> {
-        co_await mm.schema_read_barrier();
+        auto group0_guard = co_await mm.start_group0_operation();
 
         schema_ptr tab = get_table(p.local(), request);
 
@@ -1128,9 +1140,9 @@ future<executor::request_return_type> executor::update_table(client_state& clien
 
         auto schema = builder.build();
 
-        auto m = co_await mm.prepare_column_family_update_announcement(schema, false,  std::vector<view_ptr>(), std::nullopt);
+        auto m = co_await mm.prepare_column_family_update_announcement(schema, false,  std::vector<view_ptr>(), group0_guard.write_timestamp());
 
-        co_await mm.announce(std::move(m));
+        co_await mm.announce(std::move(m), std::move(group0_guard));
 
         co_await wait_for_schema_agreement(mm, db::timeout_clock::now() + 10s);
 
@@ -1328,8 +1340,8 @@ mutation put_or_delete_item::build(schema_ptr schema, api::timestamp_type ts) co
 
 // The DynamoDB API doesn't let the client control the server's timeout, so
 // we have a global default_timeout() for Alternator requests. The value of
-// default_timeout is overwritten by main.cc based on the
-// "alternator_timeout_in_ms" configuration parameter.
+// s_default_timeout is overwritten in alternator::controller::start_server()
+// based on the "alternator_timeout_in_ms" configuration parameter.
 db::timeout_clock::duration executor::s_default_timeout = 10s;
 void executor::set_default_timeout(db::timeout_clock::duration timeout) {
     s_default_timeout = timeout;
@@ -1757,8 +1769,8 @@ static schema_ptr get_table_from_batch_request(const service::storage_proxy& pro
     sstring table_name = batch_request->name.GetString(); // JSON keys are always strings
     validate_table_name(table_name);
     try {
-        return proxy.get_db().local().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + table_name, table_name);
-    } catch(replica::no_such_column_family&) {
+        return proxy.data_dictionary().find_schema(sstring(executor::KEYSPACE_NAME_PREFIX) + table_name, table_name);
+    } catch(data_dictionary::no_such_column_family&) {
         throw api_error::resource_not_found(format("Requested resource not found: Table: {} not found", table_name));
     }
 }
@@ -1896,7 +1908,7 @@ static future<> do_batch_write(service::storage_proxy& proxy,
                     return do_with(cs.get(), [&proxy, mb = std::move(mb), dk = std::move(dk), ks = std::move(ks), cf = std::move(cf),
                                               trace_state = tracing::trace_state_ptr(gt)]
                                               (service::client_state& client_state) mutable {
-                        auto schema = proxy.get_db().local().find_schema(ks, cf);
+                        auto schema = proxy.data_dictionary().find_schema(ks, cf);
                         //FIXME: A corresponding FIXME can be found in transport/server.cc when a message must be bounced
                         // to another shard - once it is solved, this place can use a similar solution. Instead of passing
                         // empty_service_permit() to the background operation, the current permit's lifetime should be prolonged,
@@ -3119,6 +3131,7 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
             future<std::tuple<std::string, std::optional<rjson::value>>> f = _proxy.query(rs.schema, std::move(command), std::move(partition_ranges), rs.cl,
                     service::storage_proxy::coordinator_query_options(executor::default_timeout(), permit, client_state, trace_state)).then(
                     [schema = rs.schema, partition_slice = std::move(partition_slice), selection = std::move(selection), attrs_to_get = rs.attrs_to_get] (service::storage_proxy::coordinator_query_result qr) mutable {
+                utils::get_local_injector().inject("alternator_batch_get_item", [] { throw std::runtime_error("batch_get_item injection"); });
                 std::optional<rjson::value> json = describe_single_item(schema, partition_slice, *selection, *qr.query_result, *attrs_to_get);
                 return make_ready_future<std::tuple<std::string, std::optional<rjson::value>>>(
                         std::make_tuple(schema->cf_name(), std::move(json)));
@@ -3128,24 +3141,57 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
     }
 
     // Wait for all requests to complete, and then return the response.
-    // FIXME: If one of the requests failed this will fail the entire request.
-    // What we should do instead is to return the failed key in the array
-    // UnprocessedKeys (which the BatchGetItem API supports) and let the user
-    // try again. Note that simply a missing key is *not* an error (we already
-    // handled it above), but this case does include things like timeouts,
-    // unavailable CL, etc.
-    return when_all_succeed(response_futures.begin(), response_futures.end()).then(
-            [] (std::vector<std::tuple<std::string, std::optional<rjson::value>>> responses) {
+    return when_all(response_futures.begin(), response_futures.end()).then(
+            [request_items = std::move(request_items)] (std::vector<future<std::tuple<std::string, std::optional<rjson::value>>>> responses) mutable {
         rjson::value response = rjson::empty_object();
         rjson::add(response, "Responses", rjson::empty_object());
         rjson::add(response, "UnprocessedKeys", rjson::empty_object());
-        for (auto& t : responses) {
-            if (!response["Responses"].HasMember(std::get<0>(t).c_str())) {
-                rjson::add_with_string_name(response["Responses"], std::get<0>(t), rjson::empty_array());
+        // In case of full failure (no reads succeeded), an arbitrary error
+        // from one of the operations will be returned.
+        bool some_succeeded = false;
+        std::exception_ptr eptr;
+        // These iterators are used to match keys from the requests with their corresponding responses.
+        // If any of the responses failed, the key iterator will be used to insert
+        // an entry into the UnprocessedKeys object, which will ultimately be returned
+        // to the user in case of partial success of BatchGetItem operation.
+        rjson::value::MemberIterator table_items_it = request_items.MemberBegin();
+        rjson::value::ValueIterator key_it = table_items_it->value["Keys"].Begin();
+
+        for (auto& fut : responses) {
+            if (fut.failed()) {
+                eptr = fut.get_exception();
+                if (!response["UnprocessedKeys"].HasMember(table_items_it->name)) {
+                    rjson::add_with_string_name(response["UnprocessedKeys"], rjson::to_string_view(table_items_it->name), rjson::empty_object());
+                    rjson::value& unprocessed_item = response["UnprocessedKeys"][table_items_it->name];
+                    for (auto it = table_items_it->value.MemberBegin(); it != table_items_it->value.MemberEnd(); ++it) {
+                        if (it->name != "Keys") {
+                            rjson::add_with_string_name(unprocessed_item, rjson::to_string_view(it->name), rjson::copy(it->value));
+                        }
+                    }
+                    rjson::add_with_string_name(unprocessed_item, "Keys", rjson::empty_array());
+                }
+                rjson::push_back(response["UnprocessedKeys"][table_items_it->name]["Keys"], std::move(*key_it));
+            } else {
+                auto t = fut.get();
+                some_succeeded = true;
+                if (!response["Responses"].HasMember(std::get<0>(t).c_str())) {
+                    rjson::add_with_string_name(response["Responses"], std::get<0>(t), rjson::empty_array());
+                }
+                if (std::get<1>(t)) {
+                    rjson::push_back(response["Responses"][std::get<0>(t)], std::move(*std::get<1>(t)));
+                }
             }
-            if (std::get<1>(t)) {
-                rjson::push_back(response["Responses"][std::get<0>(t)], std::move(*std::get<1>(t)));
+            key_it++;
+            if (key_it == table_items_it->value["Keys"].End()) {
+                table_items_it++;
+                if (table_items_it != request_items.MemberEnd()) {
+                    key_it = table_items_it->value["Keys"].Begin();
+                }
             }
+        }
+        elogger.trace("Unprocessed keys: {}", response["UnprocessedKeys"]);
+        if (!some_succeeded && eptr) {
+            return make_exception_future<executor::request_return_type>(eptr);
         }
         if (is_big(response)) {
             return make_ready_future<executor::request_return_type>(make_streamed(std::move(response)));
@@ -4096,13 +4142,13 @@ future<executor::request_return_type> executor::list_tables(client_state& client
         return make_ready_future<request_return_type>(api_error::validation("Limit must be greater than 0 and no greater than 100"));
     }
 
-    auto table_names = _proxy.get_db().local().get_column_families()
-            | boost::adaptors::map_values
-            | boost::adaptors::filtered([] (const lw_shared_ptr<replica::table>& t) {
-                        return t->schema()->ks_name().find(KEYSPACE_NAME_PREFIX) == 0 && !t->schema()->is_view();
+    auto tables = _proxy.data_dictionary().get_tables(); // hold on to temporary, table_names isn't a container, it's a view
+    auto table_names = tables
+            | boost::adaptors::filtered([] (data_dictionary::table t) {
+                        return t.schema()->ks_name().find(KEYSPACE_NAME_PREFIX) == 0 && !t.schema()->is_view();
                     })
-            | boost::adaptors::transformed([] (const lw_shared_ptr<replica::table>& t) {
-                        return t->schema()->cf_name();
+            | boost::adaptors::transformed([] (data_dictionary::table t) {
+                        return t.schema()->cf_name();
                     });
 
     rjson::value response = rjson::empty_object();
@@ -4170,7 +4216,7 @@ static std::map<sstring, sstring> get_network_topology_options(gms::gossiper& go
 // of nodes in the cluster: A cluster with 3 or more live nodes, gets RF=3.
 // A smaller cluster (presumably, a test only), gets RF=1. The user may
 // manually create the keyspace to override this predefined behavior.
-static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper) {
+static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::migration_manager& mm, gms::gossiper& gossiper, api::timestamp_type ts) {
     sstring keyspace_name_str(keyspace_name);
     int endpoint_count = co_await gms::get_all_endpoint_count(gossiper);
     int rf = 3;
@@ -4182,7 +4228,7 @@ static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_n
     auto opts = get_network_topology_options(gossiper, rf);
     auto ksm = keyspace_metadata::new_keyspace(keyspace_name_str, "org.apache.cassandra.locator.NetworkTopologyStrategy", std::move(opts), true);
 
-    co_return mm.prepare_new_keyspace_announcement(ksm);
+    co_return mm.prepare_new_keyspace_announcement(ksm, ts);
 }
 
 future<> executor::start() {

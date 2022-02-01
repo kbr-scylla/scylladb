@@ -356,25 +356,26 @@ future<> replicated_key_provider::maybe_initialize_tables() {
     }
 
     auto& mm = _ctxt.get_migration_manager().local();
-    static auto ignore_existing = [] (seastar::noncopyable_function<future<>()> func) {
-        return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
-    };
     log.debug("Creating keyspace and table");
     if (!db.has_keyspace(KSNAME)) {
-
-        co_await ignore_existing([this, &mm] () -> future<> { // Create the keyspace if not exists
+        auto group0_guard = co_await mm.start_group0_operation();
+        auto ts = group0_guard.write_timestamp();
+        try {
             auto ksm = keyspace_metadata::new_keyspace(
                     KSNAME,
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true);
-            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm));
-        });
-
+            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard));
+        } catch (exceptions::already_exists_exception&) {
+        }
     }
-    co_await ignore_existing([this, &mm] () -> future<> {
-        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(encrypted_keys_table()));
-    });
+    auto group0_guard = co_await mm.start_group0_operation();
+    auto ts = group0_guard.write_timestamp();
+    try {
+        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(encrypted_keys_table(), ts), std::move(group0_guard));
+    } catch (exceptions::already_exists_exception&) {
+    }
     auto& ks = db.find_keyspace(KSNAME);
     auto& rs = ks.get_replication_strategy();
     // should perhaps check name also..

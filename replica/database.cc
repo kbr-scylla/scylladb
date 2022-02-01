@@ -20,9 +20,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/metrics.hh>
-#include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/erase.hpp>
-#include <boost/algorithm/string/classification.hpp>
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include "compaction/compaction.hh"
@@ -1433,18 +1431,6 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     co_return std::tuple(std::move(result), hit_rate);
 }
 
-std::unordered_set<sstring> database::get_initial_tokens() {
-    std::unordered_set<sstring> tokens;
-    sstring tokens_string = get_config().initial_token();
-    try {
-        boost::split(tokens, tokens_string, boost::is_any_of(sstring(", ")));
-    } catch (...) {
-        throw std::runtime_error(format("Unable to parse initial_token={}", tokens_string));
-    }
-    tokens.erase("");
-    return tokens;
-}
-
 std::optional<gms::inet_address> database::get_replace_address() {
     auto& cfg = get_config();
     sstring replace_address = cfg.replace_address();
@@ -1770,10 +1756,31 @@ future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutat
   }));
 }
 
+// #9919 etc. The initiative to wrap exceptions here
+// causes a bunch of problems with (implicit) call sites
+// catching timed_out_error (not checking is_timeout_exception).
+// Fixing the call sites is a good idea, but it is also hard
+// to verify. This workaround should ensure we take the
+// correct code paths in all cases, until we can clean things up
+// proper.
+class wrapped_timed_out_error : public timed_out_error {
+private:
+    sstring _msg;
+public:
+    wrapped_timed_out_error(sstring msg)
+        : _msg(std::move(msg))
+    {}
+    const char* what() const noexcept override {
+        return _msg.c_str();
+    }
+};
+
+// see above (#9919)
+template<typename T = std::runtime_error>
 static void throw_commitlog_add_error(schema_ptr s, const frozen_mutation& m) {
     // it is tempting to do a full pretty print here, but the mutation is likely
     // humungous if we got an error, so just tell us where and pk...
-    std::throw_with_nested(std::runtime_error(format("Could not write mutation {}:{} ({}) to commitlog"
+    std::throw_with_nested(T(format("Could not write mutation {}:{} ({}) to commitlog"
         , s->ks_name(), s->cf_name()
         , m.key()
     )));
@@ -1786,8 +1793,11 @@ future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db
         try {
             commitlog_entry_writer cew(m.schema(), fm, db::commitlog::force_sync::no);
             h = co_await cf.commitlog()->add_entry(m.schema()->id(), cew, timeout);
+        } catch (timed_out_error&) {
+            // see above (#9919)
+            throw_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), fm);
         } catch (...) {
-            throw_commitlog_add_error(cf.schema(), fm);
+            throw_commitlog_add_error<>(cf.schema(), fm);
         }
     }
     try {
@@ -1827,8 +1837,11 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
         try {
             commitlog_entry_writer cew(s, m, sync);
             h = co_await cf.commitlog()->add_entry(uuid, cew, timeout);
+        } catch (timed_out_error&) {
+            // see above (#9919)
+            throw_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), m);
         } catch (...) {
-            throw_commitlog_add_error(s, m);
+            throw_commitlog_add_error<>(s, m);
         }
     }
     try {
@@ -1844,13 +1857,11 @@ Future database::update_write_metrics(Future&& f) {
     return f.then_wrapped([this, s = _stats] (auto f) {
         if (f.failed()) {
             ++s->total_writes_failed;
-            try {
-                f.get();
-            } catch (const timed_out_error&) {
+            auto ep = f.get_exception();
+            if (is_timeout_exception(ep)) {
                 ++s->total_writes_timedout;
-                throw;
             }
-            assert(0 && "should not reach");
+            return futurize<Future>::make_exception_future(std::move(ep));
         }
         ++s->total_writes;
         return f;
@@ -2373,6 +2384,15 @@ public:
         }
         return ret;
     }
+    virtual std::vector<data_dictionary::table> get_tables(data_dictionary::database db) const override {
+        std::vector<data_dictionary::table> ret;
+        auto&& tables = unwrap(db).get_column_families();
+        ret.reserve(tables.size());
+        for (auto&& [uuid, cf] : tables) {
+            ret.push_back(wrap(*cf));
+        }
+        return ret;
+    }
     virtual std::optional<data_dictionary::table> try_find_table(data_dictionary::database db, std::string_view ks, std::string_view table) const override {
         try {
             return wrap(unwrap(db).find_column_family(ks, table));
@@ -2401,6 +2421,9 @@ public:
     }
     virtual const locator::abstract_replication_strategy& get_replication_strategy(data_dictionary::keyspace ks) const override {
         return unwrap(ks).get_replication_strategy();
+    }
+    virtual bool is_internal(data_dictionary::keyspace ks) const override {
+        return is_internal_keyspace(unwrap(ks).metadata()->name());
     }
     virtual sstring get_available_index_name(data_dictionary::database db, std::string_view ks_name, std::string_view table_name,
             std::optional<sstring> index_name_root) const override {
