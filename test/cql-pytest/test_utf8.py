@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 # Copyright 2020-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 #############################################################################
 # Tests for finer points of UTF-8 support. The issue of *invalid* UTF-8 input

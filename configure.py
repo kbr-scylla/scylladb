@@ -5,9 +5,7 @@
 #
 
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 #
 
 import os, os.path, textwrap, argparse, sys, shlex, subprocess, tempfile, re, platform

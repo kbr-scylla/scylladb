@@ -1,8 +1,6 @@
 # Copyright 2020-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # This file contains tests which check Scylla-specific features that do
 # not exist on AWS. So all these tests are skipped when running with "--aws".

@@ -1,8 +1,6 @@
 # Copyright 2021 ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # Tests for the Time To Live (TTL) feature for item expiration.
 

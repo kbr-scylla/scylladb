@@ -3,9 +3,7 @@
  */
 
 /*
- * This file is part of Scylla.
- *
- * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
 verb [[with_client_info, with_timeout, one_way]] mutation (frozen_mutation fm, inet_address_vector_replica_set forward, gms::inet_address reply_to, unsigned shard, uint64_t response_id, std::optional<tracing::trace_info> trace_info [[version 1.3.0]]);

@@ -1,8 +1,6 @@
 # Copyright 2021-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # Tests for CORS (Cross-origin resource sharing) protocol support.
 # If the request has the "Origin" header specifying where the script which

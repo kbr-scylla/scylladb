@@ -1,8 +1,6 @@
 # Copyright 2020-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # This file configures pytest for all tests in this directory, and also
 # defines common test fixtures for all of them to use. A "fixture" is some

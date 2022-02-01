@@ -17,9 +17,7 @@
  * under the License.
  */
 /*
- * This file is part of Scylla.
- *
- * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
 // Port of etcd Raft implementation unit tests

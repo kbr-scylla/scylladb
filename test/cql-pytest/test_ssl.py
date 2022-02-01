@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright 2021-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 #############################################################################
 # Tests for CQL over SSL (TLS). These tests are skipped when the tests are

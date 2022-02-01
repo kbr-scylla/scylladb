@@ -1,8 +1,6 @@
 # Copyright 2019-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # Tests for the DescribeTable operation.
 # Some attributes used only by a specific major feature will be tested

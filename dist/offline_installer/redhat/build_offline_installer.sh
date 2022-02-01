@@ -3,9 +3,7 @@
 #  Copyright (C) 2017-present ScyllaDB
 
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 if [ ! -e dist/offline_installer/redhat/build_offline_installer.sh ]; then
     echo "run build_offline_installer.sh in top of scylla dir"

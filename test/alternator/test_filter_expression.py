@@ -1,8 +1,6 @@
 # Copyright 2020-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 # Tests for the FilterExpression parameter of the Query and Scan operations.
 # FilterExpression is a newer version of the older "QueryFilter" and

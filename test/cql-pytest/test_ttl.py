@@ -1,8 +1,6 @@
 # Copyright 2021-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 #############################################################################
 # Various tests for Scylla's ttl feature - USING TTL and DEFAULT_TIME_TO_LIVE

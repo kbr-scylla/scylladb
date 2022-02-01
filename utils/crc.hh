@@ -3,9 +3,7 @@
  */
 
 /*
- * This file is part of Scylla.
- *
- * See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
  *
  * A crc32 calculation for __PPC64__ uses the code from https://github.com/antonblanchard/crc32-vpmsum
  * written by Anton Blanchard <anton@au.ibm.com>, IBM

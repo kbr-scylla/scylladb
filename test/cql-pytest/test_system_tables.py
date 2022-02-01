@@ -1,8 +1,6 @@
 # Copyright 2021-present ScyllaDB
 #
-# This file is part of Scylla.
-#
-# See the LICENSE.PROPRIETARY file in the top-level directory for licensing information.
+# SPDX-License-Identifier: ScyllaDB-Proprietary
 
 #############################################################################
 # Various tests for the content of system tables. Many of these tables have
