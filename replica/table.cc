@@ -662,11 +662,21 @@ table::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_
                 [] (const dht::decorated_key&) { return api::min_timestamp; });
         }
 
-        mutation_fragment* fragment = co_await reader.peek();
-        if (!fragment) {
+        std::exception_ptr err;
+        try {
+            mutation_fragment* fragment = co_await reader.peek();
+            if (!fragment) {
+                co_await reader.close();
+                _memtables->erase(old);
+                co_return stop_iteration::yes;
+            }
+        } catch (...) {
+            err = std::current_exception();
+        }
+        if (err) {
+            tlogger.error("failed to flush memtable for {}.{}: {}", old->schema()->ks_name(), old->schema()->cf_name(), err);
             co_await reader.close();
-            _memtables->erase(old);
-            co_return stop_iteration::yes;
+            co_return stop_iteration(_async_gate.is_closed());
         }
 
         auto f = consumer(upgrade_to_v2(std::move(reader)));
@@ -1027,12 +1037,26 @@ void table::do_trigger_compaction() {
 }
 
 void table::trigger_offstrategy_compaction() {
+    // Run in background.
+    // This is safe since the the compaction task is tracked
+    // by the compaction_manager until stop()
+    (void)perform_offstrategy_compaction().then_wrapped([this] (future<bool> f) {
+        if (f.failed()) {
+            auto ex = f.get_exception();
+            tlogger.warn("Offstrategy compaction of {}.{} failed: {}, ignoring", schema()->ks_name(), schema()->cf_name(), ex);
+        }
+    });
+}
+
+future<bool> table::perform_offstrategy_compaction() {
     // If the user calls trigger_offstrategy_compaction() to trigger
     // off-strategy explicitly, cancel the timeout based automatic trigger.
     _off_strategy_trigger.cancel();
-    if (!_maintenance_sstables->all()->empty()) {
-        _compaction_manager.submit_offstrategy(this);
+    if (_maintenance_sstables->all()->empty()) {
+        co_return false;
     }
+    co_await _compaction_manager.perform_offstrategy(this);
+    co_return true;
 }
 
 future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
@@ -1449,27 +1473,33 @@ future<> table::snapshot(database& db, sstring name, bool skip_flush) {
                         snapshot->files.insert(std::move(sst));
                     }
 
+                    tlogger.debug("snapshot {}: signal requests", jsondir);
                     snapshot->requests.signal(1);
                     auto my_work = make_ready_future<>();
                     if (requester == this_shard_id()) {
+                        tlogger.debug("snapshot {}: waiting for all shards", jsondir);
                         my_work = snapshot->requests.wait(smp::count).then([&jsondir,
                                                                             &db, snapshot, this] {
                             // this_shard_id() here == requester == this_shard_id() before submit_to() above,
                             // so the db reference is still local
+                            tlogger.debug("snapshot {}: writing schema.cql", jsondir);
                             return write_schema_as_cql(db, jsondir).handle_exception([&jsondir](std::exception_ptr ptr) {
                                 tlogger.error("Failed writing schema file in snapshot in {} with exception {}", jsondir, ptr);
                                 return make_ready_future<>();
                             }).finally([&jsondir, snapshot] () mutable {
+                                tlogger.debug("snapshot {}: seal_snapshot", jsondir);
                                 return seal_snapshot(jsondir).handle_exception([&jsondir] (std::exception_ptr ex) {
                                     tlogger.error("Failed to seal snapshot in {}: {}. Ignored.", jsondir, ex);
-                                }).then([snapshot] {
+                                }).then([snapshot, &jsondir] {
+                                    tlogger.debug("snapshot {}: done", jsondir);
                                     snapshot->manifest_write.signal(smp::count);
                                     return make_ready_future<>();
                                 });
                             });
                         });
                     }
-                    return my_work.finally([snapshot] {
+                    return my_work.finally([snapshot, &jsondir, requester] {
+                        tlogger.debug("snapshot {}: waiting for manifest on behalf of shard {}", jsondir, requester);
                         return snapshot->manifest_write.wait(1);
                     }).then([snapshot] {});
                 });

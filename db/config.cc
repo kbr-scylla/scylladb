@@ -836,6 +836,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             "Bypass in-memory data cache (the row cache) when performing reversed queries.")
     , enable_optimized_reversed_reads(this, "enable_optimized_reversed_reads", liveness::LiveUpdate, value_status::Used, true,
             "Use a new optimized algorithm for performing reversed reads.")
+    , enable_cql_config_updates(this, "enable_cql_config_updates", liveness::LiveUpdate, value_status::Used, true,
+            "Make the system.config table UPDATEable")
+    , enable_parallelized_aggregation(this, "enable_parallelized_aggregation", liveness::LiveUpdate, value_status::Used, true,
+            "Use on a new, parallel algorithm for performing aggregate queries.")
     , alternator_port(this, "alternator_port", value_status::Used, 0, "Alternator API port")
     , alternator_https_port(this, "alternator_https_port", value_status::Used, 0, "Alternator API HTTPS port")
     , alternator_address(this, "alternator_address", value_status::Used, "0.0.0.0", "Alternator API listening address")

@@ -546,6 +546,10 @@ murmur3_partitioner_ignore_msb_bits: 12
 # Set to `false` to fall-back to the old algorithm.
 # enable_optimized_reversed_reads: true
 
+# Use on a new, parallel algorithm for performing aggregate queries.
+# Set to `false` to fall-back to the old algorithm.
+# enable_parallelized_aggregation: true
+
 # In memory storage size for sstables in MB
 # If this value is not zero the specified amount of memory
 # will be reserved to store sstables for tables with in_memory

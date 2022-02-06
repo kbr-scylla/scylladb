@@ -64,6 +64,7 @@ constexpr std::string_view features::SEPARATE_PAGE_SIZE_AND_SAFETY_LIMIT = "SEPA
 constexpr std::string_view features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT = "SUPPORTS_RAFT_CLUSTER_MANAGEMENT";
 constexpr std::string_view features::USES_RAFT_CLUSTER_MANAGEMENT = "USES_RAFT_CLUSTER_MANAGEMENT";
 constexpr std::string_view features::TOMBSTONE_GC_OPTIONS = "TOMBSTONE_GC_OPTIONS";
+constexpr std::string_view features::PARALLELIZED_AGGREGATION = "PARALLELIZED_AGGREGATION";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 constexpr std::string_view features::WORKLOAD_PRIORITIZATION = "WORKLOAD_PRIORITIZATION";
 
@@ -95,6 +96,7 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _supports_raft_cluster_mgmt(*this, features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT)
         , _uses_raft_cluster_mgmt(*this, features::USES_RAFT_CLUSTER_MANAGEMENT)
         , _tombstone_gc_options(*this, features::TOMBSTONE_GC_OPTIONS)
+        , _parallelized_aggregation(*this, features::PARALLELIZED_AGGREGATION)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
         , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION)
         , _raft_support_listener(_supports_raft_cluster_mgmt.when_enabled([this] {
@@ -221,6 +223,7 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT,
         gms::features::USES_RAFT_CLUSTER_MANAGEMENT,
         gms::features::TOMBSTONE_GC_OPTIONS,
+        gms::features::PARALLELIZED_AGGREGATION,
         gms::features::IN_MEMORY_TABLES,
         gms::features::WORKLOAD_PRIORITIZATION,
     };
@@ -333,6 +336,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_supports_raft_cluster_mgmt),
         std::ref(_uses_raft_cluster_mgmt),
         std::ref(_tombstone_gc_options),
+        std::ref(_parallelized_aggregation),
         std::ref(_in_memory_tables),
         std::ref(_workload_prioritization),
     })
