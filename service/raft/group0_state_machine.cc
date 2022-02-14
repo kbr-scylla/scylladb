@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 #include "service/raft/group0_state_machine.hh"
 #include <seastar/core/coroutine.hh>
