@@ -579,7 +579,7 @@ messaging_service::get_rpc_client_idx(messaging_verb verb) {
     // basically a new tenant with the same name.
     if (it == _dynamic_tenants_to_client_idx.end() ||
             _scheduling_info_for_connection_index[it->second].sched_group != sg_for_tenant) {
-        return add_statement_tenant(*service_level,sg_for_tenant) + (idx - 2);
+        return add_statement_tenant(*service_level,sg_for_tenant) + (idx - PER_SHARD_CONNECTION_COUNT);
     }
     return it->second;
 }
@@ -1179,18 +1179,21 @@ unsigned messaging_service::add_statement_tenant(sstring tenant_name, scheduling
     });
     sstring statement_cookie = sstring("statement:") + tenant_name;
     sstring statement_ack_cookie = sstring("statement-ack:") + tenant_name;
-    _clients.resize(_clients.size() + 2);
+    sstring forward_cookie = sstring("forward:") + tenant_name;
+    _clients.resize(_clients.size() + PER_TENANT_CONNECTION_COUNT);
     // this functions as a way to delete an obsolete tenant with the same name but keeping _clients
     // indexing and _scheduling_info_for_connection_index indexing in sync.
     for (unsigned i = 0; i < _scheduling_info_for_connection_index.size(); i++) {
         if (_scheduling_info_for_connection_index[i].isolation_cookie == statement_cookie) {
             _scheduling_info_for_connection_index[i].isolation_cookie = "";
             _scheduling_info_for_connection_index[i+1].isolation_cookie = "";
+            _scheduling_info_for_connection_index[i+2].isolation_cookie = "";
             break;
         }
     }
     _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, statement_cookie});
     _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, statement_ack_cookie});
+    _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, forward_cookie});
     _dynamic_tenants_to_client_idx.insert_or_assign(tenant_name, idx);
     undo.cancel();
     return idx;

@@ -279,7 +279,7 @@ private:
     ::shared_ptr<seastar::tls::server_credentials> _credentials;
     std::unique_ptr<seastar::tls::credentials_builder> _credentials_builder;
     std::array<std::unique_ptr<rpc_protocol_server_wrapper>, 2> _server_tls;
-    std::vector<clients_map> _clients{4};
+    std::vector<clients_map> _clients;
     uint64_t _dropped_messages[static_cast<int32_t>(messaging_verb::LAST)] = {};
     bool _shutting_down = false;
     connection_drop_signal_t _connection_dropped;
