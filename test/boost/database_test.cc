@@ -1017,10 +1017,12 @@ SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
 
 SEASTAR_TEST_CASE(populate_from_quarantine_works) {
     auto tmpdir_for_data = make_lw_shared<tmpdir>();
+    utils::UUID host_id;
 
     // populate tmpdir_for_data and
     // move a random sstable to quarantine
-    co_await do_with_some_data({"cf"}, [] (cql_test_env& e) -> future<> {
+    co_await do_with_some_data({"cf"}, [&host_id] (cql_test_env& e) -> future<> {
+        host_id = e.local_db().get_config().host_id;
         auto& db = e.db();
         co_await db.invoke_on_all([] (replica::database& db) {
             auto& cf = db.find_column_family("ks", "cf");
@@ -1051,6 +1053,7 @@ SEASTAR_TEST_CASE(populate_from_quarantine_works) {
     // verify that all rows are still there
     auto db_cfg_ptr = make_shared<db::config>();
     db_cfg_ptr->data_file_directories(std::vector<sstring>({ tmpdir_for_data->path().string() }));
+    db_cfg_ptr->host_id = host_id;
     size_t row_count = 0;
     co_await do_with_cql_env([&row_count] (cql_test_env& e) -> future<> {
         auto res = co_await e.execute_cql("select * from ks.cf;");

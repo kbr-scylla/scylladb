@@ -815,8 +815,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.")
     , cpu_scheduler(this, "cpu_scheduler", value_status::Used, true, "Enable cpu scheduling")
     , view_building(this, "view_building", value_status::Used, true, "Enable view building; should only be set to false when the node is experience issues due to view building")
-    , enable_sstables_mc_format(this, "enable_sstables_mc_format", value_status::Unused, true, "Enable SSTables 'mc' format to be used as the default file format")
-    , enable_sstables_md_format(this, "enable_sstables_md_format", value_status::Used, true, "Enable SSTables 'md' format to be used as the default file format")
+    , enable_sstables_mc_format(this, "enable_sstables_mc_format", value_status::Unused, true, "Enable SSTables 'mc' format to be used as the default file format.  Deprecated, please use \"sstable_format\" instead.")
+    , enable_sstables_md_format(this, "enable_sstables_md_format", value_status::Unused, true, "Enable SSTables 'md' format to be used as the default file format.  Deprecated, please use \"sstable_format\" instead.")
+    , sstable_format(this, "sstable_format", value_status::Used, "me", "Default sstable file format", {"mc", "md", "me"})
     , enable_dangerous_direct_import_of_cassandra_counters(this, "enable_dangerous_direct_import_of_cassandra_counters", value_status::Used, false, "Only turn this option on if you want to import tables from Cassandra containing counters, and you are SURE that no counters in that table were created in a version earlier than Cassandra 2.1."
         " It is not enough to have ever since upgraded to newer versions of Cassandra. If you EVER used a version earlier than 2.1 in the cluster where these SSTables come from, DO NOT TURN ON THIS OPTION! You will corrupt your data. You have been warned.")
     , enable_shard_aware_drivers(this, "enable_shard_aware_drivers", value_status::Used, true, "Enable native transport drivers to use connection-per-shard for better performance")
@@ -844,8 +845,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , user_defined_function_time_limit_ms(this, "user_defined_function_time_limit_ms", value_status::Used, 10, "The time limit for each UDF invocation")
     , user_defined_function_allocation_limit_bytes(this, "user_defined_function_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate")
     , user_defined_function_contiguous_allocation_limit_bytes(this, "user_defined_function_contiguous_allocation_limit_bytes", value_status::Used, 1024*1024, "How much memory each UDF invocation can allocate in one chunk")
-    , schema_registry_grace_period(this, "schema_registry_grace_period", value_status::Used, 60*15,
-        "Time period in seconds after which unused schema versions will be evicted from the local schema registry cache. Default is 15 minutes.")
+    , schema_registry_grace_period(this, "schema_registry_grace_period", value_status::Used, 1,
+        "Time period in seconds after which unused schema versions will be evicted from the local schema registry cache. Default is 1 second.")
     , max_concurrent_requests_per_shard(this, "max_concurrent_requests_per_shard",liveness::LiveUpdate, value_status::Used, std::numeric_limits<uint32_t>::max(),
         "Maximum number of concurrent requests a single shard can handle before it starts shedding extra load. By default, no requests will be shed.")
     , cdc_dont_rewrite_streams(this, "cdc_dont_rewrite_streams", value_status::Used, false,

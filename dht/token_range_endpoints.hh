@@ -2,9 +2,7 @@
  * Copyright (C) 2015-present ScyllaDB.
  */
 
-/*
- * SPDX-License-Identifier: ScyllaDB-Proprietary
- */
+// SPDX-License-Identifier: ScyllaDB-Proprietary
 
 #pragma once
 #include <vector>

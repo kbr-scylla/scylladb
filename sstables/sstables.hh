@@ -171,10 +171,6 @@ public:
                             format_types format, component_type component);
     static sstring filename(const sstring& dir, const sstring& ks, const sstring& cf, version_types version, int64_t generation,
                             format_types format, sstring component);
-    // WARNING: it should only be called to remove components of a sstable with
-    // a temporary TOC file.
-    static future<> remove_sstable_with_temp_toc(sstring ks, sstring cf, sstring dir, int64_t generation,
-                                                 version_types v, format_types f);
 
     // load sstable using components shared by a shard
     future<> load(foreign_sstable_open_info info) noexcept;
@@ -415,6 +411,8 @@ public:
     bool requires_view_building() const;
 
     bool is_quarantined() const noexcept;
+
+    bool is_uploaded() const noexcept;
 
     std::vector<std::pair<component_type, sstring>> all_components() const;
 
@@ -694,6 +692,8 @@ public:
     bool has_scylla_component() const {
         return has_component(component_type::Scylla);
     }
+
+    bool validate_originating_host_id() const;
 
     bool has_correct_promoted_index_entries() const {
         return _schema->is_compound() || !has_scylla_component() || _components->scylla_metadata->has_feature(sstable_feature::NonCompoundPIEntries);

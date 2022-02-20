@@ -318,6 +318,7 @@ public:
     named_value<bool> view_building;
     named_value<bool> enable_sstables_mc_format;
     named_value<bool> enable_sstables_md_format;
+    named_value<sstring> sstable_format;
     named_value<bool> enable_dangerous_direct_import_of_cassandra_counters;
     named_value<bool> enable_shard_aware_drivers;
     named_value<bool> enable_ipv6_dns_lookup;
@@ -382,6 +383,8 @@ public:
     seastar::logging_settings logging_settings(const log_cli::options&) const;
 
     const db::extensions& extensions() const;
+
+    utils::UUID host_id;
 
     bool create_role_attributes_table = true; // Some upgrade tests don't want enterprise-only tables
     bool create_service_levels_table = true; // Some upgrade tests don't want enterprise-only tables
