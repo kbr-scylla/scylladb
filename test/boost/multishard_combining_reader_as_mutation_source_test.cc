@@ -44,11 +44,11 @@ static auto make_populate(bool evict_paused_readers, bool single_fragment_buffer
 
         auto merged_mutations = boost::copy_range<std::vector<std::vector<frozen_mutation>>>(mutations_by_token | boost::adaptors::map_values);
 
-        auto remote_memtables = make_lw_shared<std::vector<foreign_ptr<lw_shared_ptr<memtable>>>>();
+        auto remote_memtables = make_lw_shared<std::vector<foreign_ptr<lw_shared_ptr<replica::memtable>>>>();
         for (unsigned shard = 0; shard < sharder.shard_count(); ++shard) {
             auto remote_mt = smp::submit_to(shard, [shard, gs = global_schema_ptr(s), &merged_mutations, sharder] {
                 auto s = gs.get();
-                auto mt = make_lw_shared<memtable>(s);
+                auto mt = make_lw_shared<replica::memtable>(s);
 
                 for (unsigned i = shard; i < merged_mutations.size(); i += sharder.shard_count()) {
                     for (auto& mut : merged_mutations[i]) {
@@ -87,7 +87,7 @@ static auto make_populate(bool evict_paused_readers, bool single_fragment_buffer
             };
 
             auto lifecycle_policy = seastar::make_shared<test_reader_lifecycle_policy>(std::move(factory), evict_paused_readers);
-            auto mr = make_multishard_combining_reader_for_tests(keep_alive_sharder.back(), std::move(lifecycle_policy), s,
+            auto mr = make_multishard_combining_reader_v2_for_tests(keep_alive_sharder.back(), std::move(lifecycle_policy), s,
                     std::move(permit), range, slice, pc, trace_state, fwd_mr);
             if (fwd_sm == streamed_mutation::forwarding::yes) {
                 return make_forwardable(std::move(mr));

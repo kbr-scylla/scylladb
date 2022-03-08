@@ -37,11 +37,11 @@ public:
 
     virtual future<> execute(reader_permit permit, db::result_collector& rc) override {
         return async([this, permit, &rc] {
-            auto mt = make_lw_shared<memtable>(_s);
+            auto mt = make_lw_shared<replica::memtable>(_s);
             do_for_each(_mutations, [mt] (const mutation& m) {
                 mt->apply(m);
             }).get();
-            auto rdr = mt->make_flat_reader(_s, permit);
+            auto rdr = downgrade_to_v1(mt->make_flat_reader(_s, permit));
             auto close_rdr = deferred_close(rdr);
             rdr.consume_pausable([&rc] (mutation_fragment mf) {
                 return rc.take(std::move(mf)).then([] { return stop_iteration::no; });

@@ -29,7 +29,7 @@ def type1(cql, test_keyspace):
 @pytest.fixture(scope="module")
 def table1(cql, test_keyspace, type1):
     table = test_keyspace + "." + unique_name()
-    cql.execute(f"CREATE TABLE {table} (p int PRIMARY KEY, v int, a ascii, b boolean, vi varint, mai map<ascii, int>, tup frozen<tuple<text, int>>, l list<text>, d double, t time, dec decimal, tupmap map<frozen<tuple<text, int>>, int>, t1 frozen<{type1}>)")
+    cql.execute(f"CREATE TABLE {table} (p int PRIMARY KEY, v int, bigv bigint, a ascii, b boolean, vi varint, mai map<ascii, int>, tup frozen<tuple<text, int>>, l list<text>, d double, t time, dec decimal, tupmap map<frozen<tuple<text, int>>, int>, t1 frozen<{type1}>)")
     yield table
     cql.execute("DROP TABLE " + table)
 
@@ -86,12 +86,35 @@ def test_fromjson_nonint_prepared(cql, table1):
     with pytest.raises(FunctionFailure):
         cql.execute(stmt, [p, '1.2'])
 
+# In test_fromjson_nonint_*() above we noted that the floating point number 1.2
+# cannot be assigned into an integer column v. In contrast, the numbers 1e6
+# or 1.23456789E+9, despite appearing to C programmers like a floating-point
+# constant, are perfectly valid integers - whole numbers and fitting the range
+# of int and bigint respectively - so they should be assignable into an int or
+# bigint. This test checks that.
+# Reproduces issue #10100.
+# This test is marked with "cassandra_bug" because it fails in Cassandra as
+# well and we consider this failure a bug.
+def test_fromjson_int_scientific_notation_unprepared(cql, table1, cassandra_bug):
+    p = unique_key_int()
+    cql.execute(f"INSERT INTO {table1} (p, bigv) VALUES ({p}, fromJson('1.23456789E+9'))")
+    assert list(cql.execute(f"SELECT p, bigv from {table1} where p = {p}")) == [(p, 1234567890)]
+    cql.execute(f"INSERT INTO {table1} (p, v) VALUES ({p}, fromJson('1e6'))")
+    assert list(cql.execute(f"SELECT p, v from {table1} where p = {p}")) == [(p, 1000000)]
+def test_fromjson_int_scientific_notation_prepared(cql, table1, cassandra_bug):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '1.23456789E+9'])
+    assert list(cql.execute(f"SELECT p, bigv from {table1} where p = {p}")) == [(p, 1234567890)]
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, v) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '1e6'])
+    assert list(cql.execute(f"SELECT p, v from {table1} where p = {p}")) == [(p, 1000000)]
+
 # The JSON standard does not define or limit the range or precision of
 # numbers. However, if a number is assigned to a Scylla number type, the
 # assignment can overflow and should result in an error - not be silently
 # wrapped around.
 # Reproduces issue #7914
-@pytest.mark.xfail(reason="issue #7914")
 def test_fromjson_int_overflow_unprepared(cql, table1):
     p = unique_key_int()
     # The highest legal int is 2147483647 (2^31-1).2147483648 is not a legal
@@ -99,12 +122,56 @@ def test_fromjson_int_overflow_unprepared(cql, table1):
     # wraparound to -2147483648 as happened in Scylla.
     with pytest.raises(FunctionFailure):
         cql.execute(f"INSERT INTO {table1} (p, v) VALUES ({p}, fromJson('2147483648'))")
-@pytest.mark.xfail(reason="issue #7914")
+def test_fromjson_bigint_overflow_unprepared(cql, table1):
+    p = unique_key_int()
+    with pytest.raises(FunctionFailure):
+        cql.execute(f"INSERT INTO {table1} (p, bigv) VALUES ({p}, fromJson('9223372036854775808'))")
 def test_fromjson_int_overflow_prepared(cql, table1):
     p = unique_key_int()
     stmt = cql.prepare(f"INSERT INTO {table1} (p, v) VALUES (?, fromJson(?))")
     with pytest.raises(FunctionFailure):
         cql.execute(stmt, [p, '2147483648'])
+def test_fromjson_bigint_overflow_prepared(cql, table1):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    with pytest.raises(FunctionFailure):
+        cql.execute(stmt, [p, '9223372036854775808'])
+
+# On the other hand, let's check a case of the biggest bigint (64-bit
+# integer) which should *not* overflow. Let's check that we handle it
+# correctly.
+def test_fromjson_bigint_nonoverflow(cql, table1):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    cql.execute(stmt, [p, '9223372036854775807'])
+    assert list(cql.execute(f"SELECT bigv from {table1} where p = {p}")) == [(9223372036854775807,)]
+
+# Test the same non-overflowing integer with scientific notation. This is the
+# same test as test_fromjson_int_scientific_notation_prepared above (so
+# reproduces #10100), just with a number higher than 2^53. This presents
+# difficult problem for a parser like the RapidJSON one we use, that decides
+# to read scientific notation numbers through a "double" variable: a double
+# only had 53 significant bits of mantissa, so may not preserve numbers higher
+# than 2^53 accurately.
+# Note that the JSON standard (RFC 8259) explains that because implementations
+# may use double-precision representation (as the Scylla-used RapidJSON does),
+# "numbers that are integers and are in the range [-(2**53)+1, (2**53)-1] are
+# interoperable in the sense that implementations will agree exactly on their
+# numeric values.". Because the number in this test is higher, the JSON
+# standard suggests it may be fine to botch it up, so it might be acceptable
+# to fail this test.
+# Reproduces #10100 and #10137.
+@pytest.mark.xfail(reason="issue #10137")
+def test_fromjson_bigint_nonoverflow_scientific(cql, table1, cassandra_bug):
+    p = unique_key_int()
+    stmt = cql.prepare(f"INSERT INTO {table1} (p, bigv) VALUES (?, fromJson(?))")
+    # 1152921504606846975 is 2^60-1, more than 2^53 but less than what a
+    # bigint can store (2^63-1). We do not use 2^63-1 in this test because
+    # an inaccuracy there in the up direction can lead us to overflowing
+    # the signed integer and UBSAN errors - while we want to detect the
+    # inaccuracy cleanly, here.
+    cql.execute(stmt, [p, '115292150460684697.5e1'])
+    assert list(cql.execute(f"SELECT bigv from {table1} where p = {p}")) == [(1152921504606846975,)]
 
 # When writing to an integer column, Cassandra's fromJson() function allows
 # not just JSON number constants, it also allows a string containing a number.

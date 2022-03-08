@@ -56,23 +56,25 @@ const locator::token_metadata& http_context::get_token_metadata() {
 namespace ss = httpd::storage_service_json;
 using namespace json;
 
-sstring validate_keyspace(http_context& ctx, const parameters& param) {
-    const auto& ks_name = param["keyspace"];
+sstring validate_keyspace(http_context& ctx, sstring ks_name) {
     if (ctx.db.local().has_keyspace(ks_name)) {
         return ks_name;
     }
     throw bad_param_exception(replica::no_such_keyspace(ks_name).what());
 }
 
+sstring validate_keyspace(http_context& ctx, const parameters& param) {
+    return validate_keyspace(ctx, param["keyspace"]);
+}
+
 // splits a request parameter assumed to hold a comma-separated list of table names
 // verify that the tables are found, otherwise a bad_param_exception exception is thrown
 // containing the description of the respective no_such_column_family error.
-std::vector<sstring> parse_tables(const sstring& ks_name, http_context& ctx, const std::unordered_map<sstring, sstring>& query_params, sstring param_name) {
-    auto it = query_params.find(param_name);
-    if (it == query_params.end()) {
-        return {};
+std::vector<sstring> parse_tables(const sstring& ks_name, http_context& ctx, sstring value) {
+    if (value.empty()) {
+        return map_keys(ctx.db.local().find_keyspace(ks_name).metadata().get()->cf_meta_data());
     }
-    std::vector<sstring> names = split(it->second, ",");
+    std::vector<sstring> names = split(value, ",");
     try {
         for (const auto& table_name : names) {
             ctx.db.local().find_column_family(ks_name, table_name);
@@ -81,6 +83,14 @@ std::vector<sstring> parse_tables(const sstring& ks_name, http_context& ctx, con
         throw bad_param_exception(e.what());
     }
     return names;
+}
+
+std::vector<sstring> parse_tables(const sstring& ks_name, http_context& ctx, const std::unordered_map<sstring, sstring>& query_params, sstring param_name) {
+    auto it = query_params.find(param_name);
+    if (it == query_params.end()) {
+        return {};
+    }
+    return parse_tables(ks_name, ctx, it->second);
 }
 
 static ss::token_range token_range_endpoints_to_json(const dht::token_range_endpoints& d) {
@@ -753,13 +763,13 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
 
     ss::get_operation_mode.set(r, [&ss](std::unique_ptr<request> req) {
         return ss.local().get_operation_mode().then([] (auto mode) {
-            return make_ready_future<json::json_return_type>(mode);
+            return make_ready_future<json::json_return_type>(format("{}", mode));
         });
     });
 
     ss::is_starting.set(r, [&ss](std::unique_ptr<request> req) {
-        return ss.local().is_starting().then([] (auto starting) {
-            return make_ready_future<json::json_return_type>(starting);
+        return ss.local().get_operation_mode().then([] (auto mode) {
+            return make_ready_future<json::json_return_type>(mode <= service::storage_service::mode::STARTING);
         });
     });
 
@@ -829,9 +839,13 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         return make_ready_future<json::json_return_type>(json_void());
     });
 
-    ss::is_initialized.set(r, [&ss](std::unique_ptr<request> req) {
-        return ss.local().is_initialized().then([] (bool initialized) {
-            return make_ready_future<json::json_return_type>(initialized);
+    ss::is_initialized.set(r, [&ss, &g](std::unique_ptr<request> req) {
+        return ss.local().get_operation_mode().then([&g] (auto mode) {
+            bool is_initialized = mode >= service::storage_service::mode::STARTING;
+            if (mode == service::storage_service::mode::NORMAL) {
+                is_initialized = g.is_enabled();
+            }
+            return make_ready_future<json::json_return_type>(is_initialized);
         });
     });
 
@@ -840,7 +854,9 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
     });
 
     ss::is_joined.set(r, [&ss] (std::unique_ptr<request> req) {
-        return make_ready_future<json::json_return_type>(ss.local().is_joined());
+        return ss.local().get_operation_mode().then([] (auto mode) {
+            return make_ready_future<json::json_return_type>(mode >= service::storage_service::mode::JOINING);
+        });
     });
 
     ss::set_stream_throughput_mb_per_sec.set(r, [](std::unique_ptr<request> req) {
@@ -1326,17 +1342,29 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
         });
     });
 
-    ss::scrub.set(r, wrap_ks_cf(ctx, [&snap_ctl] (http_context& ctx, std::unique_ptr<request> req, sstring keyspace, std::vector<sstring> column_families) {
+    ss::scrub.set(r, [&ctx, &snap_ctl] (std::unique_ptr<request> req) {
+        auto rp = req_params({
+            {"keyspace", {mandatory::yes}},
+            {"cf", {""}},
+            {"scrub_mode", {}},
+            {"skip_corrupted", {}},
+            {"disable_snapshot", {}},
+            {"quarantine_mode", {}},
+        });
+        rp.process(*req);
+        auto keyspace = validate_keyspace(ctx, *rp.get("keyspace"));
+        auto column_families = parse_tables(keyspace, ctx, *rp.get("cf"));
+        auto scrub_mode_opt = rp.get("scrub_mode");
         auto scrub_mode = sstables::compaction_type_options::scrub::mode::abort;
 
-        const sstring scrub_mode_str = req_param<sstring>(*req, "scrub_mode", "");
-        if (scrub_mode_str == "") {
-            const auto skip_corrupted = req_param<bool>(*req, "skip_corrupted", false);
+        if (!scrub_mode_opt) {
+            const auto skip_corrupted = rp.get_as<bool>("skip_corrupted").value_or(false);
 
             if (skip_corrupted) {
                 scrub_mode = sstables::compaction_type_options::scrub::mode::skip;
             }
         } else {
+            auto scrub_mode_str = *scrub_mode_opt;
             if (scrub_mode_str == "ABORT") {
                 scrub_mode = sstables::compaction_type_options::scrub::mode::abort;
             } else if (scrub_mode_str == "SKIP") {
@@ -1346,7 +1374,7 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
             } else if (scrub_mode_str == "VALIDATE") {
                 scrub_mode = sstables::compaction_type_options::scrub::mode::validate;
             } else {
-                throw std::invalid_argument(fmt::format("Unknown argument for 'scrub_mode' parameter: {}", scrub_mode_str));
+                throw httpd::bad_param_exception(fmt::format("Unknown argument for 'scrub_mode' parameter: {}", scrub_mode_str));
             }
         }
 
@@ -1369,7 +1397,7 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
         } else if (quarantine_mode_str == "ONLY") {
             opts.quarantine_operation_mode = sstables::compaction_type_options::scrub::quarantine_mode::only;
         } else {
-            throw std::invalid_argument(fmt::format("Unknown argument for 'quarantine_mode' parameter: {}", quarantine_mode_str));
+            throw httpd::bad_param_exception(fmt::format("Unknown argument for 'quarantine_mode' parameter: {}", quarantine_mode_str));
         }
         return f.then([&ctx, keyspace, column_families, opts] {
             return ctx.db.invoke_on_all([=] (replica::database& db) {
@@ -1382,7 +1410,7 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
         }).then([]{
             return make_ready_future<json::json_return_type>(0);
         });
-    }));
+    });
 }
 
 void unset_snapshot(http_context& ctx, routes& r) {

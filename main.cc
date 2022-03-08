@@ -55,6 +55,7 @@
 #include "message/messaging_service.hh"
 #include "db/sstables-format-selector.hh"
 #include "db/snapshot-ctl.hh"
+#include "cql3/query_processor.hh"
 #include <seastar/net/dns.hh>
 #include <seastar/core/io_queue.hh>
 #include <seastar/core/abort_on_ebadf.hh>
@@ -68,7 +69,6 @@
 #include "replica/distributed_loader.hh"
 #include "sstables_loader.hh"
 #include "cql3/cql_config.hh"
-#include "connection_notifier.hh"
 #include "transport/controller.hh"
 #include "thrift/controller.hh"
 #include "service/memory_limiter.hh"
@@ -370,11 +370,38 @@ static auto defer_verbose_shutdown(const char* what, Func&& func) {
         startlog.info("Shutting down {}", what);
         try {
             func();
+            startlog.info("Shutting down {} was successful", what);
         } catch (...) {
-            startlog.error("Unexpected error shutting down {}: {}", what, std::current_exception());
-            throw;
+            auto ex = std::current_exception();
+            bool do_abort = true;
+            try {
+                std::rethrow_exception(ex);
+            } catch (const std::system_error& e) {
+                // System error codes we consider "environmental",
+                // i.e. not scylla's fault, therefore there is no point in
+                // aborting and dumping core.
+                for (int i : {EIO, EACCES, ENOSPC}) {
+                    if (e.code() == std::error_code(i, std::system_category())) {
+                        do_abort = false;
+                        break;
+                    }
+                }
+            } catch (...) {
+            }
+            auto msg = fmt::format("Unexpected error shutting down {}: {}", what, ex);
+            if (do_abort) {
+                startlog.error("{}: aborting", msg);
+                abort();
+            } else {
+                startlog.error("{}: exiting, at {}", msg, current_backtrace());
+
+                // Call _exit() rather than exit() to exit immediately
+                // without calling exit handlers, avoiding
+                // boost::intrusive::detail::destructor_impl assert failure
+                // from ~segment_pool exit handler.
+                _exit(255);
+            }
         }
-        startlog.info("Shutting down {} was successful", what);
     };
 
     auto ret = deferred_action(std::move(vfunc));
@@ -1351,9 +1378,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_vb_api = defer_verbose_shutdown("view builder API", [&ctx] {
                 api::unset_server_view_builder(ctx).get();
             });
-
-            // Truncate `clients' CF - this table should not persist between server restarts.
-            clear_clientlist().get();
 
             db.invoke_on_all([] (replica::database& db) {
                 db.revert_initial_system_read_concurrency_boost();

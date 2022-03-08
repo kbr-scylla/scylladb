@@ -13,7 +13,7 @@
 #include "sstables/index_reader.hh"
 #include "sstables/binary_search.hh"
 #include "sstables/writer.hh"
-#include "memtable-sstable.hh"
+#include "replica/memtable-sstable.hh"
 #include "dht/i_partitioner.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/sstable_test_env.hh"
@@ -29,7 +29,7 @@ using local_shard_only = bool_class<local_shard_only_tag>;
 
 sstables::shared_sstable make_sstable_containing(std::function<sstables::shared_sstable()> sst_factory, std::vector<mutation> muts);
 
-inline future<> write_memtable_to_sstable_for_test(memtable& mt, sstables::shared_sstable sst) {
+inline future<> write_memtable_to_sstable_for_test(replica::memtable& mt, sstables::shared_sstable sst) {
     return write_memtable_to_sstable(mt, sst, sst->manager().configure_writer("memtable"));
 }
 
@@ -198,6 +198,7 @@ public:
     // Used to create synthetic sstables for testing leveled compaction strategy.
     void set_values_for_leveled_strategy(uint64_t fake_data_size, uint32_t sstable_level, int64_t max_timestamp, sstring first_key, sstring last_key) {
         _sst->_data_file_size = fake_data_size;
+        _sst->_bytes_on_disk = fake_data_size;
         // Create a synthetic stats metadata
         stats_metadata stats = {};
         // leveled strategy sorts sstables by age using max_timestamp, let's set it to 0.
@@ -344,7 +345,7 @@ class compaction_manager_test {
 public:
     explicit compaction_manager_test(compaction_manager& cm) noexcept : _cm(cm) {}
 
-    sstables::compaction_data& register_compaction(utils::UUID output_run_id = {}, replica::column_family* cf = nullptr);
+    sstables::compaction_data& register_compaction(utils::UUID output_run_id, replica::column_family* cf);
 
     void deregister_compaction(const sstables::compaction_data& c);
 };
@@ -354,5 +355,5 @@ future<compaction_result> compact_sstables(sstables::compaction_descriptor descr
 
 shared_sstable make_sstable_easy(test_env& env, const fs::path& path, flat_mutation_reader rd, sstable_writer_config cfg,
         int64_t generation = 1, const sstables::sstable::version_types version = sstables::get_highest_sstable_version(), int expected_partition = 1);
-shared_sstable make_sstable_easy(test_env& env, const fs::path& path, lw_shared_ptr<memtable> mt, sstable_writer_config cfg,
+shared_sstable make_sstable_easy(test_env& env, const fs::path& path, lw_shared_ptr<replica::memtable> mt, sstable_writer_config cfg,
         unsigned long gen = 1, const sstable::version_types v = sstables::get_highest_sstable_version(), int estimated_partitions = 1, gc_clock::time_point = gc_clock::now());

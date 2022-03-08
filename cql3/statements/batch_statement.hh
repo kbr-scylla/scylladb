@@ -16,6 +16,7 @@
 #include "log.hh"
 #include "service_permit.hh"
 #include "exceptions/exceptions.hh"
+#include "exceptions/coordinator_result.hh"
 
 namespace cql_transport::messages {
     class result_message;
@@ -91,9 +92,7 @@ public:
 
     const std::vector<single_statement>& statements() const { return _statements; }
 
-    virtual bool depends_on_keyspace(const sstring& ks_name) const override;
-
-    virtual bool depends_on_column_family(const sstring& cf_name) const override;
+    virtual bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const override;
 
     virtual uint32_t get_bound_terms() const override;
 

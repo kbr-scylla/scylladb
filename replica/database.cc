@@ -7,7 +7,7 @@
  */
 
 #include "log.hh"
-#include "lister.hh"
+#include "utils/lister.hh"
 #include "replica/database.hh"
 #include <seastar/core/future-util.hh>
 #include "db/system_keyspace.hh"
@@ -1579,6 +1579,8 @@ future<> dirty_memory_manager::shutdown() {
     });
 }
 
+namespace replica {
+
 future<> memtable_list::flush() {
     if (!may_flush()) {
         return make_ready_future<>();
@@ -1602,11 +1604,13 @@ lw_shared_ptr<memtable> memtable_list::new_memtable() {
     return make_lw_shared<memtable>(_current_schema(), *_dirty_memory_manager, _table_stats, this, _compaction_scheduling_group);
 }
 
+} // namespace replica
+
 future<flush_permit> flush_permit::reacquire_sstable_write_permit() && {
     return _manager->get_flush_permit(std::move(_background_permit));
 }
 
-future<> dirty_memory_manager::flush_one(memtable_list& mtlist, flush_permit&& permit) {
+future<> dirty_memory_manager::flush_one(replica::memtable_list& mtlist, flush_permit&& permit) {
     return mtlist.seal_active_memtable(std::move(permit)).handle_exception([this, schema = mtlist.back()->schema()] (std::exception_ptr ep) {
         dblog.error("Failed to flush memtable, {}:{} - {}", schema->ks_name(), schema->cf_name(), ep);
         return make_exception_future<>(ep);
@@ -1614,6 +1618,7 @@ future<> dirty_memory_manager::flush_one(memtable_list& mtlist, flush_permit&& p
 }
 
 future<> dirty_memory_manager::flush_when_needed() {
+    using namespace replica;
     if (!_db) {
         return make_ready_future<>();
     }

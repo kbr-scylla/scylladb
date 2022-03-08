@@ -25,12 +25,9 @@ public:
         return 0.5;
     }
 
-    void add_sstable(sstables::shared_sstable sst)  override {
-    }
-
     // Removing could be the result of a failure of an in progress write, successful finish of a
     // compaction, or some one-off operation, like drop
-    void remove_sstable(sstables::shared_sstable sst)  override {
+    void replace_sstables(std::vector<shared_sstable> old_sstables, std::vector<sstables::shared_sstable> new_sstables)  override {
     }
 };
 

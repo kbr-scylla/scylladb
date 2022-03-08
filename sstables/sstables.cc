@@ -21,6 +21,8 @@
 #include <seastar/core/byteorder.hh>
 #include <seastar/core/aligned_buffer.hh>
 #include <seastar/core/metrics.hh>
+#include <seastar/core/reactor.hh>
+#include <seastar/util/file.hh>
 #include <seastar/util/closeable.hh>
 #include <iterator>
 #include <seastar/core/coroutine.hh>
@@ -37,7 +39,7 @@
 #include "compress.hh"
 #include "unimplemented.hh"
 #include "index_reader.hh"
-#include "memtable.hh"
+#include "replica/memtable.hh"
 #include "downsampling.hh"
 #include <boost/algorithm/string.hpp>
 #include <boost/range/adaptor/map.hpp>
@@ -1785,10 +1787,10 @@ const bool sstable::has_component(component_type f) const {
     return _recognized_components.contains(f);
 }
 
-bool sstable::validate_originating_host_id() const {
+void sstable::validate_originating_host_id() const {
     if (_version < version_types::me) {
         // earlier formats do not store originating host id
-        return true;
+        return;
     }
 
     auto originating_host_id = get_stats_metadata().originating_host_id;
@@ -1796,8 +1798,7 @@ bool sstable::validate_originating_host_id() const {
         // Scylla always fills in originating host id when writing
         // sstables, so an ME-and-up sstable that does not have it is
         // invalid
-        sstlog.error("No originating host id in SSTable: {}", get_filename());
-        return false;
+        throw std::runtime_error(format("No originating host id in SSTable: {}. Load foreign SSTables via the upload dir instead.", get_filename()));
     }
 
     auto local_host_id = _manager.get_local_host_id();
@@ -1812,10 +1813,13 @@ bool sstable::validate_originating_host_id() const {
         } else {
             on_internal_error(sstlog, msg);
         }
-        return true;
+        return;
     }
 
-    return *originating_host_id == local_host_id;
+    if (*originating_host_id != local_host_id) {
+        // FIXME refrain from throwing an exception because of #10148
+        sstlog.warn("Host id {} does not match local host id {} while validating SSTable: {}. Load foreign SSTables via the upload dir instead.", *originating_host_id, local_host_id, get_filename());
+    }
 }
 
 future<> sstable::touch_temp_dir() {
@@ -2461,6 +2465,7 @@ future<> sstable::close_files() {
     }
 
     auto unlinked = make_ready_future<>();
+    auto unlinked_temp_dir = make_ready_future<>();
     if (_marked_for_deletion != mark_for_deletion::none) {
         // If a deletion fails for some reason we
         // log and ignore this failure, because on startup we'll again try to
@@ -2480,11 +2485,24 @@ future<> sstable::close_files() {
             sstlog.warn("Exception when deleting sstable file: {}", std::current_exception());
         }
 
+        if (_temp_dir) {
+            try {
+                unlinked_temp_dir = recursive_remove_directory(fs::path(*_temp_dir)).then_wrapped([this] (future<> f) {
+                    if (f.failed()) {
+                        sstlog.warn("Exception when deleting temporary sstable directory {}: {}", *_temp_dir, f.get_exception());
+                    } else {
+                        _temp_dir.reset();
+                    }
+                });
+            } catch (...) {
+                sstlog.warn("Exception when deleting temporary sstable directory {}: {}", *_temp_dir, std::current_exception());
+            }
+        }
     }
 
     _on_closed(*this);
 
-    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked)).discard_result().then([this] {
+    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked), std::move(unlinked_temp_dir)).discard_result().then([this, me = shared_from_this()] {
         if (_open_mode) {
             if (_open_mode.value() == open_flags::ro) {
                 _stats.on_close_for_reading();

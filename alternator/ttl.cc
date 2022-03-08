@@ -13,6 +13,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <boost/multiprecision/cpp_int.hpp>
 
@@ -44,6 +45,7 @@
 #include "alternator/controller.hh"
 #include "alternator/serialization.hh"
 #include "dht/sharder.hh"
+#include "db/config.hh"
 
 #include "ttl.hh"
 
@@ -170,8 +172,6 @@ expiration_service::expiration_service(data_dictionary::database db, service::st
         : _db(db)
         , _proxy(proxy)
 {
-    //FIXME: add metrics for the service
-    //setup_metrics();
 }
 
 // Convert the big_decimal used to represent expiration time to an integer.
@@ -505,6 +505,8 @@ struct scan_ranges_context {
         selection = cql3::selection::selection::wildcard(s);
         query::partition_slice::option_set opts = selection->get_query_options();
         opts.set<query::partition_slice::option::allow_short_read>();
+        // It is important that the scan bypass cache to avoid polluting it:
+        opts.set<query::partition_slice::option::bypass_cache>();
         std::vector<query::clustering_range> ck_bounds{query::clustering_range::make_open_ended_both_sides()};
         auto partition_slice = query::partition_slice(std::move(ck_bounds), {}, std::move(regular_columns), opts);
         command = ::make_lw_shared<query::read_command>(s->id(), s->version(), partition_slice, proxy.get_max_result_size(partition_slice));
@@ -524,13 +526,14 @@ struct scan_ranges_context {
 // Scan data in a list of token ranges in one table, looking for expired
 // items and deleting them.
 // Because of issue #9167, partition_ranges must have a single partition
-// for this code to work correctly.
+// range for this code to work correctly.
 static future<> scan_table_ranges(
         service::storage_proxy& proxy,
         const scan_ranges_context& scan_ctx,
         dht::partition_range_vector&& partition_ranges,
         abort_source& abort_source,
-        named_semaphore& page_sem)
+        named_semaphore& page_sem,
+        expiration_service::stats& expiration_stats)
 {
     const schema_ptr& s = scan_ctx.s;
     assert (partition_ranges.size() == 1); // otherwise issue #9167 will cause incorrect results.
@@ -598,6 +601,7 @@ static future<> scan_table_ranges(
                 expired = is_expired(n, now);
             }
             if (expired) {
+                expiration_stats.items_deleted++;
                 // FIXME: maybe don't recalculate new_timestamp() all the time
                 // FIXME: if expire_item() throws on timeout, we need to retry it.
                 auto ts = api::new_timestamp();
@@ -609,7 +613,7 @@ static future<> scan_table_ranges(
     }
 }
 
-// scan_table() scans data in one table "owned" by this shard, looking for
+// scan_table() scans, in one table, data "owned" by this shard, looking for
 // expired items and deleting them.
 // We consider each node to "own" its primary token ranges, i.e., the tokens
 // that this node is their first replica in the ring. Inside the node, each
@@ -633,10 +637,12 @@ static future<bool> scan_table(
     data_dictionary::database db,
     schema_ptr s,
     abort_source& abort_source,
-    named_semaphore& page_sem)
+    named_semaphore& page_sem,
+    expiration_service::stats& expiration_stats)
 {
     // Check if an expiration-time attribute is enabled for this table.
     // If not, just return false immediately.
+    // FIXME: the setting of the TTL may change in the middle of a long scan!
     std::optional<std::string> attribute_name = find_tag(*s, TTL_TAG_KEY);
     if (!attribute_name) {
         co_return false;
@@ -678,9 +684,8 @@ static future<bool> scan_table(
         tlogger.info("table {} TTL column has unsupported type, not scanning", s->cf_name());
         co_return false;
     }
+    expiration_stats.scan_table++;
     // FIXME: need to pace the scan, not do it all at once.
-    // FIXME: consider if we should ask the scan without caching?
-    // can we use cache but not fill it?
     scan_ranges_context scan_ctx{s, proxy, std::move(column_name), std::move(member)};
     token_ranges_owned_by_this_shard<primary> my_ranges(db.real_database(), s);
     while (std::optional<dht::partition_range> range = my_ranges.next_partition_range()) {
@@ -693,7 +698,7 @@ static future<bool> scan_table(
         // we fail the entire scan (and rescan from the beginning). Need to
         // reconsider this. Saving the scan position might be a good enough
         // solution for this problem.
-        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source, page_sem);
+        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source, page_sem, expiration_stats);
     }
     // If each node only scans its own primary ranges, then when any node is
     // down part of the token range will not get scanned. This can be viewed
@@ -704,9 +709,10 @@ static future<bool> scan_table(
     // on its *secondary* ranges - but only those whose primary owner is down.
     token_ranges_owned_by_this_shard<secondary> my_secondary_ranges(db.real_database(), s);
     while (std::optional<dht::partition_range> range = my_secondary_ranges.next_partition_range()) {
+        expiration_stats.secondary_ranges_scanned++;
         dht::partition_range_vector partition_ranges;
         partition_ranges.push_back(std::move(*range));
-        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source, page_sem);
+        co_await scan_table_ranges(proxy, scan_ctx, std::move(partition_ranges), abort_source, page_sem, expiration_stats);
     }
     co_return true;
 }
@@ -719,6 +725,7 @@ future<> expiration_service::run() {
     // also need to notice when a new table is added, a table is
     // deleted or when ttl is enabled or disabled for a table!
     for (;;) {
+        auto start = lowres_clock::now();
         // _db.tables() may change under our feet during a
         // long-living loop, so we must keep our own copy of the list of
         // schemas.
@@ -732,7 +739,7 @@ future<> expiration_service::run() {
                 co_return;
             }
             try {
-                co_await scan_table(_proxy, _db, s, _abort_source, _page_sem);
+                co_await scan_table(_proxy, _db, s, _abort_source, _page_sem, _expiration_stats);
             } catch (...) {
                 // The scan of a table may fail in the middle for many
                 // reasons, including network failure and even the table
@@ -751,10 +758,21 @@ future<> expiration_service::run() {
                 }
             }
         }
-        // FIXME: replace this silly 1-second sleep by something smarter.
-        try {
-            co_await seastar::sleep_abortable(std::chrono::seconds(1), _abort_source);
-        } catch(seastar::sleep_aborted&) {}
+        _expiration_stats.scan_passes++;
+        // The TTL scanner runs above once over all tables, at full steam.
+        // After completing such a scan, we sleep until it's time start
+        // another scan. TODO: If the scan went too fast, we can slow it down
+        // in the next iteration by reducing the scanner's scheduling-group
+        // share (if using a separate scheduling group), or introduce
+        // finer-grain sleeps into the scanning code.
+        std::chrono::seconds scan_duration(std::chrono::duration_cast<std::chrono::seconds>(lowres_clock::now() - start));
+        std::chrono::seconds period(_db.get_config().alternator_ttl_period_in_seconds());
+        if (scan_duration < period) {
+            try {
+                tlogger.info("sleeping {} seconds until next period", (period - scan_duration).count());
+                co_await seastar::sleep_abortable(period - scan_duration, _abort_source);
+            } catch(seastar::sleep_aborted&) {}
+        }
     }
 }
 
@@ -782,5 +800,19 @@ future<> expiration_service::stop() {
     }
     return std::move(*_end);
 }
+
+expiration_service::stats::stats() {
+    _metrics.add_group("expiration", {
+        seastar::metrics::make_total_operations("scan_passes", scan_passes,
+            seastar::metrics::description("number of passes over the database")),
+        seastar::metrics::make_total_operations("scan_table", scan_table,
+            seastar::metrics::description("number of table scans (counting each scan of each table that enabled expiration)")),
+        seastar::metrics::make_total_operations("items_deleted", items_deleted,
+            seastar::metrics::description("number of items deleted after expiration")),
+        seastar::metrics::make_total_operations("secondary_ranges_scanned", secondary_ranges_scanned,
+            seastar::metrics::description("number of token ranges scanned by this node while their primary owner was down")),
+    });
+}
+
 
 } // namespace alternator

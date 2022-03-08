@@ -22,6 +22,7 @@
 #include "cql3/restrictions/statement_restrictions.hh"
 #include "cql3/statements/statement_type.hh"
 #include "exceptions/exceptions.hh"
+#include "exceptions/coordinator_result.hh"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -138,9 +139,7 @@ public:
     // Validate before execute, using client state and current schema
     void validate(query_processor&, const service::client_state& state) const override;
 
-    virtual bool depends_on_keyspace(const sstring& ks_name) const override;
-
-    virtual bool depends_on_column_family(const sstring& cf_name) const override;
+    virtual bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const override;
 
     void add_operation(::shared_ptr<operation> op);
 

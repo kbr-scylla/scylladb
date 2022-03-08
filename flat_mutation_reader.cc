@@ -32,7 +32,7 @@
 logging::logger fmr_logger("flat_mutation_reader");
 
 flat_mutation_reader& flat_mutation_reader::operator=(flat_mutation_reader&& o) noexcept {
-    if (_impl) {
+    if (_impl && _impl->is_close_required()) {
         impl* ip = _impl.get();
         // Abort to enforce calling close() before readers are closed
         // to prevent leaks and potential use-after-free due to background
@@ -45,7 +45,7 @@ flat_mutation_reader& flat_mutation_reader::operator=(flat_mutation_reader&& o) 
 }
 
 flat_mutation_reader::~flat_mutation_reader() {
-    if (_impl) {
+    if (_impl && _impl->is_close_required()) {
         impl* ip = _impl.get();
         // Abort to enforce calling close() before readers are closed
         // to prevent leaks and potential use-after-free due to background
@@ -252,6 +252,10 @@ template future<bool> flat_mutation_reader::impl::fill_buffer_from<flat_mutation
 
 flat_mutation_reader make_delegating_reader(flat_mutation_reader& r) {
     return make_flat_mutation_reader<delegating_reader>(r);
+}
+
+flat_mutation_reader_v2 make_delegating_reader_v2(flat_mutation_reader_v2& r) {
+    return make_flat_mutation_reader_v2<delegating_reader_v2>(r);
 }
 
 flat_mutation_reader make_forwardable(flat_mutation_reader m) {
@@ -769,17 +773,9 @@ make_flat_mutation_reader_from_mutations_v2(schema_ptr s, reader_permit permit, 
         const dht::partition_range* _pr;
         bool _reversed;
         const dht::decorated_key* _dk = nullptr;
-        range_tombstone_change_generator _rt_gen;
-        tombstone _current_rt;
         std::optional<mutation_consume_cookie> _cookie;
 
     private:
-        void flush_tombstones(position_in_partition_view pos) {
-            _rt_gen.flush(pos, [&] (range_tombstone_change rt) {
-                _current_rt = rt.tombstone();
-                push_mutation_fragment(*_schema, _permit, std::move(rt));
-            });
-        }
         void maybe_emit_partition_start() {
             if (_dk) {
                 consume(tombstone{}); // flush partition-start
@@ -800,14 +796,12 @@ make_flat_mutation_reader_from_mutations_v2(schema_ptr s, reader_permit permit, 
         }
         stop_iteration consume(clustering_row&& cr) {
             maybe_emit_partition_start();
-            flush_tombstones(cr.position());
             push_mutation_fragment(*_schema, _permit, std::move(cr));
             return stop_iteration(is_buffer_full());
         }
-        stop_iteration consume(range_tombstone&& rt) {
+        stop_iteration consume(range_tombstone_change&& rtc) {
             maybe_emit_partition_start();
-            flush_tombstones(rt.position());
-            _rt_gen.consume(std::move(rt));
+            push_mutation_fragment(*_schema, _permit, std::move(rtc));
             return stop_iteration(is_buffer_full());
         }
         stop_iteration consume_end_of_partition() {
@@ -815,10 +809,6 @@ make_flat_mutation_reader_from_mutations_v2(schema_ptr s, reader_permit permit, 
                 return stop_iteration::yes;
             }
             maybe_emit_partition_start();
-            flush_tombstones(position_in_partition::after_all_clustered_rows());
-            if (_current_rt) {
-                push_mutation_fragment(*_schema, _permit, range_tombstone_change(position_in_partition::after_all_clustered_rows(), {}));
-            }
             push_mutation_fragment(*_schema, _permit, partition_end{});
             return stop_iteration::no;
         }
@@ -830,7 +820,6 @@ make_flat_mutation_reader_from_mutations_v2(schema_ptr s, reader_permit permit, 
             , _mutations(std::move(mutations))
             , _pr(&pr)
             , _reversed(reversed)
-            , _rt_gen(*_schema)
         {
             std::reverse(_mutations.begin(), _mutations.end());
         }
@@ -1764,7 +1753,7 @@ void mutation_fragment_stream_validating_filter::on_end_of_stream() {
 }
 
 flat_mutation_reader_v2& flat_mutation_reader_v2::operator=(flat_mutation_reader_v2&& o) noexcept {
-    if (_impl) {
+    if (_impl && _impl->is_close_required()) {
         impl* ip = _impl.get();
         // Abort to enforce calling close() before readers are closed
         // to prevent leaks and potential use-after-free due to background
@@ -1777,7 +1766,7 @@ flat_mutation_reader_v2& flat_mutation_reader_v2::operator=(flat_mutation_reader
 }
 
 flat_mutation_reader_v2::~flat_mutation_reader_v2() {
-    if (_impl) {
+    if (_impl && _impl->is_close_required()) {
         impl* ip = _impl.get();
         // Abort to enforce calling close() before readers are closed
         // to prevent leaks and potential use-after-free due to background

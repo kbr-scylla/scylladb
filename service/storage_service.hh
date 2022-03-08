@@ -157,7 +157,6 @@ private:
     sharded<streaming::stream_manager>& _stream_manager;
     sharded<qos::service_level_controller>& _sl_controller;
     sstring _operation_in_progress;
-    bool _ms_stopped = false;
     seastar::metrics::metric_groups _metrics;
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<protocol_server*> _protocol_servers;
@@ -281,17 +280,10 @@ private:
 
     std::optional<inet_address> _removing_node;
 
-    /* Are we starting this node in bootstrap mode? */
-    bool _is_bootstrap_mode = false;
-
-    bool _initialized = false;
-
-    bool _joined = false;
-
 public:
-    enum class mode { STARTING, NORMAL, JOINING, LEAVING, DECOMMISSIONED, MOVING, DRAINING, DRAINED };
+    enum class mode { NONE, STARTING, JOINING, BOOTSTRAP, NORMAL, LEAVING, DECOMMISSIONED, MOVING, DRAINING, DRAINED };
 private:
-    mode _operation_mode = mode::STARTING;
+    mode _operation_mode = mode::NONE;
     friend std::ostream& operator<<(std::ostream& os, const mode& mode);
     /* Used for tracking drain progress */
 
@@ -346,9 +338,9 @@ private:
     void run_bootstrap_ops();
 
     std::list<gms::inet_address> get_ignore_dead_nodes_for_replace();
+    future<> wait_for_ring_to_settle(std::chrono::milliseconds delay);
 
 public:
-    future<bool> is_initialized();
 
     future<> check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes,
             const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features);
@@ -401,20 +393,14 @@ private:
             std::unordered_set<gms::inet_address> initial_contact_nodes,
             std::unordered_set<gms::inet_address> loaded_endpoints,
             std::unordered_map<gms::inet_address, sstring> loaded_peer_features);
-    void join_token_ring(int delay);
+    void join_token_ring(std::chrono::milliseconds);
     void maybe_start_sys_dist_ks();
 public:
-    inline bool is_joined() const {
-        // Every time we set _joined, we do it on all shards, so we can read its
-        // value locally.
-        return _joined;
-    }
 
     future<> rebuild(sstring source_dc);
 
 private:
-    void set_mode(mode m, bool log);
-    void set_mode(mode m, sstring msg, bool log);
+    void set_mode(mode m);
     void mark_existing_views_as_built();
 
     // Stream data for which we become a new replica.
@@ -423,10 +409,6 @@ private:
     void bootstrap();
 
 public:
-    bool is_bootstrap_mode() const {
-        return _is_bootstrap_mode;
-    }
-
     /**
      * Return the rpc address associated with an endpoint as a string.
      * @param endpoint The endpoint to get rpc address for
@@ -767,9 +749,7 @@ public:
     void node_ops_cmd_check(gms::inet_address coordinator, const node_ops_cmd_request& req);
     future<> node_ops_cmd_heartbeat_updater(const node_ops_cmd& cmd, utils::UUID uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done);
 
-    future<sstring> get_operation_mode();
-
-    future<bool> is_starting();
+    future<mode> get_operation_mode();
 
     /**
      * Shuts node off to writes, empties memtables and the commit log.

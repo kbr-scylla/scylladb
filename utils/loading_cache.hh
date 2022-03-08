@@ -108,81 +108,81 @@ template<typename Key,
          typename Alloc = std::pmr::polymorphic_allocator<>>
 class loading_cache {
 
-using loading_cache_clock_type = seastar::lowres_clock;
-using safe_link_list_hook = bi::list_base_hook<bi::link_mode<bi::safe_link>>;
+    using loading_cache_clock_type = seastar::lowres_clock;
+    using safe_link_list_hook = bi::list_base_hook<bi::link_mode<bi::safe_link>>;
 
-class timestamped_val {
-public:
-    using value_type = Tp;
-    using loading_values_type = typename utils::loading_shared_values<Key, timestamped_val, Hash, EqualPred, LoadingSharedValuesStats, 256>;
-    class lru_entry;
-    class value_ptr;
+    class timestamped_val {
+    public:
+        using value_type = Tp;
+        using loading_values_type = typename utils::loading_shared_values<Key, timestamped_val, Hash, EqualPred, LoadingSharedValuesStats, 256>;
+        class lru_entry;
+        class value_ptr;
 
-private:
-    value_type _value;
-    loading_cache_clock_type::time_point _loaded;
-    loading_cache_clock_type::time_point _last_read;
-    lru_entry* _lru_entry_ptr = nullptr; /// MRU item is at the front, LRU - at the back
-    size_t _size = 0;
+    private:
+        value_type _value;
+        loading_cache_clock_type::time_point _loaded;
+        loading_cache_clock_type::time_point _last_read;
+        lru_entry* _lru_entry_ptr = nullptr; /// MRU item is at the front, LRU - at the back
+        size_t _size = 0;
 
-public:
-    timestamped_val(value_type val)
-        : _value(std::move(val))
-        , _loaded(loading_cache_clock_type::now())
-        , _last_read(_loaded)
-        , _size(EntrySize()(_value))
-    {}
-    timestamped_val(timestamped_val&&) = default;
+    public:
+        timestamped_val(value_type val)
+            : _value(std::move(val))
+            , _loaded(loading_cache_clock_type::now())
+            , _last_read(_loaded)
+            , _size(EntrySize()(_value))
+        {}
+        timestamped_val(timestamped_val&&) = default;
 
-    timestamped_val& operator=(value_type new_val) {
-        assert(_lru_entry_ptr);
+        timestamped_val& operator=(value_type new_val) {
+            assert(_lru_entry_ptr);
 
-        _value = std::move(new_val);
-        _loaded = loading_cache_clock_type::now();
-        _lru_entry_ptr->cache_size() -= _size;
-        _size = EntrySize()(_value);
-        _lru_entry_ptr->cache_size() += _size;
-        return *this;
-    }
+            _value = std::move(new_val);
+            _loaded = loading_cache_clock_type::now();
+            _lru_entry_ptr->cache_size() -= _size;
+            _size = EntrySize()(_value);
+            _lru_entry_ptr->cache_size() += _size;
+            return *this;
+        }
 
-    value_type& value() noexcept { return _value; }
-    const value_type& value() const noexcept { return _value; }
+        value_type& value() noexcept { return _value; }
+        const value_type& value() const noexcept { return _value; }
 
-    static const timestamped_val& container_of(const value_type& value) {
-        return *bi::get_parent_from_member(&value, &timestamped_val::_value);
-    }
+        static const timestamped_val& container_of(const value_type& value) {
+            return *bi::get_parent_from_member(&value, &timestamped_val::_value);
+        }
 
-    loading_cache_clock_type::time_point last_read() const noexcept {
-        return _last_read;
-    }
+        loading_cache_clock_type::time_point last_read() const noexcept {
+            return _last_read;
+        }
 
-    loading_cache_clock_type::time_point loaded() const noexcept {
-        return _loaded;
-    }
+        loading_cache_clock_type::time_point loaded() const noexcept {
+            return _loaded;
+        }
 
-    size_t size() const {
-        return _size;
-    }
+        size_t size() const {
+            return _size;
+        }
 
-    bool ready() const noexcept {
-        return _lru_entry_ptr;
-    }
+        bool ready() const noexcept {
+            return _lru_entry_ptr;
+        }
 
-    lru_entry* lru_entry_ptr() const noexcept {
-        return _lru_entry_ptr;
-    }
+        lru_entry* lru_entry_ptr() const noexcept {
+            return _lru_entry_ptr;
+        }
 
-private:
-    void touch() noexcept {
-        assert(_lru_entry_ptr);
-        _last_read = loading_cache_clock_type::now();
-        _lru_entry_ptr->touch();
-    }
+    private:
+        void touch() noexcept {
+            assert(_lru_entry_ptr);
+            _last_read = loading_cache_clock_type::now();
+            _lru_entry_ptr->touch();
+        }
 
-    void set_anchor_back_reference(lru_entry* lru_entry_ptr) noexcept {
-        _lru_entry_ptr = lru_entry_ptr;
-    }
-};
+        void set_anchor_back_reference(lru_entry* lru_entry_ptr) noexcept {
+            _lru_entry_ptr = lru_entry_ptr;
+        }
+    };
 
 private:
     using loading_values_type = typename timestamped_val::loading_values_type;
@@ -216,11 +216,11 @@ private:
 
 public:
     template<typename Func>
+    requires std::is_invocable_r_v<future<value_type>, Func, const key_type&>
     loading_cache(size_t max_size, lowres_clock::duration expiry, lowres_clock::duration refresh, logging::logger& logger, Func&& load)
         : loading_cache(max_size, expiry, refresh, logger)
     {
         static_assert(ReloadEnabled == loading_cache_reload_enabled::yes, "This constructor should only be invoked when ReloadEnabled == loading_cache_reload_enabled::yes");
-        static_assert(std::is_same<future<value_type>, std::result_of_t<Func(const key_type&)>>::value, "Bad Func signature");
 
         _load = std::forward<Func>(load);
 
@@ -254,8 +254,8 @@ public:
     }
 
     template <typename LoadFunc>
+    requires std::is_invocable_r_v<future<value_type>, LoadFunc, const key_type&>
     future<value_ptr> get_ptr(const Key& k, LoadFunc&& load) {
-        static_assert(std::is_same<future<value_type>, std::result_of_t<LoadFunc(const key_type&)>>::value, "Bad LoadFunc signature");
         // We shouldn't be here if caching is disabled
         assert(caching_enabled());
 
@@ -332,9 +332,8 @@ public:
     }
 
     template <typename Pred>
+    requires std::is_invocable_r_v<bool, Pred, const value_type&>
     void remove_if(Pred&& pred) {
-        static_assert(std::is_same<bool, std::result_of_t<Pred(const value_type&)>>::value, "Bad Pred signature");
-
         auto cond_pred = [this, &pred] (const ts_value_lru_entry& v) {
             return pred(v.timestamped_value().value());
         };

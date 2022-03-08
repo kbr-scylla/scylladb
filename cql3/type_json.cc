@@ -18,6 +18,8 @@
 #include "types/listlike_partial_deserializing_iterator.hh"
 #include "utils/managed_bytes.hh"
 #include "exceptions/exceptions.hh"
+#include <limits>
+#include <utility>
 
 static inline bool is_control_char(char c) {
     return c >= 0 && c <= 0x1F;
@@ -71,17 +73,73 @@ static sstring quote_json_string(const sstring& value) {
     return oss.str();
 }
 
-static int64_t to_int64_t(const rjson::value& value) {
+
+template <typename T> static T to_int(const rjson::value& value) {
+    int64_t result;
+
     if (value.IsInt64()) {
-        return value.GetInt64();
+        result = value.GetInt64();
     } else if (value.IsInt()) {
-        return value.GetInt();
+        result = value.GetInt();
     } else if (value.IsUint()) {
-        return value.GetUint();
-    } else if (value.GetUint64()) {
-        return value.GetUint64(); //NOTICE: large uint64_t values will get overflown
+        result = value.GetUint();
+    } else if (value.IsUint64()) {
+        uint64_t u64_result = value.GetUint64();
+
+        if (std::cmp_greater(std::numeric_limits<T>::min(), u64_result) 
+        || std::cmp_greater(u64_result, std::numeric_limits<T>::max())) {
+            throw marshal_exception(format("Value {} out of range", u64_result));
+        }
+        return u64_result;
+    } else if (value.IsDouble()) {
+        // We allow specifing integer constants
+        // using scientific notation (for example 1.3e8)
+        // and floating-point numbers ending with .0 (for example 12.0),
+        // but not floating-point numbers with fractional part (12.34).
+        //
+        // The reason is that JSON standard does not have separate
+        // types for integers and floating-point numbers, only
+        // a single "number" type. Some serializers may
+        // produce an integer in that floating-point format.
+        double double_value = value.GetDouble();
+
+        // Check if the value contains disallowed fractional part (.34 from 12.34).
+        // With RapidJSON and an integer value in range [-(2^53)+1, (2^53)-1], 
+        // the fractional part will be zero as the entire value
+        // fits in 53-bit significand. RapidJSON's parsing code does not lose accuracy:
+        // when parsing a number like 12.34e8, it accumulates 1234 to a int64_t number,
+        // then converts it to double and multiples by power of 10, never having any
+        // digit in fractional part.
+        double integral;
+        double fractional = std::modf(double_value, &integral);
+        if (fractional != 0.0 && fractional != -0.0) {
+            throw marshal_exception(format("Incorrect JSON floating-point value "
+                "for int64 type: {} (it should not contain fractional part {})", value, fractional));
+        }
+
+        if (std::numeric_limits<T>::min() > double_value || double_value > std::numeric_limits<T>::max()) {
+            throw marshal_exception(format("Value {} out of range", double_value));
+        }
+
+        return double_value;
     }
-    throw marshal_exception(format("Incorrect JSON value for int64 type: {}", value));
+    else {
+        throw marshal_exception(format("Incorrect JSON value for int64 type: {}", value));
+    }
+
+    if (std::cmp_greater(std::numeric_limits<T>::min(), result) 
+        || std::cmp_greater(result, std::numeric_limits<T>::max())) {
+        throw marshal_exception(format("Value {} out of range", result));
+    }
+
+    return result;
+}
+
+static std::string_view validated_to_string_view(const rjson::value& v, const char* type_name) {
+    if (!v.IsString()) {
+        throw marshal_exception(format("{} must be represented as string in JSON, instead got '{}'", type_name, v));
+    }
+    return rjson::to_string_view(v); 
 }
 
 static bytes from_json_object_aux(const map_type_impl& t, const rjson::value& value, cql_serialization_format sf) {
@@ -181,15 +239,13 @@ struct from_json_object_visitor {
         if (value.IsString()) {
             return t.from_string(rjson::to_string_view(value));
         }
-        return t.decompose(T(to_int64_t(value)));
+
+        return t.decompose(to_int<T>(value));
     }
     bytes operator()(const string_type_impl& t) { return t.from_string(rjson::to_string_view(value)); }
     bytes operator()(const bytes_type_impl& t) {
-        if (!value.IsString()) {
-            throw marshal_exception("bytes_type must be represented as string");
-        }
-        std::string_view string_v = rjson::to_string_view(value);
-        if (string_v.size() < 2 && string_v[0] != '0' && string_v[1] != 'x') {
+        std::string_view string_v = validated_to_string_view(value, "bytes_type");
+        if (string_v.size() < 2 || string_v[0] != '0' || string_v[1] != 'x') {
             throw marshal_exception("Blob JSON strings must start with 0x");
         }
         string_v.remove_prefix(2);
@@ -206,20 +262,15 @@ struct from_json_object_visitor {
             throw marshal_exception("timestamp_type must be represented as string or integer");
         }
         if (value.IsNumber()) {
-            return long_type->decompose(to_int64_t(value));
+            return long_type->decompose(to_int<int64_t>(value));
         }
         return t.from_string(rjson::to_string_view(value));
     }
-    bytes operator()(const timeuuid_type_impl& t) {
-        if (!value.IsString()) {
-            throw marshal_exception(format("{} must be represented as string in JSON", value));
-        }
-        return t.from_string(rjson::to_string_view(value));
-    }
-    bytes operator()(const simple_date_type_impl& t) { return t.from_string(rjson::to_string_view(value)); }
-    bytes operator()(const time_type_impl& t) { return t.from_string(rjson::to_string_view(value)); }
-    bytes operator()(const uuid_type_impl& t) { return t.from_string(rjson::to_string_view(value)); }
-    bytes operator()(const inet_addr_type_impl& t) { return t.from_string(rjson::to_string_view(value)); }
+    bytes operator()(const timeuuid_type_impl& t) { return t.from_string(validated_to_string_view(value, "timeuuid_type")); }
+    bytes operator()(const simple_date_type_impl& t) { return t.from_string(validated_to_string_view(value, "simple_date_type")); }
+    bytes operator()(const time_type_impl& t) { return t.from_string(validated_to_string_view(value, "time_type")); }
+    bytes operator()(const uuid_type_impl& t) { return t.from_string(validated_to_string_view(value, "uuid_type")); }
+    bytes operator()(const inet_addr_type_impl& t) { return t.from_string(validated_to_string_view(value, "inet_addr_type")); }
     template <typename T> bytes operator()(const floating_type_impl<T>& t) {
         if (value.IsString()) {
             return t.from_string(rjson::to_string_view(value));
@@ -255,14 +306,9 @@ struct from_json_object_visitor {
         if (!value.IsNumber()) {
             throw marshal_exception("Counters must be represented as JSON integer");
         }
-        return counter_cell_view::total_value_type()->decompose(to_int64_t(value));
+        return counter_cell_view::total_value_type()->decompose(to_int<int64_t>(value));
     }
-    bytes operator()(const duration_type_impl& t) {
-        if (!value.IsString()) {
-            throw marshal_exception(format("{} must be represented as string in JSON", value));
-        }
-        return t.from_string(rjson::to_string_view(value));
-    }
+    bytes operator()(const duration_type_impl& t) { return t.from_string(validated_to_string_view(value, "duration_type")); }
     bytes operator()(const empty_type_impl& t) { return bytes(); }
     bytes operator()(const map_type_impl& t) { return from_json_object_aux(t, value, sf); }
     bytes operator()(const set_type_impl& t) { return from_json_object_aux(t, value, sf); }

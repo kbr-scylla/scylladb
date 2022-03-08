@@ -59,7 +59,7 @@ struct futurizing_converter {
 };
 
 template<typename From, typename Converter, typename To>
-concept ConvertsWithTo = std::convertible_to<From, typename Converter::template wrapped_type<To>>;
+concept ConvertsWithTo = std::convertible_to<typename Converter::template wrapped_type<From>, typename Converter::template wrapped_type<To>>;
 
 // We require forall<ExceptionContainerResult R> ExceptionHandle<H, R>.
 // However, C++ does not support quantification like that in the constraints.
@@ -103,6 +103,18 @@ public:
     void forward_to_promise(seastar::promise<S>& p) {
         p.set_value(std::move(_failed_result).as_failure());
     }
+
+    const typename R::error_type& as_inner() const & {
+        return _failed_result.assume_error();
+    }
+
+    typename R::error_type&& as_inner() && {
+        return std::move(_failed_result).assume_error();
+    }
+
+    typename R::error_type clone_inner() {
+        return _failed_result.assume_error().clone();
+    }
 };
 
 static_assert(ExceptionHandle<failed_result_handle<dummy_result<>>>);
@@ -128,6 +140,18 @@ public:
     requires std::same_as<typename R::error_type, typename S::error_type>
     void forward_to_promise(seastar::promise<S>& p) {
         p.set_exception(std::move(_eptr));
+    }
+
+    const std::exception_ptr& as_inner() const & {
+        return _eptr;
+    }
+
+    std::exception_ptr&& as_inner() && {
+        return std::move(_eptr);
+    }
+
+    std::exception_ptr clone_inner() {
+        return _eptr;
     }
 };
 
@@ -471,14 +495,11 @@ concept ResultFuturizeTryBody = requires (Fun&& fun) {
 /// if you use it with a future-returning function. See result_futurize_try
 /// for a version which additionally works with exceptional futures.
 template<ResultTryBody Fun, ResultCatcherMaybeDots<internal::noop_converter, std::invoke_result_t<Fun>>... Handlers>
+requires (!seastar::is_future<std::invoke_result_t<Fun>>::value)
 inline
 std::invoke_result_t<Fun>
 result_try(Fun&& fun, Handlers&&... handlers) {
-    using return_type = std::invoke_result_t<Fun>;
-    static_assert(!seastar::is_future<return_type>::value,
-            "result_try does not work with futures, try using result_futurize_try instead");
-
-    using result_type = return_type;
+    using result_type = std::invoke_result_t<Fun>;
     using combined_handler_type = internal::combined_handler_impl<result_type, internal::noop_converter, Handlers...>;
     using try_catch_chain_type = internal::try_catch_chain_impl<result_type, internal::noop_converter, Handlers...>;
 

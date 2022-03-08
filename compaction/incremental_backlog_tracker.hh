@@ -69,16 +69,17 @@ public:
         return b > 0 ? b : 0;
     }
 
-    virtual void add_sstable(sstables::shared_sstable sst)  override {
+    // Removing could be the result of a failure of an in progress write, successful finish of a
+    // compaction, or some one-off operation, like drop
+    virtual void replace_sstables(std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) override {
+      for (auto&& sst : new_ssts) {
         if (sst->data_size() > 0) {
             _total_bytes_per_run[sst->run_identifier()] += sst->data_size();
             _total_bytes += sst->data_size();
         }
-    }
+      }
 
-    // Removing could be the result of a failure of an in progress write, successful finish of a
-    // compaction, or some one-off operation, like drop
-    virtual void remove_sstable(sstables::shared_sstable sst)  override {
+      for (auto&& sst : old_ssts) {
         if (sst->data_size() > 0) {
             auto run_identifier = sst->run_identifier();
             _total_bytes_per_run[run_identifier] -= sst->data_size();
@@ -87,6 +88,7 @@ public:
             }
             _total_bytes -= sst->data_size();
         }
+      }
     }
     int64_t total_bytes() const {
         return _total_bytes;

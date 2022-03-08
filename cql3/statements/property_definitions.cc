@@ -11,6 +11,7 @@
  * SPDX-License-Identifier: (ScyllaDB-Proprietary and Apache-2.0)
  */
 
+#include <seastar/core/print.hh>
 #include "cql3/statements/property_definitions.hh"
 #include "exceptions/exceptions.hh"
 

@@ -30,6 +30,7 @@
 #include "strategy_control.hh"
 #include "backlog_controller.hh"
 #include "seastarx.hh"
+#include "sstables/exceptions.hh"
 
 namespace replica {
 class table;
@@ -76,10 +77,9 @@ private:
         replica::table* compacting_table = nullptr;
         shared_future<> compaction_done = make_ready_future<>();
         exponential_backoff_retry compaction_retry = exponential_backoff_retry(std::chrono::seconds(5), std::chrono::seconds(300));
-        bool stopping = false;
         sstables::compaction_type type = sstables::compaction_type::Compaction;
         bool compaction_running = false;
-        std::optional<utils::UUID> output_run_identifier;
+        utils::UUID output_run_identifier;
         sstables::compaction_data compaction_data;
         compaction_state& compaction_state;
         gate::holder gate_holder;
@@ -94,15 +94,23 @@ private:
         task(task&&) = delete;
         task(const task&) = delete;
 
-        void setup_new_compaction();
+        void setup_new_compaction(utils::UUID output_run_id = utils::null_uuid());
         void finish_compaction() noexcept;
 
         bool generating_output_run() const noexcept {
             return compaction_running && output_run_identifier;
         }
         const utils::UUID& output_run_id() const noexcept {
-            return *output_run_identifier;
+            return output_run_identifier;
         }
+
+        bool stopping() const noexcept {
+            return compaction_data.abort.abort_requested();
+        }
+
+        void stop(sstring reason) noexcept;
+
+        sstables::compaction_stopped_exception make_compaction_stopped_exception() const;
     };
 
     // compaction manager may have N fibers to allow parallel compaction per shard.
@@ -162,7 +170,6 @@ private:
     class strategy_control;
     std::unique_ptr<strategy_control> _strategy_control;
 private:
-    future<> task_stop(lw_shared_ptr<task> task, sstring reason);
     future<> stop_tasks(std::vector<lw_shared_ptr<task>> tasks, sstring reason);
 
     // Return the largest fan-in of currently running compactions
@@ -179,8 +186,13 @@ private:
     // Get candidates for compaction strategy, which are all sstables but the ones being compacted.
     std::vector<sstables::shared_sstable> get_candidates(const replica::table& t);
 
-    void register_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
-    void deregister_compacting_sstables(const std::vector<sstables::shared_sstable>& sstables);
+    template <typename Iterator, typename Sentinel>
+    requires std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>
+    void register_compacting_sstables(Iterator first, Sentinel last);
+
+    template <typename Iterator, typename Sentinel>
+    requires std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>
+    void deregister_compacting_sstables(Iterator first, Sentinel last);
 
     // gets the table's compaction state
     // throws std::out_of_range exception if not found.
@@ -217,9 +229,8 @@ public:
 
     void register_metrics();
 
-    // enable/disable compaction manager.
+    // enable the compaction manager.
     void enable();
-    void disable();
 
     // Stop all fibers. Ongoing compactions will be waited. Should only be called
     // once, from main teardown path.

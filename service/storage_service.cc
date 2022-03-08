@@ -143,7 +143,9 @@ enum class node_external_status {
 
 static node_external_status map_operation_mode(storage_service::mode m) {
     switch (m) {
+    case storage_service::mode::NONE: return node_external_status::STARTING;
     case storage_service::mode::STARTING: return node_external_status::STARTING;
+    case storage_service::mode::BOOTSTRAP: return node_external_status::JOINING;
     case storage_service::mode::JOINING: return node_external_status::JOINING;
     case storage_service::mode::NORMAL: return node_external_status::NORMAL;
     case storage_service::mode::LEAVING: return node_external_status::LEAVING;
@@ -377,13 +379,48 @@ static future<> set_gossip_tokens(gms::gossiper& g,
     });
 }
 
+/*
+ * The helper waits for two things
+ *  1) for schema agreement
+ *  2) there's no pending node operations
+ * before proceeding with the bootstrap or replace
+ */
+future<> storage_service::wait_for_ring_to_settle(std::chrono::milliseconds delay) {
+    // first sleep the delay to make sure we see *at least* one other node
+    for (int i = 0; i < delay.count() && _gossiper.get_live_members().size() < 2; i += 1000) {
+        co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+    }
+
+    auto t = gms::gossiper::clk::now();
+    while (true) {
+        while (!_migration_manager.local().have_schema_agreement()) {
+            slogger.info("waiting for schema information to complete");
+            co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+        }
+        co_await update_pending_ranges("joining");
+
+        auto tmptr = get_token_metadata_ptr();
+        if (!_db.local().get_config().consistent_rangemovement() ||
+                (tmptr->get_bootstrap_tokens().empty() && tmptr->get_leaving_endpoints().empty())) {
+            break;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(gms::gossiper::clk::now() - t).count();
+        slogger.info("Checking bootstrapping/leaving nodes: tokens {}, leaving {}, sleep 1 second and check again ({} seconds elapsed)",
+                tmptr->get_bootstrap_tokens().size(),
+                tmptr->get_leaving_endpoints().size(),
+                elapsed);
+
+        if (gms::gossiper::clk::now() > t + std::chrono::seconds(60)) {
+            throw std::runtime_error("Other bootstrapping/leaving nodes detected, cannot bootstrap while consistent_rangemovement is true");
+        }
+        co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+    }
+    slogger.info("Checking bootstrapping/leaving nodes: ok");
+}
+
 // Runs inside seastar::async context
-void storage_service::join_token_ring(int delay) {
-    // This function only gets called on shard 0, but we want to set _joined
-    // on all shards, so this variable can be later read locally.
-    container().invoke_on_all([] (auto&& ss) {
-        ss._joined = true;
-    }).get();
+void storage_service::join_token_ring(std::chrono::milliseconds delay) {
+    set_mode(mode::JOINING);
 
     _group0->join_group0().get();
 
@@ -403,55 +440,19 @@ void storage_service::join_token_ring(int delay) {
         } else {
             db::system_keyspace::set_bootstrap_state(db::system_keyspace::bootstrap_state::IN_PROGRESS).get();
         }
-        set_mode(mode::JOINING, "waiting for ring information", true);
-        // first sleep the delay to make sure we see *at least* one other node
-        for (int i = 0; i < delay && _gossiper.get_live_members().size() < 2; i += 1000) {
-            sleep_abortable(std::chrono::seconds(1), _abort_source).get();
-        }
+        slogger.info("waiting for ring information");
+
         // if our schema hasn't matched yet, keep sleeping until it does
         // (post CASSANDRA-1391 we don't expect this to be necessary very often, but it doesn't hurt to be careful)
-        while (!_migration_manager.local().have_schema_agreement()) {
-            set_mode(mode::JOINING, "waiting for schema information to complete", true);
-            sleep_abortable(std::chrono::seconds(1), _abort_source).get();
-        }
-        set_mode(mode::JOINING, "schema complete, ready to bootstrap", true);
-        set_mode(mode::JOINING, "waiting for pending range calculation", true);
-        update_pending_ranges("joining").get();
-        set_mode(mode::JOINING, "calculation complete, ready to bootstrap", true);
-        slogger.debug("... got ring + schema info");
-
-        auto t = gms::gossiper::clk::now();
-        auto tmptr = get_token_metadata_ptr();
-        while (_db.local().get_config().consistent_rangemovement() &&
-            (!tmptr->get_bootstrap_tokens().empty() ||
-             !tmptr->get_leaving_endpoints().empty())) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(gms::gossiper::clk::now() - t).count();
-            slogger.info("Checking bootstrapping/leaving nodes: tokens {}, leaving {}, sleep 1 second and check again ({} seconds elapsed)",
-                tmptr->get_bootstrap_tokens().size(),
-                tmptr->get_leaving_endpoints().size(),
-                elapsed);
-
-            sleep_abortable(std::chrono::seconds(1), _abort_source).get();
-
-            if (gms::gossiper::clk::now() > t + std::chrono::seconds(60)) {
-                throw std::runtime_error("Other bootstrapping/leaving nodes detected, cannot bootstrap while consistent_rangemovement is true");
-            }
-
-            // Check the schema and pending range again
-            while (!_migration_manager.local().have_schema_agreement()) {
-                set_mode(mode::JOINING, "waiting for schema information to complete", true);
-                sleep_abortable(std::chrono::seconds(1), _abort_source).get();
-            }
-            update_pending_ranges("bootstrapping/leaving nodes while joining").get();
-            tmptr = get_token_metadata_ptr();
-        }
-        slogger.info("Checking bootstrapping/leaving nodes: ok");
+        wait_for_ring_to_settle(delay).get();
 
         if (!is_replacing()) {
+            auto tmptr = get_token_metadata_ptr();
+
             if (tmptr->is_member(get_broadcast_address())) {
                 throw std::runtime_error("This node is already a member of the token ring; bootstrap aborted. (If replacing a dead node, remove the old one from the ring first.)");
             }
-            set_mode(mode::JOINING, "getting bootstrap token", true);
+            slogger.info("getting bootstrap token");
             if (resume_bootstrap) {
                 _bootstrap_tokens = db::system_keyspace::get_saved_tokens().get0();
                 if (!_bootstrap_tokens.empty()) {
@@ -475,7 +476,7 @@ void storage_service::join_token_ring(int delay) {
                     auto existing = tmptr->get_endpoint(token);
                     if (existing) {
                         auto* eps = _gossiper.get_endpoint_state_for_endpoint_ptr(*existing);
-                        if (eps && eps->get_update_timestamp() > gms::gossiper::clk::now() - std::chrono::milliseconds(delay)) {
+                        if (eps && eps->get_update_timestamp() > gms::gossiper::clk::now() - delay) {
                             throw std::runtime_error("Cannot replace a live node...");
                         }
                     } else {
@@ -485,7 +486,7 @@ void storage_service::join_token_ring(int delay) {
             } else {
                 sleep_abortable(get_ring_delay(), _abort_source).get();
             }
-            set_mode(mode::JOINING, format("Replacing a node with token(s): {}", _bootstrap_tokens), true);
+            slogger.info("Replacing a node with token(s): {}", _bootstrap_tokens);
             // _bootstrap_tokens was previously set in prepare_to_join using tokens gossiped by the replaced node
         }
         maybe_start_sys_dist_ks();
@@ -591,7 +592,7 @@ void storage_service::join_token_ring(int delay) {
     // start participating in the ring.
     set_gossip_tokens(_gossiper, _bootstrap_tokens, _cdc_gen_id).get();
 
-    set_mode(mode::NORMAL, "node is now in normal status", true);
+    set_mode(mode::NORMAL);
 
     if (get_token_metadata().sorted_tokens().empty()) {
         auto err = format("join_token_ring: Sorted token in token_metadata is empty");
@@ -636,10 +637,9 @@ std::list<gms::inet_address> storage_service::get_ignore_dead_nodes_for_replace(
 
 // Runs inside seastar::async context
 void storage_service::bootstrap() {
-    _is_bootstrap_mode = true;
-    auto x = seastar::defer([this] { _is_bootstrap_mode = false; });
     auto bootstrap_rbno = is_repair_based_node_ops_enabled(streaming::stream_reason::bootstrap);
 
+    set_mode(mode::BOOTSTRAP);
     slogger.debug("bootstrap: rbno={} replacing={}", bootstrap_rbno, is_replacing());
     if (!is_replacing()) {
         // Wait until we know tokens of existing node before announcing join status.
@@ -667,16 +667,16 @@ void storage_service::bootstrap() {
 
         // Update pending ranges now, so we correctly count ourselves as a pending replica
         // when inserting the new CDC generation.
-      if (!bootstrap_rbno) {
-        // When is_repair_based_node_ops_enabled is true, the bootstrap node
-        // will use node_ops_cmd to bootstrap, node_ops_cmd will update the pending ranges.
-        slogger.debug("bootstrap: update pending ranges: endpoint={} bootstrap_tokens={}", get_broadcast_address(), _bootstrap_tokens);
-        mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
-            auto endpoint = get_broadcast_address();
-            tmptr->add_bootstrap_tokens(_bootstrap_tokens, endpoint);
-            return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
-        }).get();
-      }
+        if (!bootstrap_rbno) {
+            // When is_repair_based_node_ops_enabled is true, the bootstrap node
+            // will use node_ops_cmd to bootstrap, node_ops_cmd will update the pending ranges.
+            slogger.debug("bootstrap: update pending ranges: endpoint={} bootstrap_tokens={}", get_broadcast_address(), _bootstrap_tokens);
+            mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
+                auto endpoint = get_broadcast_address();
+                tmptr->add_bootstrap_tokens(_bootstrap_tokens, endpoint);
+                return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
+            }).get();
+        }
 
         // After we pick a generation timestamp, we start gossiping it, and we stick with it.
         // We don't do any other generation switches (unless we crash before complecting bootstrap).
@@ -684,22 +684,26 @@ void storage_service::bootstrap() {
 
         _cdc_gen_id = _cdc_gen_service.local().make_new_generation(_bootstrap_tokens, !is_first_node()).get0();
 
-      if (!bootstrap_rbno) {
-        // When is_repair_based_node_ops_enabled is true, the bootstrap node
-        // will use node_ops_cmd to bootstrap, bootstrapping gossip status is not needed for bootstrap.
-        _gossiper.add_local_application_state({
-            // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.
-            { gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens) },
-            { gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(_cdc_gen_id) },
-            { gms::application_state::STATUS, versioned_value::bootstrapping(_bootstrap_tokens) },
-        }).get();
+        if (!bootstrap_rbno) {
+            // When is_repair_based_node_ops_enabled is true, the bootstrap node
+            // will use node_ops_cmd to bootstrap, bootstrapping gossip status is not needed for bootstrap.
+            _gossiper.add_local_application_state({
+                { gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens) },
+                { gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(_cdc_gen_id) },
+                { gms::application_state::STATUS, versioned_value::bootstrapping(_bootstrap_tokens) },
+            }).get();
 
-        set_mode(mode::JOINING, format("sleeping {} ms for pending range setup", get_ring_delay().count()), true);
-        _gossiper.wait_for_range_setup().get();
-     }
+            slogger.info("sleeping {} ms for pending range setup", get_ring_delay().count());
+            _gossiper.wait_for_range_setup().get();
+        } else {
+            // Even with RBNO bootstrap we need to announce the new CDC generation immediately after it's created.
+            _gossiper.add_local_application_state({
+                { gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(_cdc_gen_id) },
+            }).get();
+        }
     } else {
         // Wait until we know tokens of existing node before announcing replacing status.
-        set_mode(mode::JOINING, fmt::format("Wait until local node knows tokens of peer nodes"), true);
+        slogger.info("Wait until local node knows tokens of peer nodes");
         _gossiper.wait_for_range_setup().get();
         auto replace_addr = get_replace_address();
         slogger.debug("Removing replaced endpoint {} from system.peers", *replace_addr);
@@ -713,7 +717,7 @@ void storage_service::bootstrap() {
         }
     }).get();
 
-    set_mode(mode::JOINING, "Starting to bootstrap...", true);
+    slogger.info("Starting to bootstrap...");
     if (is_replacing()) {
         run_replace_ops();
     } else {
@@ -1330,7 +1334,7 @@ future<> storage_service::init_server(cql3::query_processor& qp) {
     assert(this_shard_id() == 0);
 
     return seastar::async([this, &qp] {
-        _initialized = true;
+        set_mode(mode::STARTING);
 
         _group0 = std::make_unique<raft_group0>(_abort_source, _raft_gr, _messaging.local(),
             _gossiper, qp, _migration_manager.local());
@@ -1389,7 +1393,7 @@ future<> storage_service::init_server(cql3::query_processor& qp) {
 
 future<> storage_service::join_cluster() {
     return seastar::async([this] {
-        join_token_ring(get_ring_delay().count());
+        join_token_ring(get_ring_delay());
     });
 }
 
@@ -1681,9 +1685,11 @@ future<std::map<gms::inet_address, float>> storage_service::effective_ownership(
 }
 
 static const std::map<storage_service::mode, sstring> mode_names = {
+    {storage_service::mode::NONE,           "STARTING"},
     {storage_service::mode::STARTING,       "STARTING"},
     {storage_service::mode::NORMAL,         "NORMAL"},
     {storage_service::mode::JOINING,        "JOINING"},
+    {storage_service::mode::BOOTSTRAP,      "BOOTSTRAP"},
     {storage_service::mode::LEAVING,        "LEAVING"},
     {storage_service::mode::DECOMMISSIONED, "DECOMMISSIONED"},
     {storage_service::mode::MOVING,         "MOVING"},
@@ -1696,16 +1702,15 @@ std::ostream& operator<<(std::ostream& os, const storage_service::mode& m) {
     return os;
 }
 
-void storage_service::set_mode(mode m, bool log) {
-    set_mode(m, "", log);
-}
-
-void storage_service::set_mode(mode m, sstring msg, bool log) {
-    _operation_mode = m;
-    if (log) {
-        slogger.info("{}: {}", m, msg);
+void storage_service::set_mode(mode m) {
+    if (m != _operation_mode) {
+        slogger.info("entering {} mode", m);
+        _operation_mode = m;
     } else {
-        slogger.debug("{}: {}", m, msg);
+        // This shouldn't happen, but it's too much for an assert,
+        // so -- just emit a warning in the hope that it will be
+        // noticed, reported and fixed
+        slogger.warn("re-entering {} mode", m);
     }
 }
 
@@ -1759,17 +1764,9 @@ future<std::unordered_map<sstring, std::vector<sstring>>> storage_service::descr
     });
 };
 
-future<sstring> storage_service::get_operation_mode() {
+future<storage_service::mode> storage_service::get_operation_mode() {
     return run_with_no_api_lock([] (storage_service& ss) {
-        auto mode = ss._operation_mode;
-        return make_ready_future<sstring>(format("{}", mode));
-    });
-}
-
-future<bool> storage_service::is_starting() {
-    return run_with_no_api_lock([] (storage_service& ss) {
-        auto mode = ss._operation_mode;
-        return mode == storage_service::mode::STARTING;
+        return make_ready_future<mode>(ss._operation_mode);
     });
 }
 
@@ -1782,7 +1779,7 @@ future<bool> storage_service::is_gossip_running() {
 future<> storage_service::start_gossiping() {
     return run_with_api_lock(sstring("start_gossiping"), [] (storage_service& ss) {
         return seastar::async([&ss] {
-            if (!ss._initialized) {
+            if (!ss._gossiper.is_enabled()) {
                 slogger.warn("Starting gossip by operator request");
                 ss._gossiper.container().invoke_on_all(&gms::gossiper::start).get();
                 auto undo = defer([&ss] { ss._gossiper.container().invoke_on_all(&gms::gossiper::stop).get(); });
@@ -1794,9 +1791,7 @@ future<> storage_service::start_gossiping() {
                         db::system_keyspace::get_local_tokens().get0(),
                         cdc_gen_ts).get();
                 ss._gossiper.force_newer_generation();
-                ss._gossiper.start_gossiping(utils::get_generation_number()).then([&ss] {
-                    ss._initialized = true;
-                }).get();
+                ss._gossiper.start_gossiping(utils::get_generation_number()).get();
                 undo.cancel();
             }
         });
@@ -1805,21 +1800,15 @@ future<> storage_service::start_gossiping() {
 
 future<> storage_service::stop_gossiping() {
     return run_with_api_lock(sstring("stop_gossiping"), [] (storage_service& ss) {
-        if (ss._initialized) {
+        if (ss._gossiper.is_enabled()) {
             slogger.warn("Stopping gossip by operator request");
-            return ss._gossiper.container().invoke_on_all(&gms::gossiper::stop).then([&ss] {
-                ss._initialized = false;
-            });
+            return ss._gossiper.container().invoke_on_all(&gms::gossiper::stop);
         }
         return make_ready_future<>();
     });
 }
 
 future<> storage_service::do_stop_ms() {
-    if (_ms_stopped) {
-        return make_ready_future<>();
-    }
-    _ms_stopped = true;
     return _messaging.invoke_on_all([] (auto& ms) {
         return ms.shutdown();
     }).then([] {
@@ -1988,7 +1977,7 @@ future<> storage_service::decommission() {
             // StageManager.shutdownNow();
             db::system_keyspace::set_bootstrap_state(db::system_keyspace::bootstrap_state::DECOMMISSIONED).get();
             slogger.info("DECOMMISSIONING: set_bootstrap_state done");
-            ss.set_mode(mode::DECOMMISSIONED, true);
+            ss.set_mode(mode::DECOMMISSIONED);
             slogger.info("DECOMMISSIONING: done");
             // let op be responsible for killing the process
         });
@@ -2612,10 +2601,10 @@ future<> storage_service::drain() {
             return make_ready_future<>();
         }
 
-        ss.set_mode(mode::DRAINING, "starting drain process", true);
+        ss.set_mode(mode::DRAINING);
         return ss.do_drain().then([&ss] {
             ss._drain_finished.set_value();
-            ss.set_mode(mode::DRAINED, true);
+            ss.set_mode(mode::DRAINED);
         });
     });
 }
@@ -2629,10 +2618,10 @@ future<> storage_service::do_drain() {
         return bm.drain();
     });
 
-    set_mode(mode::DRAINING, "shutting down migration manager", false);
+    slogger.debug("shutting down migration manager");
     co_await _migration_manager.invoke_on_all(&service::migration_manager::drain);
 
-    set_mode(mode::DRAINING, "flushing column families", false);
+    slogger.debug("flushing column families");
     co_await _db.invoke_on_all(&replica::database::drain);
 }
 
@@ -2673,12 +2662,6 @@ int32_t storage_service::get_exception_count() {
     // the unhandled exceptions.
     //return (int)StorageMetrics.exceptions.count();
     return 0;
-}
-
-future<bool> storage_service::is_initialized() {
-    return run_with_no_api_lock([] (storage_service& ss) {
-        return ss._initialized;
-    });
 }
 
 // Runs inside seastar::async context
@@ -2772,7 +2755,7 @@ void storage_service::unbootstrap() {
             ranges_to_stream.emplace(keyspace_name, std::move(ranges_mm));
         }
 
-        set_mode(mode::LEAVING, "replaying batch log and streaming data to other nodes", true);
+        set_mode(mode::LEAVING);
 
         auto stream_success = stream_ranges(ranges_to_stream);
         // Wait for batch log to complete before streaming hints.
@@ -2780,7 +2763,7 @@ void storage_service::unbootstrap() {
         // Start with BatchLog replay, which may create hints but no writes since this is no longer a valid endpoint.
         get_batchlog_manager().local().do_batch_log_replay().get();
 
-        set_mode(mode::LEAVING, "streaming hints to other nodes", true);
+        slogger.info("streaming hints to other nodes");
 
         // wait for the transfer runnables to signal the latch.
         slogger.debug("waiting for stream acks.");
@@ -3563,7 +3546,7 @@ future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
     return container().invoke_on(0, [keyspace = std::move(keyspace)] (storage_service& ss) {
         auto my_address = ss.get_broadcast_address();
         auto pending_ranges = ss.get_token_metadata().has_pending_ranges(keyspace, my_address);
-        bool is_bootstrap_mode = ss._is_bootstrap_mode;
+        bool is_bootstrap_mode = ss._operation_mode == mode::BOOTSTRAP;
         slogger.debug("is_cleanup_allowed: keyspace={}, is_bootstrap_mode={}, pending_ranges={}",
                 keyspace, is_bootstrap_mode, pending_ranges);
         return !is_bootstrap_mode && !pending_ranges;
