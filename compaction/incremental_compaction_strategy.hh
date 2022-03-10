@@ -67,9 +67,13 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
     const sstring SPACE_AMPLIFICATION_GOAL_OPTION = "space_amplification_goal";
     std::optional<double> _space_amplification_goal;
 
-    std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs) const;
+    static std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs);
 
-    std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs) const;
+    static std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs, const incremental_compaction_strategy_options& options);
+
+    std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs) const {
+        return get_buckets(runs, _options);
+    }
 
     std::vector<sstables::sstable_run>
     most_interesting_bucket(std::vector<std::vector<sstables::sstable_run>> buckets, size_t min_threshold, size_t max_threshold);

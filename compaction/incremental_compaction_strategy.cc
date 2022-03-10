@@ -41,7 +41,7 @@ bool incremental_compaction_strategy::is_any_bucket_interesting(const std::vecto
 }
 
 std::vector<sstable_run_and_length>
-incremental_compaction_strategy::create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs) const {
+incremental_compaction_strategy::create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs) {
 
     std::vector<sstable_run_and_length> run_length_pairs;
     run_length_pairs.reserve(runs.size());
@@ -55,7 +55,7 @@ incremental_compaction_strategy::create_run_and_length_pairs(const std::vector<s
 }
 
 std::vector<std::vector<sstables::sstable_run>>
-incremental_compaction_strategy::get_buckets(const std::vector<sstables::sstable_run>& runs) const {
+incremental_compaction_strategy::get_buckets(const std::vector<sstables::sstable_run>& runs, const incremental_compaction_strategy_options& options) {
     auto sorted_runs = create_run_and_length_pairs(runs);
 
     std::sort(sorted_runs.begin(), sorted_runs.end(), [] (sstable_run_and_length& i, sstable_run_and_length& j) {
@@ -75,8 +75,8 @@ incremental_compaction_strategy::get_buckets(const std::vector<sstables::sstable
         if (!bucket_list.empty()) {
             auto& bucket_average_size = bucket_average_size_list.back();
 
-            if ((size > (bucket_average_size * _options.bucket_low) && size < (bucket_average_size * _options.bucket_high)) ||
-                    (size < _options.min_sstable_size && bucket_average_size < _options.min_sstable_size)) {
+            if ((size > (bucket_average_size * options.bucket_low) && size < (bucket_average_size * options.bucket_high)) ||
+                    (size < options.min_sstable_size && bucket_average_size < options.min_sstable_size)) {
                 auto& bucket = bucket_list.back();
                 auto total_size = bucket.size() * bucket_average_size;
                 auto new_average_size = (total_size + size) / (bucket.size() + 1);
@@ -86,7 +86,7 @@ incremental_compaction_strategy::get_buckets(const std::vector<sstables::sstable
                 // average might drift upwards.
                 // Don't let it drift too high, to a point where the smallest
                 // SSTable might fall out of range.
-                if (size < _options.min_sstable_size || smallest_run_in_bucket > new_average_size * _options.bucket_low) {
+                if (size < options.min_sstable_size || smallest_run_in_bucket > new_average_size * options.bucket_low) {
                     bucket.push_back(pair.first);
                     bucket_average_size = new_average_size;
                     continue;
