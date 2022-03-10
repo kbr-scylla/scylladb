@@ -121,11 +121,12 @@ incremental_compaction_strategy::most_interesting_bucket(std::vector<std::vector
     if (interesting_buckets.empty()) {
         return std::vector<sstables::sstable_run>();
     }
-    auto& min = *std::min_element(interesting_buckets.begin(), interesting_buckets.end(),
+    // Pick the bucket with more elements, as efficiency of same-tier compactions increases with number of files.
+    auto& max = *std::max_element(interesting_buckets.begin(), interesting_buckets.end(),
                     [] (sstable_run_bucket_and_length& i, sstable_run_bucket_and_length& j) {
-        return i.second < j.second;
+        return i.first.size() < j.first.size();
     });
-    return std::move(min.first);
+    return std::move(max.first);
 }
 
 compaction_descriptor
