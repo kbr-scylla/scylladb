@@ -330,7 +330,7 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
 incremental_compaction_strategy::incremental_compaction_strategy(const std::map<sstring, sstring>& options)
     : compaction_strategy_impl(options)
     , _options(options)
-    , _backlog_tracker(std::make_unique<incremental_backlog_tracker>())
+    , _backlog_tracker(std::make_unique<incremental_backlog_tracker>(_options))
 {
     using namespace cql3::statements;
     auto option_value = compaction_strategy_impl::get_value(options, FRAGMENT_SIZE_OPTION);
