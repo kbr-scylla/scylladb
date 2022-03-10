@@ -30,7 +30,7 @@ uint64_t incremental_compaction_strategy::avg_size(std::vector<sstables::sstable
     return n / runs.size();
 }
 
-bool incremental_compaction_strategy::is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) const {
+bool incremental_compaction_strategy::is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) {
     return bucket.size() >= min_threshold;
 }
 

@@ -80,7 +80,7 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
 
     uint64_t avg_size(std::vector<sstables::sstable_run>& runs) const;
 
-    bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) const;
+    static bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold);
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
 
