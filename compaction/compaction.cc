@@ -86,7 +86,7 @@ compaction_type to_compaction_type(sstring type_name) {
     throw std::runtime_error("Invalid Compaction Type Name");
 }
 
-static std::string_view to_string(compaction_type type) {
+std::string_view to_string(compaction_type type) {
     switch (type) {
     case compaction_type::Compaction: return "Compact";
     case compaction_type::Cleanup: return "Cleanup";
@@ -316,9 +316,9 @@ public:
     stop_iteration consume(clustering_row&& cr) {
         return consume(std::move(cr), row_tombstone{}, bool{});
     }
-    stop_iteration consume(range_tombstone&& rt) {
+    stop_iteration consume(range_tombstone_change&& rtc) {
         maybe_abort_compaction();
-        return _compaction_writer->writer.consume(std::move(rt));
+        return _compaction_writer->writer.consume(std::move(rtc));
     }
 
     stop_iteration consume_end_of_partition();
@@ -669,13 +669,13 @@ private:
     // to be compacted together.
     future<> consume_without_gc_writer(gc_clock::time_point compaction_time) {
         auto consumer = make_interposer_consumer([this] (flat_mutation_reader_v2 reader) mutable {
-            return seastar::async([this, reader = downgrade_to_v1(std::move(reader))] () mutable {
+            return seastar::async([this, reader = std::move(reader)] () mutable {
                 auto close_reader = deferred_close(reader);
                 auto cfc = compacted_fragments_writer(get_compacted_fragments_writer());
                 reader.consume_in_thread(std::move(cfc));
             });
         });
-        return consumer(upgrade_to_v2(make_compacting_reader(make_sstable_reader(), compaction_time, max_purgeable_func())));
+        return consumer(make_compacting_reader(make_sstable_reader(), compaction_time, max_purgeable_func()));
     }
 
     future<> consume() {
@@ -692,7 +692,7 @@ private:
                 auto close_reader = deferred_close(reader);
 
                 if (enable_garbage_collected_sstable_writer()) {
-                    using compact_mutations = compact_for_compaction<compacted_fragments_writer, compacted_fragments_writer>;
+                    using compact_mutations = compact_for_compaction_v2<compacted_fragments_writer, compacted_fragments_writer>;
                     auto cfc = compact_mutations(*schema(), now,
                         max_purgeable_func(),
                         get_compacted_fragments_writer(),
@@ -701,7 +701,7 @@ private:
                     reader.consume_in_thread(std::move(cfc));
                     return;
                 }
-                using compact_mutations = compact_for_compaction<compacted_fragments_writer, noop_compacted_fragments_consumer>;
+                using compact_mutations = compact_for_compaction_v2<compacted_fragments_writer, noop_compacted_fragments_consumer>;
                 auto cfc = compact_mutations(*schema(), now,
                     max_purgeable_func(),
                     get_compacted_fragments_writer(),
@@ -749,7 +749,7 @@ private:
         return ret;
     }
 
-    void interrupt(std::exception_ptr ex) {
+    void on_interrupt(std::exception_ptr ex) {
         log_info("{} of {} sstables interrupted due to: {}", report_start_desc(), _input_sstable_generations.size(), ex);
         delete_sstables_for_interrupted_compaction();
     }
@@ -1572,7 +1572,7 @@ future<compaction_result> compaction::run(std::unique_ptr<compaction> c) {
         try {
            consumer.get();
         } catch (...) {
-            c->interrupt(std::current_exception());
+            c->on_interrupt(std::current_exception());
             c = nullptr; // make sure writers are stopped while running in thread context. This is because of calls to file.close().get();
             throw;
         }

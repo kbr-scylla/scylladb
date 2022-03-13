@@ -3265,7 +3265,7 @@ SEASTAR_TEST_CASE(partial_sstable_run_filtered_out_test) {
 
         sstable_writer_config sst_cfg = env.manager().configure_writer();
         sst_cfg.run_identifier = partial_sstable_run_identifier;
-        auto partial_sstable_run_sst = make_sstable_easy(env, tmp.path(), make_flat_mutation_reader_from_mutations(s, env.make_reader_permit(), { std::move(mut) }), sst_cfg);
+        auto partial_sstable_run_sst = make_sstable_easy(env, tmp.path(), make_flat_mutation_reader_from_mutations_v2(s, env.make_reader_permit(), { std::move(mut) }), sst_cfg);
 
         column_family_test(cf).add_sstable(partial_sstable_run_sst);
         column_family_test::update_sstables_known_generation(*cf, partial_sstable_run_sst->generation());
@@ -3280,15 +3280,9 @@ SEASTAR_TEST_CASE(partial_sstable_run_filtered_out_test) {
 
         // register partial sstable run
         auto cm_test = compaction_manager_test(*cm);
-        auto& cdata = cm_test.register_compaction(partial_sstable_run_identifier, cf.get());
-        auto deregister_compaction = defer([&] () noexcept {
-            cm_test.deregister_compaction(cdata);
-        });
-
-        cf->compact_all_sstables().get();
-
-        deregister_compaction.cancel();
-        cm_test.deregister_compaction(cdata);
+        cm_test.run(partial_sstable_run_identifier, cf.get(), [cf] (sstables::compaction_data&) {
+            return cf->compact_all_sstables();
+        }).get();
 
         // make sure partial sstable run has none of its fragments compacted.
         BOOST_REQUIRE(generation_exists(partial_sstable_run_sst->generation()));
@@ -3326,7 +3320,7 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
             void consume(tombstone t) { _writer.consume(t); }
             stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer.consume(std::move(sr)); }
             stop_iteration consume(clustering_row&& cr, row_tombstone tomb, bool) { return _writer.consume(std::move(cr)); }
-            stop_iteration consume(range_tombstone&& rt) { return _writer.consume(std::move(rt)); }
+            stop_iteration consume(range_tombstone_change&& rtc) { return _writer.consume(std::move(rtc)); }
 
             stop_iteration consume_end_of_partition() { return _writer.consume_end_of_partition(); }
             void consume_end_of_stream() { _writer.consume_end_of_stream(); _sst->open_data().get0(); }
@@ -3354,7 +3348,7 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
             gc_before = gc_now - s->gc_grace_seconds();
             auto gc_grace_seconds = s->gc_grace_seconds();
 
-            auto cfc = compact_for_compaction<compacting_sstable_writer_test, compacting_sstable_writer_test>(
+            auto cfc = compact_for_compaction_v2<compacting_sstable_writer_test, compacting_sstable_writer_test>(
                 *s, gc_now, max_purgeable_func, std::move(cr), std::move(purged_cr));
 
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, s->compaction_strategy_options());
@@ -3362,7 +3356,7 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
             for (auto&& sst : all) {
                 compacting->insert(std::move(sst));
             }
-            auto reader = compacting->make_range_sstable_reader(s,
+            auto r = compacting->make_range_sstable_reader(s,
                 env.make_reader_permit(),
                 query::full_partition_range,
                 s->full_slice(),
@@ -3371,7 +3365,6 @@ SEASTAR_TEST_CASE(purged_tombstone_consumer_sstable_test) {
                 ::streamed_mutation::forwarding::no,
                 ::mutation_reader::forwarding::no);
 
-            auto r = std::move(reader);
             auto close_r = deferred_close(r);
             r.consume_in_thread(std::move(cfc));
 
@@ -3678,7 +3671,7 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
 
         // no compactions done yet
         auto& ss = cm.get_stats();
-        BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0 && ss.completed_tasks == 0);
+        BOOST_REQUIRE(cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0 && ss.completed_tasks == 0);
         // auto compaction is enabled by default
         BOOST_REQUIRE(!cf->is_auto_compaction_disabled_by_user());
         // disable auto compaction by user
@@ -3709,7 +3702,7 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
         auto stop_cf = deferred_stop(*cf);
         cf->trigger_compaction();
         cf->get_compaction_manager().submit(cf.get());
-        BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0 && ss.completed_tasks == 0);
+        BOOST_REQUIRE(cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0 && ss.completed_tasks == 0);
         // enable auto compaction
         cf->enable_auto_compaction();
         // check enabled
@@ -3717,7 +3710,7 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
         // trigger background compaction
         cf->trigger_compaction();
         // wait until compaction finished
-        do_until([&ss] { return ss.pending_tasks == 0 && ss.active_tasks == 0; }, [] {
+        do_until([&cm] { return cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0; }, [] {
             return sleep(std::chrono::milliseconds(100));
         }).wait();
         // test compaction successfully finished

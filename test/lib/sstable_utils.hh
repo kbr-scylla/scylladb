@@ -345,7 +345,9 @@ class compaction_manager_test {
 public:
     explicit compaction_manager_test(compaction_manager& cm) noexcept : _cm(cm) {}
 
-    sstables::compaction_data& register_compaction(utils::UUID output_run_id, replica::column_family* cf);
+    future<> run(utils::UUID output_run_id, replica::column_family* cf, noncopyable_function<future<> (sstables::compaction_data&)> job);
+private:
+    sstables::compaction_data& register_compaction(shared_ptr<compaction_manager::task> task);
 
     void deregister_compaction(const sstables::compaction_data& c);
 };
@@ -353,7 +355,7 @@ public:
 future<compaction_result> compact_sstables(sstables::compaction_descriptor descriptor, replica::column_family& cf,
         std::function<shared_sstable()> creator, sstables::compaction_sstable_replacer_fn replacer = sstables::replacer_fn_no_op());
 
-shared_sstable make_sstable_easy(test_env& env, const fs::path& path, flat_mutation_reader rd, sstable_writer_config cfg,
+shared_sstable make_sstable_easy(test_env& env, const fs::path& path, flat_mutation_reader_v2 rd, sstable_writer_config cfg,
         int64_t generation = 1, const sstables::sstable::version_types version = sstables::get_highest_sstable_version(), int expected_partition = 1);
 shared_sstable make_sstable_easy(test_env& env, const fs::path& path, lw_shared_ptr<replica::memtable> mt, sstable_writer_config cfg,
         unsigned long gen = 1, const sstable::version_types v = sstables::get_highest_sstable_version(), int estimated_partitions = 1, gc_clock::time_point = gc_clock::now());
