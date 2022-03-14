@@ -14,6 +14,8 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "size_tiered_compaction_strategy.hh"
 
+class incremental_backlog_tracker;
+
 namespace sstables {
 
 class incremental_compaction_strategy_options {
@@ -67,16 +69,20 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
     const sstring SPACE_AMPLIFICATION_GOAL_OPTION = "space_amplification_goal";
     std::optional<double> _space_amplification_goal;
 
-    std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs) const;
+    static std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs);
 
-    std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs) const;
+    static std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs, const incremental_compaction_strategy_options& options);
+
+    std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs) const {
+        return get_buckets(runs, _options);
+    }
 
     std::vector<sstables::sstable_run>
     most_interesting_bucket(std::vector<std::vector<sstables::sstable_run>> buckets, size_t min_threshold, size_t max_threshold);
 
     uint64_t avg_size(std::vector<sstables::sstable_run>& runs) const;
 
-    bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold) const;
+    static bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold);
 
     bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
 
@@ -106,6 +112,8 @@ public:
     virtual compaction_descriptor get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) override;
 
     virtual std::unique_ptr<sstable_set_impl> make_sstable_set(schema_ptr schema) const override;
+
+    friend class ::incremental_backlog_tracker;
 };
 
 }

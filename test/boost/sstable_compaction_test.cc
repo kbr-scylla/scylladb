@@ -4790,13 +4790,13 @@ SEASTAR_TEST_CASE(basic_ics_controller_correctness_test) {
             return backlog_tracker.backlog();
         };
 
-        auto ics_backlog = backlog(compaction_backlog_tracker(std::make_unique<incremental_backlog_tracker>()), default_fragment_size);
+        sstables::incremental_compaction_strategy_options ics_options;
+        auto ics_backlog = backlog(compaction_backlog_tracker(std::make_unique<incremental_backlog_tracker>(ics_options)), default_fragment_size);
         sstables::size_tiered_compaction_strategy_options stcs_options;
         auto stcs_backlog = backlog(compaction_backlog_tracker(std::make_unique<size_tiered_backlog_tracker>(stcs_options)), std::numeric_limits<size_t>::max());
 
         // don't expect ics and stcs to yield different backlogs for the same workload.
-        // temporarily disabled until we adjust for d8833de3bb1274500e90590197df300a097d93ba
-        // XFAIL: BOOST_CHECK_CLOSE(ics_backlog, stcs_backlog, 0.0001);
+        BOOST_CHECK_CLOSE(ics_backlog, stcs_backlog, 0.0001);
     });
 }
 
@@ -4958,5 +4958,6 @@ SEASTAR_TEST_CASE(simple_backlog_controller_test) {
        run_controller_test(sstables::compaction_strategy_type::size_tiered, env);
        run_controller_test(sstables::compaction_strategy_type::time_window, env);
        run_controller_test(sstables::compaction_strategy_type::leveled, env);
+       run_controller_test(sstables::compaction_strategy_type::incremental, env);
     });
 }
