@@ -15,7 +15,13 @@
 #include "mutation.hh"
 #include "mutation_fragment.hh"
 #include "test/lib/mutation_source_test.hh"
-#include "flat_mutation_reader.hh"
+#include "readers/flat_mutation_reader.hh"
+#include "readers/reversing.hh"
+#include "readers/forwardable.hh"
+#include "readers/delegating.hh"
+#include "readers/multi_range.hh"
+#include "readers/from_mutations.hh"
+#include "readers/from_fragments.hh"
 #include "mutation_reader.hh"
 #include "schema_builder.hh"
 #include "replica/memtable.hh"
@@ -31,7 +37,9 @@
 #include "test/lib/random_utils.hh"
 #include "test/lib/random_schema.hh"
 
-#include <boost/range/adaptor/map.hpp>
+#include "readers/from_mutations_v2.hh"
+#include "readers/from_fragments_v2.hh"
+#include "readers/forwardable_v2.hh"
 
 struct mock_consumer {
     struct result {
@@ -115,7 +123,7 @@ SEASTAR_TEST_CASE(test_flat_mutation_reader_consume_single_partition) {
                 query::clustering_row_ranges ck_ranges = {};
                 if (depth > 1) {
                     const auto& mf = result._fragments.back();
-                    auto ck_range = query::clustering_range::make_ending_with({mf.position().key(), false});
+                    auto ck_range = query::clustering_range::make_ending_with({mf.position().key(), mf.position().get_bound_weight() >= bound_weight::equal});
                     ck_ranges = {ck_range};
                 }
                 for (auto& mf : result._fragments) {
@@ -560,7 +568,7 @@ void test_flat_stream(schema_ptr s, std::vector<mutation> muts, reversed_partiti
             return fmr.consume_in_thread(std::move(fsc));
         } else {
             if (reversed) {
-                return with_closeable(make_reversing_reader(make_flat_mutation_reader<delegating_reader>(fmr), query::max_result_size(size_t(1) << 20)),
+                return with_closeable(make_reversing_reader(make_delegating_reader(fmr), query::max_result_size(size_t(1) << 20)),
                         [fsc = std::move(fsc)] (flat_mutation_reader& reverse_reader) mutable {
                     return reverse_reader.consume(std::move(fsc));
                 }).get0();
@@ -715,21 +723,6 @@ SEASTAR_TEST_CASE(test_abandoned_flat_mutation_reader_from_mutation) {
     });
 }
 
-static std::vector<mutation> squash_mutations(std::vector<mutation> mutations) {
-    if (mutations.empty()) {
-        return {};
-    }
-    std::map<dht::decorated_key, mutation, dht::ring_position_less_comparator> merged_muts{
-            dht::ring_position_less_comparator{*mutations.front().schema()}};
-    for (const auto& mut : mutations) {
-        auto [it, inserted] = merged_muts.try_emplace(mut.decorated_key(), mut);
-        if (!inserted) {
-            it->second.apply(mut);
-        }
-    }
-    return boost::copy_range<std::vector<mutation>>(merged_muts | boost::adaptors::map_values);
-}
-
 SEASTAR_THREAD_TEST_CASE(test_mutation_reader_from_mutations_as_mutation_source) {
     auto populate = [] (schema_ptr, const std::vector<mutation> &muts) {
         return mutation_source([=] (
@@ -811,7 +804,7 @@ SEASTAR_THREAD_TEST_CASE(test_mutation_reader_from_fragments_v2_as_mutation_sour
                 mutation_reader::forwarding) mutable {
             auto get_fragments = [&schema, &permit, &muts] {
                 std::deque<mutation_fragment_v2> fragments;
-                auto rd = upgrade_to_v2(make_flat_mutation_reader_from_mutations(muts.front().schema(), permit, squash_mutations(muts)));
+                auto rd = make_flat_mutation_reader_from_mutations_v2(muts.front().schema(), permit, squash_mutations(muts));
                 auto close_rd = deferred_close(rd);
                 while (auto mfopt = rd().get()) {
                     fragments.emplace_back(std::move(*mfopt));

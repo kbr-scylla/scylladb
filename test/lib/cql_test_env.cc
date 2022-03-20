@@ -521,6 +521,11 @@ public:
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, scheduling_groups.statement_scheduling_group).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
+            sharded<cql3::query_processor> qp;
+
+            auto sys_ks = seastar::sharded<db::system_keyspace>();
+            sys_ks.start(std::ref(qp), std::ref(db)).get();
+            auto stop_sys_kd = defer([&sys_ks] { sys_ks.stop().get(); });
 
             sharded<netw::messaging_service> ms;
             // don't start listening so tests can be run in parallel
@@ -577,13 +582,13 @@ public:
             sharded<db::view::view_update_generator> view_update_generator;
             sharded<cdc::generation_service> cdc_generation_service;
             sharded<repair_service> repair;
-            sharded<cql3::query_processor> qp;
             sharded<service::raft_group_registry> raft_gr;
             sharded<streaming::stream_manager> stream_manager;
             sharded<service::forward_service> forward_service;
 
             raft_gr.start(cfg->check_experimental(db::experimental_features_t::RAFT),
-                std::ref(ms), std::ref(gossiper)).get();
+                std::ref(ms), std::ref(gossiper), std::ref(feature_service)).get();
+            auto stop_raft_gr = deferred_stop(raft_gr);
             raft_gr.invoke_on_all(&service::raft_group_registry::start).get();
 
             stream_manager.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(ms), std::ref(mm), std::ref(gms::get_gossiper())).get();
@@ -619,7 +624,9 @@ public:
             db.invoke_on_all(&replica::database::start, std::ref(sl_controller)).get();
 
             feature_service.invoke_on_all([] (auto& fs) {
-                fs.enable(fs.known_feature_set());
+                return seastar::async([&fs] {
+                    fs.enable(fs.known_feature_set());
+                });
             }).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
@@ -639,7 +646,7 @@ public:
             forward_service.start(std::ref(ms), std::ref(proxy), std::ref(db), std::ref(token_metadata)).get();
             auto stop_forward_service =  defer([&forward_service] { forward_service.stop().get(); });
 
-            mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(proxy), std::ref(gossiper), std::ref(raft_gr)).get();
+            mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(proxy), std::ref(gossiper), std::ref(raft_gr), std::ref(sys_ks)).get();
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
             cql3::query_processor::memory_config qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
@@ -647,9 +654,7 @@ public:
             qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
-            // In main.cc we call db::system_keyspace::setup which calls
-            // minimal_setup and init_local_cache
-            db::system_keyspace::minimal_setup(qp);
+            sys_ks.invoke_on_all(&db::system_keyspace::start).get();
 
             db::batchlog_manager_config bmcfg;
             bmcfg.replay_rate = 100000000;
@@ -665,7 +670,7 @@ public:
             sscfg.available_memory = memory::stats().total_memory();
             ss.start(std::ref(abort_sources), std::ref(db),
                 std::ref(gossiper),
-                std::ref(sys_dist_ks),
+                std::ref(sys_dist_ks), std::ref(sys_ks),
                 std::ref(feature_service), sscfg, std::ref(mm),
                 std::ref(token_metadata), std::ref(erm_factory), std::ref(ms),
                 std::ref(cdc_generation_service),
@@ -683,7 +688,7 @@ public:
                 auto cfm = pair.second;
                 return ks.make_directory_for_column_family(cfm->cf_name(), cfm->id());
             }).get();
-            replica::distributed_loader::init_non_system_keyspaces(db, proxy).get();
+            replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
 
             db.invoke_on_all([] (replica::database& db) {
                 for (auto& x : db.get_column_families()) {
@@ -697,20 +702,19 @@ public:
             auto shutdown_db = defer([&db] {
                 db.invoke_on_all(&replica::database::shutdown).get();
             });
-            // XXX: stop_raft before stopping the database and
+            // XXX: drain_on_shutdown raft before stopping the database and
             // query processor. Group registry stop raft groups
             // when stopped, and until then the groups may use
             // the database and the query processor.
-            auto stop_raft = defer([&raft_gr] { raft_gr.stop().get(); });
+            auto drain_raft = defer([&raft_gr] {
+                raft_gr.invoke_on_all(&service::raft_group_registry::drain_on_shutdown).get();
+            });
 
             view_update_generator.start(std::ref(db)).get();
             view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
             auto stop_view_update_generator = defer([&view_update_generator] {
                 view_update_generator.stop().get();
             });
-
-            db::system_keyspace::init_local_cache().get();
-            auto stop_local_cache = defer([] { db::system_keyspace::deinit_local_cache().get(); });
 
             sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
 

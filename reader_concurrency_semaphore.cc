@@ -8,6 +8,7 @@
 
 #include <seastar/core/seastar.hh>
 #include <seastar/core/print.hh>
+#include <seastar/core/file.hh>
 #include <seastar/util/lazy.hh>
 #include <seastar/util/log.hh>
 #include <seastar/core/coroutine.hh>
@@ -294,10 +295,11 @@ public:
         }
     }
 
-    future<> maybe_wait_readmission() {
-        if (_state != reader_permit::state::evicted) {
-            return make_ready_future<>();
-        }
+    bool needs_readmission() const {
+        return _state == reader_permit::state::evicted;
+    }
+
+    future<> wait_readmission() {
         return _semaphore.do_wait_admission(shared_from_this());
     }
 
@@ -360,8 +362,12 @@ reader_concurrency_semaphore& reader_permit::semaphore() {
     return _impl->semaphore();
 }
 
-future<> reader_permit::maybe_wait_readmission() {
-    return _impl->maybe_wait_readmission();
+bool reader_permit::needs_readmission() const {
+    return _impl->needs_readmission();
+}
+
+future<> reader_permit::wait_readmission() {
+    return _impl->wait_readmission();
 }
 
 void reader_permit::consume(reader_resources res) {
@@ -775,7 +781,7 @@ flat_mutation_reader_v2 reader_concurrency_semaphore::detach_inactive_reader(ina
             ir.notify_handler(reason);
         }
     } catch (...) {
-        rcslog.error("[semaphore {}] evict(): notify handler failed for inactive read evicted due to {}: {}", _name, reason, std::current_exception());
+        rcslog.error("[semaphore {}] evict(): notify handler failed for inactive read evicted due to {}: {}", _name, static_cast<int>(reason), std::current_exception());
     }
     switch (reason) {
         case evict_reason::permit:

@@ -11,6 +11,8 @@
 #include "message/messaging_service.hh"
 #include "serializer_impl.hh"
 #include "idl/raft.dist.hh"
+#include "gms/feature_service.hh"
+#include "gms/gossiper.hh"
 
 #include <seastar/core/coroutine.hh>
 
@@ -18,8 +20,19 @@ namespace service {
 
 logging::logger rslog("raft_group_registry");
 
-raft_group_registry::raft_group_registry(bool is_enabled, netw::messaging_service& ms, gms::gossiper& gossiper)
-    : _is_enabled(is_enabled), _ms(ms), _fd(make_shared<raft_gossip_failure_detector>(gossiper, _srv_address_mappings))
+raft_group_registry::raft_group_registry(bool is_enabled, netw::messaging_service& ms, gms::gossiper& gossiper, gms::feature_service& feat)
+    : _is_enabled(is_enabled)
+    , _ms(ms)
+    , _fd(make_shared<raft_gossip_failure_detector>(gossiper, _srv_address_mappings))
+    , _raft_support_listener(feat.cluster_supports_raft_cluster_mgmt().when_enabled([&feat, &gossiper] {
+        // When the cluster fully supports raft-based cluster management,
+        // we can re-enable support for the second gossip feature to trigger
+        // actual use of raft-based cluster management procedures.
+        feat.support(gms::features::USES_RAFT_CLUSTER_MANAGEMENT).get();
+        // When the supported feature set is dynamically extended, re-advertise it through the gossip.
+        gossiper.add_local_application_state(gms::application_state::SUPPORTED_FEATURES,
+            gms::versioned_value::supported_features(feat.supported_feature_set())).get();
+    }))
 {
 }
 
@@ -144,13 +157,16 @@ future<> raft_group_registry::uninit_rpc_verbs() {
     ).discard_result();
 }
 
-future<> raft_group_registry::stop_servers() {
-    std::vector<future<>> stop_futures;
-    stop_futures.reserve(_servers.size());
-    for (auto& entry : _servers) {
-        stop_futures.emplace_back(entry.second.server->abort());
+future<> raft_group_registry::stop_servers() noexcept {
+    gate g;
+    for (auto it = _servers.begin(); it != _servers.end(); it = _servers.erase(it)) {
+        auto abort_server = it->second.server->abort();
+        // discarded future is waited via g.close()
+        (void)std::move(abort_server).handle_exception([rsfg = std::move(it->second), gh = g.hold()] (std::exception_ptr ex) {
+            rslog.warn("Failed to abort raft group server {}: {}", rsfg.gid, ex);
+        });
     }
-    co_await when_all_succeed(stop_futures.begin(), stop_futures.end());
+    co_await g.close();
 }
 
 seastar::future<> raft_group_registry::start() {
@@ -167,11 +183,12 @@ seastar::future<> raft_group_registry::stop() {
     if (!_is_enabled) {
         co_return;
     }
-    co_await when_all_succeed(
-        _shutdown_gate.close(),
-        uninit_rpc_verbs(),
-        stop_servers()
-    ).discard_result();
+    co_await drain_on_shutdown();
+    co_await uninit_rpc_verbs();
+}
+
+seastar::future<> raft_group_registry::drain_on_shutdown() noexcept {
+    return stop_servers();
 }
 
 raft_server_for_group& raft_group_registry::server_for_group(raft::group_id gid) {

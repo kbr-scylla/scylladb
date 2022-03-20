@@ -68,6 +68,10 @@ private:
         // Raised by any function running under run_with_compaction_disabled();
         long compaction_disabled_counter = 0;
 
+        // This semaphore ensures that off-strategy compaction will be serialized for
+        // a given table, protecting against candidates being picked more than once.
+        seastar::named_semaphore off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
+
         bool compaction_disabled() const noexcept {
             return compaction_disabled_counter > 0;
         }
@@ -140,6 +144,9 @@ public:
         // otherwise, returns stop_iteration::no after sleep for exponential retry.
         future<stop_iteration> maybe_retry(std::exception_ptr err);
 
+        // Compacts set of SSTables according to the descriptor.
+        using release_exhausted_func_t = std::function<void(const std::vector<sstables::shared_sstable>& exhausted_sstables)>;
+        future<> compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted);
     public:
         future<> run() noexcept;
 
@@ -376,6 +383,31 @@ public:
     //      associated with, use compaction_type::Compaction, if none apply.
     // parameter job is a function that will carry the operation
     future<> run_custom_job(replica::table* t, sstables::compaction_type type, const char *desc, noncopyable_function<future<>(sstables::compaction_data&)> job);
+
+    class compaction_reenabler {
+        compaction_manager& _cm;
+        replica::table* _table;
+        compaction_state& _compaction_state;
+        gate::holder _holder;
+
+    public:
+        compaction_reenabler(compaction_manager&, replica::table*);
+        compaction_reenabler(compaction_reenabler&&) noexcept;
+
+        ~compaction_reenabler();
+
+        replica::table* compacting_table() const noexcept {
+            return _table;
+        }
+
+        const compaction_state& compaction_state() const noexcept {
+            return _compaction_state;
+        }
+    };
+
+    // Disable compaction temporarily for a table t.
+    // Caller should call the compaction_reenabler::reenable
+    future<compaction_reenabler> stop_and_disable_compaction(replica::table* t);
 
     // Run a function with compaction temporarily disabled for a table T.
     future<> run_with_compaction_disabled(replica::table* t, std::function<future<> ()> func);

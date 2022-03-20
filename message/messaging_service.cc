@@ -90,7 +90,7 @@
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/indirected.hpp>
 #include "frozen_mutation.hh"
-#include "flat_mutation_reader.hh"
+#include "readers/flat_mutation_reader.hh"
 #include "streaming/stream_manager.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "locator/snitch_base.hh"
@@ -415,7 +415,7 @@ future<> messaging_service::stop() {
             for (auto verb = messaging_verb::MUTATION; verb < messaging_verb::LAST;
                     verb = messaging_verb(int(verb) + 1)) {
                 if (_rpc->has_handler(verb)) {
-                    mlogger.error(" - {}", verb);
+                    mlogger.error(" - {}", static_cast<int>(verb));
                 }
             }
 

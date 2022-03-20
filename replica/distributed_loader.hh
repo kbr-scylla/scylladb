@@ -13,6 +13,7 @@
 #include <seastar/core/distributed.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/file.hh>
+#include <seastar/util/bool_class.hh>
 #include <vector>
 #include <functional>
 #include <filesystem>
@@ -28,6 +29,7 @@ using column_family = table;
 namespace db {
 class config;
 class system_distributed_keyspace;
+class system_keyspace;
 namespace view {
 class view_update_generator;
 }
@@ -67,14 +69,16 @@ class distributed_loader {
     static future<size_t> make_sstables_available(sstables::sstable_directory& dir,
             sharded<replica::database>& db, sharded<db::view::view_update_generator>& view_update_generator,
             std::filesystem::path datadir, sstring ks, sstring cf);
-    static future<> populate_column_family(distributed<replica::database>& db, sstring sstdir, sstring ks, sstring cf, bool must_exist = true);
+    using allow_offstrategy_compaction = bool_class<struct allow_offstrategy_compaction_tag>;
+    using must_exist = bool_class<struct must_exist_tag>;
+    static future<> populate_column_family(distributed<replica::database>& db, sstring sstdir, sstring ks, sstring cf, allow_offstrategy_compaction, must_exist = must_exist::yes);
     static future<> populate_keyspace(distributed<replica::database>& db, sstring datadir, sstring ks_name);
     static future<> cleanup_column_family_temp_sst_dirs(sstring sstdir);
     static future<> handle_sstables_pending_delete(sstring pending_deletes_dir);
 
 public:
     static future<> init_system_keyspace(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
-    static future<> init_non_system_keyspaces(distributed<replica::database>& db, distributed<service::storage_proxy>& proxy);
+    static future<> init_non_system_keyspaces(distributed<replica::database>& db, distributed<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks);
     static future<> ensure_system_table_directories(distributed<replica::database>& db);
 
     // Scan sstables under upload directory. Return a vector with smp::count entries.

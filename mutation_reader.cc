@@ -16,10 +16,12 @@
 #include <seastar/util/closeable.hh>
 
 #include "mutation_reader.hh"
-#include "flat_mutation_reader.hh"
+#include "readers/flat_mutation_reader.hh"
+#include "readers/empty.hh"
 #include "schema_registry.hh"
 #include "mutation_compactor.hh"
 #include "dht/sharder.hh"
+#include "readers/empty_v2.hh"
 
 logging::logger mrlog("mutation_reader");
 
@@ -1229,7 +1231,18 @@ future<flat_mutation_reader_v2> evictable_reader_v2::resume_or_create_reader() {
     if (auto reader_opt = try_resume()) {
         co_return std::move(*reader_opt);
     }
-    co_await _permit.maybe_wait_readmission();
+    // When the reader is created the first time and we are actually resuming a
+    // saved reader in `recreate_reader()`, we have two cases here:
+    // * the reader is still alive (in inactive state)
+    // * the reader was evicted
+    // We check for this below with `needs_readmission()` and it is very
+    // important to not allow for preemption between said check and
+    // `recreate_reader()`, otherwise the reader might be evicted between the
+    // check and `recreate_reader()` and the latter will recreate it without
+    // waiting for re-admission.
+    if (_permit.needs_readmission()) {
+        co_await _permit.wait_readmission();
+    }
     co_return recreate_reader();
 }
 
@@ -2305,11 +2318,11 @@ std::pair<flat_mutation_reader_v2, queue_reader_handle_v2> make_queue_reader_v2(
 namespace {
 
 class compacting_reader : public flat_mutation_reader_v2::impl {
-    friend class compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes, compactor_output_format::v2>;
+    friend class compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes>;
 
 private:
     flat_mutation_reader_v2 _reader;
-    compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes, compactor_output_format::v2> _compactor;
+    compact_mutation_state<emit_only_live_rows::no, compact_for_sstables::yes> _compactor;
     noop_compacted_fragments_consumer _gc_consumer;
 
     // Uncompacted stream

@@ -69,6 +69,8 @@
 #include "test/lib/reader_concurrency_semaphore.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/random_utils.hh"
+#include "readers/from_mutations_v2.hh"
+#include "readers/from_fragments_v2.hh"
 
 namespace fs = std::filesystem;
 
@@ -158,6 +160,9 @@ public:
 
     api::timestamp_type min_memtable_timestamp() const override {
         return _t->min_memtable_timestamp();
+    }
+    future<> update_compaction_history(utils::UUID compaction_id, sstring ks_name, sstring cf_name, std::chrono::milliseconds ended_at, int64_t bytes_in, int64_t bytes_out) override {
+        return make_ready_future<>();
     }
 };
 
@@ -4155,8 +4160,7 @@ SEASTAR_TEST_CASE(test_offstrategy_sstable_compaction) {
                 auto sst = make_sstable_containing(sst_gen, {mut});
                 cf->add_sstable_and_update_cache(std::move(sst), sstables::offstrategy::yes).get();
             }
-            auto info = make_lw_shared<sstables::compaction_data>();
-            cf->run_offstrategy_compaction(*info).get();
+            BOOST_REQUIRE(cf->perform_offstrategy_compaction().get0());
         }
     });
 }

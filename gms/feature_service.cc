@@ -101,12 +101,6 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _parallelized_aggregation(*this, features::PARALLELIZED_AGGREGATION)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
         , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION)
-        , _raft_support_listener(_supports_raft_cluster_mgmt.when_enabled([this] {
-            // When the cluster fully supports raft-based cluster management,
-            // we can re-enable support for the second gossip feature to trigger
-            // actual use of raft-based cluster management procedures.
-            support(features::USES_RAFT_CLUSTER_MANAGEMENT);
-        }))
 {}
 
 feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> disabled) {
@@ -182,8 +176,13 @@ void feature_service::enable(const sstring& name) {
     }
 }
 
-void feature_service::support(const std::string_view& name) {
+future<> feature_service::support(const std::string_view& name) {
     _config._masked_features.erase(sstring(name));
+
+    if (db::qctx) {
+        // Update `system.local#supported_features` accordingly
+        co_await db::system_keyspace::save_local_supported_features(supported_feature_set());
+    }
 }
 
 std::set<std::string_view> feature_service::known_feature_set() {

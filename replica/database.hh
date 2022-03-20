@@ -118,6 +118,7 @@ class extensions;
 class rp_handle;
 class data_listeners;
 class large_data_handler;
+class system_keyspace;
 
 future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
 
@@ -444,9 +445,6 @@ private:
     // sstables deleted by compaction in parallel, a race condition which could
     // easily result in failure.
     seastar::named_semaphore _sstable_deletion_sem = {1, named_semaphore_exception_factory{"sstable deletion"}};
-    // This semaphore ensures that off-strategy compaction will be serialized and also
-    // protects against candidates being picked more than once.
-    seastar::named_semaphore _off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
     // Ensures that concurrent updates to sstable set will work correctly
     seastar::named_semaphore _sstable_set_mutation_sem = {1, named_semaphore_exception_factory{"sstable set mutation"}};
     mutable row_cache _cache; // Cache covers only sstables.
@@ -595,14 +593,17 @@ private:
     static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
         return sstable_generation % smp::count;
     }
-
+public:
+    // This will update sstable lists on behalf of off-strategy compaction, where
+    // input files will be removed from the maintenance set and output files will
+    // be inserted into the main set.
     future<>
     update_sstable_lists_on_off_strategy_completion(const std::vector<sstables::shared_sstable>& old_maintenance_sstables,
                                                     const std::vector<sstables::shared_sstable>& new_main_sstables);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
     void on_compaction_completion(sstables::compaction_completion_desc& desc);
-
+private:
     void rebuild_statistics();
 
     // Called on schema change.
@@ -843,8 +844,6 @@ public:
     // Active memtable is flushed first to guarantee that data like tombstone,
     // sitting in the memtable, will be compacted with shadowed data.
     future<> compact_all_sstables();
-    // Compact all sstables provided in the vector.
-    future<> compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata);
 
     future<bool> snapshot_exists(sstring name);
 
@@ -887,6 +886,7 @@ public:
     future<std::unordered_set<sstring>> get_sstables_by_partition_key(const sstring& key) const;
 
     const sstables::sstable_set& get_sstable_set() const;
+    const sstables::sstable_set& maintenance_sstable_set() const;
     lw_shared_ptr<const sstable_list> get_sstables() const;
     lw_shared_ptr<const sstable_list> get_sstables_including_compacted_undeleted() const;
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;
@@ -906,7 +906,6 @@ public:
     // a future<bool> that is resolved when offstrategy_compaction completes.
     // The future value is true iff offstrategy compaction was required.
     future<bool> perform_offstrategy_compaction();
-    future<> run_offstrategy_compaction(sstables::compaction_data& info);
     void set_compaction_strategy(sstables::compaction_strategy_type strategy);
     const sstables::compaction_strategy& get_compaction_strategy() const {
         return _compaction_strategy;
@@ -1416,7 +1415,7 @@ public:
         }
     };
 
-    future<> parse_system_tables(distributed<service::storage_proxy>&);
+    future<> parse_system_tables(distributed<service::storage_proxy>&, sharded<db::system_keyspace>&);
     database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
             abort_source& as, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
     database(database&&) = delete;
@@ -1593,7 +1592,6 @@ public:
     /** Truncates the given column family */
     future<> truncate(sstring ksname, sstring cfname, timestamp_func);
     future<> truncate(const keyspace& ks, column_family& cf, timestamp_func, bool with_snapshot = true);
-    future<> truncate_views(const column_family& base, db_clock::time_point truncated_at, bool should_flush);
 
     bool update_column_family(schema_ptr s);
     future<> drop_column_family(const sstring& ks_name, const sstring& cf_name, timestamp_func, bool with_snapshot = true);

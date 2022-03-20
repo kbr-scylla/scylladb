@@ -36,6 +36,12 @@ inline bool can_upgrade_schema(schema_ptr from, schema_ptr to) {
     return from->is_counter() == to->is_counter();
 }
 
+// Merge mutations that have the same key.
+// The returned vector has mutations with unique keys.
+// run_mutation_source_tests() might pass in multiple mutations for the same key.
+// Some tests need these deduplicated, which is what this method does.
+std::vector<mutation> squash_mutations(std::vector<mutation> mutations);
+
 class random_mutation_generator {
     class impl;
     std::unique_ptr<impl> _impl;
@@ -49,7 +55,9 @@ public:
     // tombstone will cover data, i.e. compacting the mutation will not result
     // in any changes.
     explicit random_mutation_generator(generate_counters, local_shard_only lso = local_shard_only::yes,
-            generate_uncompactable uc = generate_uncompactable::no);
+            generate_uncompactable uc = generate_uncompactable::no, std::optional<uint32_t> seed_opt = std::nullopt);
+    random_mutation_generator(generate_counters gc, uint32_t seed)
+            : random_mutation_generator(gc, local_shard_only::yes, generate_uncompactable::no, seed) {}
     ~random_mutation_generator();
     mutation operator()();
     // Generates n mutations sharing the same schema nad sorted by their decorated keys.
@@ -68,6 +76,8 @@ void for_each_schema_change(std::function<void(schema_ptr, const std::vector<mut
 
 void compare_readers(const schema&, flat_mutation_reader authority, flat_mutation_reader tested);
 void compare_readers(const schema&, flat_mutation_reader authority, flat_mutation_reader tested, const std::vector<position_range>& fwd_ranges);
+void compare_readers(const schema&, flat_mutation_reader_v2 authority, flat_mutation_reader_v2 tested);
+void compare_readers(const schema&, flat_mutation_reader_v2 authority, flat_mutation_reader_v2 tested, const std::vector<position_range>& fwd_ranges);
 
 // Forward `r` to each range in `fwd_ranges` and consume all fragments produced by `r` in these ranges.
 // Build a mutation out of these fragments.

@@ -394,7 +394,7 @@ static future<json::json_return_type> describe_ring_as_json(sharded<service::sto
     co_return json::json_return_type(stream_range_as_array(co_await ss.local().describe_ring(keyspace), token_range_endpoints_to_json));
 }
 
-void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_service>& ss, gms::gossiper& g, sharded<cdc::generation_service>& cdc_gs) {
+void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_service>& ss, gms::gossiper& g, sharded<cdc::generation_service>& cdc_gs, sharded<db::system_keyspace>& sys_ks) {
     ss::local_hostid.set(r, [](std::unique_ptr<request> req) {
         return db::system_keyspace::load_local_host_id().then([](const utils::UUID& id) {
             return make_ready_future<json::json_return_type>(id.to_sstring());
@@ -597,28 +597,37 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         });
     });
 
-    ss::force_keyspace_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
+    ss::force_keyspace_compaction.set(r, [&ctx](std::unique_ptr<request> req) -> future<json::json_return_type> {
         auto keyspace = validate_keyspace(ctx, req->param);
         auto column_families = parse_tables(keyspace, ctx, req->query_parameters, "cf");
         if (column_families.empty()) {
             column_families = map_keys(ctx.db.local().find_keyspace(keyspace).metadata().get()->cf_meta_data());
         }
-        return ctx.db.invoke_on_all([keyspace, column_families] (replica::database& db) -> future<> {
-            auto table_ids = boost::copy_range<std::vector<utils::UUID>>(column_families | boost::adaptors::transformed([&] (auto& cf_name) {
-                return db.find_uuid(keyspace, cf_name);
-            }));
-            // major compact smaller tables first, to increase chances of success if low on space.
-            std::ranges::sort(table_ids, std::less<>(), [&] (const utils::UUID& id) {
+
+        auto table_ids = boost::copy_range<std::vector<utils::UUID>>(column_families | boost::adaptors::transformed([&] (auto& cf_name) {
+            return ctx.db.local().find_uuid(keyspace, cf_name);
+        }));
+
+        std::unordered_map<utils::UUID, uint64_t> table_sizes;
+        co_await parallel_for_each(table_ids, [&] (const utils::UUID& id) -> future<> {
+            table_sizes[id] = co_await ctx.db.map_reduce0([&id] (replica::database& db) {
                 return db.find_column_family(id).get_stats().live_disk_space_used;
-            });
-            // as a table can be dropped during loop below, let's find it before issuing major compaction request.
-            for (auto& id : table_ids) {
-                co_await db.find_column_family(id).compact_all_sstables();
-            }
-            co_return;
-        }).then([]{
-                return make_ready_future<json::json_return_type>(json_void());
+            }, 0.0, std::plus<double>());
         });
+
+        // major compact smaller tables first, to increase chances of success if low on space.
+        std::ranges::sort(table_ids, std::less<>(), [&] (const utils::UUID& uuid) {
+            return table_sizes[uuid];
+        });
+
+        // run major compaction on all shards in parallel, one table at a time.
+        for (const auto& id : table_ids) {
+            co_await ctx.db.invoke_on_all([&id] (replica::database& db) {
+                return db.find_column_family(id).compact_all_sstables();
+            });
+        }
+
+        co_return json_void();
     });
 
     ss::force_keyspace_cleanup.set(r, [&ctx, &ss](std::unique_ptr<request> req) {
@@ -955,11 +964,11 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         return make_ready_future<json::json_return_type>(res);
     });
 
-    ss::reset_local_schema.set(r, [](std::unique_ptr<request> req) {
+    ss::reset_local_schema.set(r, [&sys_ks](std::unique_ptr<request> req) {
         // FIXME: We should truncate schema tables if more than one node in the cluster.
         auto& sp = service::get_storage_proxy();
         auto& fs = sp.local().features();
-        return db::schema_tables::recalculate_schema_version(sp, fs).then([] {
+        return db::schema_tables::recalculate_schema_version(sys_ks, sp, fs).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
     });

@@ -47,6 +47,15 @@
 #include "mutation_rebuilder.hh"
 
 #include <boost/range/algorithm/sort.hpp>
+#include "readers/from_mutations_v2.hh"
+#include "readers/from_mutations.hh"
+#include "readers/forwardable_v2.hh"
+#include "readers/forwardable.hh"
+#include "readers/from_fragments_v2.hh"
+#include "readers/generating_v2.hh"
+#include "readers/empty.hh"
+#include "readers/empty_v2.hh"
+#include "readers/next_partition_adaptor.hh"
 
 static schema_ptr make_schema() {
     return schema_builder("ks", "cf")
@@ -67,7 +76,7 @@ SEASTAR_TEST_CASE(test_combining_two_readers_with_the_same_row) {
         mutation m2(s, partition_key::from_single_value(*s, "key1"));
         m2.set_clustered_cell(clustering_key::make_empty(), "v", data_value(bytes("v2")), 2);
 
-        assert_that(make_combined_reader(s, permit, upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m1})), upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m2}))))
+        assert_that(make_combined_reader(s, permit, make_flat_mutation_reader_from_mutations_v2(s, permit, {m1}), make_flat_mutation_reader_from_mutations_v2(s, permit, {m2})))
             .produces(m2)
             .produces_end_of_stream();
     });
@@ -85,7 +94,7 @@ SEASTAR_TEST_CASE(test_combining_two_non_overlapping_readers) {
         mutation m2(s, partition_key::from_single_value(*s, "keyA"));
         m2.set_clustered_cell(clustering_key::make_empty(), "v", data_value(bytes("v2")), 2);
 
-        auto cr = make_combined_reader(s, permit, upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m1})), upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m2})));
+        auto cr = make_combined_reader(s, permit, make_flat_mutation_reader_from_mutations_v2(s, permit, {m1}), make_flat_mutation_reader_from_mutations_v2(s, permit, {m2}));
         assert_that(std::move(cr))
             .produces(m2)
             .produces(m1)
@@ -108,7 +117,7 @@ SEASTAR_TEST_CASE(test_combining_two_partially_overlapping_readers) {
         mutation m3(s, partition_key::from_single_value(*s, "keyC"));
         m3.set_clustered_cell(clustering_key::make_empty(), "v", data_value(bytes("v3")), 1);
 
-        assert_that(make_combined_reader(s, permit, upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m1, m2})), upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m2, m3}))))
+        assert_that(make_combined_reader(s, permit, make_flat_mutation_reader_from_mutations_v2(s, permit, {m1, m2}), make_flat_mutation_reader_from_mutations_v2(s, permit, {m2, m3})))
             .produces(m1)
             .produces(m2)
             .produces(m3)
@@ -132,7 +141,7 @@ SEASTAR_TEST_CASE(test_combining_one_reader_with_many_partitions) {
         m3.set_clustered_cell(clustering_key::make_empty(), "v", data_value(bytes("v3")), 1);
 
         std::vector<flat_mutation_reader_v2> v;
-        v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m1, m2, m3})));
+        v.push_back(make_flat_mutation_reader_from_mutations_v2(s, permit, {m1, m2, m3}));
         assert_that(make_combined_reader(s, permit, std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
             .produces(m1)
             .produces(m2)
@@ -158,8 +167,8 @@ SEASTAR_THREAD_TEST_CASE(combined_reader_galloping_within_partition_test) {
     };
 
     std::vector<flat_mutation_reader_v2> v;
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {make_partition(boost::irange(0, 5))})));
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {make_partition(boost::irange(5, 10))})));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {make_partition(boost::irange(0, 5))}));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {make_partition(boost::irange(5, 10))}));
     assert_that(make_combined_reader(s.schema(), permit, std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
         .produces(make_partition(boost::irange(0, 10)))
         .produces_end_of_stream();
@@ -182,14 +191,14 @@ SEASTAR_THREAD_TEST_CASE(combined_mutation_reader_galloping_over_multiple_partit
     const auto k = s.make_pkeys(2);
 
     std::vector<flat_mutation_reader_v2> v;
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {
         make_partition_with_clustering_rows(s, k[0], boost::irange(5, 10)),
         make_partition_with_clustering_rows(s, k[1], boost::irange(0, 5))
-    })));
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {
+    }));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {
         make_partition_with_clustering_rows(s, k[0], boost::irange(0, 5)),
         make_partition_with_clustering_rows(s, k[1], boost::irange(5, 10))
-    })));
+    }));
     assert_that(make_combined_reader(s.schema(), permit, std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
         .produces(make_partition_with_clustering_rows(s, k[0], boost::irange(0, 10)))
         .produces(make_partition_with_clustering_rows(s, k[1], boost::irange(0, 10)))
@@ -204,14 +213,14 @@ SEASTAR_THREAD_TEST_CASE(combined_reader_galloping_changing_multiple_partitions_
     const auto k = s.make_pkeys(2);
 
     std::vector<flat_mutation_reader_v2> v;
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {
         make_partition_with_clustering_rows(s, k[0], boost::irange(0, 5)),
         make_partition_with_clustering_rows(s, k[1], boost::irange(0, 5))
-    })));
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, {
+    }));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, {
         make_partition_with_clustering_rows(s, k[0], boost::irange(5, 10)),
         make_partition_with_clustering_rows(s, k[1], boost::irange(5, 10)),
-    })));
+    }));
     assert_that(make_combined_reader(s.schema(), permit, std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
         .produces(make_partition_with_clustering_rows(s, k[0], boost::irange(0, 10)))
         .produces(make_partition_with_clustering_rows(s, k[1], boost::irange(0, 10)))
@@ -328,7 +337,7 @@ SEASTAR_TEST_CASE(test_filtering) {
         auto m4 = make_mutation_with_key(s, "key4");
 
         // All pass
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [] (const dht::decorated_key& dk) { return true; }))
             .produces(m1)
             .produces(m2)
@@ -337,47 +346,47 @@ SEASTAR_TEST_CASE(test_filtering) {
             .produces_end_of_stream();
 
         // None pass
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [] (const dht::decorated_key& dk) { return false; }))
             .produces_end_of_stream();
 
         // Trim front
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                 [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m1.key()); }))
             .produces(m2)
             .produces(m3)
             .produces(m4)
             .produces_end_of_stream();
 
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
             [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m1.key()) && !dk.key().equal(*s, m2.key()); }))
             .produces(m3)
             .produces(m4)
             .produces_end_of_stream();
 
         // Trim back
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m4.key()); }))
             .produces(m1)
             .produces(m2)
             .produces(m3)
             .produces_end_of_stream();
 
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m4.key()) && !dk.key().equal(*s, m3.key()); }))
             .produces(m1)
             .produces(m2)
             .produces_end_of_stream();
 
         // Trim middle
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m3.key()); }))
             .produces(m1)
             .produces(m2)
             .produces(m4)
             .produces_end_of_stream();
 
-        assert_that(make_filtering_reader(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, semaphore.make_permit(), {m1, m2, m3, m4})),
+        assert_that(make_filtering_reader(make_flat_mutation_reader_from_mutations_v2(s, semaphore.make_permit(), {m1, m2, m3, m4}),
                  [&] (const dht::decorated_key& dk) { return !dk.key().equal(*s, m2.key()) && !dk.key().equal(*s, m3.key()); }))
             .produces(m1)
             .produces(m4)
@@ -393,7 +402,7 @@ SEASTAR_TEST_CASE(test_combining_two_readers_with_one_reader_empty) {
         mutation m1(s, partition_key::from_single_value(*s, "key1"));
         m1.set_clustered_cell(clustering_key::make_empty(), "v", data_value(bytes("v1")), 1);
 
-        assert_that(make_combined_reader(s, permit, upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m1})), make_empty_flat_reader_v2(s, permit)))
+        assert_that(make_combined_reader(s, permit, make_flat_mutation_reader_from_mutations_v2(s, permit, {m1}), make_empty_flat_reader_v2(s, permit)))
             .produces(m1)
             .produces_end_of_stream();
     });
@@ -470,7 +479,7 @@ SEASTAR_TEST_CASE(test_fast_forwarding_combining_reader) {
 
         auto make_reader = [&] (reader_permit permit, const dht::partition_range& pr) {
             return make_combined_reader(s, permit, ranges::to<std::vector<flat_mutation_reader_v2>>(mutations | boost::adaptors::transformed([&pr, s, permit] (auto& ms) {
-                return upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {ms}, pr));
+                return make_flat_mutation_reader_from_mutations_v2(s, permit, {ms}, pr);
             })));
         };
 
@@ -522,8 +531,8 @@ SEASTAR_THREAD_TEST_CASE(test_fast_forwarding_combining_reader_with_galloping) {
 
     auto pr = dht::partition_range::make(ring[0], ring[0]);
     std::vector<flat_mutation_reader_v2> v;
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, make_n_mutations(boost::irange(0, 5), 7), pr)));
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, make_n_mutations(boost::irange(5, 10), 7), pr)));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, make_n_mutations(boost::irange(0, 5), 7), pr));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, make_n_mutations(boost::irange(5, 10), 7), pr));
 
     assert_that(make_combined_reader(s.schema(), permit, std::move(v), streamed_mutation::forwarding::no, mutation_reader::forwarding::yes))
             .produces(make_partition_with_clustering_rows(s, pkeys[0], boost::irange(0, 10)))
@@ -573,7 +582,7 @@ SEASTAR_TEST_CASE(test_sm_fast_forwarding_combining_reader) {
 
         std::vector<flat_mutation_reader_v2> readers;
         for (auto& mutations : readers_mutations) {
-            readers.emplace_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, mutations, streamed_mutation::forwarding::yes)));
+            readers.emplace_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, mutations, streamed_mutation::forwarding::yes));
         }
 
         assert_that(make_combined_reader(s.schema(), permit, std::move(readers), streamed_mutation::forwarding::yes, mutation_reader::forwarding::no))
@@ -620,8 +629,8 @@ SEASTAR_THREAD_TEST_CASE(test_sm_fast_forwarding_combining_reader_with_galloping
 
     auto pr = dht::partition_range::make(ring[0], ring[0]);
     std::vector<flat_mutation_reader_v2> v;
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, make_n_mutations(boost::irange(0, 5), 3), streamed_mutation::forwarding::yes)));
-    v.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s.schema(), permit, make_n_mutations(boost::irange(5, 10), 3), streamed_mutation::forwarding::yes)));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, make_n_mutations(boost::irange(0, 5), 3), streamed_mutation::forwarding::yes));
+    v.push_back(make_flat_mutation_reader_from_mutations_v2(s.schema(), permit, make_n_mutations(boost::irange(5, 10), 3), streamed_mutation::forwarding::yes));
 
     auto reader = make_combined_reader(s.schema(), permit, std::move(v), streamed_mutation::forwarding::yes, mutation_reader::forwarding::no);
     auto assertions = assert_that(std::move(reader));
@@ -806,7 +815,7 @@ class dummy_incremental_selector : public reader_selector {
         _readers_mutations.pop_back();
         _position = _readers_mutations.empty() ? dht::ring_position::max() : _readers_mutations.back().front().decorated_key();
         _selector_position = _position;
-        return upgrade_to_v2(make_flat_mutation_reader_from_mutations(_schema, _permit, std::move(muts), _pr, _fwd));
+        return make_flat_mutation_reader_from_mutations_v2(_schema, _permit, std::move(muts), _pr, _fwd);
     }
 public:
     // readers_mutations is expected to be sorted on both levels.
@@ -1674,105 +1683,6 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_reading_empty_table) {
 // fine-grained control over which shard will fill the multishard reader's
 // buffer and how much read-ahead it launches and consequently when the
 // read-ahead terminates.
-class puppet_reader : public flat_mutation_reader::impl {
-public:
-    struct control {
-        promise<> buffer_filled;
-        bool destroyed = true;
-        bool pending = false;
-        unsigned fast_forward_to = 0;
-    };
-
-    enum class fill_buffer_action {
-        fill,
-        block
-    };
-
-private:
-    simple_schema _s;
-    control& _ctrl;
-    std::vector<fill_buffer_action> _actions;
-    std::vector<uint32_t> _pkeys;
-    unsigned _partition_index = 0;
-
-    bool maybe_push_next_partition() {
-        if (_partition_index == _pkeys.size()) {
-            _end_of_stream = true;
-            return false;
-        }
-        push_mutation_fragment(*_s.schema(), _permit, partition_start(_s.make_pkey(_pkeys.at(_partition_index++)), {}));
-        return true;
-    }
-
-    void do_fill_buffer() {
-        if (!maybe_push_next_partition()) {
-            return;
-        }
-        auto ck = uint32_t(0);
-        while (!is_buffer_full()) {
-            push_mutation_fragment(*_s.schema(), _permit, _s.make_row(_permit, _s.make_ckey(ck++), make_random_string(2 << 5)));
-        }
-
-        push_mutation_fragment(*_s.schema(), _permit, partition_end());
-    }
-
-public:
-    puppet_reader(simple_schema s, reader_permit permit, control& ctrl, std::vector<fill_buffer_action> actions, std::vector<uint32_t> pkeys)
-        : impl(s.schema(), std::move(permit))
-        , _s(std::move(s))
-        , _ctrl(ctrl)
-        , _actions(std::move(actions))
-        , _pkeys(std::move(pkeys)) {
-        std::ranges::reverse(_actions);
-        _end_of_stream = false;
-        _ctrl.destroyed = false;
-    }
-    ~puppet_reader() {
-        _ctrl.destroyed = true;
-    }
-
-    virtual future<> fill_buffer() override {
-        if (is_end_of_stream() || !is_buffer_empty()) {
-            return make_ready_future<>();
-        }
-        if (_actions.empty()) {
-            _end_of_stream = true;
-            return make_ready_future<>();
-        }
-
-        auto action = _actions.back();
-        _actions.pop_back();
-
-        switch (action) {
-        case fill_buffer_action::fill:
-            do_fill_buffer();
-            return make_ready_future<>();
-        case fill_buffer_action::block:
-            do_fill_buffer();
-            _ctrl.pending = true;
-            return _ctrl.buffer_filled.get_future().then([this] {
-                BOOST_REQUIRE(!_ctrl.destroyed);
-                _ctrl.pending = false;
-                return make_ready_future<>();
-            });
-        }
-        abort();
-    }
-    virtual future<> next_partition() override { return make_ready_future<>(); }
-    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
-        ++_ctrl.fast_forward_to;
-        clear_buffer();
-        _end_of_stream = true;
-        return make_ready_future<>();
-    }
-    virtual future<> fast_forward_to(position_range) override {
-        return make_exception_future<>(make_backtraced_exception_ptr<std::bad_function_call>());
-    }
-    virtual future<> close() noexcept override {
-        return make_ready_future<>();
-    };
-};
-
 class puppet_reader_v2 : public flat_mutation_reader_v2::impl {
 public:
     struct control {
@@ -2463,7 +2373,7 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
 
     // Simultaneous read and write
     {
-        auto read_all = [] (flat_mutation_reader& reader, std::vector<mutation>& muts) {
+        auto read_all = [] (flat_mutation_reader_v2& reader, std::vector<mutation>& muts) {
             return async([&reader, &muts] {
                 auto close_reader = deferred_close(reader);
                 while (auto mut_opt = read_mutation_from_flat_mutation_reader(reader).get0()) {
@@ -2472,9 +2382,9 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
             });
         };
 
-        auto write_all = [&semaphore] (queue_reader_handle& handle, const std::vector<mutation>& muts) {
+        auto write_all = [&semaphore] (queue_reader_handle_v2& handle, const std::vector<mutation>& muts) {
             return async([&] {
-                auto reader = make_flat_mutation_reader_from_mutations(muts.front().schema(), semaphore.make_permit(), muts);
+                auto reader = make_flat_mutation_reader_from_mutations_v2(muts.front().schema(), semaphore.make_permit(), muts);
                 auto close_reader = deferred_close(reader);
                 while (auto mf_opt = reader().get0()) {
                     handle.push(std::move(*mf_opt)).get();
@@ -2486,7 +2396,7 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
         auto actual_muts = std::vector<mutation>{};
         actual_muts.reserve(20);
 
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
@@ -2499,13 +2409,13 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
 
     // abort() -- check that consumer is aborted
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
         auto fill_buffer_fut = reader.fill_buffer();
 
-        auto expected_reader = make_flat_mutation_reader_from_mutations(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
+        auto expected_reader = make_flat_mutation_reader_from_mutations_v2(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
         auto close_expected_reader = deferred_close(expected_reader);
 
         handle.push(std::move(*expected_reader().get0())).get();
@@ -2515,19 +2425,19 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
         handle.abort(std::make_exception_ptr<std::runtime_error>(std::runtime_error("error")));
 
         BOOST_REQUIRE_THROW(fill_buffer_fut.get(), std::runtime_error);
-        BOOST_REQUIRE_THROW(handle.push(mutation_fragment(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
+        BOOST_REQUIRE_THROW(handle.push(mutation_fragment_v2(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
         BOOST_REQUIRE(!reader.is_end_of_stream());
     }
 
     // abort() -- check that producer is aborted
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
         reader.set_max_buffer_size(1);
 
-        auto expected_reader = make_flat_mutation_reader_from_mutations(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
+        auto expected_reader = make_flat_mutation_reader_from_mutations_v2(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
         auto close_expected_reader = deferred_close(expected_reader);
 
         auto push_fut = make_ready_future<>();
@@ -2546,7 +2456,7 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
 
     // Detached handle
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto fill_buffer_fut = reader.fill_buffer();
@@ -2556,20 +2466,20 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
             throwaway_reader.close().get();
         }
 
-        BOOST_REQUIRE_THROW(handle.push(mutation_fragment(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
+        BOOST_REQUIRE_THROW(handle.push(mutation_fragment_v2(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
         BOOST_REQUIRE_THROW(handle.push_end_of_stream(), std::runtime_error);
         BOOST_REQUIRE_NO_THROW(fill_buffer_fut.get());
     }
 
     // Abandoned handle aborts, move-assignment
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
         auto fill_buffer_fut = reader.fill_buffer();
 
-        auto expected_reader = make_flat_mutation_reader_from_mutations(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
+        auto expected_reader = make_flat_mutation_reader_from_mutations_v2(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
         auto close_expected_reader = deferred_close(expected_reader);
 
         handle.push(std::move(*expected_reader().get0())).get();
@@ -2577,7 +2487,7 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
         BOOST_REQUIRE(!fill_buffer_fut.available());
 
         {
-            auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+            auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
             auto& throwaway_reader = std::get<0>(p);
             auto& throwaway_handle = std::get<1>(p);
             auto close_throwaway_reader = deferred_close(throwaway_reader);
@@ -2586,18 +2496,18 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
         }
 
         BOOST_REQUIRE_THROW(fill_buffer_fut.get(), std::runtime_error);
-        BOOST_REQUIRE_THROW(handle.push(mutation_fragment(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
+        BOOST_REQUIRE_THROW(handle.push(mutation_fragment_v2(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
     }
 
     // Abandoned handle aborts, destructor
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
         auto fill_buffer_fut = reader.fill_buffer();
 
-        auto expected_reader = make_flat_mutation_reader_from_mutations(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
+        auto expected_reader = make_flat_mutation_reader_from_mutations_v2(expected_muts.front().schema(), semaphore.make_permit(), expected_muts);
         auto close_expected_reader = deferred_close(expected_reader);
 
         handle.push(std::move(*expected_reader().get0())).get();
@@ -2606,28 +2516,28 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
 
         {
             // Destroy handle
-            queue_reader_handle throwaway_handle(std::move(handle));
+            queue_reader_handle_v2 throwaway_handle(std::move(handle));
         }
 
         BOOST_REQUIRE_THROW(fill_buffer_fut.get(), std::runtime_error);
-        BOOST_REQUIRE_THROW(handle.push(mutation_fragment(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
+        BOOST_REQUIRE_THROW(handle.push(mutation_fragment_v2(*gen.schema(), semaphore.make_permit(), partition_end{})).get(), std::runtime_error);
     }
 
     // Life-cycle, relies on ASAN for error reporting
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
         {
-            auto throwaway_p = make_queue_reader(gen.schema(), semaphore.make_permit());
+            auto throwaway_p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
             auto& throwaway_reader = std::get<0>(throwaway_p);
             auto& throwaway_handle = std::get<1>(throwaway_p);
             auto close_throwaway_reader = deferred_close(throwaway_reader);
             // Overwrite handle
             handle = std::move(throwaway_handle);
 
-            auto another_throwaway_p = make_queue_reader(gen.schema(), semaphore.make_permit());
+            auto another_throwaway_p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
             auto& another_throwaway_reader = std::get<0>(another_throwaway_p);
             auto& another_throwaway_handle = std::get<1>(another_throwaway_p);
             auto close_another_throwaway_reader = deferred_close(another_throwaway_reader);
@@ -2636,13 +2546,13 @@ SEASTAR_THREAD_TEST_CASE(test_queue_reader) {
             another_throwaway_handle = std::move(throwaway_handle);
 
             // Overwrite with moved-from handle (move constructor)
-            queue_reader_handle yet_another_throwaway_handle(std::move(throwaway_handle));
+            queue_reader_handle_v2 yet_another_throwaway_handle(std::move(throwaway_handle));
         }
     }
 
     // push_end_of_stream() detaches handle from reader, relies on ASAN for error reporting
     {
-        auto p = make_queue_reader(gen.schema(), semaphore.make_permit());
+        auto p = make_queue_reader_v2(gen.schema(), semaphore.make_permit());
         auto& reader = std::get<0>(p);
         auto& handle = std::get<1>(p);
         auto close_reader = deferred_close(reader);
@@ -3746,7 +3656,7 @@ static reader_bounds make_reader_bounds(
     }
 
     return reader_bounds {
-        .r = mb.m ? upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {std::move(*mb.m)}, *slice, fwd))
+        .r = mb.m ? make_flat_mutation_reader_from_mutations_v2(s, permit, {std::move(*mb.m)}, *slice, fwd)
                   : make_empty_flat_reader_v2(s, permit),
         .lower = std::move(mb.lower),
         .upper = std::move(mb.upper)
@@ -3855,9 +3765,9 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_in_memory) {
     auto make_authority = [s = g._s, &semaphore] (std::optional<mutation> mut, streamed_mutation::forwarding fwd) {
         auto permit = semaphore.make_permit();
         if (mut) {
-            return make_flat_mutation_reader_from_mutations(s, permit, {std::move(*mut)}, fwd);
+            return make_flat_mutation_reader_from_mutations_v2(s, permit, {std::move(*mut)}, fwd);
         }
-        return make_empty_flat_reader(s, permit);
+        return make_empty_flat_reader_v2(s, permit);
     };
 
     auto make_tested = [s = g._s, &semaphore] (std::vector<mutation_bounds> ms, streamed_mutation::forwarding fwd) {
@@ -3867,7 +3777,7 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_in_memory) {
                     return make_reader_bounds(s, permit, std::move(mb), fwd);
                 }));
         auto q = std::make_unique<simple_position_reader_queue>(*s, std::move(rs));
-        return downgrade_to_v1(make_clustering_combined_reader(s, permit, fwd, std::move(q)));
+        return make_clustering_combined_reader(s, permit, fwd, std::move(q));
     };
 
     auto seed = tests::random::get_int<uint32_t>();
@@ -3921,7 +3831,7 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
     }
 
     auto make_authority = [&env, &query_schema, &query_slice] (mutation mut, streamed_mutation::forwarding fwd) {
-        return make_flat_mutation_reader_from_mutations(query_schema, env.make_reader_permit(), {std::move(mut)}, query_slice, fwd);
+        return make_flat_mutation_reader_from_mutations_v2(query_schema, env.make_reader_permit(), {std::move(mut)}, query_slice, fwd);
     };
 
     auto pr = dht::partition_range::make_singular(dht::ring_position(dht::decorate_key(*query_schema, g._pk)));
@@ -3936,7 +3846,7 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
             },
             [included_gens] (const sstable& sst) { return included_gens.contains(sst.generation()); },
             pk, query_schema, permit, fwd, reversed);
-        return downgrade_to_v1(make_clustering_combined_reader(query_schema, permit, fwd, std::move(q)));
+        return make_clustering_combined_reader(query_schema, permit, fwd, std::move(q));
     };
 
     auto seed = tests::random::get_int<uint32_t>();
@@ -4222,7 +4132,7 @@ SEASTAR_THREAD_TEST_CASE(clustering_combined_reader_mutation_source_test) {
 
             std::vector<flat_mutation_reader_v2> readers;
             for (auto& m: bad) {
-                readers.push_back(upgrade_to_v2(make_flat_mutation_reader_from_mutations(s, permit, {m}, range, slice, fwd_sm)));
+                readers.push_back(make_flat_mutation_reader_from_mutations_v2(s, permit, {m}, range, slice, fwd_sm));
             }
             readers.push_back(upgrade_to_v2(make_flat_mutation_reader<multi_partition_reader>(s, permit, std::move(good_readers), range)));
 
@@ -4254,4 +4164,58 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_combining_of_empty_readers) {
     if (mf) {
         BOOST_FAIL(format("reader combined of empty readers returned fragment {}", mutation_fragment::printer(*s, *mf)));
     }
+}
+
+template <typename Reader>
+class closing_holder {
+    Reader _rd;
+public:
+    closing_holder(Reader&& rd) : _rd(std::move(rd)) { }
+    closing_holder(closing_holder&&) = default;
+    ~closing_holder() { _rd.close().get(); }
+    auto operator()() { return _rd(); }
+};
+
+SEASTAR_THREAD_TEST_CASE(test_generating_reader_v1) {
+    auto populator_v1 = [] (schema_ptr s, const std::vector<mutation>& muts) {
+        return mutation_source([muts] (
+                schema_ptr schema,
+                reader_permit permit,
+                const dht::partition_range& range,
+                const query::partition_slice& slice,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr trace_state,
+                streamed_mutation::forwarding fwd_sm,
+                mutation_reader::forwarding fwd_mr) {
+            auto underlying = make_flat_mutation_reader_from_mutations(schema, permit, squash_mutations(muts), range, slice);
+            auto rd = make_next_partition_adaptor(make_generating_reader_v1(schema, permit, closing_holder(std::move(underlying))));
+            if (fwd_sm == streamed_mutation::forwarding::yes) {
+                return make_forwardable(std::move(rd));
+            }
+            return rd;
+        });
+    };
+    run_mutation_source_tests(populator_v1, false);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_generating_reader_v2) {
+    auto populator_v2 = [] (schema_ptr s, const std::vector<mutation>& muts) {
+        return mutation_source([muts] (
+                schema_ptr schema,
+                reader_permit permit,
+                const dht::partition_range& range,
+                const query::partition_slice& slice,
+                const io_priority_class& pc,
+                tracing::trace_state_ptr trace_state,
+                streamed_mutation::forwarding fwd_sm,
+                mutation_reader::forwarding fwd_mr) {
+            auto underlying = make_flat_mutation_reader_from_mutations_v2(schema, permit, squash_mutations(muts), range, slice);
+            auto rd = make_next_partition_adaptor(make_generating_reader_v2(schema, permit, closing_holder(std::move(underlying))));
+            if (fwd_sm == streamed_mutation::forwarding::yes) {
+                return make_forwardable(std::move(rd));
+            }
+            return rd;
+        });
+    };
+    run_mutation_source_tests(populator_v2, false);
 }

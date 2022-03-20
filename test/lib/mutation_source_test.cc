@@ -7,6 +7,7 @@
  */
 
 #include <set>
+#include <boost/range/adaptor/map.hpp>
 #include <boost/test/unit_test.hpp>
 #include "partition_slice_builder.hh"
 #include "schema_builder.hh"
@@ -14,7 +15,7 @@
 #include "counters.hh"
 #include "mutation_rebuilder.hh"
 #include "test/lib/simple_schema.hh"
-#include "flat_mutation_reader.hh"
+#include "readers/flat_mutation_reader.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "mutation_query.hh"
 #include "mutation_rebuilder.hh"
@@ -2090,9 +2091,9 @@ private:
     }
 public:
     explicit impl(generate_counters counters, local_shard_only lso = local_shard_only::yes,
-            generate_uncompactable uc = generate_uncompactable::no) : _generate_counters(counters), _local_shard_only(lso), _uncompactable(uc) {
+            generate_uncompactable uc = generate_uncompactable::no, std::optional<uint32_t> seed_opt = std::nullopt) : _generate_counters(counters), _local_shard_only(lso), _uncompactable(uc) {
         // In case of errors, reproduce using the --random-seed command line option with the test_runner seed.
-        auto seed = tests::random::get_int<uint32_t>();
+        auto seed = seed_opt.value_or(tests::random::get_int<uint32_t>());
         std::cout << "random_mutation_generator seed: " << seed << "\n";
         _gen = std::mt19937(seed);
 
@@ -2353,8 +2354,8 @@ public:
 
 random_mutation_generator::~random_mutation_generator() {}
 
-random_mutation_generator::random_mutation_generator(generate_counters counters, local_shard_only lso, generate_uncompactable uc)
-    : _impl(std::make_unique<random_mutation_generator::impl>(counters, lso, uc))
+random_mutation_generator::random_mutation_generator(generate_counters counters, local_shard_only lso, generate_uncompactable uc, std::optional<uint32_t> seed_opt)
+    : _impl(std::make_unique<random_mutation_generator::impl>(counters, lso, uc, seed_opt))
 { }
 
 mutation random_mutation_generator::operator()() {
@@ -2710,6 +2711,35 @@ void compare_readers(const schema& s, flat_mutation_reader authority, flat_mutat
     }
 }
 
+static bool compare_readers(const schema& s, flat_mutation_reader_v2& authority, flat_reader_assertions_v2& tested) {
+    bool empty = true;
+    while (auto expected = authority().get()) {
+        tested.produces(s, *expected);
+        empty = false;
+    }
+    tested.produces_end_of_stream();
+    return !empty;
+}
+
+void compare_readers(const schema& s, flat_mutation_reader_v2 authority, flat_mutation_reader_v2 tested) {
+    auto close_authority = deferred_close(authority);
+    auto assertions = assert_that(std::move(tested));
+    compare_readers(s, authority, assertions);
+}
+
+// Assumes that the readers return fragments from (at most) a single (and the same) partition.
+void compare_readers(const schema& s, flat_mutation_reader_v2 authority, flat_mutation_reader_v2 tested, const std::vector<position_range>& fwd_ranges) {
+    auto close_authority = deferred_close(authority);
+    auto assertions = assert_that(std::move(tested));
+    if (compare_readers(s, authority, assertions)) {
+        for (auto& r: fwd_ranges) {
+            authority.fast_forward_to(r).get();
+            assertions.fast_forward_to(r);
+            compare_readers(s, authority, assertions);
+        }
+    }
+}
+
 mutation forwardable_reader_to_mutation(flat_mutation_reader r, const std::vector<position_range>& fwd_ranges) {
     auto close_reader = deferred_close(r);
 
@@ -2767,4 +2797,19 @@ mutation forwardable_reader_to_mutation(flat_mutation_reader r, const std::vecto
     BOOST_REQUIRE(m);
 
     return std::move(*m);
+}
+
+std::vector<mutation> squash_mutations(std::vector<mutation> mutations) {
+    if (mutations.empty()) {
+        return {};
+    }
+    std::map<dht::decorated_key, mutation, dht::ring_position_less_comparator> merged_muts{
+            dht::ring_position_less_comparator{*mutations.front().schema()}};
+    for (const auto& mut : mutations) {
+        auto [it, inserted] = merged_muts.try_emplace(mut.decorated_key(), mut);
+        if (!inserted) {
+            it->second.apply(mut);
+        }
+    }
+    return boost::copy_range<std::vector<mutation>>(merged_muts | boost::adaptors::map_values);
 }

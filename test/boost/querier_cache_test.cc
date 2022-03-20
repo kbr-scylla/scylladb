@@ -19,6 +19,8 @@
 #include <seastar/util/closeable.hh>
 
 #include <boost/range/algorithm/sort.hpp>
+#include "readers/from_mutations.hh"
+#include "readers/empty_v2.hh"
 
 using namespace std::chrono_literals;
 
@@ -45,7 +47,7 @@ public:
         _ck = cr.key();
         return stop_iteration::no;
     }
-    stop_iteration consume(range_tombstone&& rt) {
+    stop_iteration consume(range_tombstone_change&& rtc) {
         return stop_iteration::no;
     }
     stop_iteration consume_end_of_partition() {

@@ -43,6 +43,10 @@
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
 #include "utils/error_injection.hh"
+#include "readers/reversing.hh"
+#include "readers/from_mutations.hh"
+#include "readers/empty_v2.hh"
+#include "readers/multi_range.hh"
 
 namespace replica {
 
@@ -178,12 +182,16 @@ table::make_reader_v2(schema_ptr s,
     // https://github.com/scylladb/scylla/issues/185
 
     for (auto&& mt : *_memtables) {
-        readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
+        if (auto reader_opt = mt->make_flat_reader_opt(s, permit, range, slice, pc, trace_state, fwd, fwd_mr)) {
+            readers.emplace_back(std::move(*reader_opt));
+        }
     }
 
     const auto bypass_cache = slice.options.contains(query::partition_slice::option::bypass_cache);
     if (cache_enabled() && !bypass_cache && !(reversed && _config.reversed_reads_auto_bypass_cache())) {
-        readers.emplace_back(upgrade_to_v2(_cache.make_reader(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr)));
+        if (auto reader_opt = _cache.make_reader_opt(s, permit, range, slice, pc, std::move(trace_state), fwd, fwd_mr)) {
+            readers.emplace_back(upgrade_to_v2(std::move(*reader_opt)));
+        }
     } else {
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     }
@@ -238,7 +246,9 @@ table::make_streaming_reader(schema_ptr s, reader_permit permit,
         std::vector<flat_mutation_reader_v2> readers;
         readers.reserve(_memtables->size() + 1);
         for (auto&& mt : *_memtables) {
-            readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
+            if (auto reader_opt = mt->make_flat_reader_opt(s, permit, range, slice, pc, trace_state, fwd, fwd_mr)) {
+                readers.emplace_back(std::move(*reader_opt));
+            }
         }
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
         return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
@@ -256,7 +266,9 @@ flat_mutation_reader_v2 table::make_streaming_reader(schema_ptr schema, reader_p
     std::vector<flat_mutation_reader_v2> readers;
     readers.reserve(_memtables->size() + 1);
     for (auto&& mt : *_memtables) {
-        readers.emplace_back(mt->make_flat_reader(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr));
+        if (auto reader_opt = mt->make_flat_reader_opt(schema, permit, range, slice, pc, trace_state, fwd, fwd_mr)) {
+            readers.emplace_back(std::move(*reader_opt));
+        }
     }
     readers.emplace_back(make_sstable_reader(schema, permit, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     return make_combined_reader(std::move(schema), std::move(permit), std::move(readers), fwd, fwd_mr);
@@ -980,46 +992,6 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
 }
 
 future<>
-table::compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata) {
-    if (!descriptor.sstables.size()) {
-        // if there is nothing to compact, just return.
-        co_return;
-    }
-
-    descriptor.creator = [this] (shard_id dummy) {
-        auto sst = make_sstable();
-        return sst;
-    };
-    descriptor.replacer = [this, release_exhausted = descriptor.release_exhausted] (sstables::compaction_completion_desc desc) {
-        _compaction_strategy.notify_completion(desc.old_sstables, desc.new_sstables);
-        _compaction_manager.propagate_replacement(this, desc.old_sstables, desc.new_sstables);
-        this->on_compaction_completion(desc);
-        if (release_exhausted) {
-            release_exhausted(desc.old_sstables);
-        }
-    };
-    auto compaction_type = descriptor.options.type();
-    auto start_size = boost::accumulate(descriptor.sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
-
-    sstables::compaction_result res = co_await sstables::compact_sstables(std::move(descriptor), cdata, as_table_state());
-    if (compaction_type != sstables::compaction_type::Compaction) {
-        co_return;
-    }
-    // skip update if running without a query context, for example, when running a test case.
-    if (!db::qctx) {
-        co_return;
-    }
-    auto ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(res.ended_at.time_since_epoch()).count();
-
-    // FIXME: add support to merged_rows. merged_rows is a histogram that
-    // shows how many sstables each row is merged from. This information
-    // cannot be accessed until we make combined_reader more generic,
-    // for example, by adding a reducer method.
-    co_return co_await db::system_keyspace::update_compaction_history(cdata.compaction_uuid, _schema->ks_name(), _schema->cf_name(), ended_at,
-        start_size, res.end_size, std::unordered_map<int32_t, int64_t>{});
-}
-
-future<>
 table::compact_all_sstables() {
     co_await flush();
     co_await _compaction_manager.perform_major_compaction(this);
@@ -1070,83 +1042,6 @@ future<bool> table::perform_offstrategy_compaction() {
     }
     co_await _compaction_manager.perform_offstrategy(this);
     co_return true;
-}
-
-future<> table::run_offstrategy_compaction(sstables::compaction_data& info) {
-    // This procedure will reshape sstables in maintenance set until it's ready for
-    // integration into main set.
-    // It may require N reshape rounds before the set satisfies the strategy invariant.
-    // This procedure also only updates maintenance set at the end, on success.
-    // Otherwise, some overlapping could be introduced in the set after each reshape
-    // round, progressively degrading read amplification until integration happens.
-    // The drawback of this approach is the 2x space requirement as the old sstables
-    // will only be deleted at the end. The impact of this space requirement is reduced
-    // by the fact that off-strategy is serialized across all tables, meaning that the
-    // actual requirement is the size of the largest table's maintenance set.
-
-    auto sem_unit = co_await seastar::get_units(_off_strategy_sem, 1);
-
-    tlogger.info("Starting off-strategy compaction for {}.{}, {} candidates were found",
-        _schema->ks_name(), _schema->cf_name(), _maintenance_sstables->all()->size());
-
-    const auto old_sstables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_maintenance_sstables->all());
-    std::vector<sstables::shared_sstable> reshape_candidates = old_sstables;
-    std::vector<sstables::shared_sstable> sstables_to_remove;
-    std::unordered_set<sstables::shared_sstable> new_unused_sstables;
-
-    auto cleanup_new_unused_sstables_on_failure = defer([&new_unused_sstables] {
-        for (auto& sst : new_unused_sstables) {
-            sst->mark_for_deletion();
-        }
-    });
-
-    for (;;) {
-        auto& iop = service::get_local_streaming_priority(); // run reshape in maintenance mode
-        auto desc = _compaction_strategy.get_reshaping_job(reshape_candidates, _schema, iop, sstables::reshape_mode::strict);
-        if (desc.sstables.empty()) {
-            // at this moment reshape_candidates contains a set of sstables ready for integration into main set
-            co_await update_sstable_lists_on_off_strategy_completion(old_sstables, reshape_candidates);
-            break;
-        }
-
-        desc.creator = [this, &new_unused_sstables] (shard_id dummy) {
-            auto sst = make_sstable();
-            new_unused_sstables.insert(sst);
-            return sst;
-        };
-        auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.sstables);
-
-        auto ret = co_await sstables::compact_sstables(std::move(desc), info, as_table_state());
-
-        // update list of reshape candidates without input but with output added to it
-        auto it = boost::remove_if(reshape_candidates, [&] (auto& s) { return input.contains(s); });
-        reshape_candidates.erase(it, reshape_candidates.end());
-        std::move(ret.new_sstables.begin(), ret.new_sstables.end(), std::back_inserter(reshape_candidates));
-
-        // If compaction strategy is unable to reshape input data in a single round, it may happen that a SSTable A
-        // created in round 1 will be compacted in a next round producing SSTable B. As SSTable A is no longer needed,
-        // it can be removed immediately. Let's remove all such SSTables immediately to reduce off-strategy space requirement.
-        // Input SSTables from maintenance set can only be removed later, as SSTable sets are only updated on completion.
-        auto can_remove_now = [&] (const sstables::shared_sstable& s) { return new_unused_sstables.contains(s); };
-        for (auto&& sst : input) {
-            if (can_remove_now(sst)) {
-                co_await sst->unlink();
-                new_unused_sstables.erase(std::move(sst));
-            } else {
-                sstables_to_remove.push_back(std::move(sst));
-            }
-        }
-    }
-
-    cleanup_new_unused_sstables_on_failure.cancel();
-    // By marking input sstables for deletion instead, the ones which require view building will stay in the staging
-    // directory until they're moved to the main dir when the time comes. Also, that allows view building to resume
-    // on restart if there's a crash midway.
-    for (auto& sst : sstables_to_remove) {
-        sst->mark_for_deletion();
-    }
-
-    tlogger.info("Done with off-strategy compaction for {}.{}", _schema->ks_name(), _schema->cf_name());
 }
 
 void table::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
@@ -1219,6 +1114,10 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
 const sstables::sstable_set& table::get_sstable_set() const {
     // main sstables is enough for the outside world. sstables in other set like maintenance is not needed even for expiration purposes in compaction
     return *_main_sstables;
+}
+
+const sstables::sstable_set& table::maintenance_sstable_set() const {
+    return *_maintenance_sstables;
 }
 
 lw_shared_ptr<const sstable_list> table::get_sstables() const {
@@ -2319,7 +2218,9 @@ table::make_reader_excluding_sstables(schema_ptr s,
     readers.reserve(_memtables->size() + 1);
 
     for (auto&& mt : *_memtables) {
-        readers.emplace_back(mt->make_flat_reader(s, permit, range, slice, pc, trace_state, fwd, fwd_mr));
+        if (auto reader_opt = mt->make_flat_reader_opt(s, permit, range, slice, pc, trace_state, fwd, fwd_mr)) {
+            readers.emplace_back(std::move(*reader_opt));
+        }
     }
 
     auto excluded_ssts = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(excluded);
@@ -2506,6 +2407,17 @@ public:
     }
     api::timestamp_type min_memtable_timestamp() const override {
         return _t.min_memtable_timestamp();
+    }
+    future<> update_compaction_history(utils::UUID compaction_id, sstring ks_name, sstring cf_name, std::chrono::milliseconds ended_at, int64_t bytes_in, int64_t bytes_out) override {
+        // FIXME: add support to merged_rows. merged_rows is a histogram that
+        // shows how many sstables each row is merged from. This information
+        // cannot be accessed until we make combined_reader more generic,
+        // for example, by adding a reducer method.
+        if (!db::qctx) {
+            return make_ready_future<>();
+        }
+        return db::system_keyspace::update_compaction_history(compaction_id, ks_name, cf_name, ended_at.count(),
+                                                              bytes_in, bytes_out, std::unordered_map<int32_t, int64_t>{});
     }
 };
 

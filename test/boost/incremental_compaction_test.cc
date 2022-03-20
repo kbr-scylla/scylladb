@@ -78,6 +78,9 @@ public:
     api::timestamp_type min_memtable_timestamp() const override {
         return api::max_timestamp;
     }
+    future<> update_compaction_history(utils::UUID compaction_id, sstring ks_name, sstring cf_name, std::chrono::milliseconds ended_at, int64_t bytes_in, int64_t bytes_out)  override {
+        return make_ready_future<>();
+    }
 };
 
 static std::unique_ptr<table_state> make_table_state_for_test(replica::column_family& t) {
