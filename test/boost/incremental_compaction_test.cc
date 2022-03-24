@@ -433,6 +433,8 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
 }
 
 SEASTAR_TEST_CASE(ics_reshape_test) {
+    static constexpr unsigned disjoint_sstable_count = 256;
+
     return test_env::do_with_async([] (test_env& env) {
         auto builder = schema_builder("tests", "ics_reshape_test")
                 .with_column("id", utf8_type, column_kind::partition_key)
@@ -447,7 +449,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
         builder.set_compaction_strategy_options(std::move(opts));
         auto s = builder.build();
 
-        auto tokens = token_generation_for_shard(1, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+        auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
 
         auto make_row = [&](unsigned token_idx) {
             auto key_str = tokens[token_idx].first;
@@ -480,6 +482,32 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
             auto ret = cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict);
             BOOST_REQUIRE(ret.sstables.size() == s->max_compaction_threshold());
             BOOST_REQUIRE(ret.max_sstable_bytes == target_sstable_size_in_mb*1024*1024);
+        }
+
+        {
+            // create set of 256 disjoint ssts and expect that stcs reshape allows them all to be compacted at once
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(i)});
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == disjoint_sstable_count);
+        }
+
+        {
+            // create set of 256 overlapping ssts and expect that stcs reshape allows only 32 to be compacted at once
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(0)});
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
     });
 }

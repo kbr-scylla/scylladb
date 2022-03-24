@@ -315,6 +315,19 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         offstrategy_threshold = max_sstables;
     }
 
+    if (input.size() >= offstrategy_threshold && mode == reshape_mode::strict) {
+        std::sort(input.begin(), input.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
+            return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
+        });
+        // All sstables can be reshaped at once if the amount of overlapping will not cause memory usage to be high,
+        // which is possible because partitioned set is able to incrementally open sstables during compaction
+        if (sstable_set_overlapping_count(schema, input) <= max_sstables) {
+            compaction_descriptor desc(std::move(input), iop, 0/* level */, _fragment_size);
+            desc.options = compaction_type_options::make_reshape();
+            return desc;
+        }
+    }
+
     for (auto& bucket : get_buckets(sstables_to_runs(std::move(input)))) {
         if (bucket.size() >= offstrategy_threshold) {
             // preserve token contiguity by prioritizing runs with the lowest first keys.
