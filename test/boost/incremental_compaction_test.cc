@@ -30,8 +30,10 @@
 #include "dht/i_partitioner.hh"
 #include "dht/murmur3_partitioner.hh"
 #include "db/large_data_handler.hh"
+#include "db/config.hh"
 
 #include "test/lib/sstable_utils.hh"
+#include "test/lib/test_services.hh"
 
 using namespace sstables;
 
@@ -427,6 +429,58 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             sstables::test(sst).set_data_file_write_time(db_clock::now());
             auto descriptor = cs.get_sstables_for_compaction(*table_s, *control, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
+        }
+    });
+}
+
+SEASTAR_TEST_CASE(ics_reshape_test) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto builder = schema_builder("tests", "ics_reshape_test")
+                .with_column("id", utf8_type, column_kind::partition_key)
+                .with_column("cl", ::timestamp_type, column_kind::clustering_key)
+                .with_column("value", int32_type);
+        builder.set_compaction_strategy(sstables::compaction_strategy_type::incremental);
+        constexpr unsigned target_sstable_size_in_mb = 1000;
+        std::map <sstring, sstring> opts = {
+                {"sstable_size_in_mb", to_sstring(target_sstable_size_in_mb)},
+        };
+        auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, opts);
+        builder.set_compaction_strategy_options(std::move(opts));
+        auto s = builder.build();
+
+        auto tokens = token_generation_for_shard(1, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+
+        auto make_row = [&](unsigned token_idx) {
+            auto key_str = tokens[token_idx].first;
+            auto key = partition_key::from_exploded(*s, {to_bytes(key_str)});
+
+            mutation m(s, key);
+            auto value = 1;
+            auto next_ts = 1;
+            auto c_key = clustering_key::from_exploded(*s, {::timestamp_type->decompose(next_ts)});
+            m.set_clustered_cell(c_key, bytes("value"), data_value(int32_t(value)), next_ts);
+            return m;
+        };
+
+        auto tmp = tmpdir();
+
+        auto sst_gen = [&env, s, &tmp, gen = make_lw_shared<unsigned>(1)]() {
+            return env.make_sstable(s, tmp.path().string(), (*gen)++, sstables::sstable::version_types::md, big);
+        };
+
+        {
+            auto sstable_count = s->max_compaction_threshold() * 2;
+
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(sstable_count);
+            for (unsigned i = 0; i < sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(0)});
+                sstables.push_back(std::move(sst));
+            }
+
+            auto ret = cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict);
+            BOOST_REQUIRE(ret.sstables.size() == s->max_compaction_threshold());
+            BOOST_REQUIRE(ret.max_sstable_bytes == target_sstable_size_in_mb*1024*1024);
         }
     });
 }
