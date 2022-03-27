@@ -72,7 +72,9 @@ inline compaction_descriptor
 in_memory_compaction_strategy::get_sstables_for_compaction(table_state& cfs, strategy_control& control, std::vector<sstables::shared_sstable> candidates) {
     // compact everything into one sstable
     if (candidates.size() > 1) {
-        return sstables::compaction_descriptor(std::move(candidates), cfs.get_sstable_set(), service::get_local_compaction_priority());
+        auto cd = sstables::compaction_descriptor(std::move(candidates), service::get_local_compaction_priority());
+        cd.enable_garbage_collection(cfs.get_sstable_set());
+        return cd;
     }
     return sstables::compaction_descriptor();
 }

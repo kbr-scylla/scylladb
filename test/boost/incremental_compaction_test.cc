@@ -126,7 +126,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
         auto compact = [&, s] (std::vector<shared_sstable> all, auto replacer) -> std::vector<shared_sstable> {
-            auto desc = sstables::compaction_descriptor(std::move(all), cf->get_sstable_set(), service::get_local_compaction_priority(), 1, 0);
+            auto desc = sstables::compaction_descriptor(std::move(all), service::get_local_compaction_priority(), 1, 0);
+            desc.enable_garbage_collection(cf->get_sstable_set());
             return compact_sstables(std::move(desc), *cf, sst_gen, replacer).get0().new_sstables;
         };
         auto make_insert = [&] (auto p) {
@@ -389,7 +390,9 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
         run.insert(sst);
         BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
-        auto info = compact_sstables(sstables::compaction_descriptor({ sst }, cf->get_sstable_set(), default_priority_class()), *cf, creator).get0();
+        auto cd = sstables::compaction_descriptor({ sst }, default_priority_class());
+        cd.enable_garbage_collection(cf->get_sstable_set());
+        auto info = compact_sstables(std::move(cd), *cf, creator).get0();
         auto uncompacted_size = sst->data_size();
         BOOST_REQUIRE(info.new_sstables.size() == 1);
         BOOST_REQUIRE(info.new_sstables.front()->estimate_droppable_tombstone_ratio(gc_before) == 0.0f);

@@ -22,11 +22,10 @@ submodules=(
     tools/python3
 )
 
-REMOTE=$(git rev-parse --abbrev-ref --symbolic-full-name  @{upstream})
-BRANCH=${REMOTE##*/}
-
-for submodule in "${@:-${submodules[@]}}"; do
-    GIT_DIR="$submodule/.git" git pull --ff-only origin ${BRANCH}
+for ent in "${@:-${submodules[@]}}"; do
+    submodule=${ent%%:*}
+    [ ${submodule} == ${ent} ] && branch="master" || branch=${ent#*:}
+    GIT_DIR="$submodule/.git" git pull --ff-only origin ${branch}
     SUMMARY=$(git submodule summary $submodule)
     if grep '^ *<' <<< "$SUMMARY"; then
         echo "Non fast-forward changes detected! Fire three red flares from your flare pistol."
