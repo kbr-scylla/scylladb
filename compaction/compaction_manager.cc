@@ -1054,7 +1054,7 @@ protected:
     }
 
 private:
-    future<> rewrite_sstable(const sstables::shared_sstable& sst) {
+    future<> rewrite_sstable(sstables::shared_sstable sst) {
         co_await coroutine::switch_to(_cm._compaction_controller.sg());
 
         for (;;) {
@@ -1063,7 +1063,7 @@ private:
             auto sstable_level = sst->get_sstable_level();
             auto run_identifier = sst->run_identifier();
             // FIXME: this compaction should run with maintenance priority.
-            auto descriptor = sstables::compaction_descriptor({ sst }, service::get_local_compaction_priority(),
+            auto descriptor = sstables::compaction_descriptor({ std::move(sst) }, service::get_local_compaction_priority(),
                 sstable_level, sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, _options);
 
             // Releases reference to cleaned sstable such that respective used disk space can be freed.
@@ -1193,7 +1193,7 @@ public:
             : task(mgr, t, options.type(), sstring(sstables::to_string(options.type())))
             , _cleanup_options(std::move(options))
             , _compacting(std::move(compacting))
-            , _pending_cleanup_jobs(t->get_compaction_strategy().get_cleanup_compaction_jobs(t->as_table_state(), candidates))
+            , _pending_cleanup_jobs(t->get_compaction_strategy().get_cleanup_compaction_jobs(t->as_table_state(), std::move(candidates)))
     {
         // Cleanup is made more resilient under disk space pressure, by cleaning up smaller jobs first, so larger jobs
         // will have more space available released by previous jobs.
@@ -1486,7 +1486,8 @@ void compaction_backlog_tracker::replace_sstables(const std::vector<sstables::sh
     try {
         _impl->replace_sstables(filter_and_revert_charges(old_ssts), filter_and_revert_charges(new_ssts));
     } catch (...) {
-        cmlog.warn("Disabling backlog tracker due to exception {}", std::current_exception());
+        cmlog.error("Disabling backlog tracker due to exception {}", std::current_exception());
+        // FIXME: tracker should be able to recover from a failure, e.g. OOM, by having its state reset. More details on https://github.com/scylladb/scylla/issues/10297.
         disable();
     }
 }

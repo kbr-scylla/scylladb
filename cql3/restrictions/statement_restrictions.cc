@@ -544,7 +544,7 @@ statement_restrictions::statement_restrictions(data_dictionary::database db,
     }
 
     if (!_nonprimary_key_restrictions->empty()) {
-        if (_has_queriable_regular_index) {
+        if (_has_queriable_regular_index && _partition_range_is_simple) {
             _uses_secondary_indexing = true;
         } else if (!allow_filtering) {
             throw exceptions::invalid_request_exception("Cannot execute this query as it might involve data filtering and "
@@ -1580,7 +1580,7 @@ bool statement_restrictions::need_filtering() const {
 void statement_restrictions::validate_secondary_index_selections(bool selects_only_static_columns) {
     if (key_is_in_relation()) {
         throw exceptions::invalid_request_exception(
-            "Select on indexed columns and with IN clause for the PRIMARY KEY are not supported");
+            "Index cannot be used if the partition key is restricted with IN clause. This query would require filtering instead.");
     }
 }
 

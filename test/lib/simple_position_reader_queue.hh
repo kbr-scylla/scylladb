@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include "mutation_reader.hh"
+#include "readers/clustering_combined.hh"
+#include "readers/flat_mutation_reader_v2.hh"
 
 /*
  * Single-partition reader, a lower bound and an upper bound for the set of positions

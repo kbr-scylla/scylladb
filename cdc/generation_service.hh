@@ -29,6 +29,7 @@
 
 namespace db {
 class system_distributed_keyspace;
+class system_keyspace;
 }
 
 namespace gms {
@@ -65,6 +66,7 @@ private:
     config _cfg;
     gms::gossiper& _gossiper;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
+    sharded<db::system_keyspace>& _sys_ks;
     abort_source& _abort_src;
     const locator::shared_token_metadata& _token_metadata;
     gms::feature_service& _feature_service;
@@ -91,7 +93,9 @@ private:
     future<> _cdc_streams_rewrite_complete = make_ready_future<>();
 public:
     generation_service(config cfg, gms::gossiper&,
-            sharded<db::system_distributed_keyspace>&, abort_source&, const locator::shared_token_metadata&,
+            sharded<db::system_distributed_keyspace>&,
+            sharded<db::system_keyspace>& sys_ks,
+            abort_source&, const locator::shared_token_metadata&,
             gms::feature_service&, replica::database& db);
 
     future<> stop();

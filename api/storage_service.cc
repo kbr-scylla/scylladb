@@ -155,7 +155,7 @@ seastar::future<json::json_return_type> run_toppartitions_query(db::toppartition
     });
 }
 
-future<json::json_return_type> set_tables_autocompaction(http_context& ctx, service::storage_service& ss, const sstring &keyspace, std::vector<sstring> tables, bool enabled) {
+future<json::json_return_type> set_tables_autocompaction(http_context& ctx, const sstring &keyspace, std::vector<sstring> tables, bool enabled) {
     if (tables.empty()) {
         tables = map_keys(ctx.db.local().find_keyspace(keyspace).metadata().get()->cf_meta_data());
     }
@@ -395,10 +395,9 @@ static future<json::json_return_type> describe_ring_as_json(sharded<service::sto
 }
 
 void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_service>& ss, gms::gossiper& g, sharded<cdc::generation_service>& cdc_gs, sharded<db::system_keyspace>& sys_ks) {
-    ss::local_hostid.set(r, [](std::unique_ptr<request> req) {
-        return db::system_keyspace::load_local_host_id().then([](const utils::UUID& id) {
-            return make_ready_future<json::json_return_type>(id.to_sstring());
-        });
+    ss::local_hostid.set(r, [&ctx](std::unique_ptr<request> req) {
+        auto id = ctx.db.local().get_config().host_id;
+        return make_ready_future<json::json_return_type>(id.to_sstring());
     });
 
     ss::get_tokens.set(r, [&ctx] (std::unique_ptr<request> req) {
@@ -1025,18 +1024,18 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         }
     });
 
-    ss::enable_auto_compaction.set(r, [&ctx, &ss](std::unique_ptr<request> req) {
+    ss::enable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
         auto keyspace = validate_keyspace(ctx, req->param);
         auto tables = parse_tables(keyspace, ctx, req->query_parameters, "cf");
 
-        return set_tables_autocompaction(ctx, ss.local(), keyspace, tables, true);
+        return set_tables_autocompaction(ctx, keyspace, tables, true);
     });
 
-    ss::disable_auto_compaction.set(r, [&ctx, &ss](std::unique_ptr<request> req) {
+    ss::disable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
         auto keyspace = validate_keyspace(ctx, req->param);
         auto tables = parse_tables(keyspace, ctx, req->query_parameters, "cf");
 
-        return set_tables_autocompaction(ctx, ss.local(), keyspace, tables, false);
+        return set_tables_autocompaction(ctx, keyspace, tables, false);
     });
 
     ss::deliver_hints.set(r, [](std::unique_ptr<request> req) {

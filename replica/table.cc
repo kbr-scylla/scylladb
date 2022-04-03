@@ -12,6 +12,7 @@
 #include <seastar/util/closeable.hh>
 
 #include "replica/database.hh"
+#include "replica/data_dictionary_impl.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include "service/priority_manager.hh"
@@ -43,11 +44,13 @@
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
 #include "utils/error_injection.hh"
-#include "readers/reversing.hh"
+#include "readers/reversing_v2.hh"
 #include "readers/from_mutations_v2.hh"
 #include "readers/empty_v2.hh"
 #include "readers/multi_range.hh"
 #include "readers/conversion.hh"
+#include "readers/combined.hh"
+#include "readers/compacting.hh"
 
 namespace replica {
 
@@ -104,7 +107,7 @@ void table::refresh_compound_sstable_set() {
 future<table::const_mutation_partition_ptr>
 table::find_partition(schema_ptr s, reader_permit permit, const dht::decorated_key& key) const {
     return do_with(dht::partition_range::make_singular(key), [s = std::move(s), permit = std::move(permit), this] (auto& range) mutable {
-        return with_closeable(this->make_reader(std::move(s), std::move(permit), range), [] (flat_mutation_reader& reader) {
+        return with_closeable(this->make_reader_v2(std::move(s), std::move(permit), range), [] (flat_mutation_reader_v2& reader) {
             return read_mutation_from_flat_mutation_reader(reader).then([] (mutation_opt&& mo) -> std::unique_ptr<const mutation_partition> {
                 if (!mo) {
                     return {};
@@ -204,22 +207,10 @@ table::make_reader_v2(schema_ptr s,
     }
 
     if (unreversed_slice) [[unlikely]] {
-        return upgrade_to_v2(make_reversing_reader(downgrade_to_v1(std::move(rd)), permit.max_result_size(), std::move(unreversed_slice)));
+        return make_reversing_reader(std::move(rd), permit.max_result_size(), std::move(unreversed_slice));
     }
 
     return rd;
-}
-
-flat_mutation_reader
-table::make_reader(schema_ptr s,
-                           reader_permit permit,
-                           const dht::partition_range& range,
-                           const query::partition_slice& slice,
-                           const io_priority_class& pc,
-                           tracing::trace_state_ptr trace_state,
-                           streamed_mutation::forwarding fwd,
-                           mutation_reader::forwarding fwd_mr) const {
-    return downgrade_to_v1(make_reader_v2(std::move(s), std::move(permit), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
 }
 
 sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<sstring> subdir) {
@@ -308,7 +299,7 @@ api::timestamp_type table::min_memtable_timestamp() const {
 future<bool>
 table::for_all_partitions_slow(schema_ptr s, reader_permit permit, std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const {
     struct iteration_state {
-        flat_mutation_reader reader;
+        flat_mutation_reader_v2 reader;
         std::function<bool (const dht::decorated_key&, const mutation_partition&)> func;
         bool ok = true;
         bool empty = false;
@@ -316,7 +307,7 @@ table::for_all_partitions_slow(schema_ptr s, reader_permit permit, std::function
         bool done() const { return !ok || empty; }
         iteration_state(schema_ptr s, reader_permit permit, const column_family& cf,
                 std::function<bool (const dht::decorated_key&, const mutation_partition&)>&& func)
-            : reader(cf.make_reader(std::move(s), std::move(permit)))
+            : reader(cf.make_reader_v2(std::move(s), std::move(permit)))
             , func(std::move(func))
         { }
     };
@@ -1191,7 +1182,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
     , _commitlog(cl)
     , _durable_writes(true)
     , _compaction_manager(compaction_manager)
-    , _index_manager(*this)
+    , _index_manager(this->as_data_dictionary())
     , _counter_cell_locks(_schema->is_counter() ? std::make_unique<cell_locker>(_schema, cl_stats) : nullptr)
     , _table_state(std::make_unique<table_state>(*this))
     , _row_locker(_schema)
@@ -1510,8 +1501,8 @@ future<> table::clear() {
             _commitlog->discard_completed_segments(_schema->id(), t->get_and_discard_rp_set());
         }
     }
-    _memtables->clear_and_add();
-    return _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
+    co_await _memtables->clear_and_add();
+    co_await _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
 }
 
 // NOTE: does not need to be futurized, but might eventually, depending on
@@ -2205,8 +2196,8 @@ table::disable_auto_compaction() {
     });
 }
 
-flat_mutation_reader
-table::make_reader_excluding_sstables(schema_ptr s,
+flat_mutation_reader_v2
+table::make_reader_v2_excluding_sstables(schema_ptr s,
         reader_permit permit,
         std::vector<sstables::shared_sstable>& excluded,
         const dht::partition_range& range,
@@ -2234,7 +2225,7 @@ table::make_reader_excluding_sstables(schema_ptr s,
     });
 
     readers.emplace_back(make_sstable_reader(s, permit, std::move(effective_sstables), range, slice, pc, std::move(trace_state), fwd, fwd_mr));
-    return downgrade_to_v1(make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr));
+    return make_combined_reader(s, std::move(permit), std::move(readers), fwd, fwd_mr);
 }
 
 future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable> sstables) {
@@ -2361,7 +2352,7 @@ table::as_mutation_source_excluding(std::vector<sstables::shared_sstable>& ssts)
                                    tracing::trace_state_ptr trace_state,
                                    streamed_mutation::forwarding fwd,
                                    mutation_reader::forwarding fwd_mr) {
-        return this->make_reader_excluding_sstables(std::move(s), std::move(permit), ssts, range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+        return this->make_reader_v2_excluding_sstables(std::move(s), std::move(permit), ssts, range, slice, pc, std::move(trace_state), fwd, fwd_mr);
     });
 }
 
@@ -2424,6 +2415,12 @@ public:
 
 compaction::table_state& table::as_table_state() const noexcept {
     return *_table_state;
+}
+
+data_dictionary::table
+table::as_data_dictionary() const {
+    static constinit data_dictionary_impl _impl;
+    return _impl.wrap(*this);
 }
 
 } // namespace replica

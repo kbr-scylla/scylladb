@@ -33,7 +33,6 @@
 #include "sstables/sstables_manager.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"
-#include "mutation_reader.hh"
 #include "schema.hh"
 #include "db/system_keyspace.hh"
 #include "service/priority_manager.hh"
@@ -48,6 +47,8 @@
 #include "utils/UUID_gen.hh"
 #include "utils/utf8.hh"
 #include "utils/fmt-compat.hh"
+#include "readers/filtering.hh"
+#include "readers/compacting.hh"
 #include "tombstone_gc.hh"
 
 namespace sstables {
@@ -1285,6 +1286,13 @@ private:
             maybe_abort_scrub();
 
             const auto& key = _validator.previous_partition_key();
+
+            if (_validator.current_tombstone()) {
+                throw compaction_aborted_exception(
+                        _schema->ks_name(),
+                        _schema->cf_name(),
+                        "scrub compaction cannot handle invalid fragments with an active range tombstone change");
+            }
 
             // If the unexpected fragment is a partition end, we just drop it.
             // The only case a partition end is invalid is when it comes after

@@ -19,7 +19,6 @@
 #include "schema.hh"
 #include "replica/database.hh"
 #include "compaction/compaction_manager.hh"
-#include "mutation_reader.hh"
 #include "sstable_test.hh"
 #include "sstables/metadata_collector.hh"
 #include "test/lib/tmpdir.hh"

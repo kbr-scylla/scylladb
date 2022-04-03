@@ -32,7 +32,6 @@
 #include "encoding_stats.hh"
 #include "filter.hh"
 #include "exceptions.hh"
-#include "mutation_reader.hh"
 #include "query-request.hh"
 #include "compound_compat.hh"
 #include "utils/disk-error-handler.hh"
@@ -48,6 +47,8 @@
 #include "sstables/open_info.hh"
 #include "query-request.hh"
 #include "mutation_fragment_stream_validator.hh"
+#include "readers/flat_mutation_reader_fwd.hh"
+#include "tracing/trace_state.hh"
 
 #include <seastar/util/optimized_optional.hh>
 
@@ -219,30 +220,9 @@ public:
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
             read_monitor& monitor = default_read_monitor());
 
-    // Precondition: if the slice is reversed, the schema must be reversed as well.
-    // Reversed slices must be provided in the 'half-reversed' format (the order of ranges
-    // being reversed, but the ranges themselves are not).
-    flat_mutation_reader make_reader_v1(
-            schema_ptr schema,
-            reader_permit permit,
-            const dht::partition_range& range,
-            const query::partition_slice& slice,
-            const io_priority_class& pc = default_priority_class(),
-            tracing::trace_state_ptr trace_state = {},
-            streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-            mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
-            read_monitor& monitor = default_read_monitor());
-
     // A reader which doesn't use the index at all. It reads everything from the
     // sstable and it doesn't support skipping.
     flat_mutation_reader_v2 make_crawling_reader(
-            schema_ptr schema,
-            reader_permit permit,
-            const io_priority_class& pc = default_priority_class(),
-            tracing::trace_state_ptr trace_state = {},
-            read_monitor& monitor = default_read_monitor());
-
-    flat_mutation_reader make_crawling_reader_v1(
             schema_ptr schema,
             reader_permit permit,
             const io_priority_class& pc = default_priority_class(),

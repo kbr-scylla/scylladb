@@ -39,7 +39,6 @@
 #include "db/snapshot-ctl.hh"
 #include "gms/feature.hh"
 #include "memtable.hh"
-#include "mutation_reader.hh"
 #include "row_cache.hh"
 #include "compaction/compaction_strategy.hh"
 #include "utils/estimated_histogram.hh"
@@ -227,15 +226,7 @@ public:
 
     // Clears the active memtable and adds a new, empty one.
     // Exception safe.
-    void clear_and_add() {
-        auto mt = new_memtable();
-        _memtables.clear();
-        // emplace_back might throw only if _memtables was empty
-        // on entry. Otherwise, we rely on clear() not to release
-        // the vector capacity (See https://en.cppreference.com/w/cpp/container/vector/clear)
-        // and lw_shared_ptr being nothrow move constructible.
-        _memtables.emplace_back(std::move(mt));
-    }
+    future<> clear_and_add();
 
     size_t size() const {
         return _memtables.size();
@@ -508,6 +499,8 @@ private:
     class table_state;
     std::unique_ptr<table_state> _table_state;
 public:
+    data_dictionary::table as_data_dictionary() const;
+
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
                                           sstables::offstrategy offstrategy = sstables::offstrategy::no);
     future<> add_sstables_and_update_cache(const std::vector<sstables::shared_sstable>& ssts);
@@ -686,15 +679,7 @@ public:
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
-    flat_mutation_reader make_reader(schema_ptr schema,
-            reader_permit permit,
-            const dht::partition_range& range,
-            const query::partition_slice& slice,
-            const io_priority_class& pc = default_priority_class(),
-            tracing::trace_state_ptr trace_state = nullptr,
-            streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-            mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
-    flat_mutation_reader make_reader_excluding_sstables(schema_ptr schema,
+    flat_mutation_reader_v2 make_reader_v2_excluding_sstables(schema_ptr schema,
             reader_permit permit,
             std::vector<sstables::shared_sstable>& sst,
             const dht::partition_range& range,
@@ -704,9 +689,9 @@ public:
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
 
-    flat_mutation_reader make_reader(schema_ptr schema, reader_permit permit, const dht::partition_range& range = query::full_partition_range) const {
+    flat_mutation_reader_v2 make_reader_v2(schema_ptr schema, reader_permit permit, const dht::partition_range& range = query::full_partition_range) const {
         auto& full_slice = schema->full_slice();
-        return make_reader(std::move(schema), std::move(permit), range, full_slice);
+        return make_reader_v2(std::move(schema), std::move(permit), range, full_slice);
     }
 
     // The streaming mutation reader differs from the regular mutation reader in that:
@@ -1344,8 +1329,6 @@ private:
     std::unique_ptr<wasm::engine> _wasm_engine;
     utils::cross_shard_barrier _stop_barrier;
 
-    class data_dictionary_impl;
-    friend class data_dictionary_impl;
 public:
     data_dictionary::database as_data_dictionary() const;
     future<> init_commitlog();
