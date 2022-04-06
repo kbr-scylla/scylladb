@@ -126,9 +126,18 @@ future<conn_ptr> ldap_role_manager::connect() {
     const socket_address addr(host, uint16_t(desc->lud_port));
     connected_socket sock = co_await seastar::connect(addr);
     auto conn = make_lw_shared<ldap_connection>(std::move(sock));
-    ldap_msg_ptr response = co_await conn->simple_bind(_bind_name.c_str(), _bind_password.c_str());
-    if (!response || ldap_msgtype(response.get()) != LDAP_RES_BIND) {
-        co_return coroutine::make_exception(std::runtime_error(format("simple_bind error: {}", conn->get_error())));
+    sstring error;
+    try {
+        ldap_msg_ptr response = co_await conn->simple_bind(_bind_name.c_str(), _bind_password.c_str());
+        if (!response || ldap_msgtype(response.get()) != LDAP_RES_BIND) {
+            error = format("simple_bind error: {}", conn->get_error());
+        }
+    } catch (...) {
+        error = format("connect error: {}", std::current_exception());
+    }
+    if (!error.empty()) {
+        co_await conn->close();
+        co_return coroutine::make_exception(std::runtime_error(std::move(error)));
     }
     co_return std::move(conn);
 }
