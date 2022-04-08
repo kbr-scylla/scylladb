@@ -5046,5 +5046,8 @@ SEASTAR_TEST_CASE(test_compaction_strategy_cleanup_method) {
             {time_window_compaction_strategy_options::COMPACTION_WINDOW_SIZE_KEY, "1"},
         };
         run_cleanup_strategy_test(sstables::compaction_strategy_type::time_window, 1, std::move(twcs_opts), 1h);
+
+        // ICS: Check that 2 jobs are returned for a size tier containing 2x more files (single-fragment runs) than max threshold.
+        run_cleanup_strategy_test(sstables::compaction_strategy_type::incremental, 32);
     });
 }
