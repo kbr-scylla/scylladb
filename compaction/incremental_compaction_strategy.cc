@@ -290,8 +290,8 @@ incremental_compaction_strategy::runs_to_sstables(std::vector<sstable_run> runs)
 std::vector<sstable_run>
 incremental_compaction_strategy::sstables_to_runs(std::vector<shared_sstable> sstables) {
     std::unordered_map<utils::UUID, sstable_run> runs;
-    for (auto& sst : sstables) {
-        runs[sst->run_identifier()].insert(sst);
+    for (auto&& sst : sstables) {
+        runs[sst->run_identifier()].insert(std::move(sst));
     }
     return boost::copy_range<std::vector<sstable_run>>(runs | boost::adaptors::map_values);
 }
