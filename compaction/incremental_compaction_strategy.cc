@@ -296,6 +296,17 @@ incremental_compaction_strategy::sstables_to_runs(std::vector<shared_sstable> ss
     return boost::copy_range<std::vector<sstable_run>>(runs | boost::adaptors::map_values);
 }
 
+void incremental_compaction_strategy::sort_run_bucket_by_first_key(size_bucket_t& bucket, size_t max_elements, const schema_ptr& schema) {
+    std::partial_sort(bucket.begin(), bucket.begin() + max_elements, bucket.end(), [&schema](const sstable_run& a, const sstable_run& b) {
+        auto sst_first_key_less = [&schema] (const shared_sstable& sst_a, const shared_sstable& sst_b) {
+            return sst_a->get_first_decorated_key().tri_compare(*schema, sst_b->get_first_decorated_key()) <= 0;
+        };
+        auto& a_first = *boost::min_element(a.all(), sst_first_key_less);
+        auto& b_first = *boost::min_element(b.all(), sst_first_key_less);
+        return a_first->get_first_decorated_key().tri_compare(*schema, b_first->get_first_decorated_key()) <= 0;
+    });
+}
+
 compaction_descriptor
 incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) {
     size_t offstrategy_threshold = std::max(schema->min_compaction_threshold(), 4);
@@ -322,14 +333,7 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         if (bucket.size() >= offstrategy_threshold) {
             // preserve token contiguity by prioritizing runs with the lowest first keys.
             if (bucket.size() > max_sstables) {
-                std::partial_sort(bucket.begin(), bucket.begin() + max_sstables, bucket.end(), [&schema](const sstable_run& a, const sstable_run& b) {
-                    auto sst_first_key_less = [&schema] (const shared_sstable& sst_a, const shared_sstable& sst_b) {
-                        return sst_a->get_first_decorated_key().tri_compare(*schema, sst_b->get_first_decorated_key()) <= 0;
-                    };
-                    auto& a_first = *boost::min_element(a.all(), sst_first_key_less);
-                    auto& b_first = *boost::min_element(b.all(), sst_first_key_less);
-                    return a_first->get_first_decorated_key().tri_compare(*schema, b_first->get_first_decorated_key()) <= 0;
-                });
+                sort_run_bucket_by_first_key(bucket, max_sstables, schema);
                 bucket.resize(max_sstables);
             }
             compaction_descriptor desc(runs_to_sstables(std::move(bucket)), iop, 0/* level */, _fragment_size);

@@ -90,6 +90,7 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
 
     static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
     static std::vector<sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
+    static void sort_run_bucket_by_first_key(size_bucket_t& bucket, size_t max_elements, const schema_ptr& schema);
 public:
     incremental_compaction_strategy() = default;
 
