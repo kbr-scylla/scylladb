@@ -182,30 +182,30 @@ incremental_compaction_strategy::find_garbage_collection_job(const compaction::t
 }
 
 compaction_descriptor
-incremental_compaction_strategy::get_sstables_for_compaction(table_state& cf, strategy_control& control, std::vector<sstables::shared_sstable> candidates) {
+incremental_compaction_strategy::get_sstables_for_compaction(table_state& t, strategy_control& control, std::vector<sstables::shared_sstable> candidates) {
     // make local copies so they can't be changed out from under us mid-method
-    size_t min_threshold = cf.min_compaction_threshold();
-    size_t max_threshold = cf.schema()->max_compaction_threshold();
+    size_t min_threshold = t.min_compaction_threshold();
+    size_t max_threshold = t.schema()->max_compaction_threshold();
 
-    auto buckets = get_buckets(cf.get_sstable_set().select_sstable_runs(candidates));
+    auto buckets = get_buckets(t.get_sstable_set().select_sstable_runs(candidates));
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
         return sstables::compaction_descriptor(runs_to_sstables(std::move(most_interesting)), service::get_local_compaction_priority(), 0, _fragment_size);
     }
     // If we are not enforcing min_threshold explicitly, try any pair of sstable runs in the same tier.
-    if (!cf.compaction_enforce_min_threshold() && is_any_bucket_interesting(buckets, 2)) {
+    if (!t.compaction_enforce_min_threshold() && is_any_bucket_interesting(buckets, 2)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), 2, max_threshold);
         return sstables::compaction_descriptor(runs_to_sstables(std::move(most_interesting)), service::get_local_compaction_priority(), 0, _fragment_size);
     }
 
     // The cross-tier behavior is only triggered once we're done with all the pending same-tier compaction to
     // increase overall efficiency.
-    if (control.has_ongoing_compaction(cf)) {
+    if (control.has_ongoing_compaction(t)) {
         return sstables::compaction_descriptor();
     }
 
-    auto desc = find_garbage_collection_job(cf, buckets);
+    auto desc = find_garbage_collection_job(t, buckets);
     if (!desc.sstables.empty()) {
         return desc;
     }
@@ -253,25 +253,25 @@ incremental_compaction_strategy::get_sstables_for_compaction(table_state& cf, st
 }
 
 compaction_descriptor
-incremental_compaction_strategy::get_major_compaction_job(table_state& cf, std::vector<sstables::shared_sstable> candidates) {
+incremental_compaction_strategy::get_major_compaction_job(table_state& t, std::vector<sstables::shared_sstable> candidates) {
     if (candidates.empty()) {
         return compaction_descriptor();
     }
     return compaction_descriptor(std::move(candidates), service::get_local_compaction_priority(), 0, _fragment_size);
 }
 
-int64_t incremental_compaction_strategy::estimated_pending_compactions(table_state& cf) const {
-    size_t min_threshold = cf.schema()->min_compaction_threshold();
-    size_t max_threshold = cf.schema()->max_compaction_threshold();
+int64_t incremental_compaction_strategy::estimated_pending_compactions(table_state& t) const {
+    size_t min_threshold = t.schema()->min_compaction_threshold();
+    size_t max_threshold = t.schema()->max_compaction_threshold();
     std::vector<sstables::shared_sstable> sstables;
     int64_t n = 0;
 
-    sstables.reserve(cf.get_sstable_set().all()->size());
-    for (auto all_sstables = cf.get_sstable_set(); auto entry : *all_sstables.all()) {
+    sstables.reserve(t.get_sstable_set().all()->size());
+    for (auto all_sstables = t.get_sstable_set(); auto entry : *all_sstables.all()) {
         sstables.push_back(entry);
     }
 
-    for (auto& bucket : get_buckets(cf.get_sstable_set().select_sstable_runs(sstables))) {
+    for (auto& bucket : get_buckets(t.get_sstable_set().select_sstable_runs(sstables))) {
         if (bucket.size() >= min_threshold) {
             n += (bucket.size() + max_threshold - 1) / max_threshold;
         }
