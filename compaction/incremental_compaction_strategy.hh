@@ -98,6 +98,8 @@ public:
 
     virtual compaction_descriptor get_sstables_for_compaction(table_state& t, strategy_control& control, std::vector<sstables::shared_sstable> candidates) override;
 
+    virtual std::vector<compaction_descriptor> get_cleanup_compaction_jobs(table_state& t, std::vector<shared_sstable> candidates) const override;
+
     virtual compaction_descriptor get_major_compaction_job(table_state& t, std::vector<sstables::shared_sstable> candidates) override;
 
     virtual int64_t estimated_pending_compactions(table_state& t) const override;

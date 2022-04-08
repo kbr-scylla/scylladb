@@ -345,6 +345,30 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
     return compaction_descriptor();
 }
 
+std::vector<compaction_descriptor>
+incremental_compaction_strategy::get_cleanup_compaction_jobs(table_state& t, std::vector<shared_sstable> candidates) const {
+    std::vector<compaction_descriptor> ret;
+    const auto& schema = t.schema();
+    unsigned max_threshold = schema->max_compaction_threshold();
+
+    for (auto& bucket : get_buckets(sstables_to_runs(std::move(candidates)))) {
+        if (bucket.size() > max_threshold) {
+            // preserve token contiguity
+            sort_run_bucket_by_first_key(bucket, bucket.size(), schema);
+        }
+        auto it = bucket.begin();
+        while (it != bucket.end()) {
+            unsigned remaining = std::distance(it, bucket.end());
+            unsigned needed = std::min(remaining, max_threshold);
+            std::vector<sstable_run> runs;
+            std::move(it, it + needed, std::back_inserter(runs));
+            ret.push_back(compaction_descriptor(runs_to_sstables(std::move(runs)), service::get_local_compaction_priority(), 0/* level */, _fragment_size));
+            std::advance(it, needed);
+        }
+    }
+    return ret;
+}
+
 incremental_compaction_strategy::incremental_compaction_strategy(const std::map<sstring, sstring>& options)
     : compaction_strategy_impl(options)
     , _options(options)
