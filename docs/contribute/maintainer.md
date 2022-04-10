@@ -241,3 +241,53 @@ Alternatively
  2. Use the refreshing script specifying the `seastar:<branch>` as its
     first argument (`refresh-submodules.sh seastar:branch-3.2`)
  3. Publish with `git push`.
+
+
+## Merging from an open-source branch to an enterprise branch
+
+Periodically, we merge into enterprise branches from their open-source bases.
+This is usually scylla.git master -> scylla-enterprise.git next-enterprise,
+but can also be othr branches, e.g. scylla.git branch-5.0 -> scylla-enterprise.git next-2022.1.
+
+Procedure (written for master->next-enterprise, adjust for other branches):
+
+1. Start with checking out next-enterprise and fast-forward it to make sure you are not behind scylla-enterprise.git.
+
+2. Run `git submodule foreach git fetch --all && git submodule update --recursive` to synchronize submodules.
+
+3. Perform a merge: `git merge --log origin master`. There will be conflicts, below are instructions for dealing with them.
+
+4. For a submodule that changed but did not get a conflict (e.g. seastar, abseil), update the submodule using `git submodule update --recursive seastar`.
+
+5. For a submodule that changed and got a conflict (e.g. tools/java), resolve with this sub-procedure:
+ 
+    - change to the submodule in question (`cd tools/java`)
+    - switch to the corresponding enterprise branch (`git switch enterprise` or `git switch branch-2022.1`). This should not move HEAD.
+    - perform a merge from the open source branch (`git pull --log origin master`), resolve conflicts, and commit. Do not push yet.
+    - change back to the main directory (`cd -`).
+    - create a changelog for the submodule (`git submodule summary tools/java`) and copy it somewhere safe.
+    - stage the submodule (`git add tools/java`).
+
+6. Resolve source conflicts. For textual conflicts (code added to both branches), try to keep the enterprise additions below
+   the open-source additions to avoid spreading out the changes over multiple merges. Avoid making indentation changes as that
+   makes further merges more difficult. Use `git diff some-source.cc` and `git add some-source.cc` to verify and stage changes.
+   For semantic conflicts (e.g. an API has changed, do your best, if you cannot then ask for help (below)). modify/delete conflicts
+   can usually be resolved by deleting the source `git rm some-source.cc`, if it has not seen enterprise-specific changes beyond
+   the license.
+
+7. If a conflict happened in tools/toolchain/image, choose a new name for the toolchain, `git add` it, and create and push it. Note this
+   must be done after resolving conflicts in install-dependencies.sh and is best left to the end.
+
+8. Run `sh scripts/license.sh`, verify the changes are sane, and stage them.
+
+9. Commit (but do not push). Record any significant changes you made in the changelog. Add submodule
+   summaries from submodule conflict resolution. It's also possible to start committing earlier, but not
+   before conflicts are resolved.
+
+10. Build and test, amending the commit (and changelog) as needed.
+
+11. If you were not able to get it working, push it to some personal (but private) repository and
+    enlist help. Also push submodule changes to the private clones of their respective repositories. Apply
+    and stage the resulting patch.
+
+12. Push the submodules and the next-enterprise branch.
