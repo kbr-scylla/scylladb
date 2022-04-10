@@ -916,10 +916,6 @@ public:
         return _config;
     }
 
-    compaction_manager& get_compaction_manager() const {
-        return _compaction_manager;
-    }
-
     cache_temperature get_global_cache_hit_rate() const {
         return _global_cache_hit_rate;
     }
@@ -1359,7 +1355,6 @@ private:
     auto sum_read_concurrency_sem_var(std::invocable<reader_concurrency_semaphore&> auto member);
     auto sum_read_concurrency_sem_stat(std::invocable<reader_concurrency_semaphore::stats&> auto stats_member);
 
-    friend class db_apply_executor;
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 

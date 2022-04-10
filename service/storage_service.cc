@@ -346,10 +346,14 @@ void storage_service::prepare_to_join(
     if (replacing_a_node_with_same_ip || replacing_a_node_with_diff_ip) {
         app_states.emplace(gms::application_state::TOKENS, versioned_value::tokens(_bootstrap_tokens));
     }
-    const auto& snitch_name = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_name();
-    app_states.emplace(gms::application_state::SNITCH_NAME, versioned_value::snitch_name(snitch_name));
+    auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
+    app_states.emplace(gms::application_state::SNITCH_NAME, versioned_value::snitch_name(snitch->get_name()));
     app_states.emplace(gms::application_state::SHARD_COUNT, versioned_value::shard_count(smp::count));
     app_states.emplace(gms::application_state::IGNORE_MSB_BITS, versioned_value::ignore_msb_bits(_db.local().get_config().murmur3_partitioner_ignore_msb_bits()));
+
+    for (auto&& s : snitch->get_app_states()) {
+        app_states.emplace(s.first, std::move(s.second));
+    }
 
     slogger.info("Starting up server gossip");
 
@@ -358,7 +362,7 @@ void storage_service::prepare_to_join(
     _gossiper.start_gossiping(generation_number, app_states, advertise).get();
 }
 
-void storage_service::maybe_start_sys_dist_ks() {
+void storage_service::start_sys_dist_ks() {
     supervisor::notify("starting system distributed keyspace");
     _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start).get();
 }
@@ -491,12 +495,12 @@ void storage_service::join_token_ring(std::chrono::milliseconds delay) {
             slogger.info("Replacing a node with token(s): {}", _bootstrap_tokens);
             // _bootstrap_tokens was previously set in prepare_to_join using tokens gossiped by the replaced node
         }
-        maybe_start_sys_dist_ks();
+        start_sys_dist_ks();
         mark_existing_views_as_built();
         _sys_ks.local().update_tokens(_bootstrap_tokens).get();
         bootstrap(); // blocks until finished
     } else {
-        maybe_start_sys_dist_ks();
+        start_sys_dist_ks();
         _bootstrap_tokens = db::system_keyspace::get_saved_tokens().get0();
         if (_bootstrap_tokens.empty()) {
             _bootstrap_tokens = boot_strapper::get_bootstrap_tokens(get_token_metadata_ptr(), _db.local().get_config(), dht::check_token_endpoint::no);
@@ -1292,6 +1296,9 @@ future<> storage_service::stop_transport() {
 
         (void) seastar::async([this] {
             slogger.info("Stop transport: starts");
+
+            slogger.debug("shutting down migration manager");
+            _migration_manager.invoke_on_all(&service::migration_manager::drain).get();
 
             shutdown_protocol_servers().get();
             slogger.info("Stop transport: shutdown rpc and cql server done");
@@ -2617,9 +2624,6 @@ future<> storage_service::do_drain() {
     co_await get_batchlog_manager().invoke_on_all([] (auto& bm) {
         return bm.drain();
     });
-
-    slogger.debug("shutting down migration manager");
-    co_await _migration_manager.invoke_on_all(&service::migration_manager::drain);
 
     slogger.debug("flushing column families");
     co_await _db.invoke_on_all(&replica::database::drain);
