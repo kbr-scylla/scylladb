@@ -5057,5 +5057,8 @@ SEASTAR_TEST_CASE(test_compaction_strategy_cleanup_method) {
         // LCS: Check that 1 jobs is returned for all non-overlapping files in level 1, as incremental compaction can be employed
         // to limit memory usage and space requirement.
         run_cleanup_strategy_test(sstables::compaction_strategy_type::leveled, 64, empty_opts, 0ms, 1);
+
+        // ICS: Check that 2 jobs are returned for a size tier containing 2x more files (single-fragment runs) than max threshold.
+        run_cleanup_strategy_test(sstables::compaction_strategy_type::incremental, 32);
     });
 }
