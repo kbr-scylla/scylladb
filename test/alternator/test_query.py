@@ -157,6 +157,13 @@ def test_query_attributes_to_get(dynamodb, test_table):
         expected_items = [{k: x[k] for k in wanted if k in x} for x in items]
         assert multiset(expected_items) == multiset(got_items)
 
+# Verify that it is forbidden to ask for an empty AttributesToGet
+# Reproduces issue #10332.
+def test_query_attributes_to_get_empty(dynamodb, test_table):
+    p = random_string()
+    with pytest.raises(ClientError, match='ValidationException'):
+        full_query(test_table, KeyConditions={'p': {'AttributeValueList': [p], 'ComparisonOperator': 'EQ'}}, AttributesToGet=[])
+
 # Test that in a table with both hash key and sort key, which keys we can
 # Query by: We can Query by the hash key, by a combination of both hash and
 # sort keys, but *cannot* query by just the sort key, and obviously not
@@ -214,7 +221,6 @@ def test_query_which_key(test_table):
 # ALL_ATTRIBUTES, returns items with all their attributes. Other modes
 # allow returning just specific attributes or just counting the results
 # without returning items at all.
-@pytest.mark.xfail(reason="Select not supported yet. Issue #5058")
 def test_query_select(test_table_sn):
     numbers = [Decimal(i) for i in range(10)]
     # Insert these numbers, in random order, into one partition:
@@ -262,6 +268,10 @@ def test_query_select(test_table_sn):
     # Select with some unknown string generates a validation exception:
     with pytest.raises(ClientError, match='ValidationException'):
         test_table_sn.query(ConsistentRead=True, KeyConditions={'p': {'AttributeValueList': [p], 'ComparisonOperator': 'EQ'}}, Select='UNKNOWN')
+    # The Select value is case sensitive - "COUNT" works (checked above),
+    # but "count" doesn't:
+    with pytest.raises(ClientError, match='ValidationException'):
+        test_table_sn.query(ConsistentRead=True, KeyConditions={'p': {'AttributeValueList': [p], 'ComparisonOperator': 'EQ'}}, Select='count')
     # If either AttributesToGet or ProjectionExpression appear in the query,
     # only Select=SPECIFIC_ATTRIBUTES (or nothing) is allowed - other Select
     # settings contradict the AttributesToGet or ProjectionExpression, and

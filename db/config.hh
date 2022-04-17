@@ -81,7 +81,8 @@ namespace db {
 struct experimental_features_t {
     // NOTE: RAFT feature is not enabled via `experimental` umbrella flag.
     // This option should be enabled explicitly.
-    enum feature { UNUSED, UDF, ALTERNATOR_STREAMS, ALTERNATOR_TTL, RAFT };
+    enum feature { UNUSED, UDF, ALTERNATOR_STREAMS, ALTERNATOR_TTL, RAFT,
+            KEYSPACE_STORAGE_OPTIONS };
     static std::unordered_map<sstring, feature> map(); // See enum_option.
     static std::vector<enum_option<experimental_features_t>> all();
 };
@@ -171,7 +172,8 @@ public:
     named_value<uint32_t> commitlog_sync_period_in_ms;
     named_value<uint32_t> commitlog_sync_batch_window_in_ms;
     named_value<int64_t> commitlog_total_space_in_mb;
-    named_value<bool> commitlog_reuse_segments;
+    named_value<bool> commitlog_reuse_segments; // unused. retained for upgrade compat
+    named_value<int64_t> commitlog_flush_threshold_in_mb;
     named_value<bool> commitlog_use_o_dsync;
     named_value<bool> commitlog_use_hard_size_limit;
     named_value<bool> compaction_preheat_key_cache;

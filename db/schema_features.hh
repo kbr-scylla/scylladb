@@ -22,6 +22,7 @@ enum class schema_feature {
     COMPUTED_COLUMNS,
     CDC_OPTIONS,
     PER_TABLE_PARTITIONERS,
+    SCYLLA_KEYSPACES,
     IN_MEMORY_TABLES,
 };
 
@@ -31,6 +32,7 @@ using schema_features = enum_set<super_enum<schema_feature,
     schema_feature::COMPUTED_COLUMNS,
     schema_feature::CDC_OPTIONS,
     schema_feature::PER_TABLE_PARTITIONERS,
+    schema_feature::SCYLLA_KEYSPACES,
     schema_feature::IN_MEMORY_TABLES
     >>;
 

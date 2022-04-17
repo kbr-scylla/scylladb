@@ -3706,6 +3706,10 @@ future<> storage_service::node_ops_abort_thread() {
     });
 }
 
+future<> storage_service::join_group0() {
+    assert(_group0);
+    return _group0->join_group0();
+}
 
 void storage_service::start_workload_prioritization(workload_prioritization_create_tables create_tables) {
         if (create_tables) {

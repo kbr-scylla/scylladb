@@ -782,7 +782,8 @@ do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring
 future<> database::parse_system_tables(distributed<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks) {
     using namespace db::schema_tables;
     co_await do_parse_schema_tables(proxy, db::schema_tables::KEYSPACES, [&] (schema_result_value_type &v) -> future<> {
-        auto ksm = create_keyspace_from_schema_partition(v);
+        auto scylla_specific_rs = co_await db::schema_tables::extract_scylla_specific_keyspace_info(proxy, v);
+        auto ksm = create_keyspace_from_schema_partition(v, scylla_specific_rs);
         co_return co_await create_keyspace(ksm, proxy.local().get_erm_factory(), true /* bootstrap. do not mark populated yet */, system_keyspace::no);
     });
     co_await do_parse_schema_tables(proxy, db::schema_tables::TYPES, [&] (schema_result_value_type &v) -> future<> {
@@ -870,7 +871,8 @@ future<> database::update_keyspace(sharded<service::storage_proxy>& proxy, const
     auto v = co_await db::schema_tables::read_schema_partition_for_keyspace(proxy, db::schema_tables::KEYSPACES, name);
     auto& ks = find_keyspace(name);
 
-    auto tmp_ksm = db::schema_tables::create_keyspace_from_schema_partition(v);
+    auto scylla_specific_rs = co_await db::schema_tables::extract_scylla_specific_keyspace_info(proxy, v);
+    auto tmp_ksm = db::schema_tables::create_keyspace_from_schema_partition(v, scylla_specific_rs);
     auto new_ksm = ::make_lw_shared<keyspace_metadata>(tmp_ksm->name(), tmp_ksm->strategy_name(), tmp_ksm->strategy_options(), tmp_ksm->durable_writes(),
                     boost::copy_range<std::vector<schema_ptr>>(ks.metadata()->cf_meta_data() | boost::adaptors::map_values), std::move(ks.metadata()->user_types()));
 
@@ -1999,16 +2001,15 @@ schema_ptr database::find_indexed_table(const sstring& ks_name, const sstring& i
 }
 
 future<> database::close_tables(table_kind kind_to_close) {
-    return parallel_for_each(_column_families, [this, kind_to_close](auto& val_pair) {
+    auto b = defer([this] { _stop_barrier.abort(); });
+    co_await parallel_for_each(_column_families, [this, kind_to_close](auto& val_pair) -> future<> {
         table_kind k = is_system_table(*val_pair.second->schema()) ? table_kind::system : table_kind::user;
         if (k == kind_to_close) {
-            return val_pair.second->stop();
-        } else {
-            return make_ready_future<>();
+            co_await val_pair.second->stop();
         }
-    }).then([this] {
-        return _stop_barrier.arrive_and_wait();
     });
+    co_await _stop_barrier.arrive_and_wait();
+    b.cancel();
 }
 
 void database::revert_initial_system_read_concurrency_boost() {
@@ -2067,8 +2068,11 @@ future<> database::start(sharded<qos::service_level_controller>& sl_controller) 
 
 future<> database::shutdown() {
     _shutdown = true;
+    auto b = defer([this] { _stop_barrier.abort(); });
     co_await _compaction_manager->stop();
     co_await _stop_barrier.arrive_and_wait();
+    b.cancel();
+
     // Closing a table can cause us to find a large partition. Since we want to record that, we have to close
     // system.large_partitions after the regular tables.
     co_await close_tables(database::table_kind::user);
@@ -2394,6 +2398,7 @@ future<> database::flush_system_column_families() {
 }
 
 future<> database::drain() {
+    auto b = defer([this] { _stop_barrier.abort(); });
     // Interrupt on going compaction and shutdown to prevent further compaction
     co_await _compaction_manager->drain();
 
@@ -2405,6 +2410,7 @@ future<> database::drain() {
     co_await flush_system_column_families();
     co_await _stop_barrier.arrive_and_wait();
     co_await _commitlog->shutdown();
+    b.cancel();
 }
 
 data_dictionary::database

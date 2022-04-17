@@ -12,6 +12,9 @@
 #include "gms/inet_address.hh"
 #include "repair/repair.hh"
 #include <seastar/core/distributed.hh>
+#include <seastar/util/bool_class.hh>
+
+using namespace seastar;
 
 class row_level_repair_gossip_helper;
 
@@ -22,6 +25,7 @@ class storage_proxy;
 
 namespace db {
 
+class system_keyspace;
 class system_distributed_keyspace;
 class batchlog_manager;
 
@@ -82,6 +86,7 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
     sharded<service::storage_proxy>& _sp;
     sharded<db::batchlog_manager>& _bm;
     sharded<db::system_distributed_keyspace>& _sys_dist_ks;
+    sharded<db::system_keyspace>& _sys_ks;
     sharded<db::view::view_update_generator>& _view_update_generator;
     service::migration_manager& _mm;
     tracker _tracker;
@@ -107,6 +112,7 @@ public:
             sharded<service::storage_proxy>& sp,
             sharded<db::batchlog_manager>& bm,
             sharded<db::system_distributed_keyspace>& sys_dist_ks,
+            sharded<db::system_keyspace>& sys_ks,
             sharded<db::view::view_update_generator>& vug,
             service::migration_manager& mm, size_t max_repair_memory);
     ~repair_service();
@@ -228,7 +234,17 @@ public:
 };
 
 class repair_info;
+using repair_master = bool_class<class repair_master_tag>;
+class partition_key_and_mutation_fragments;
+using repair_rows_on_wire = std::list<partition_key_and_mutation_fragments>;
+class repair_row;
+class repair_hasher;
+class repair_writer;
 
 future<> repair_cf_range_row_level(repair_info& ri,
         sstring cf_name, utils::UUID table_id, dht::token_range range,
         const std::vector<gms::inet_address>& all_peer_nodes);
+future<std::list<repair_row>> to_repair_rows_list(repair_rows_on_wire rows,
+        schema_ptr s, uint64_t seed, repair_master is_master,
+        reader_permit permit, repair_hasher hasher);
+void flush_rows(schema_ptr s, std::list<repair_row>& rows, lw_shared_ptr<repair_writer>& writer);

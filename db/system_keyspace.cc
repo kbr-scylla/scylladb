@@ -1758,19 +1758,23 @@ future<bool> system_keyspace::cdc_is_rewritten() {
     });
 }
 
-bool system_keyspace::bootstrap_complete() {
+bool system_keyspace::bootstrap_needed() const {
+    return get_bootstrap_state() == bootstrap_state::NEEDS_BOOTSTRAP;
+}
+
+bool system_keyspace::bootstrap_complete() const {
     return get_bootstrap_state() == bootstrap_state::COMPLETED;
 }
 
-bool system_keyspace::bootstrap_in_progress() {
+bool system_keyspace::bootstrap_in_progress() const {
     return get_bootstrap_state() == bootstrap_state::IN_PROGRESS;
 }
 
-bool system_keyspace::was_decommissioned() {
+bool system_keyspace::was_decommissioned() const {
     return get_bootstrap_state() == bootstrap_state::DECOMMISSIONED;
 }
 
-system_keyspace::bootstrap_state system_keyspace::get_bootstrap_state() {
+system_keyspace::bootstrap_state system_keyspace::get_bootstrap_state() const {
     return _cache->_state;
 }
 
@@ -2820,6 +2824,27 @@ future<> system_keyspace::get_compaction_history(compaction_history_consumer&& f
                 return stop_iteration::no;
             });
         });
+    });
+}
+
+future<> system_keyspace::update_repair_history(repair_history_entry entry) {
+    sstring req = format("INSERT INTO system.{} (table_uuid, repair_time, repair_uuid, keyspace_name, table_name, range_start, range_end) VALUES (?, ?, ?, ?, ?, ?, ?)", REPAIR_HISTORY);
+    co_await execute_cql(req, entry.table_uuid, entry.ts, entry.id, entry.ks, entry.cf, entry.range_start, entry.range_end).discard_result();
+}
+
+future<> system_keyspace::get_repair_history(utils::UUID table_id, repair_history_consumer f) {
+    sstring req = format("SELECT * from system.{} WHERE table_uuid = {}", REPAIR_HISTORY, table_id);
+    co_await _qp.local().query_internal(req, [&f] (const cql3::untyped_result_set::row& row) mutable -> future<stop_iteration> {
+        repair_history_entry ent;
+        ent.id = row.get_as<utils::UUID>("repair_uuid");
+        ent.table_uuid = row.get_as<utils::UUID>("table_uuid");
+        ent.range_start = row.get_as<int64_t>("range_start");
+        ent.range_end = row.get_as<int64_t>("range_end");
+        ent.ks = row.get_as<sstring>("keyspace_name");
+        ent.cf = row.get_as<sstring>("table_name");
+        ent.ts = row.get_as<db_clock::time_point>("repair_time");
+        co_await f(std::move(ent));
+        co_return stop_iteration::no;
     });
 }
 

@@ -66,6 +66,7 @@ constexpr std::string_view features::SUPPORTS_RAFT_CLUSTER_MANAGEMENT = "SUPPORT
 constexpr std::string_view features::USES_RAFT_CLUSTER_MANAGEMENT = "USES_RAFT_CLUSTER_MANAGEMENT";
 constexpr std::string_view features::TOMBSTONE_GC_OPTIONS = "TOMBSTONE_GC_OPTIONS";
 constexpr std::string_view features::PARALLELIZED_AGGREGATION = "PARALLELIZED_AGGREGATION";
+constexpr std::string_view features::KEYSPACE_STORAGE_OPTIONS = "KEYSPACE_STORAGE_OPTIONS";
 constexpr std::string_view features::IN_MEMORY_TABLES = "IN_MEMORY_TABLES";
 constexpr std::string_view features::WORKLOAD_PRIORITIZATION = "WORKLOAD_PRIORITIZATION";
 
@@ -99,6 +100,7 @@ feature_service::feature_service(feature_config cfg) : _config(cfg)
         , _uses_raft_cluster_mgmt(*this, features::USES_RAFT_CLUSTER_MANAGEMENT)
         , _tombstone_gc_options(*this, features::TOMBSTONE_GC_OPTIONS)
         , _parallelized_aggregation(*this, features::PARALLELIZED_AGGREGATION)
+        , _keyspace_storage_options(*this, features::KEYSPACE_STORAGE_OPTIONS)
         , _in_memory_tables(*this, features::IN_MEMORY_TABLES)
         , _workload_prioritization(*this, features::WORKLOAD_PRIORITIZATION)
 {}
@@ -146,6 +148,9 @@ feature_config feature_config_from_db_config(db::config& cfg, std::set<sstring> 
         // This prevents the `USES_RAFT_CLUSTER_MANAGEMENT` feature from being
         // advertised via gossip ahead of time.
         fcfg._masked_features.insert(sstring(gms::features::USES_RAFT_CLUSTER_MANAGEMENT));
+    }
+    if (!cfg.check_experimental(db::experimental_features_t::KEYSPACE_STORAGE_OPTIONS)) {
+        fcfg._disabled_features.insert(sstring(gms::features::KEYSPACE_STORAGE_OPTIONS));
     }
 
     return fcfg;
@@ -236,6 +241,7 @@ std::set<std::string_view> feature_service::known_feature_set() {
         gms::features::USES_RAFT_CLUSTER_MANAGEMENT,
         gms::features::TOMBSTONE_GC_OPTIONS,
         gms::features::PARALLELIZED_AGGREGATION,
+        gms::features::KEYSPACE_STORAGE_OPTIONS,
         gms::features::IN_MEMORY_TABLES,
         gms::features::WORKLOAD_PRIORITIZATION,
     };
@@ -299,6 +305,7 @@ db::schema_features feature_service::cluster_schema_features() const {
     f.set_if<db::schema_feature::COMPUTED_COLUMNS>(bool(_computed_columns));
     f.set_if<db::schema_feature::CDC_OPTIONS>(bool(_cdc_feature));
     f.set_if<db::schema_feature::PER_TABLE_PARTITIONERS>(bool(_per_table_partitioners_feature));
+    f.set_if<db::schema_feature::SCYLLA_KEYSPACES>(bool(_keyspace_storage_options));
     f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(_in_memory_tables));
     return f;
 }
@@ -350,6 +357,7 @@ void feature_service::enable(const std::set<std::string_view>& list) {
         std::ref(_uses_raft_cluster_mgmt),
         std::ref(_tombstone_gc_options),
         std::ref(_parallelized_aggregation),
+        std::ref(_keyspace_storage_options),
         std::ref(_in_memory_tables),
         std::ref(_workload_prioritization),
     })

@@ -8,14 +8,14 @@
 
 import pytest
 import re
-from cassandra.protocol import SyntaxException, AlreadyExists, InvalidRequest, ConfigurationException, ReadFailure
-from util import unique_name, unique_key_string, new_test_table
+from cassandra.protocol import InvalidRequest
+from util import unique_name, unique_key_string
 
 
 @pytest.fixture(scope="module")
 def table1(cql, test_keyspace):
     table = test_keyspace + "." + unique_name()
-    cql.execute(f"CREATE TABLE {table} (p text, c text, v text, primary key (p, c))")
+    cql.execute(f"CREATE TABLE {table} (p text, c text, v text, i int, s set<int>, m map<int, int>, primary key (p, c))")
     yield table
     cql.execute("DROP TABLE " + table)
 
@@ -106,71 +106,64 @@ def test_filtering_eq_null(cassandra_bug, cql, table1):
     # not even the one with an unset v:
     assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND v=NULL ALLOW FILTERING")) == []
 
-# In test_insert_null_key() above we verified that a null value is not
-# allowed as a key column - neither as a partition key nor clustering key.
-# An *empty string*, in contrast, is NOT a null. So ideally should have been
-# allowed as a key. However, for undocumented reasons (having to do with how
-# partition keys are serialized in sstables), an empty string is NOT allowed
-# as a partition key. It is allowed as a clustering key, though. In the
-# following test we confirm those things.
-# See issue #9352.
-def test_insert_empty_string_key(cql, table1):
-    s = unique_key_string()
-    # An empty-string clustering *is* allowed:
-    cql.execute(f"INSERT INTO {table1} (p,c,v) VALUES ('{s}', '', 'cat')")
-    assert list(cql.execute(f"SELECT v FROM {table1} WHERE p='{s}' AND c=''")) == [('cat',)]
-    # But an empty-string partition key is *not* allowed, with a specific
-    # error that a "Key may not be empty":
-    with pytest.raises(InvalidRequest, match='Key may not be empty'):
-        cql.execute(f"INSERT INTO {table1} (p,c,v) VALUES ('', '{s}', 'dog')")
+# Similarly, inequality restrictions with NULL, like > NULL, also match
+# nothing.
+def test_filtering_inequality_null(cassandra_bug, cql, table1):
+    p = unique_key_string()
+    cql.execute(f"INSERT INTO {table1} (p,c,i) VALUES ('{p}', '1', 7)")
+    cql.execute(f"INSERT INTO {table1} (p,c,i) VALUES ('{p}', '2', -3)")
+    cql.execute(f"INSERT INTO {table1} (p,c) VALUES ('{p}', '3')")
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND i>NULL ALLOW FILTERING")) == []
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND i>=NULL ALLOW FILTERING")) == []
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND i<NULL ALLOW FILTERING")) == []
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND i<=NULL ALLOW FILTERING")) == []
 
-# test_update_empty_string_key() is the same as test_insert_empty_string_key()
-# just uses an UPDATE instead of INSERT. It turns out that exactly the cases
-# which are allowed by INSERT are also allowed by UPDATE.
-def test_update_empty_string_key(cql, table1):
-    s = unique_key_string()
-    # An empty-string clustering *is* allowed:
-    cql.execute(f"UPDATE {table1} SET v = 'cat' WHERE p='{s}' AND c=''")
-    assert list(cql.execute(f"SELECT v FROM {table1} WHERE p='{s}' AND c=''")) == [('cat',)]
-    # But an empty-string partition key is *not* allowed, with a specific
-    # error that a "Key may not be empty":
-    with pytest.raises(InvalidRequest, match='Key may not be empty'):
-        cql.execute(f"UPDATE {table1} SET v = 'dog' WHERE p='' AND c='{s}'")
+# Similarly, CONTAINS restriction with NULL should also match nothing.
+# Reproduces #10359.
+@pytest.mark.xfail(reason="Issue #10359")
+def test_filtering_contains_null(cassandra_bug, cql, table1):
+    p = unique_key_string()
+    cql.execute(f"INSERT INTO {table1} (p,c,s) VALUES ('{p}', '1', {{1, 2}})")
+    cql.execute(f"INSERT INTO {table1} (p,c,s) VALUES ('{p}', '2', {{3, 4}})")
+    cql.execute(f"INSERT INTO {table1} (p,c) VALUES ('{p}', '3')")
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND s CONTAINS NULL ALLOW FILTERING")) == []
 
-# ... and same for DELETE
-def test_delete_empty_string_key(cql, table1):
-    s = unique_key_string()
-    # An empty-string clustering *is* allowed:
-    cql.execute(f"DELETE FROM {table1} WHERE p='{s}' AND c=''")
-    # But an empty-string partition key is *not* allowed, with a specific
-    # error that a "Key may not be empty":
-    with pytest.raises(InvalidRequest, match='Key may not be empty'):
-        cql.execute(f"DELETE FROM {table1} WHERE p='' AND c='{s}'")
+# Similarly, CONTAINS KEY restriction with NULL should also match nothing.
+# Reproduces #10359.
+@pytest.mark.xfail(reason="Issue #10359")
+def test_filtering_contains_key_null(cassandra_bug, cql, table1):
+    p = unique_key_string()
+    cql.execute(f"INSERT INTO {table1} (p,c,m) VALUES ('{p}', '1', {{1: 2}})")
+    cql.execute(f"INSERT INTO {table1} (p,c,m) VALUES ('{p}', '2', {{3: 4}})")
+    cql.execute(f"INSERT INTO {table1} (p,c) VALUES ('{p}', '3')")
+    assert list(cql.execute(f"SELECT c FROM {table1} WHERE p='{p}' AND m CONTAINS KEY NULL ALLOW FILTERING")) == []
 
-# Another test like test_insert_empty_string_key() just using an INSERT JSON
-# instead of a regular INSERT. Because INSERT JSON takes a different code path
-# from regular INSERT, we need the emptiness test in yet another place.
-# Reproduces issue #9853 (the empty-string partition key was allowed, and
-# actually inserted into the table.)
-def test_insert_json_empty_string_key(cql, table1):
-    s = unique_key_string()
-    # An empty-string clustering *is* allowed:
-    cql.execute("""INSERT INTO %s JSON '{"p": "%s", "c": "", "v": "cat"}'""" % (table1, s))
-    assert list(cql.execute(f"SELECT v FROM {table1} WHERE p='{s}' AND c=''")) == [('cat',)]
-    # But an empty-string partition key is *not* allowed, with a specific
-    # error that a "Key may not be empty":
-    with pytest.raises(InvalidRequest, match='Key may not be empty'):
-        cql.execute("""INSERT INTO %s JSON '{"p": "", "c": "%s", "v": "cat"}'""" % (table1, s))
+# The above tests test_filtering_eq_null and test_filtering_inequality_null
+# have WHERE x=NULL or x>NULL where "x" is a regular column. Such a
+# comparison requires ALLOW FILTERING for non-NULL parameters, so we also
+# require it for NULL. Unlike the previous tests, this one also passed on
+# Cassandra.
+def test_filtering_null_comparison_no_filtering(cql, table1):
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND i=NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND i>NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND i>=NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND i<NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND i<=NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND s CONTAINS NULL")
+    with pytest.raises(InvalidRequest, match='ALLOW FILTERING'):
+        cql.execute(f"SELECT c FROM {table1} WHERE p='x' AND m CONTAINS KEY NULL")
 
-# Although an empty string is not allowed as a partition key (as tested
-# above by test_empty_string_key()), it turns out that in a *compound*
-# partition key (with multiple partition-key columns), any or all of them
-# may be empty strings! This inconsistency is known in Cassandra, but
-# deemed unworthy to fix - see:
-#    https://issues.apache.org/jira/browse/CASSANDRA-11487
-def test_empty_string_key2(cql, test_keyspace):
-    schema = 'p1 text, p2 text, c text, v text, primary key ((p1, p2), c)'
-    with new_test_table(cql, test_keyspace, schema) as table:
-        cql.execute(f"INSERT INTO {table} (p1,p2,c,v) VALUES ('', '', '', 'cat')")
-        cql.execute(f"INSERT INTO {table} (p1,p2,c,v) VALUES ('x', 'y', 'z', 'dog')")
-        assert list(cql.execute(f"SELECT v FROM {table} WHERE p1='' AND p2='' AND c=''")) == [('cat',)]
+# Test that null subscript m[null] is caught as the appropriate invalid-
+# request error, and not some internal server error as we had in #10361.
+@pytest.mark.xfail(reason="Issue #10361")
+def test_map_subscript_null(cql, table1):
+    with pytest.raises(InvalidRequest, match='null'):
+        cql.execute(f"SELECT p FROM {table1} WHERE m[null] = 3 ALLOW FILTERING")
+    with pytest.raises(InvalidRequest, match='null'):
+        cql.execute(cql.prepare(f"SELECT p FROM {table1} WHERE m[?] = 3 ALLOW FILTERING"), [None])

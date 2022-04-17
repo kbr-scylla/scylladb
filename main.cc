@@ -691,11 +691,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
                 auto ip = utils::resolve(cfg->prometheus_address || cfg->listen_address, family, preferred).get0();
 
-                //FIXME discarded future
                 prometheus::config pctx;
                 pctx.metric_help = "Scylla server statistics";
                 pctx.prefix = cfg->prometheus_prefix();
-                (void)prometheus::start(prometheus_server, pctx);
+                prometheus::start(prometheus_server, pctx).get();
                 with_scheduling_group(maintenance_scheduling_group, [&] {
                   return prometheus_server.listen(socket_address{ip, cfg->prometheus_port()}).handle_exception([&ip, &cfg] (auto ep) {
                     startlog.error("Could not start Prometheus API server on {}:{}: {}", ip, cfg->prometheus_port(), ep);
@@ -758,9 +757,16 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 startlog.error("audit creation failed: {}", e);
             }).get();
             supervisor::notify("creating snitch");
-            i_endpoint_snitch::create_snitch(cfg->endpoint_snitch()).get();
-            // #293 - do not stop anything
-            // engine().at_exit([] { return i_endpoint_snitch::stop_snitch(); });
+            snitch_config snitch_cfg;
+            snitch_cfg.name = cfg->endpoint_snitch();
+            sharded<locator::snitch_ptr>& snitch = i_endpoint_snitch::snitch_instance();
+            snitch.start(snitch_cfg).get();
+            auto stop_snitch = defer_verbose_shutdown("snitch", [&snitch] {
+                snitch.stop().get();
+            });
+            snitch.invoke_on_all(&locator::snitch_ptr::start).get();
+            // #293 - do not stop anything (unless snitch.on_all(start) fails)
+            stop_snitch->cancel();
 
             auto api_addr = utils::resolve(cfg->api_address || cfg->rpc_address, family, preferred).get0();
             supervisor::notify("starting API server");
@@ -1111,8 +1117,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             api::set_server_storage_proxy(ctx, ss).get();
             api::set_server_load_sstable(ctx).get();
             static seastar::sharded<memory_threshold_guard> mtg;
-            //FIXME: discarded future
-            (void)mtg.start(cfg->large_memory_allocation_warning_threshold());
+            mtg.start(cfg->large_memory_allocation_warning_threshold()).get();
             supervisor::notify("initializing migration manager RPC verbs");
             mm.invoke_on_all([] (auto& mm) {
                 mm.init_messaging_service();
@@ -1164,7 +1169,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // both)
             supervisor::notify("starting messaging service");
             auto max_memory_repair = memory::stats().total_memory() * 0.1;
-            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(proxy), std::ref(bm), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(mm), max_memory_repair).get();
+            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(proxy), std::ref(bm), std::ref(sys_dist_ks), std::ref(sys_ks), std::ref(view_update_generator), std::ref(mm), max_memory_repair).get();
             auto stop_repair_service = defer_verbose_shutdown("repair service", [&repair] {
                 repair.stop().get();
             });
@@ -1265,6 +1270,20 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return ss.local().init_server(qp.local());
             }).get();
+
+            // Raft group0 can be joined before we wait for gossip to settle
+            // if one of the following applies:
+            //  - it's a fresh node start (in a fresh cluster)
+            //  - it's a restart of an existing node, which have already joined some group0
+            const bool can_join_with_raft =
+                cfg->check_experimental(db::experimental_features_t::RAFT) && (
+                    sys_ks.local().bootstrap_needed() ||
+                    !sys_ks.local().get_raft_group0_id().get().is_null());
+            if (can_join_with_raft) {
+                with_scheduling_group(maintenance_scheduling_group, [&ss] {
+                    return ss.local().join_group0();
+                }).get();
+            }
 
             auto schema_change_announce = db.local().observable_schema_version().observe([&mm] (utils::UUID schema_version) mutable {
                 mm.local().passive_announce(std::move(schema_version));
