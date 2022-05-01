@@ -1501,8 +1501,8 @@ future<> table::clear() {
             _commitlog->discard_completed_segments(_schema->id(), t->get_and_discard_rp_set());
         }
     }
-    co_await _memtables->clear_and_add();
-    co_await _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
+    _memtables->clear_and_add();
+    return _cache.invalidate(row_cache::external_updater([] { /* There is no underlying mutation source */ }));
 }
 
 // NOTE: does not need to be futurized, but might eventually, depending on
@@ -1672,7 +1672,7 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
     db::view::view_update_builder builder = co_await db::view::make_view_update_builder(
             base,
             std::move(views),
-            make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), {std::move(m)}),
+            make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), std::move(m)),
             std::move(existings),
             now);
 

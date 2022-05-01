@@ -16,6 +16,7 @@
 #include "db/config.hh"
 #include "to_string.hh"
 #include "cql3/functions/functions.hh"
+#include "cql3/functions/user_function.hh"
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/reactor.hh>
@@ -52,6 +53,7 @@
 
 #include "data_dictionary/user_types_metadata.hh"
 #include <seastar/core/shared_ptr_incomplete.hh>
+#include <seastar/coroutine/as_future.hh>
 #include <seastar/util/memory_diagnostics.hh>
 
 #include "locator/abstract_replication_strategy.hh"
@@ -62,6 +64,8 @@
 #include "replica/data_dictionary_impl.hh"
 #include "readers/multi_range.hh"
 #include "readers/multishard.hh"
+
+#include "lang/wasm.hh"
 
 using namespace std::chrono_literals;
 using namespace db;
@@ -853,20 +857,6 @@ database::init_commitlog() {
     });
 }
 
-unsigned
-database::shard_of(const mutation& m) {
-    return dht::shard_of(*m.schema(), m.token());
-}
-
-unsigned
-database::shard_of(const frozen_mutation& m) {
-    // FIXME: This lookup wouldn't be necessary if we
-    // sent the partition key in legacy form or together
-    // with token.
-    schema_ptr schema = find_schema(m.column_family_id());
-    return dht::shard_of(*schema, dht::get_token(*schema, m.key()));
-}
-
 future<> database::update_keyspace(sharded<service::storage_proxy>& proxy, const sstring& name) {
     auto v = co_await db::schema_tables::read_schema_partition_for_keyspace(proxy, db::schema_tables::KEYSPACES, name);
     auto& ks = find_keyspace(name);
@@ -947,10 +937,9 @@ bool database::update_column_family(schema_ptr new_schema) {
     return columns_changed;
 }
 
-future<> database::remove(const column_family& cf) noexcept {
+void database::remove(const table& cf) noexcept {
     auto s = cf.schema();
     auto& ks = find_keyspace(s->ks_name());
-    co_await _querier_cache.evict_all_for_table(s->id());
     _column_families.erase(s->id());
     ks.metadata()->remove_column_family(s);
     _ks_cf_to_uuid.erase(std::make_pair(s->ks_name(), s->cf_name()));
@@ -974,13 +963,13 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
         on_internal_error(dblog, fmt::format("drop_column_family {}.{}: UUID={} not found", ks_name, cf_name, uuid));
     }
     dblog.debug("Dropping {}.{}", ks_name, cf_name);
-    co_await remove(*cf);
+    remove(*cf);
     cf->clear_views();
-    co_return co_await cf->await_pending_ops().then([this, &ks, cf, tsf = std::move(tsf), snapshot] {
-        return truncate(ks, *cf, std::move(tsf), snapshot).finally([this, cf] {
-            return cf->stop();
-        });
-    }).finally([cf] {});
+    co_await cf->await_pending_ops();
+    co_await _querier_cache.evict_all_for_table(cf->schema()->id());
+    auto f = co_await coroutine::as_future(truncate(ks, *cf, std::move(tsf), snapshot));
+    co_await cf->stop();
+    f.get(); // re-throw exception from truncate() if any
 }
 
 const utils::UUID& database::find_uuid(std::string_view ks, std::string_view cf) const {
@@ -1607,16 +1596,6 @@ lw_shared_ptr<memtable> memtable_list::new_memtable() {
     return make_lw_shared<memtable>(_current_schema(), *_dirty_memory_manager, _table_stats, this, _compaction_scheduling_group);
 }
 
-future<> memtable_list::clear_and_add() {
-    auto mt = new_memtable();
-    for (auto& smt : _memtables) {
-        co_await std::move(smt)->clear_gently();
-    }
-    // emplace_back might throw only if _memtables was empty
-    // on entry.
-    _memtables.emplace_back(std::move(mt));
-}
-
 } // namespace replica
 
 future<flush_permit> flush_permit::reacquire_sstable_write_permit() && {
@@ -1807,9 +1786,6 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     // initied from datadir.
     auto uuid = m.column_family_id();
     auto& cf = find_column_family(uuid);
-    if (!s->is_synced()) {
-        throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
-    }
 
     sync = sync || db::commitlog::force_sync(s->wait_for_sync_to_commitlog());
 
@@ -1875,12 +1851,18 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
         update_write_metrics_for_timed_out_write();
         return make_exception_future<>(timed_out_error{});
     }
+    if (!s->is_synced()) {
+        on_internal_error(dblog, format("attempted to apply mutation using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
+    }
     return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync));
 }
 
 future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply hint {}", m.pretty_printer(s));
+    }
+    if (!s->is_synced()) {
+        on_internal_error(dblog, format("attempted to apply hint using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
     }
     return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, tr_state = std::move(tr_state), timeout] () mutable {
         return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no));

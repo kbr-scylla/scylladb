@@ -2168,16 +2168,16 @@ sstable::make_reader(
         // The kl reader does not support reversed queries at all.
         // Perform a forward query on it, then reverse the result.
         // Note: we can pass a half-reversed slice, the kl reader performs an unreversed query nevertheless.
-        auto rd = make_reversing_reader(upgrade_to_v2(kl::make_reader(shared_from_this(), schema->make_reversed(), std::move(permit),
-                    range, slice, pc, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr, mon)), max_result_size);
+        auto rd = make_reversing_reader(kl::make_reader(shared_from_this(), schema->make_reversed(), std::move(permit),
+                    range, slice, pc, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr, mon), max_result_size);
         if (fwd) {
             rd = make_forwardable(std::move(rd));
         }
         return rd;
     }
 
-    return upgrade_to_v2(kl::make_reader(shared_from_this(), schema, std::move(permit),
-                range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon));
+    return kl::make_reader(shared_from_this(), schema, std::move(permit),
+                range, slice, pc, std::move(trace_state), fwd, fwd_mr, mon);
 }
 
 flat_mutation_reader_v2
@@ -2190,7 +2190,7 @@ sstable::make_crawling_reader(
     if (_version >= version_types::mc) {
         return mx::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), pc, std::move(trace_state), monitor);
     }
-    return upgrade_to_v2(kl::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), pc, std::move(trace_state), monitor));
+    return kl::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), pc, std::move(trace_state), monitor);
 }
 
 static entry_descriptor make_entry_descriptor(sstring sstdir, sstring fname, sstring* const provided_ks, sstring* const provided_cf) {
@@ -2660,14 +2660,15 @@ future<> sstable::close_files() {
     });
 }
 
-static inline sstring dirname(const sstring& fname) {
+static inline sstring parent_path(const sstring& fname) {
     return fs::canonical(fs::path(fname)).parent_path().string();
 }
 
+// Must be called on a directory.
 future<>
-fsync_directory(const io_error_handler& error_handler, sstring fname) {
+fsync_directory(const io_error_handler& error_handler, sstring dirname) {
     return ::sstable_io_check(error_handler, [&] {
-        return open_checked_directory(error_handler, dirname(fname)).then([] (file f) {
+        return open_checked_directory(error_handler, dirname).then([] (file f) {
             return do_with(std::move(f), [] (file& f) {
                 return f.flush().then([&f] {
                     return f.close();
@@ -2679,7 +2680,6 @@ fsync_directory(const io_error_handler& error_handler, sstring fname) {
 
 static future<>
 remove_by_toc_name(sstring sstable_toc_name) {
-    auto dir = dirname(sstable_toc_name);
     sstring prefix = sstable_toc_name.substr(0, sstable_toc_name.size() - sstable_version_constants::TOC_SUFFIX.size());
     sstring new_toc_name = prefix + sstable_version_constants::TEMPORARY_TOC_SUFFIX;
 
@@ -2687,7 +2687,7 @@ remove_by_toc_name(sstring sstable_toc_name) {
     if (co_await sstable_io_check(sstable_write_error_handler, file_exists, sstable_toc_name)) {
         // If new_toc_name exists it will be atomically replaced.  See rename(2)
         co_await sstable_io_check(sstable_write_error_handler, rename_mirrored_file, sstable_toc_name, new_toc_name);
-        co_await fsync_directory(sstable_write_error_handler, dir);
+        co_await fsync_directory(sstable_write_error_handler, parent_path(new_toc_name));
     } else {
         if (!co_await sstable_io_check(sstable_write_error_handler, file_exists, new_toc_name)) {
             sstlog.warn("Unable to delete {} because it doesn't exist.", sstable_toc_name);
@@ -2729,7 +2729,7 @@ remove_by_toc_name(sstring sstable_toc_name) {
             sstlog.debug("Forgiving ENOENT when deleting file {}", fname);
         }
     });
-    co_await fsync_directory(sstable_write_error_handler, dir);
+    co_await fsync_directory(sstable_write_error_handler, parent_path(new_toc_name));
     co_await sstable_io_check(sstable_write_error_handler, remove_mirrored_file, new_toc_name);
 }
 
@@ -3020,10 +3020,10 @@ delete_atomically(std::vector<shared_sstable> ssts) {
 future<> replay_pending_delete_log(sstring pending_delete_log) {
     sstlog.debug("Reading pending_deletes log file {}", pending_delete_log);
     return seastar::async([pending_delete_log = std::move(pending_delete_log)] {
-        sstring pending_delete_dir = dirname(pending_delete_log);
+        sstring pending_delete_dir = parent_path(pending_delete_log);
         assert(sstable::is_pending_delete_dir(fs::path(pending_delete_dir)));
         try {
-            auto sstdir = dirname(pending_delete_dir);
+            auto sstdir = parent_path(pending_delete_dir);
             auto f = open_file_dma(pending_delete_log, open_flags::ro).get0();
             auto size = f.size().get0();
             auto in = make_file_input_stream(f);

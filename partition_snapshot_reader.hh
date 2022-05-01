@@ -9,14 +9,14 @@
 #pragma once
 
 #include "partition_version.hh"
-#include "readers/flat_mutation_reader.hh"
 #include "readers/flat_mutation_reader_v2.hh"
 #include "clustering_key_filter.hh"
 #include "query-request.hh"
 #include <boost/range/algorithm/heap_algorithm.hpp>
+#include <any>
 
 template <bool Reversing, typename Accounter>
-class partition_snapshot_flat_reader : public flat_mutation_reader::impl, public Accounter {
+class partition_snapshot_flat_reader : public flat_mutation_reader_v2::impl, public Accounter {
     using rows_iter_type = std::conditional_t<Reversing,
           mutation_partition::rows_type::const_reverse_iterator,
           mutation_partition::rows_type::const_iterator>;
@@ -319,7 +319,7 @@ class partition_snapshot_flat_reader : public flat_mutation_reader::impl, public
 private:
     // Keeps shared pointer to the container we read mutation from to make sure
     // that its lifetime is appropriately extended.
-    boost::any _container_guard;
+    std::any _container_guard;
 
     // Each range from _ck_ranges are taken to be in snapshot clustering key
     // order, i.e. given a comparator derived from snapshot schema, for each ck_range from
@@ -338,6 +338,8 @@ private:
     std::optional<position_in_partition> _last_rts;
     mutation_fragment_opt _next_row;
 
+    range_tombstone_change_generator _rtc_gen;
+
     lsa_partition_reader _reader;
     bool _static_row_done = false;
     bool _no_more_rows_in_current_range = false;
@@ -349,7 +351,7 @@ private:
     void push_static_row() {
         auto sr = _reader.get_static_row();
         if (!sr.empty()) {
-            emplace_mutation_fragment(mutation_fragment(*_schema, _permit, std::move(sr)));
+            emplace_mutation_fragment(mutation_fragment_v2(*_schema, _permit, std::move(sr)));
         }
     }
 
@@ -396,7 +398,19 @@ private:
         }
     }
 
-    void emplace_mutation_fragment(mutation_fragment&& mfopt) {
+    void emplace_mutation_fragment(mutation_fragment&& mf) {
+        _rtc_gen.flush(mf.position(), [this] (range_tombstone_change&& rtc) {
+            emplace_mutation_fragment(mutation_fragment_v2(*_schema, _permit, std::move(rtc)));
+        });
+        if (mf.is_clustering_row()) {
+            emplace_mutation_fragment(mutation_fragment_v2(*_schema, _permit, std::move(mf).as_clustering_row()));
+        } else {
+            assert(mf.is_range_tombstone());
+            _rtc_gen.consume(std::move(mf).as_range_tombstone());
+        }
+    }
+
+    void emplace_mutation_fragment(mutation_fragment_v2&& mfopt) {
         mfopt.visit(accounter());
         push_mutation_fragment(std::move(mfopt));
     }
@@ -404,7 +418,10 @@ private:
     void on_new_range() {
         if (_current_ck_range == _ck_range_end) {
             _end_of_stream = true;
-            push_mutation_fragment(mutation_fragment(*_schema, _permit, partition_end()));
+            _rtc_gen.flush(position_in_partition::after_all_clustered_rows(), [this] (range_tombstone_change&& rtc) {
+                emplace_mutation_fragment(mutation_fragment_v2(*_schema, _permit, std::move(rtc)));
+            });
+            push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, partition_end()));
         } else {
             _reader.reset_state(*_current_ck_range);
         }
@@ -442,13 +459,14 @@ public:
     partition_snapshot_flat_reader(schema_ptr s, reader_permit permit, dht::decorated_key dk, partition_snapshot_ptr snp,
                               query::clustering_key_filter_ranges crr, bool digest_requested,
                               logalloc::region& region, logalloc::allocating_section& read_section,
-                              boost::any pointer_to_container, Args&&... args)
+                              std::any pointer_to_container, Args&&... args)
         : impl(std::move(s), std::move(permit))
         , Accounter(std::forward<Args>(args)...)
         , _container_guard(std::move(pointer_to_container))
         , _ck_ranges(std::move(crr))
         , _current_ck_range(_ck_ranges.begin())
         , _ck_range_end(_ck_ranges.end())
+        , _rtc_gen(*_schema)
         , _reader(*_schema, _permit, std::move(snp), region, read_section, digest_requested)
     {
         fill_opt_reversed_range();
@@ -498,12 +516,12 @@ make_partition_snapshot_flat_reader(schema_ptr s,
                                     bool digest_requested,
                                     logalloc::region& region,
                                     logalloc::allocating_section& read_section,
-                                    boost::any pointer_to_container,
+                                    std::any pointer_to_container,
                                     streamed_mutation::forwarding fwd,
                                     Args&&... args)
 {
-    auto res = upgrade_to_v2(make_flat_mutation_reader<partition_snapshot_flat_reader<Reversing, Accounter>>(std::move(s), std::move(permit), std::move(dk),
-            snp, std::move(crr), digest_requested, region, read_section, std::move(pointer_to_container), std::forward<Args>(args)...));
+    auto res = make_flat_mutation_reader_v2<partition_snapshot_flat_reader<Reversing, Accounter>>(std::move(s), std::move(permit), std::move(dk),
+            snp, std::move(crr), digest_requested, region, read_section, std::move(pointer_to_container), std::forward<Args>(args)...);
     if (fwd) {
         return make_forwardable(std::move(res)); // FIXME: optimize
     } else {

@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include "seastar/include/seastar/testing/perf_tests.hh"
+#include <seastar/testing/perf_tests.hh>
 #include <seastar/testing/test_runner.hh>
 
 #include <random>

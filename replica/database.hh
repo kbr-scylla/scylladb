@@ -226,7 +226,15 @@ public:
 
     // Clears the active memtable and adds a new, empty one.
     // Exception safe.
-    future<> clear_and_add();
+    void clear_and_add() {
+        auto mt = new_memtable();
+        _memtables.clear();
+        // emplace_back might throw only if _memtables was empty
+        // on entry. Otherwise, we rely on clear() not to release
+        // the vector capacity (See https://en.cppreference.com/w/cpp/container/vector/clear)
+        // and lw_shared_ptr being nothrow move constructible.
+        _memtables.emplace_back(std::move(mt));
+    }
 
     size_t size() const {
         return _memtables.size();
@@ -1365,6 +1373,7 @@ private:
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
     future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, locator::effective_replication_map_factory& erm_factory, bool is_bootstrap, system_keyspace system);
+    void remove(const table&) noexcept;
 public:
     static utils::UUID empty_version;
 
@@ -1478,8 +1487,6 @@ public:
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
-    unsigned shard_of(const mutation& m);
-    unsigned shard_of(const frozen_mutation& m);
     future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
                                                                   const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
                                                                   db::timeout_clock::time_point timeout);
@@ -1573,7 +1580,6 @@ public:
 
     bool update_column_family(schema_ptr s);
     future<> drop_column_family(const sstring& ks_name, const sstring& cf_name, timestamp_func, bool with_snapshot = true);
-    future<> remove(const column_family&) noexcept;
 
     const logalloc::region_group& dirty_memory_region_group() const {
         return _dirty_memory_manager.region_group();
