@@ -159,10 +159,10 @@ template<typename... Args>
 future<::shared_ptr<cql3::untyped_result_set>> replicated_key_provider::query(sstring q, Args&& ...params) {
     return _ctxt.get_storage_service().local().get_operation_mode().then([this, t = std::make_tuple<sstring, Args...>(std::move(q), std::forward<Args>(params)...)](service::storage_service::mode mode) {
         auto query_internal = [this](const sstring& q, auto&& ...params) {
-            return _ctxt.get_query_processor().local().execute_internal(q, { (params)...});
+            return _ctxt.get_query_processor().local().execute_internal(q, { (params)...}, cql3::query_processor::cache_internal::no);
         };
         auto query_normal = [this](const sstring& q, auto&& ...params) {
-            return _ctxt.get_query_processor().local().execute_internal(q, db::consistency_level::ONE, rkp_db_query_state(), { (params)...}, false);
+            return _ctxt.get_query_processor().local().execute_internal(q, db::consistency_level::ONE, rkp_db_query_state(), { (params)...}, cql3::query_processor::cache_internal::no);
         };
         return mode == service::storage_service::mode::STARTING ? std::apply(query_internal, t) : std::apply(query_normal, t);
     });

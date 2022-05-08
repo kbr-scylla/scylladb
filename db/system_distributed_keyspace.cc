@@ -346,7 +346,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
          return make_ready_future<>();
      }
      if (_qp.db().get_config().create_service_levels_table &&
-             _qp.db().features().cluster_supports_workload_prioritization()) {
+             _qp.db().features().workload_prioritization) {
          return create_tables(workload_prioritization_tables());
      }
      return make_ready_future();
@@ -380,7 +380,7 @@ future<std::unordered_map<utils::UUID, sstring>> system_distributed_keyspace::vi
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             { std::move(ks_name), std::move(view_name) },
-            false).then([this] (::shared_ptr<cql3::untyped_result_set> cql_result) {
+            cql3::query_processor::cache_internal::no).then([this] (::shared_ptr<cql3::untyped_result_set> cql_result) {
         return boost::copy_range<std::unordered_map<utils::UUID, sstring>>(*cql_result
                 | boost::adaptors::transformed([] (const cql3::untyped_result_set::row& row) {
                     auto host_id = row.get_as<utils::UUID>("host_id");
@@ -397,7 +397,7 @@ future<> system_distributed_keyspace::start_view_build(sstring ks_name, sstring 
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             { std::move(ks_name), std::move(view_name), std::move(host_id), "STARTED" },
-            false).discard_result();
+            cql3::query_processor::cache_internal::no).discard_result();
 }
 
 future<> system_distributed_keyspace::finish_view_build(sstring ks_name, sstring view_name) const {
@@ -407,7 +407,7 @@ future<> system_distributed_keyspace::finish_view_build(sstring ks_name, sstring
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             { "SUCCESS", std::move(ks_name), std::move(view_name), std::move(host_id) },
-            false).discard_result();
+            cql3::query_processor::cache_internal::no).discard_result();
 }
 
 future<> system_distributed_keyspace::remove_view(sstring ks_name, sstring view_name) const {
@@ -416,7 +416,7 @@ future<> system_distributed_keyspace::remove_view(sstring ks_name, sstring view_
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             { std::move(ks_name), std::move(view_name) },
-            false).discard_result();
+            cql3::query_processor::cache_internal::no).discard_result();
 }
 
 /* We want to make sure that writes/reads to/from CDC management-related distributed tables
@@ -489,7 +489,7 @@ system_distributed_keyspace::insert_cdc_topology_description(
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { gen_id.ts, make_list_value(cdc_generation_description_type, prepare_cdc_generation_description(description)) },
-            false).discard_result();
+            cql3::query_processor::cache_internal::no).discard_result();
 }
 
 future<std::optional<cdc::topology_description>>
@@ -502,7 +502,7 @@ system_distributed_keyspace::read_cdc_topology_description(
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { gen_id.ts },
-            false
+            cql3::query_processor::cache_internal::no
     ).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) -> std::optional<cdc::topology_description> {
         if (cql_result->empty() || !cql_result->one().has("description")) {
             return {};
@@ -700,7 +700,7 @@ system_distributed_keyspace::create_cdc_desc(
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { CDC_TIMESTAMPS_KEY, time },
-            false).discard_result();
+            cql3::query_processor::cache_internal::no).discard_result();
 }
 
 future<bool>
@@ -745,7 +745,7 @@ system_distributed_keyspace::cdc_desc_exists(
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { CDC_TIMESTAMPS_KEY, streams_ts },
-            false
+            cql3::query_processor::cache_internal::no
     ).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) -> bool {
         return !cql_result->empty() && cql_result->one().has("time");
     });
@@ -758,7 +758,7 @@ system_distributed_keyspace::cdc_get_versioned_streams(db_clock::time_point not_
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { CDC_TIMESTAMPS_KEY },
-            false);
+            cql3::query_processor::cache_internal::no);
 
     std::vector<db_clock::time_point> timestamps;
     timestamps.reserve(timestamps_cql->size());
@@ -780,7 +780,7 @@ system_distributed_keyspace::cdc_get_versioned_streams(db_clock::time_point not_
                 quorum_if_many(ctx.num_token_owners),
                 internal_distributed_query_state(),
                 { ts },
-                false);
+                cql3::query_processor::cache_internal::no);
 
         utils::chunked_vector<cdc::stream_id> ids;
         for (auto& row : *streams_cql) {
@@ -801,7 +801,7 @@ system_distributed_keyspace::cdc_current_generation_timestamp(context ctx) {
             quorum_if_many(ctx.num_token_owners),
             internal_distributed_query_state(),
             { CDC_TIMESTAMPS_KEY },
-            false);
+            cql3::query_processor::cache_internal::no);
 
     co_return timestamp_cql->one().get_as<db_clock::time_point>("time");
 }
@@ -852,7 +852,7 @@ future<qos::service_levels_info> system_distributed_keyspace::get_service_levels
     return _qp.execute_internal(prepared_query,
             db::consistency_level::ONE,
             internal_distributed_query_state(),
-            {}, true).then([] (shared_ptr<cql3::untyped_result_set> result_set) {
+            cql3::query_processor::cache_internal::yes).then([] (shared_ptr<cql3::untyped_result_set> result_set) {
         qos::service_levels_info service_levels;
         for (auto &&row : *result_set) {
             try {
@@ -874,7 +874,7 @@ future<qos::service_levels_info> system_distributed_keyspace::get_service_levels
 
 future<qos::service_levels_info> system_distributed_keyspace::get_service_level(sstring service_level_name) const {
     static sstring prepared_query = format("SELECT * FROM {}.{} WHERE service_level = ?;", NAME, SERVICE_LEVELS);
-    return _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name}).then(
+    return _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name}, cql3::query_processor::cache_internal::yes).then(
                 [service_level_name = std::move(service_level_name)] (shared_ptr<cql3::untyped_result_set> result_set) {
         qos::service_levels_info service_levels;
         if (!result_set->empty()) {
@@ -897,7 +897,7 @@ future<qos::service_levels_info> system_distributed_keyspace::get_service_level(
 
 future<> system_distributed_keyspace::set_service_level(sstring service_level_name, qos::service_level_options slo) const {
     static sstring prepared_query = format("INSERT INTO {}.{} (service_level) VALUES (?);", NAME, SERVICE_LEVELS);
-    co_await _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name});
+    co_await _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name}, cql3::query_processor::cache_internal::no);
     auto to_data_value = [&] (const qos::service_level_options::timeout_type& tv) {
         return std::visit(overloaded_functor {
             [&] (const qos::service_level_options::unset_marker&) {
@@ -934,11 +934,13 @@ future<> system_distributed_keyspace::set_service_level(sstring service_level_na
                 internal_distributed_query_state(),
                 {to_data_value(slo.timeout),
                     workload,
-                    service_level_name});
+                    service_level_name},
+                cql3::query_processor::cache_internal::no);
     co_await _qp.execute_internal(format("UPDATE {}.{} SET shares = ? WHERE service_level = ?;", NAME, SERVICE_LEVELS),
                 db::consistency_level::ONE,
                 internal_distributed_query_state(),
-                {to_data_value_g(slo.shares), service_level_name});
+                {to_data_value_g(slo.shares), service_level_name},
+                cql3::query_processor::cache_internal::no);
 }
 
 future<> system_distributed_keyspace::drop_service_level(sstring service_level_name) const {
@@ -946,7 +948,7 @@ future<> system_distributed_keyspace::drop_service_level(sstring service_level_n
     return _qp.execute_internal(prepared_query,
             db::consistency_level::ONE,
             internal_distributed_query_state(),
-            {service_level_name}, true).discard_result();
+            {service_level_name}, cql3::query_processor::cache_internal::yes).discard_result();
 }
 
 }

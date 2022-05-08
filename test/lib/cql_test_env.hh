@@ -22,6 +22,7 @@
 #include "cql3/query_options_fwd.hh"
 #include "cql3/values.hh"
 #include "cql3/prepared_statements_cache.hh"
+#include "cql3/query_processor.hh"
 #include "bytes.hh"
 #include "schema.hh"
 #include "test/lib/eventually.hh"
@@ -86,6 +87,7 @@ public:
     // Scheduling groups are overwritten unconditionally, see get_scheduling_groups().
     std::optional<replica::database_config> dbcfg;
     std::set<sstring> disabled_features;
+    std::optional<cql3::query_processor::memory_config> qp_mcfg;
 
     cql_test_config();
     cql_test_config(const cql_test_config&);
@@ -157,6 +159,8 @@ public:
     virtual sharded<service::migration_manager>& migration_manager() = 0;
 
     virtual sharded<db::batchlog_manager>& batchlog_manager() = 0;
+
+    virtual sharded<gms::gossiper>& gossiper() = 0;
 
     virtual future<> refresh_client_state() = 0;
 

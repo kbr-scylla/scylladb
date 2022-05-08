@@ -51,8 +51,6 @@ constexpr std::chrono::milliseconds gossiper::INTERVAL;
 constexpr std::chrono::hours gossiper::A_VERY_LONG_TIME;
 constexpr int64_t gossiper::MAX_GENERATION_DIFFERENCE;
 
-distributed<gossiper> _the_gossiper;
-
 netw::msg_addr gossiper::get_msg_addr(inet_address to) const noexcept {
     return msg_addr{to, _default_cpuid};
 }
@@ -925,7 +923,7 @@ void gossiper::run() {
                     _shadow_unreachable_endpoints = _unreachable_endpoints;
                 }
 
-                _the_gossiper.invoke_on_all([this, live_endpoint_changed, unreachable_endpoint_changed, es = endpoint_state_map] (gossiper& local_gossiper) {
+                container().invoke_on_all([this, live_endpoint_changed, unreachable_endpoint_changed, es = endpoint_state_map] (gossiper& local_gossiper) {
                     // Don't copy gossiper(CPU0) maps into themselves!
                     if (this_shard_id() != 0) {
                         if (live_endpoint_changed) {
@@ -2325,19 +2323,12 @@ future<> gossiper::wait_for_gossip(std::chrono::milliseconds initial_delay, std:
 
 future<> gossiper::wait_for_gossip_to_settle() {
     auto force_after = _gcfg.skip_wait_for_gossip_to_settle;
-    auto do_enable_features = [this] {
-        return async([this] {
-            if (!std::exchange(_gossip_settled, true)) {
-               maybe_enable_features().get();
-            }
-        });
-    };
-    if (force_after == 0) {
-        return do_enable_features();
+    if (force_after != 0) {
+        co_await wait_for_gossip(GOSSIP_SETTLE_MIN_WAIT_MS, force_after);
     }
-    return wait_for_gossip(GOSSIP_SETTLE_MIN_WAIT_MS, force_after).then([this, do_enable_features] {
-        return do_enable_features();
-    });
+    if (!std::exchange(_gossip_settled, true)) {
+        co_await maybe_enable_features();
+    }
 }
 
 future<> gossiper::wait_for_range_setup() {

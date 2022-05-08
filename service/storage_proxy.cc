@@ -128,7 +128,7 @@ using fbu = utils::fb_utilities;
 
 static inline
 query::digest_algorithm digest_algorithm(service::storage_proxy& proxy) {
-    return proxy.features().cluster_supports_digest_for_null_values()
+    return proxy.features().digest_for_null_values
             ? query::digest_algorithm::xxHash
             : query::digest_algorithm::legacy_xxHash_without_null_digest;
 }
@@ -796,7 +796,7 @@ static future<> sleep_approx_50ms() {
  */
 future<paxos_response_handler::ballot_and_data>
 paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& contentions, bool is_write) {
-    if (!_proxy->features().cluster_supports_lwt()) {
+    if (!_proxy->features().lwt) {
         co_return coroutine::make_exception(std::runtime_error("The cluster does not support Paxos. Upgrade all the nodes to the version with LWT support."));
     }
 
@@ -1331,7 +1331,7 @@ endpoints_to_replica_ids(const locator::token_metadata& tm, const inet_address_v
 }
 
 query::max_result_size storage_proxy::get_max_result_size(const query::partition_slice& slice) const {
-    if (_features.cluster_supports_separate_page_size_and_safety_limit()) {
+    if (_features.separate_page_size_and_safety_limit) {
         auto max_size = _db.local().get_unlimited_query_max_result_size();
         return query::max_result_size(max_size.soft_limit, max_size.hard_limit, query::result_memory_limiter::maximum_result_size);
     }
@@ -2669,7 +2669,7 @@ future<> storage_proxy::send_to_endpoint(
 }
 
 future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {
-    if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
+    if (!_features.hinted_handoff_separate_connection) {
         return send_to_endpoint(
                 std::make_unique<shared_mutation>(std::move(fm_a_s)),
                 std::move(target),
@@ -2691,7 +2691,7 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
 }
 
 future<> storage_proxy::send_hint_to_all_replicas(frozen_mutation_and_schema fm_a_s) {
-    if (!_features.cluster_supports_hinted_handoff_separate_connection()) {
+    if (!_features.hinted_handoff_separate_connection) {
         std::array<mutation, 1> ms{fm_a_s.fm.unfreeze(fm_a_s.s)};
         return mutate_internal(std::move(ms), db::consistency_level::ALL, false, nullptr, empty_service_permit())
                 .then(utils::result_into_future<result<>>);
@@ -3334,7 +3334,7 @@ public:
     bool all_reached_end() const {
         return _all_reached_end;
     }
-    std::optional<reconcilable_result> resolve(schema_ptr schema, const query::read_command& cmd, uint64_t original_row_limit, uint64_t original_per_partition_limit,
+    future<std::optional<reconcilable_result>> resolve(schema_ptr schema, const query::read_command& cmd, uint64_t original_row_limit, uint64_t original_per_partition_limit,
             uint32_t original_partition_limit) {
         assert(_data_results.size());
 
@@ -3343,7 +3343,7 @@ public:
             // should happen only for range reads since single key reads will not
             // try to reconcile for CL=ONE
             auto& p = _data_results[0].result;
-            return reconcilable_result(p->row_count(), p->partitions(), p->is_short_read());
+            co_return reconcilable_result(p->row_count(), p->partitions(), p->is_short_read());
         }
 
         const auto& s = *schema;
@@ -3406,28 +3406,24 @@ public:
         reconciled_partitions.reserve(versions.size());
 
         // reconcile all versions
-        boost::range::transform(boost::make_iterator_range(versions.begin(), versions.end()), std::back_inserter(reconciled_partitions),
-                                [this, schema, original_per_partition_limit] (std::vector<version>& v) {
+        for (std::vector<version>& v : versions) {
             auto it = boost::range::find_if(v, [] (auto&& ver) {
                     return bool(ver.par);
             });
-#if __cplusplus <= 201703L
-            using mutation_ref = mutation&;
-#else
-            using mutation_ref = mutation&&;
-#endif
-            auto m = boost::accumulate(v, mutation(schema, it->par->mut().key()), [this, schema] (mutation_ref m, const version& ver) {
+            auto m = mutation(schema, it->par->mut().key());
+            for (const version& ver : v) {
                 if (ver.par) {
                     mutation_application_stats app_stats;
                     m.partition().apply(*schema, ver.par->mut().partition(), *schema, app_stats);
+                    co_await coroutine::maybe_yield();
                 }
-                return std::move(m);
-            });
+            }
             auto live_row_count = m.live_row_count();
             _total_live_count += live_row_count;
             _live_partition_count += !!live_row_count;
-            return mutation_and_live_row_count { std::move(m), live_row_count };
-        });
+            reconciled_partitions.emplace_back(mutation_and_live_row_count{ std::move(m), live_row_count });
+            co_await coroutine::maybe_yield();
+        }
         _partition_count = reconciled_partitions.size();
 
         bool has_diff = false;
@@ -3437,7 +3433,7 @@ public:
             const mutation& m = z.get<1>().mut;
             for (const version& v : z.get<0>()) {
                 auto diff = v.par
-                          ? m.partition().difference(schema, v.par->mut().unfreeze(schema).partition())
+                          ? m.partition().difference(schema, (co_await v.par->mut().unfreeze_gently(schema)).partition())
                           : mutation_partition(*schema, m.partition());
                 std::optional<mutation> mdiff;
                 if (!diff.empty()) {
@@ -3454,13 +3450,14 @@ public:
                         }
                     }
                 }
+                co_await coroutine::maybe_yield();
             }
         }
 
         if (has_diff) {
             if (got_incomplete_information(*schema, cmd, original_row_limit, original_per_partition_limit,
                                            original_partition_limit, reconciled_partitions, versions)) {
-                return {};
+                co_return std::nullopt;
             }
             // filter out partitions with empty diffs
             for (auto it = _diffs.begin(); it != _diffs.end();) {
@@ -3486,12 +3483,14 @@ public:
         // build reconcilable_result from reconciled data
         // traverse backwards since large keys are at the start
         utils::chunked_vector<partition> vec;
-        auto r = boost::accumulate(reconciled_partitions | boost::adaptors::reversed, std::ref(vec), [] (utils::chunked_vector<partition>& a, const mutation_and_live_row_count& m_a_rc) {
-            a.emplace_back(partition(m_a_rc.live_row_count, freeze(m_a_rc.mut)));
-            return std::ref(a);
-        });
+        vec.reserve(_partition_count);
+        for (auto it = reconciled_partitions.rbegin(); it != reconciled_partitions.rend(); it++) {
+            const mutation_and_live_row_count& m_a_rc = *it;
+            vec.emplace_back(partition(m_a_rc.live_row_count, freeze(m_a_rc.mut)));
+            co_await coroutine::maybe_yield();
+        }
 
-        return reconcilable_result(_total_live_count, std::move(r.get()), _is_short_read);
+        co_return reconcilable_result(_total_live_count, std::move(vec), _is_short_read);
     }
     auto total_live_count() const {
         return _total_live_count;
@@ -3685,15 +3684,22 @@ protected:
         make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end(), timeout);
 
         // Waited on indirectly.
-        (void)data_resolver->done().then_wrapped([this, exec, data_resolver, cmd = std::move(cmd), cl, timeout] (future<result<>> f) {
+        (void)data_resolver->done().then_wrapped([this, exec_ = std::move(exec), data_resolver_ = std::move(data_resolver), cmd_ = std::move(cmd), cl_ = cl, timeout_ = timeout] (future<result<>> f) mutable -> future<> {
+            // move captures to coroutine stack frame
+            // to prevent use after free
+            auto exec = std::move(exec_);
+            auto data_resolver = std::move(data_resolver_);
+            auto cmd = std::move(cmd_);
+            auto cl = cl_;
+            auto timeout = timeout_;
             try {
                 result<> res = f.get();
                 if (!res) {
                     _result_promise.set_value(std::move(res).as_failure());
                     on_read_resolved();
-                    return;
+                    co_return;
                 }
-                auto rr_opt = data_resolver->resolve(_schema, *cmd, original_row_limit(), original_per_partition_row_limit(), original_partition_limit()); // reconciliation happens here
+                auto rr_opt = co_await data_resolver->resolve(_schema, *cmd, original_row_limit(), original_per_partition_row_limit(), original_partition_limit()); // reconciliation happens here
 
                 // We generate a retry if at least one node reply with count live columns but after merge we have less
                 // than the total number of column we are interested in (which may be < count on a retry).
@@ -3703,7 +3709,7 @@ protected:
                                || data_resolver->live_partition_count() >= original_partition_limit())
                         && !data_resolver->any_partition_short_read()) {
                     auto result = ::make_foreign(::make_lw_shared<query::result>(
-                            to_data_query_result(std::move(*rr_opt), _schema, _cmd->slice, _cmd->get_row_limit(), cmd->partition_limit)));
+                            co_await to_data_query_result(std::move(*rr_opt), _schema, _cmd->slice, _cmd->get_row_limit(), cmd->partition_limit)));
                     // wait for write to complete before returning result to prevent multiple concurrent read requests to
                     // trigger repair multiple times and to prevent quorum read to return an old value, even after a quorum
                     // another read had returned a newer value (but the newer value had not yet been sent to the other replicas)
@@ -3989,6 +3995,7 @@ db::read_repair_decision storage_proxy::new_read_repair_decision(const schema& s
 
     auto cf = _db.local().find_column_family(schema).shared_from_this();
     inet_address_vector_replica_set target_replicas = db::filter_for_query(cl, ks, all_replicas, preferred_endpoints, repair_decision,
+            _gossiper,
             retry_type == speculative_retry::type::NONE ? nullptr : &extra_replica,
             _db.local().get_config().cache_hit_rate_read_balancing() ? &*cf : nullptr);
 
@@ -4215,7 +4222,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
     std::unordered_map<abstract_read_executor*, std::vector<dht::token_range>> ranges_per_exec;
     const auto tmptr = get_token_metadata_ptr();
 
-    if (_features.cluster_supports_range_scan_data_variant()) {
+    if (_features.range_scan_data_variant) {
         cmd->slice.options.set<query::partition_slice::option::range_scan_data_variant>();
     }
 
@@ -4238,7 +4245,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         dht::partition_range& range = *i;
         inet_address_vector_replica_set live_endpoints = get_live_sorted_endpoints(ks, end_token(range));
         inet_address_vector_replica_set merged_preferred_replicas = preferred_replicas_for_range(*i);
-        inet_address_vector_replica_set filtered_endpoints = filter_for_query(cl, ks, live_endpoints, merged_preferred_replicas, pcf);
+        inet_address_vector_replica_set filtered_endpoints = filter_for_query(cl, ks, live_endpoints, merged_preferred_replicas, _gossiper, pcf);
         std::vector<dht::token_range> merged_ranges{to_token_range(range)};
         ++i;
 
@@ -4250,7 +4257,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
             const auto current_range_preferred_replicas = preferred_replicas_for_range(*i);
             dht::partition_range& next_range = *i;
             inet_address_vector_replica_set next_endpoints = get_live_sorted_endpoints(ks, end_token(next_range));
-            inet_address_vector_replica_set next_filtered_endpoints = filter_for_query(cl, ks, next_endpoints, current_range_preferred_replicas, pcf);
+            inet_address_vector_replica_set next_filtered_endpoints = filter_for_query(cl, ks, next_endpoints, current_range_preferred_replicas, _gossiper, pcf);
 
             // Origin has this to say here:
             // *  If the current range right is the min token, we should stop merging because CFS.getRangeSlice
@@ -4295,20 +4302,21 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
                 break;
             }
 
-            inet_address_vector_replica_set filtered_merged = filter_for_query(cl, ks, merged, current_merged_preferred_replicas, pcf);
+            inet_address_vector_replica_set filtered_merged = filter_for_query(cl, ks, merged, current_merged_preferred_replicas, _gossiper, pcf);
 
             // Estimate whether merging will be a win or not
             if (!locator::i_endpoint_snitch::get_local_snitch_ptr()->is_worth_merging_for_range_query(filtered_merged, filtered_endpoints, next_filtered_endpoints)) {
                 break;
             } else if (pcf) {
                 // check that merged set hit rate is not to low
-                auto find_min = [pcf] (const inet_address_vector_replica_set& range) {
+                auto find_min = [&g = _gossiper, pcf] (const inet_address_vector_replica_set& range) {
                     struct {
+                        gms::gossiper& g;
                         replica::column_family* cf = nullptr;
                         float operator()(const gms::inet_address& ep) const {
-                            return float(cf->get_hit_rate(ep).rate);
+                            return float(cf->get_hit_rate(g, ep).rate);
                         }
-                    } ep_to_hr{pcf};
+                    } ep_to_hr{g, pcf};
                     return *boost::range::min_element(range | boost::adaptors::transformed(ep_to_hr));
                 };
                 auto merged = find_min(filtered_merged) * 1.2; // give merged set 20% boost
@@ -5374,7 +5382,7 @@ storage_proxy::query_nonsingular_data_locally(schema_ptr s, lw_shared_ptr<query:
         ret = co_await query_data_on_all_shards(_db, std::move(s), *local_cmd, ranges, opts, std::move(trace_state), timeout);
     } else {
         auto res = co_await query_mutations_on_all_shards(_db, s, *local_cmd, ranges, std::move(trace_state), timeout);
-        ret = rpc::tuple(make_foreign(make_lw_shared<query::result>(to_data_query_result(std::move(*std::get<0>(res)), std::move(s), local_cmd->slice,
+        ret = rpc::tuple(make_foreign(make_lw_shared<query::result>(co_await to_data_query_result(std::move(*std::get<0>(res)), std::move(s), local_cmd->slice,
                 local_cmd->get_row_limit(), local_cmd->partition_limit, opts))), std::get<1>(res));
     }
     co_return ret;

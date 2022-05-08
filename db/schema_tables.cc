@@ -2281,7 +2281,7 @@ static void make_update_indices_mutations(
     mutation indices_mutation(indexes(), partition_key::from_singular(*indexes(), old_table->ks_name()));
 
     auto diff = difference(old_table->all_indices(), new_table->all_indices());
-    bool new_token_column_computation = db.features().cluster_supports_correct_idx_token_in_secondary_index();
+    bool new_token_column_computation = db.features().correct_idx_token_in_secondary_index;
 
     // indices that are no longer needed
     for (auto&& name : diff.entries_only_on_left) {
@@ -3334,7 +3334,8 @@ future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_ver
     shared_ptr<cql3::untyped_result_set> results = co_await qctx->qp().execute_internal(
         GET_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
-        {table_id, version}
+        {table_id, version},
+        cql3::query_processor::cache_internal::no
     );
     if (results->empty()) {
         // If we don't have a stored column_mapping for an obsolete schema version
@@ -3374,7 +3375,8 @@ future<bool> column_mapping_exists(utils::UUID table_id, table_schema_version ve
     shared_ptr<cql3::untyped_result_set> results = co_await qctx->qp().execute_internal(
         GET_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
-        {table_id, version}
+        {table_id, version},
+        cql3::query_processor::cache_internal::yes
     );
     co_return !results->empty();
 }
@@ -3386,7 +3388,8 @@ future<> drop_column_mapping(utils::UUID table_id, table_schema_version version)
     co_await qctx->qp().execute_internal(
         DEL_COLUMN_MAPPING_QUERY,
         db::consistency_level::LOCAL_ONE,
-        {table_id, version});
+        {table_id, version},
+        cql3::query_processor::cache_internal::no);
 }
 
 } // namespace schema_tables
