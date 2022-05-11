@@ -1749,11 +1749,34 @@ class scylla_memory(gdb.Command):
         db = find_db()
 
         try:
+            # Per-scheduling-group semaphores are aggregated into single info - detailed info is available under `scylla read-stats`
+            read_concurrency_sem_info = dict()
+            read_concurrency_sem_info['_initial_resources'] = dict()
+            read_concurrency_sem_info['_resources'] = dict()
+            read_concurrency_sem_info['_wait_list'] = dict()
+            read_concurrency_sem_info['_initial_resources']['memory'] = 0
+            read_concurrency_sem_info['_resources']['memory'] = 0
+            read_concurrency_sem_info['_initial_resources']['count'] = 0
+            read_concurrency_sem_info['_resources']['count'] = 0
+            read_concurrency_sem_info['_wait_list']['_size'] = 0
+
+            for sem in [weighted_sem["sem"] for (_, weighted_sem) in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"])]:
+                read_concurrency_sem_info['_initial_resources']['memory'] += sem['_initial_resources']['memory']
+                read_concurrency_sem_info['_resources']['memory'] += sem['_resources']['memory']
+                read_concurrency_sem_info['_initial_resources']['count'] += sem['_initial_resources']['count']
+                read_concurrency_sem_info['_resources']['count'] += sem['_resources']['count']
+                read_concurrency_sem_info['_wait_list']['_size'] += sem['_wait_list']['_size']
+        except gdb.error:
+            # Read concurrency semaphore from before per-scheduling-group semaphores
+            read_concurrency_sem_info = db['_read_concurrency_sem']
+
+        semaphores = [('user_mem_str', read_concurrency_sem_info), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]
+        try:
             mem_stats = dict()
-            for key, sem in [('user_mem_str', db['_read_concurrency_sem']), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]:
+            for key, sem in semaphores:
                 mem_stats[key] = '{:>13}/{:>13} B'.format(int(sem['_initial_resources']['memory'] - sem['_resources']['memory']), int(sem['_initial_resources']['memory']))
         except gdb.error: # <= 4.2 compatibility
-            for key, sem in [('user_mem_str', db['_read_concurrency_sem']), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]:
+            for key, sem in semaphores:
                 mem_stats[key] = 'remaining mem: {:>13} B'.format(int(sem['_resources']['memory']))
 
         database_typename = lookup_type(['replica::database', 'database'])[1].name
@@ -1763,9 +1786,9 @@ class scylla_memory(gdb.Command):
                 '    streaming sstable reads: {streaming_sst_rd_count:>3}/{streaming_sst_rd_max_count:>3}, {streaming_mem_str}, queued: {streaming_sst_rd_queued}\n'
                 '    system sstable reads:    {system_sst_rd_count:>3}/{system_sst_rd_max_count:>3}, {system_mem_str}, queued: {system_sst_rd_queued}\n'
                 .format(
-                        user_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_concurrent_reads')) - int(db['_read_concurrency_sem']['_resources']['count']),
+                        user_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_concurrent_reads')) - int(read_concurrency_sem_info['_resources']['count']),
                         user_sst_rd_max_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_concurrent_reads')),
-                        user_sst_rd_queued=int(db['_read_concurrency_sem']['_wait_list']['_size']),
+                        user_sst_rd_queued=int(read_concurrency_sem_info['_wait_list']['_size']),
                         streaming_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_streaming_concurrent_reads')) - int(db['_streaming_concurrency_sem']['_resources']['count']),
                         streaming_sst_rd_max_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_streaming_concurrent_reads')),
                         streaming_sst_rd_queued=int(db['_streaming_concurrency_sem']['_wait_list']['_size']),
