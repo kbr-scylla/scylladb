@@ -4480,11 +4480,17 @@ class scylla_read_stats(gdb.Command):
             semaphores = [gdb.parse_and_eval(arg) for arg in args.split(' ')]
         else:
             db = find_db()
-            semaphores = [db["_read_concurrency_sem"], db["_streaming_concurrency_sem"], db["_system_read_concurrency_sem"]]
+            semaphores = [db["_streaming_concurrency_sem"], db["_system_read_concurrency_sem"]]
+            for sem_name in ["_compaction_concurrency_sem", "_read_concurrency_sem"]:
+                try:
+                    semaphores.append(db[sem_name])
+                except gdb.error:
+                    # 2020.1 compatibility
+                    pass
             try:
-                semaphores.append(db["_compaction_concurrency_sem"])
+                semaphores += [weighted_sem["sem"] for (_, weighted_sem) in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"])]
             except gdb.error:
-                # 2020.1 compatibility
+                # compatibility with code before per-scheduling-group semaphore
                 pass
 
         for semaphore in semaphores:
