@@ -1,7 +1,4 @@
 /*
- */
-
-/*
  * SPDX-License-Identifier: (ScyllaDB-Proprietary and Apache-2.0)
  */
 

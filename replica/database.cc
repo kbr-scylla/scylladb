@@ -19,6 +19,7 @@
 #include "cql3/functions/user_function.hh"
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/metrics.hh>
 #include <boost/algorithm/string/erase.hpp>
@@ -305,6 +306,24 @@ void database::setup_scylla_memory_diagnostics_producer() {
     });
 }
 
+class db_user_types_storage : public data_dictionary::dummy_user_types_storage {
+    const replica::database* _db = nullptr;
+public:
+    db_user_types_storage(const database& db) noexcept : _db(&db) {}
+
+    virtual const user_types_metadata& get(const sstring& ks) const override {
+        if (_db == nullptr) {
+            return dummy_user_types_storage::get(ks);
+        }
+
+        return _db->find_keyspace(ks).metadata()->user_types();
+    }
+
+    void deactivate() noexcept {
+        _db = nullptr;
+    }
+};
+
 reader_concurrency_semaphore&
 database::read_concurrency_sem() {
     reader_concurrency_semaphore* sem = _reader_concurrency_semaphores_group.get_or_null(current_scheduling_group());
@@ -331,6 +350,7 @@ database::read_concurrency_sem() {
 database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
         abort_source& as, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
     : _stats(make_lw_shared<db_stats>())
+    , _user_types(std::make_shared<db_user_types_storage>(*this))
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
     // Allow system tables a pool of 10 MB memory to write, but never block on other regions.
@@ -396,6 +416,14 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
 
 const db::extensions& database::extensions() const {
     return get_config().extensions();
+}
+
+std::shared_ptr<data_dictionary::user_types_storage> database::as_user_types_storage() const noexcept {
+    return _user_types;
+}
+
+const data_dictionary::user_types_storage& database::user_types() const noexcept {
+    return *_user_types;
 }
 
 } // namespace replica
@@ -746,6 +774,7 @@ void database::set_format(sstables::sstable_version_types format) noexcept {
 }
 
 database::~database() {
+    _user_types->deactivate();
 }
 
 void database::update_version(const utils::UUID& version) {
@@ -1596,6 +1625,15 @@ lw_shared_ptr<memtable> memtable_list::new_memtable() {
     return make_lw_shared<memtable>(_current_schema(), *_dirty_memory_manager, _table_stats, this, _compaction_scheduling_group);
 }
 
+// Synchronously swaps the active memtable with a new, empty one,
+// returning the old memtables list.
+// Exception safe.
+std::vector<replica::shared_memtable> memtable_list::clear_and_add() {
+    std::vector<replica::shared_memtable> new_memtables;
+    new_memtables.emplace_back(new_memtable());
+    return std::exchange(_memtables, std::move(new_memtables));
+}
+
 } // namespace replica
 
 future<flush_permit> flush_permit::reacquire_sstable_write_permit() && {
@@ -2106,6 +2144,53 @@ future<> database::flush_all_memtables() {
 future<> database::flush(const sstring& ksname, const sstring& cfname) {
     auto& cf = find_column_family(ksname, cfname);
     return cf.flush();
+}
+
+future<> database::flush_on_all(utils::UUID id) {
+    return container().invoke_on_all([id] (replica::database& db) {
+        return db.find_column_family(id).flush();
+    });
+}
+
+future<> database::flush_on_all(std::string_view ks_name, std::string_view table_name) {
+    return flush_on_all(find_uuid(ks_name, table_name));
+}
+
+future<> database::flush_on_all(std::string_view ks_name, std::vector<sstring> table_names) {
+    return parallel_for_each(table_names, [this, ks_name] (const auto& table_name) {
+        return flush_on_all(ks_name, table_name);
+    });
+}
+
+future<> database::flush_on_all(std::string_view ks_name) {
+    return parallel_for_each(find_keyspace(ks_name).metadata()->cf_meta_data(), [this] (auto& pair) {
+        return flush_on_all(pair.second->id());
+    });
+}
+
+future<> database::snapshot_on_all(std::string_view ks_name, std::vector<sstring> table_names, sstring tag, bool skip_flush) {
+    co_await coroutine::parallel_for_each(table_names, [this, ks_name, tag = std::move(tag), skip_flush] (const auto& table_name) -> future<> {
+        if (!skip_flush) {
+            co_await flush_on_all(ks_name, table_name);
+        }
+        co_await container().invoke_on_all([ks_name, &table_name, tag, skip_flush] (replica::database& db) {
+            auto& t = db.find_column_family(ks_name, table_name);
+            return t.snapshot(db, tag);
+        });
+    });
+}
+
+future<> database::snapshot_on_all(std::string_view ks_name, sstring tag, bool skip_flush) {
+    auto& ks = find_keyspace(ks_name);
+    co_await coroutine::parallel_for_each(ks.metadata()->cf_meta_data(), [this, tag = std::move(tag), skip_flush] (const auto& pair) -> future<> {
+        if (!skip_flush) {
+            co_await flush_on_all(pair.second->id());
+        }
+        co_await container().invoke_on_all([id = pair.second, tag, skip_flush] (replica::database& db) {
+            auto& t = db.find_column_family(id);
+            return t.snapshot(db, tag);
+        });
+    });
 }
 
 future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) {

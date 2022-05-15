@@ -66,9 +66,23 @@ closes="${NL}${NL}Closes #${PR_NUM}${NL}"
 if [[ $nr_commits == 1 ]]; then
 	commit=$(git log --pretty=oneline HEAD..FETCH_HEAD | awk '{print $1}')
 	message="$(git log -1 "$commit" --format="format:%s%n%n%b")"
-	git cherry-pick $commit
+	if ! git cherry-pick $commit
+	then
+		git cherry-pick --abort
+		exit 1
+	fi
 	git commit --amend -m "${message}${closes}"
 else
 	git merge --no-ff --log=1000 FETCH_HEAD -m "Merge '$PR_TITLE' from $USER_NAME" -m "${PR_DESCR}${closes}"
 fi
 git commit --amend # for a manual double-check
+
+# Check PR tests status
+PR_HEAD_SHA=$(jq -r .head.sha <<< $PR_DATA)
+PR_TESTS_STATUS=$(curl -s "https://api.github.com/repos/$PROJECT/commits/$PR_HEAD_SHA/status" | jq -r .state)
+if [ "$PR_TESTS_STATUS" != "success" ]; then
+  ORANGE='\033[0;33m'
+  NC='\033[0m'
+  echo -e "${ORANGE}\nWARNING:${NC} Some of the tests that ran for this PR were not completed successfully,\n" \
+        "please make sure all tests are done successfully before merge this PR.\n"
+fi

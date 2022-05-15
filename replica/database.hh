@@ -65,6 +65,7 @@
 #include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
+#include "sstables/generation_type.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
 
 class cell_locker;
@@ -224,17 +225,10 @@ public:
         }
     }
 
-    // Clears the active memtable and adds a new, empty one.
+    // Synchronously swaps the active memtable with a new, empty one,
+    // returning the old memtables list.
     // Exception safe.
-    void clear_and_add() {
-        auto mt = new_memtable();
-        _memtables.clear();
-        // emplace_back might throw only if _memtables was empty
-        // on entry. Otherwise, we rely on clear() not to release
-        // the vector capacity (See https://en.cppreference.com/w/cpp/container/vector/clear)
-        // and lw_shared_ptr being nothrow move constructible.
-        _memtables.emplace_back(std::move(mt));
-    }
+    std::vector<replica::shared_memtable> clear_and_add();
 
     size_t size() const {
         return _memtables.size();
@@ -513,9 +507,9 @@ public:
                                           sstables::offstrategy offstrategy = sstables::offstrategy::no);
     future<> add_sstables_and_update_cache(const std::vector<sstables::shared_sstable>& ssts);
     future<> move_sstables_from_staging(std::vector<sstables::shared_sstable>);
-    sstables::shared_sstable make_sstable(sstring dir, int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f,
+    sstables::shared_sstable make_sstable(sstring dir, sstables::generation_type generation, sstables::sstable_version_types v, sstables::sstable_format_types f,
             io_error_handler_gen error_handler_gen);
-    sstables::shared_sstable make_sstable(sstring dir, int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
+    sstables::shared_sstable make_sstable(sstring dir, sstables::generation_type generation, sstables::sstable_version_types v, sstables::sstable_format_types f);
     sstables::shared_sstable make_sstable(sstring dir);
     sstables::shared_sstable make_sstable();
     void cache_truncation_record(db_clock::time_point truncated_at) {
@@ -582,7 +576,7 @@ private:
         _sstable_generation = std::max<uint64_t>(*_sstable_generation, generation /  smp::count + 1);
     }
 
-    uint64_t calculate_generation_for_new_table() {
+    sstables::generation_type calculate_generation_for_new_table() {
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
@@ -842,7 +836,11 @@ public:
 
     db::replay_position set_low_replay_position_mark();
 
-    future<> snapshot(database& db, sstring name, bool skip_flush = false);
+private:
+    future<> snapshot(database& db, sstring name);
+
+    friend class database;
+public:
     future<std::unordered_map<sstring, snapshot_details>> get_snapshot_details();
 
     /*!
@@ -1211,12 +1209,14 @@ struct string_pair_eq {
     bool operator()(spair lhs, spair rhs) const;
 };
 
+class db_user_types_storage;
+
 // Policy for distributed<database>:
 //   broadcast metadata writes
 //   local metadata reads
 //   use shard_of() for data
 
-class database : public qos::qos_configuration_change_subscriber {
+class database : public peering_sharded_service<database>, qos::qos_configuration_change_subscriber {
     friend class ::database_test;
 public:
     enum class table_kind {
@@ -1265,6 +1265,7 @@ private:
     };
 
     lw_shared_ptr<db_stats> _stats;
+    std::shared_ptr<db_user_types_storage> _user_types;
     std::unique_ptr<cell_locker_stats> _cl_stats;
 
     const db::config& _cfg;
@@ -1335,6 +1336,8 @@ private:
 
 public:
     data_dictionary::database as_data_dictionary() const;
+    std::shared_ptr<data_dictionary::user_types_storage> as_user_types_storage() const noexcept;
+    const data_dictionary::user_types_storage& user_types() const noexcept;
     future<> init_commitlog();
     const gms::feature_service& features() const { return _feat; }
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
@@ -1569,6 +1572,17 @@ public:
 
     future<> flush_all_memtables();
     future<> flush(const sstring& ks, const sstring& cf);
+    // flush a table identified by the given id on all shards.
+    future<> flush_on_all(utils::UUID id);
+    // flush a single table in a keyspace on all shards.
+    future<> flush_on_all(std::string_view ks_name, std::string_view table_name);
+    // flush a list of tables in a keyspace on all shards.
+    future<> flush_on_all(std::string_view ks_name, std::vector<sstring> table_names);
+    // flush all tables in a keyspace on all shards.
+    future<> flush_on_all(std::string_view ks_name);
+
+    future<> snapshot_on_all(std::string_view ks_name, std::vector<sstring> table_names, sstring tag, bool skip_flush);
+    future<> snapshot_on_all(std::string_view ks_name, sstring tag, bool skip_flush);
 
     // See #937. Truncation now requires a callback to get a time stamp
     // that must be guaranteed to be the same for all shards.

@@ -120,6 +120,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         };
 
         auto cm = make_lw_shared<compaction_manager>();
+        auto cmt = compaction_manager_test(*cm);
         auto tracker = make_lw_shared<cache_tracker>();
         auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.manager(), env.semaphore()), replica::column_family::no_commitlog(), *cm, cl_stats, *tracker);
         auto table_s = make_table_state_for_test(*cf);
@@ -154,7 +155,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
                 sstables.insert(new_sst);
             }
             column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
-            cm->propagate_replacement(&*cf, old_sstables, new_sstables);
+            cmt.propagate_replacement(&*cf, old_sstables, new_sstables);
         };
 
         auto do_incremental_replace = [&] (auto old_sstables, auto new_sstables, auto& expected_sst, auto& closed_sstables_tracker) {

@@ -453,6 +453,7 @@ scylla_tests = set([
     'test/boost/restrictions_test',
     'test/boost/repair_test',
     'test/boost/row_cache_test',
+    'test/boost/rust_test',
     'test/boost/schema_change_test',
     'test/boost/schema_registry_test',
     'test/boost/secondary_index_test',
@@ -562,6 +563,7 @@ raft_tests = set([
     'test/raft/raft_sys_table_storage_test',
     'test/raft/raft_address_map_test',
     'test/raft/discovery_test',
+    'test/raft/failure_detector_test',
 ])
 
 apps = set([
@@ -1038,10 +1040,10 @@ scylla_core = (['replica/database.cc',
                 'serializer.cc',
                 'release.cc',
                 'service/raft/raft_rpc.cc',
-                'service/raft/raft_gossip_failure_detector.cc',
                 'service/raft/raft_group_registry.cc',
                 'service/raft/discovery.cc',
                 'service/raft/raft_group0.cc',
+                'direct_failure_detector/failure_detector.cc',
                 'reader_concurrency_semaphore_group.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
@@ -1149,6 +1151,10 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/group0_state_machine.idl.hh',
         'idl/forward_request.idl.hh',
         ]
+
+rusts = [
+    'rust/inc/src/lib.rs',
+]
 
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
 
@@ -1258,7 +1264,7 @@ perf_tests_seastar_deps = [
 
 for t in perf_tests:
     deps[t] = [t + '.cc'] + scylla_tests_dependencies + perf_tests_seastar_deps
-    deps[t] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
+    deps[t] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc']
 
 deps['test/boost/mutation_reader_test'] += ['test/lib/dummy_sharder.cc' ]
 deps['test/boost/multishard_combining_reader_as_mutation_source_test'] += ['test/lib/dummy_sharder.cc' ]
@@ -1279,11 +1285,11 @@ deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_t
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
 deps['test/boost/estimated_histogram_test'] = ['test/boost/estimated_histogram_test.cc']
 deps['test/boost/anchorless_list_test'] = ['test/boost/anchorless_list_test.cc']
-deps['test/perf/perf_fast_forward'] += ['test/perf/linux-perf-event.cc']
-deps['test/perf/perf_simple_query'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc', 'test/lib/alternator_test_env.cc'] + alternator
-deps['test/perf/perf_commitlog'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
-deps['test/perf/perf_row_cache_reads'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
-deps['test/perf/perf_row_cache_update'] += ['test/perf/perf.cc', 'test/perf/linux-perf-event.cc']
+deps['test/perf/perf_fast_forward'] += ['seastar/tests/perf/linux_perf_event.cc']
+deps['test/perf/perf_simple_query'] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc', 'test/lib/alternator_test_env.cc'] + alternator
+deps['test/perf/perf_commitlog'] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc']
+deps['test/perf/perf_row_cache_reads'] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc']
+deps['test/perf/perf_row_cache_update'] += ['test/perf/perf.cc', 'seastar/tests/perf/linux_perf_event.cc']
 deps['test/boost/reusable_buffer_test'] = [
     "test/boost/reusable_buffer_test.cc",
     "test/lib/log.cc",
@@ -1300,9 +1306,11 @@ deps['test/boost/expr_test'] = ['test/boost/expr_test.cc'] + scylla_core
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
+deps['test/boost/rust_test'] += rusts
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
-deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc'] + scylla_raft_dependencies
+deps['test/raft/randomized_nemesis_test'] = ['test/raft/randomized_nemesis_test.cc', 'direct_failure_detector/failure_detector.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
+deps['test/raft/failure_detector_test'] = ['test/raft/failure_detector_test.cc', 'direct_failure_detector/failure_detector.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/many_test'] = ['test/raft/many_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/fsm_test'] =  ['test/raft/fsm_test.cc', 'test/raft/helpers.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
 deps['test/raft/etcd_test'] =  ['test/raft/etcd_test.cc', 'test/raft/helpers.cc', 'test/lib/log.cc'] + scylla_raft_dependencies
@@ -1685,6 +1693,8 @@ def configure_abseil(build_dir, mode, mode_config):
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_CXX_FLAGS_{}={}'.format(cmake_mode.upper(), abseil_cflags),
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
+        '-DCMAKE_CXX_STANDARD=20',
+        '-DABSL_PROPAGATE_CXX_STD=ON',
     ] + distro_extra_cmake_args
 
     abseil_cmd = ['cmake', '-G', 'Ninja', real_relpath('abseil', abseil_build_dir)] + abseil_cmake_args
@@ -1726,7 +1736,6 @@ libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-l
                 ])
 if has_wasmtime:
     print("Found wasmtime dependency, linking with libwasmtime")
-    libs += ' -lwasmtime'
 
 if not args.staticboost:
     args.user_cflags += ' -DBOOST_TEST_DYN_LINK'
@@ -1847,6 +1856,9 @@ with open(buildfile_tmp, 'w') as f:
             command = reloc/build_deb.sh --reloc-pkg $in --builddir $out
         rule unified
             command = unified/build_unified.sh --mode $mode --unified-pkg $out
+        rule rust_header
+            command = cxxbridge $in > $out
+            description = RUST_HEADER $out
         ''').format(**globals()))
     for mode in build_modes:
         modeval = modes[mode]
@@ -1905,6 +1917,9 @@ with open(buildfile_tmp, 'w') as f:
               command = ./test.py --mode={mode} --repeat={test_repeat} --timeout={test_timeout}
               pool = console
               description = TEST {mode}
+            rule rust_lib.{mode}
+              command = CARGO_HOME=build/{mode}/rust/.cargo cargo build --release --manifest-path=rust/Cargo.toml --target-dir=build/{mode}/rust -p ${{pkg}}
+              description = RUST_LIB $out
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, test_repeat=test_repeat, test_timeout=test_timeout, **modeval))
         f.write(
             'build {mode}-build: phony {artifacts}\n'.format(
@@ -1921,6 +1936,8 @@ with open(buildfile_tmp, 'w') as f:
         thrifts = set()
         ragels = {}
         antlr3_grammars = set()
+        rust_headers = {}
+        rust_libs = {}
         seastar_dep = '$builddir/{}/seastar/libseastar.a'.format(mode)
         seastar_testing_dep = '$builddir/{}/seastar/libseastar_testing.a'.format(mode)
         for binary in build_artifacts:
@@ -1931,6 +1948,8 @@ with open(buildfile_tmp, 'w') as f:
                     for src in srcs
                     if src.endswith('.cc')]
             objs.append('$builddir/../utils/arch/powerpc/crc32-vpmsum/crc32.S')
+            if has_wasmtime:
+                objs.append('/usr/lib64/libwasmtime.a')
             has_thrift = False
             for dep in deps[binary]:
                 if isinstance(dep, Thrift):
@@ -1940,6 +1959,9 @@ with open(buildfile_tmp, 'w') as f:
                     objs += dep.objects('$builddir/' + mode + '/gen')
                 if isinstance(dep, Json2Code):
                     objs += dep.objects('$builddir/' + mode + '/gen')
+                if dep.endswith('/src/lib.rs'):
+                    lib = dep.replace('/src/lib.rs', '.a').replace('rust/','lib')
+                    objs.append('$builddir/' + mode + '/rust/release/' + lib)
             if binary.endswith('.a'):
                 f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
             else:
@@ -1987,6 +2009,11 @@ with open(buildfile_tmp, 'w') as f:
                     thrifts.add(src)
                 elif src.endswith('.g'):
                     antlr3_grammars.add(src)
+                elif src.endswith('/src/lib.rs'):
+                    hh = '$builddir/' + mode + '/gen/' + src.replace('/src/lib.rs', '.hh')
+                    rust_headers[hh] = src
+                    staticlib = src.replace('rust/', '$builddir/' + mode + '/rust/release/lib').replace('/src/lib.rs', '.a')
+                    rust_libs[staticlib] = src
                 else:
                     raise Exception('No rule for ' + src)
         compiles['$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o'] = '$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc'
@@ -2031,6 +2058,7 @@ with open(buildfile_tmp, 'w') as f:
             gen_headers += g.headers('$builddir/{}/gen'.format(mode))
         gen_headers += list(serializers.keys())
         gen_headers += list(ragels.keys())
+        gen_headers += list(rust_headers.keys())
         gen_headers_dep = ' '.join(gen_headers)
 
         for obj in compiles:
@@ -2051,6 +2079,13 @@ with open(buildfile_tmp, 'w') as f:
         for hh in ragels:
             src = ragels[hh]
             f.write('build {}: ragel {}\n'.format(hh, src))
+        for hh in rust_headers:
+            src = rust_headers[hh]
+            f.write('build {}: rust_header {}\n'.format(hh, src))
+        for lib in rust_libs:
+            src = rust_libs[lib]
+            package = src.replace('/src/lib.rs', '').replace('rust/','')
+            f.write('build {}: rust_lib.{} {}\n  pkg = {}\n'.format(lib, mode, src, package))
         for thrift in thrifts:
             outs = ' '.join(thrift.generated('$builddir/{}/gen'.format(mode)))
             f.write('build {}: thrift.{} {}\n'.format(outs, mode, thrift.source))

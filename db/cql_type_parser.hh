@@ -1,7 +1,4 @@
 /*
- */
-
-/*
  * Modified by ScyllaDB
  * Copyright (C) 2017-present ScyllaDB
  */
@@ -24,12 +21,13 @@ class types_metadata;
 
 namespace data_dictionary {
 class keyspace_metadata;
+class user_types_storage;
 }
 
 namespace db {
 namespace cql_type_parser {
 
-data_type parse(const sstring& keyspace, const sstring& type);
+data_type parse(const sstring& keyspace, const sstring& type, const data_dictionary::user_types_storage& uts);
 
 class raw_builder {
 public:

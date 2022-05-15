@@ -1,6 +1,4 @@
 /*
- */
-/*
  * Copyright (C) 2015-present ScyllaDB
  *
  * Modified by ScyllaDB
@@ -11,6 +9,7 @@
  */
 
 #include <chrono>
+#include <exception>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/semaphore.hh>
@@ -252,6 +251,7 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
             } catch (data_dictionary::no_such_keyspace& ex) {
                 // should probably ignore and drop the batch
             } catch (...) {
+                blogger.warn("Replay failed (will retry): {}", std::current_exception());
                 // timeout, overload etc.
                 // Do _not_ remove the batch, assuning we got a node write error.
                 // Since we don't have hints (which origin is satisfied with),

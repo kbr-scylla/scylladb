@@ -465,6 +465,10 @@ private:
     std::optional<index_bound> _upper_bound;
 
 private:
+    bool bound_eof(const index_bound& b) const {
+        return b.data_file_position == data_file_end();
+    }
+
     static future<> reset_clustered_cursor(index_bound& bound) noexcept {
         if (bound.clustered_cursor) {
             return bound.clustered_cursor->close().then([&bound] {
@@ -627,6 +631,10 @@ private:
             return make_ready_future<>();
         } else if (pos.is_max()) {
             return advance_to_end(bound);
+        }
+        if (bound_eof(bound)) {
+            sstlog.trace("index {}: eof", fmt::ptr(this));
+            return make_ready_future<>();
         }
 
         auto& summary = _sstable->get_summary();
@@ -1070,7 +1078,7 @@ public:
     }
 
     bool eof() const {
-        return _lower_bound.data_file_position == data_file_end();
+        return bound_eof(_lower_bound);
     }
 
     const shared_sstable& sstable() const { return _sstable; }
