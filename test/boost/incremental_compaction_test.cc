@@ -119,7 +119,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             return sst;
         };
 
-        auto cm = make_lw_shared<compaction_manager>();
+        auto cm = make_lw_shared<compaction_manager>(compaction_manager::for_testing_tag());
         auto cmt = compaction_manager_test(*cm);
         auto tracker = make_lw_shared<cache_tracker>();
         auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.manager(), env.semaphore()), replica::column_family::no_commitlog(), *cm, cl_stats, *tracker);
@@ -250,7 +250,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
 
     struct sag_test {
         test_env& _env;
-        compaction_manager _cm;
+        compaction_manager _cm { compaction_manager::for_testing_tag() };
         cell_locker_stats _cl_stats;
         cache_tracker _tracker;
         lw_shared_ptr<replica::column_family> _cf;

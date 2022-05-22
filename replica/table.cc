@@ -771,7 +771,7 @@ void table::set_metrics() {
     namespace ms = seastar::metrics;
     if (_config.enable_metrics_reporting) {
         _metrics.add_group("column_family", {
-                ms::make_derive("memtable_switch", ms::description("Number of times flush has resulted in the memtable being switched out"), _stats.memtable_switch_count)(cf)(ks),
+                ms::make_counter("memtable_switch", ms::description("Number of times flush has resulted in the memtable being switched out"), _stats.memtable_switch_count)(cf)(ks),
                 ms::make_counter("memtable_partition_writes", [this] () { return _stats.memtable_partition_insertions + _stats.memtable_partition_hits; }, ms::description("Number of write operations performed on partitions in memtables"))(cf)(ks),
                 ms::make_counter("memtable_partition_hits", _stats.memtable_partition_hits, ms::description("Number of times a write operation was issued on an existing partition in memtables"))(cf)(ks),
                 ms::make_counter("memtable_row_writes", _stats.memtable_app_stats.row_writes, ms::description("Number of row writes performed in memtables"))(cf)(ks),
@@ -2170,7 +2170,7 @@ std::chrono::milliseconds table::get_coordinator_read_latency_percentile(double 
 
 void
 table::enable_auto_compaction() {
-    // XXX: unmute backlog. turn table backlog back on.
+    // FIXME: unmute backlog. turn table backlog back on.
     //      see table::disable_auto_compaction() notes.
     _compaction_disabled_by_user = false;
     trigger_compaction();
@@ -2178,7 +2178,7 @@ table::enable_auto_compaction() {
 
 future<>
 table::disable_auto_compaction() {
-    // XXX: mute backlog. When we disable background compactions
+    // FIXME: mute backlog. When we disable background compactions
     // for the table, we must also disable current backlog of the
     // table compaction strategy that contributes to the scheduling
     // group resources prioritization.
@@ -2205,8 +2205,9 @@ table::disable_auto_compaction() {
     // - it will break computation of major compaction descriptor
     //   for new submissions
     _compaction_disabled_by_user = true;
-    // FIXME: stop ongoing compactions
-    return make_ready_future<>();
+    return with_gate(_async_gate, [this] {
+        return _compaction_manager.stop_ongoing_compactions("disable auto-compaction", this, sstables::compaction_type::Compaction);
+    });
 }
 
 flat_mutation_reader_v2

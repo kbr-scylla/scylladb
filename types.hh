@@ -423,6 +423,9 @@ public:
     friend data_value make_user_value(data_type, std::vector<data_value>);
     template <typename Func>
     friend inline auto visit(const data_value& v, Func&& f);
+    // Prints a value of this type in a way which is parsable back from CQL.
+    // Differs from operator<< for collections.
+    sstring to_parsable_string() const;
 };
 
 template<typename T>
@@ -1188,6 +1191,7 @@ void write_collection_size(managed_bytes_mutable_view&, int size, cql_serializat
 void write_collection_value(bytes::iterator& out, cql_serialization_format sf, bytes_view val_bytes);
 void write_collection_value(managed_bytes_mutable_view&, cql_serialization_format sf, bytes_view val_bytes);
 void write_collection_value(managed_bytes_mutable_view&, cql_serialization_format sf, const managed_bytes_view& val_bytes);
+void write_int32(bytes::iterator& out, int32_t value);
 
 // Splits a serialized collection into a vector of elements, but does not recursively deserialize the elements.
 // Does not perform validation.

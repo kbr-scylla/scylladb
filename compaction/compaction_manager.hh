@@ -68,10 +68,6 @@ private:
         // Raised by any function running under run_with_compaction_disabled();
         long compaction_disabled_counter = 0;
 
-        // This semaphore ensures that off-strategy compaction will be serialized for
-        // a given table, protecting against candidates being picked more than once.
-        seastar::named_semaphore off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
-
         bool compaction_disabled() const noexcept {
             return compaction_disabled_counter > 0;
         }
@@ -269,6 +265,11 @@ private:
     // If the operation must be serialized with regular, then the per-table write lock must be taken.
     seastar::named_semaphore _maintenance_ops_sem = {1, named_semaphore_exception_factory{"maintenance operation"}};
 
+    // This semaphore ensures that off-strategy compaction will be serialized for
+    // all tables, to limit space requirement and protect against candidates
+    // being picked more than once.
+    seastar::named_semaphore _off_strategy_sem = {1, named_semaphore_exception_factory{"off-strategy compaction"}};
+
     std::function<void()> compaction_submission_callback();
     // all registered tables are reevaluated at a constant interval.
     // Submission is a NO-OP when there's nothing to do, so it's fine to call it regularly.
@@ -342,11 +343,17 @@ private:
 
     // Propagate replacement of sstables to all ongoing compaction of a given table
     void propagate_replacement(replica::table* t, const std::vector<sstables::shared_sstable>& removed, const std::vector<sstables::shared_sstable>& added);
+
+    // This constructor is suposed to only be used for testing so lets be more explicit
+    // about invoking it. Ref #10146
+    compaction_manager();
 public:
     compaction_manager(compaction_scheduling_group csg, maintenance_scheduling_group msg, size_t available_memory, abort_source& as);
     compaction_manager(compaction_scheduling_group csg, maintenance_scheduling_group msg, size_t available_memory, uint64_t shares, abort_source& as);
-    compaction_manager();
     ~compaction_manager();
+    class for_testing_tag{};
+    // An inline constructor for testing
+    compaction_manager(for_testing_tag) : compaction_manager() {}
 
     void register_metrics();
 
