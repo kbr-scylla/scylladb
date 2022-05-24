@@ -573,7 +573,7 @@ class LdapTest(BoostTest):
             return can_connect(('127.0.0.1', port)) and can_connect(('127.0.0.1', port + 1)) and can_connect(('127.0.0.1', port + 2))
         def can_connect_to_saslauthd():
             return can_connect(os.path.join(instance_path, 'mux'), socket.AF_UNIX)
-        slapd_proc = subprocess.Popen(['slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
+        slapd_proc = subprocess.Popen(['prlimit', '-n1024', 'slapd', '-F', instance_path, '-h', SLAPD_URLS, '-d', '0'])
         saslauthd_conf_path = make_saslauthd_conf(port, instance_path)
         saslauthd_proc = subprocess.Popen(
             ['saslauthd', '-d', '-n', '1', '-a', 'ldap', '-O', saslauthd_conf_path, '-m', instance_path],
