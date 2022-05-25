@@ -31,6 +31,7 @@
 #include "utils/loading_cache.hh"
 #include "utils/UUID.hh"
 #include "utils/UUID_gen.hh"
+#include "marshal_exception.hh"
 #include "db/config.hh"
 
 using namespace std::chrono_literals;
@@ -154,6 +155,8 @@ public:
     future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const key_options& = {});
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const std::optional<key_info>& = {});
 
+    id_type kmip_id_to_id(const sstring&) const;
+    sstring id_to_kmip_string(const id_type&) const;
 private:
     future<key_and_id_type> create_key(const kmip_key_info&);
     future<shared_ptr<symmetric_key>> find_key(const id_type&);
@@ -697,6 +700,43 @@ std::tuple<kmip_host::impl::kmip_data_list, unsigned int> kmip_host::impl::make_
     }
 }
 
+kmip_host::id_type kmip_host::impl::kmip_id_to_id(const sstring& s) const {
+    try {
+        // #2205 - we previously made all ID:s into uuids (because the literal functions
+        // are called KMIP_CMD_get_uuid etc). This has issues with Keysecure which apparently
+        // does _not_ give back UUID format strings, but "other" things.
+        // Could just always store ascii as bytes instead, but that would now
+        // break existing installations, so we check for UUID, and if it does not
+        // match we encode it.
+        utils::UUID uuid(s);
+        return uuid.serialize();
+    } catch (marshal_exception&) {
+        // very simple exncoding scheme: add a "len" byte at the end.
+        // iff byte size of id + 1 (len) equals 16 (length of UUID),
+        // add a padding byte.
+        size_t len = s.size() + 1;
+        if (len == 16) {
+            ++len;
+        }
+        bytes res(len, 0);
+        std::copy(s.begin(), s.end(), res.begin());
+        res.back() = int8_t(len - s.size());
+        return res;
+    }
+}
+
+sstring kmip_host::impl::id_to_kmip_string(const id_type& id) const {
+    // see comment above for encoding scheme.
+    if (id.size() == 16) {
+        // if byte size is UUID it must be a UUID. No "old" id:s are
+        // not, and we never encode non-uuid as 16 bytes.
+        auto uuid = utils::UUID_gen::get_UUID(id);
+        return uuid.to_sstring();
+    }
+    auto len = id.size() - id.back();
+    return sstring(id.begin(), id.begin() + len);
+}
+
 future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_key_info& info) {
     if (this_shard_id() == 0) {
         // #1039 First try looking for existing keys on server
@@ -729,16 +769,16 @@ future<kmip_host::impl::key_and_id_type> kmip_host::impl::create_key(const kmip_
                 /* now get the details (the value of the key) */
                 char* new_id;
                 kmip_chk(KMIP_CMD_get_uuid(cmd, 0, &new_id), cmd);
+                sstring uuid(new_id);
 
-                utils::UUID uuid(new_id);
                 kmip_log.debug("{}: Created {}:{}", _name, info, uuid);
 
                 KMIP_CMD_set_ctx(cmd, const_cast<char *>("activate"));
 
                 return do_cmd(std::move(cmd), [new_id](KMIP_CMD* cmd) {
                     return KMIP_CMD_activate(cmd, new_id);
-                }).then([this, uuid, info](kmip_cmd cmd) {
-                    bytes id = uuid.serialize();
+                }).then([this, info, uuid](kmip_cmd cmd) {
+                    auto id = kmip_id_to_id(uuid);
                     kmip_log.debug("{}: Activated {}", _name, uuid);
                     return get_key_by_id(id, info.info).then([id](auto k) {
                         return key_and_id_type(k, id);
@@ -809,9 +849,8 @@ future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(cons
             if (err == KMIP_ERROR_NOT_FOUND) {
                 break;
             }
-            kmip_chk(err, cmd);            
-            utils::UUID uuid(new_id);
-            result.emplace_back(uuid.serialize());
+            kmip_chk(err, cmd);
+            result.emplace_back(kmip_id_to_id(new_id));
         }
 
         kmip_log.debug("{}: Found {} matching keys {}", _name, result.size(), info);
@@ -825,9 +864,7 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
         kmip_cmd cmd;
         KMIP_CMD_set_ctx(cmd, const_cast<char *>("Find key"));
 
-        auto uuid = utils::UUID_gen::get_UUID(id);
-        sstring tmp = uuid.to_sstring();
-
+        auto uuid = id_to_kmip_string(id);
         kmip_log.debug("{}: Finding {}", _name, uuid);
 
         // Batch operation. Nothing is sent/received until xmit below
@@ -835,9 +872,9 @@ future<shared_ptr<symmetric_key>> kmip_host::impl::find_key(const id_type& id) {
         kmip_chk(KMIP_CMD_set_batch_order(cmd, 1));
         {
             int key_format_type = KMIP_KEY_FORMAT_TYPE_RAW;
-            kmip_chk(KMIP_CMD_get(cmd, const_cast<char *>(tmp.c_str()), &key_format_type, nullptr, nullptr));
+            kmip_chk(KMIP_CMD_get(cmd, const_cast<char *>(uuid.c_str()), &key_format_type, nullptr, nullptr));
         }
-        kmip_chk(KMIP_CMD_get_attributes(cmd, const_cast<char *>(tmp.c_str()), nullptr, 0));
+        kmip_chk(KMIP_CMD_get_attributes(cmd, const_cast<char *>(uuid.c_str()), nullptr, 0));
 
         return do_cmd(std::move(cmd), [](KMIP_CMD* cmd) {
             return KMIP_CMD_batch_xmit(cmd);
@@ -1017,6 +1054,9 @@ future<shared_ptr<symmetric_key>> kmip_host::get_key_by_id(const id_type& id, st
     return _impl->get_key_by_id(id, info);
 }
 
+future<shared_ptr<symmetric_key>> kmip_host::get_key_by_name(const sstring& name) {
+    return _impl->get_key_by_id(_impl->kmip_id_to_id(name));    
+}
 
 std::ostream& operator<<(std::ostream& os, const kmip_host::key_options& opts) {
     return os << opts.template_name << ":" << opts.key_namespace;

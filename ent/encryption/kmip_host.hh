@@ -7,6 +7,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#pragma once
+
 #include <vector>
 #include <optional>
 #include <chrono>
@@ -56,6 +58,9 @@ public:
     future<> connect();
     future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const key_options& = {});
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, std::optional<key_info> = std::nullopt);
+
+    /** for system key(s) */
+    future<shared_ptr<symmetric_key>> get_key_by_name(const sstring&);
 
 private:
     class impl;
