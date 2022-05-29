@@ -486,7 +486,7 @@ query_processor::execute_direct_without_checking_exception_message(const sstring
             std::rethrow_exception(access_future.get_exception());
         }
         return process_authorized_statement(std::move(cql_statement), query_state, options).then(
-                [warnings = move(warnings)] (::shared_ptr<result_message> m) {
+                [warnings = std::move(warnings)] (::shared_ptr<result_message> m) {
                     for (const auto& w : warnings) {
                         m->add_warning(w);
                     }

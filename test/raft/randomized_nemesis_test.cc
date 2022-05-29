@@ -334,6 +334,42 @@ future<call_result_t<M>> call(
     });
 }
 
+template <PureStateMachine M>
+using read_result_t = std::variant<typename M::state_t, timed_out_error, raft::stopped_error>;
+
+// Performs a linearizable read by calling a `read_barrier` and then reading the local state of the server's state machine.
+// Only to be used in forwarding mode.
+// See `call` for the meanings of `timeout`, `timer`, `server` and `sm`.
+template <PureStateMachine M>
+future<read_result_t<M>> read(
+        raft::logical_clock::time_point timeout,
+        logical_timer& timer,
+        raft::server& server,
+        impure_state_machine<M>& sm) {
+    // FIXME: using lambda as workaround for clang bug #50345.
+    auto impl = [] (raft::logical_clock::time_point timeout, logical_timer& timer,
+                    raft::server& server, impure_state_machine<M>& sm) -> future<read_result_t<M>> {
+        try {
+            co_await with_timeout(timer, timeout, [&] (abort_source& as) {
+                return server.read_barrier(&as);
+            });
+
+            co_return sm.state();
+        } catch (raft::stopped_error e) {
+            co_return e;
+        } catch (seastar::timed_out_error e) {
+            co_return e;
+        } catch (raft::request_aborted&) {
+            co_return timed_out_error{};
+        } catch (...) {
+            tlogger.error("unexpected exception from `read`: {}", std::current_exception());
+            assert(false);
+        }
+    };
+
+    return impl(timeout, timer, server, sm);
+}
+
 // Allows a Raft server to communicate with other servers.
 // The implementation is mostly boilerplate. It assumes that there exists a method of message passing
 // given by a `send_message_t` function (passed in the constructor) for sending and by the `receive`
@@ -438,7 +474,6 @@ private:
         promise<>
     >;
     std::unordered_map<reply_id_t, reply_promise> _reply_promises;
-    reply_id_t _counter = 0;
 
     // Used to ensure that when `abort()` returns there are
     // no more in-progress methods running on this object.
@@ -455,6 +490,11 @@ private:
             .handle_exception_type([] (const gate_closed_exception&) -> decltype(f()) {
                 throw raft::stopped_error{};
             });
+    }
+
+    static reply_id_t new_reply_id() {
+        static size_t counter = 0;
+        return counter++;
     }
 
 public:
@@ -640,7 +680,7 @@ public:
                 throw snapshot_not_found{ .id = ins.snp.id };
             }
 
-            auto id = _counter++;
+            auto id = new_reply_id();
             promise<raft::snapshot_reply> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
@@ -675,7 +715,7 @@ public:
 
     virtual future<raft::add_entry_reply> send_add_entry(raft::server_id dst, const raft::command& cmd) override {
         co_return co_await with_gate([&] () -> future<raft::add_entry_reply> {
-            auto id = _counter++;
+            auto id = new_reply_id();
             promise<raft::add_entry_reply> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
@@ -700,7 +740,7 @@ public:
                 const std::vector<raft::server_address>& add,
                 const std::vector<raft::server_id>& del) override {
         co_return co_await with_gate([&] () -> future<raft::add_entry_reply> {
-            auto id = _counter++;
+            auto id = new_reply_id();
             promise<raft::add_entry_reply> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
@@ -724,7 +764,7 @@ public:
     }
     virtual future<raft::read_barrier_reply> execute_read_barrier_on_leader(raft::server_id dst) override {
         co_return co_await with_gate([&] () -> future<raft::read_barrier_reply> {
-            auto id = _counter++;
+            auto id = new_reply_id();
             promise<raft::read_barrier_reply> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
@@ -738,14 +778,19 @@ public:
             static const raft::logical_clock::duration execute_read_barrier_on_leader_timeout = 20_t;
 
             // TODO: catch aborts from the abort_source as well
-            co_return co_await _timer.with_timeout(_timer.now() + execute_read_barrier_on_leader_timeout, std::move(f));
+            try {
+                co_return co_await _timer.with_timeout(_timer.now() + execute_read_barrier_on_leader_timeout, std::move(f));
+            } catch (logical_timer::timed_out<raft::read_barrier_reply>& e) {
+                (void) e.get_future().discard_result().handle_exception_type([] (const broken_promise&) { });
+                throw timed_out_error{};
+            }
             // co_await ensures that `guard` is destroyed before we leave `_gate`
         });
     }
 
     future<> ping(raft::server_id dst, abort_source& as) {
         co_await with_gate([&] () -> future<> {
-            auto id = _counter++;
+            auto id = new_reply_id();
             promise<> p;
             auto f = p.get_future();
             _reply_promises.emplace(id, std::move(p));
@@ -1275,6 +1320,8 @@ future<reconfigure_result_t> modify_config(
         co_return e;
     } catch (raft::request_aborted&) {
         co_return timed_out_error{};
+    } catch (seastar::timed_out_error e) {
+        co_return e;
     } catch (...) {
         tlogger.error("unexpected exception from modify_config: {}", std::current_exception());
         assert(false);
@@ -1428,6 +1475,19 @@ public:
         try {
             co_return co_await with_gate(_gate, [this, input = std::move(input), timeout, &timer] {
                 return ::call(std::move(input), timeout, timer, *_server, _sm);
+            });
+        } catch (const gate_closed_exception&) {
+            co_return raft::stopped_error{};
+        }
+    }
+
+    future<read_result_t<M>> read(
+            raft::logical_clock::time_point timeout,
+            logical_timer& timer) {
+        assert(_started);
+        try {
+            co_return co_await with_gate(_gate, [this, timeout, &timer] {
+                return ::read(timeout, timer, *_server, _sm);
             });
         } catch (const gate_closed_exception&) {
             co_return raft::stopped_error{};
@@ -1772,6 +1832,28 @@ public:
         if (srv != n._server.get()) {
             // The server stopped while the call was happening.
             // As above, we simulate a 'remote' call by timing it out in this case.
+            co_await timer.sleep_until(timeout);
+            co_return timed_out_error{};
+        }
+        co_return res;
+    }
+
+    future<read_result_t<M>> read(
+            raft::server_id id,
+            raft::logical_clock::time_point timeout,
+            logical_timer& timer) {
+        auto& n = _routes.at(id);
+        if (!n._server) {
+            // As in `call`.
+            co_await timer.sleep_until(timeout);
+            co_return timed_out_error{};
+        }
+
+        auto srv = n._server.get();
+        auto res = co_await srv->read(timeout, timer);
+
+        if (srv != n._server.get()) {
+            // As in `call`.
             co_await timer.sleep_until(timeout);
             co_return timed_out_error{};
         }
@@ -2289,8 +2371,7 @@ struct bouncing {
                 --bounces;
 
                 if (n_a_l->leader) {
-                    assert(n_a_l->leader != srv_id);
-                    if (!tried.contains(n_a_l->leader)) {
+                    if (n_a_l->leader == srv_id || !tried.contains(n_a_l->leader)) {
                         co_await timer.sleep(known_leader_delay);
                         srv_id = n_a_l->leader;
                         tlogger.trace("bouncing call: got `not_a_leader`, rerouted to {}", srv_id);
@@ -2356,6 +2437,41 @@ struct raft_call {
 
     friend std::ostream& operator<<(std::ostream& os, const raft_call& c) {
         return os << format("raft_call{{input:{},timeout:{}}}", c.input, c.timeout);
+    }
+};
+
+// An operation representing a linearizable read from a Raft server.
+// To be used only in forwarding mode. Doesn't bounce.
+template <PureStateMachine M>
+struct raft_read {
+    int32_t read_id;
+    raft::logical_clock::duration timeout;
+
+    using result_type = std::pair<int32_t, read_result_t<M>>;
+
+    struct state_type {
+        environment<M>& env;
+        const std::unordered_set<raft::server_id>& known;
+        logical_timer& timer;
+    };
+
+    future<result_type> execute(state_type& s, const operation::context& ctx) {
+        assert(s.known.size() > 0);
+        static std::mt19937 engine{0};
+
+        auto it = s.known.begin();
+        std::advance(it, std::uniform_int_distribution<size_t>{0, s.known.size() - 1}(engine));
+        auto contact = *it;
+
+        tlogger.debug("read start tid {} start time {} current time {} contact {}", ctx.thread, ctx.start, s.timer.now(), contact);
+        auto res = co_await s.env.read(contact, s.timer.now() + timeout, s.timer);
+        tlogger.debug("read end tid {} start time {} current time {} contact {}", ctx.thread, ctx.start, s.timer.now(), contact);
+
+        co_return result_type{read_id, std::move(res)};
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const raft_read& r) {
+        return os << format("raft_read{{id:{}, timeout:{}}}", r.read_id, r.timeout);
     }
 };
 
@@ -2447,7 +2563,42 @@ struct reconfiguration {
 
     using result_type = reconfigure_result_t;
 
-    future<result_type> execute(state_type& s, const operation::context& ctx) {
+    future<result_type> execute_modify_config(state_type& s, const operation::context&) {
+        assert(s.all_servers.size() > 1);
+        std::vector<raft::server_id> nodes{s.all_servers.begin(), s.all_servers.end()};
+
+        std::shuffle(nodes.begin(), nodes.end(), s.rnd);
+        size_t added_ix = std::uniform_int_distribution<size_t>{1, nodes.size()}(s.rnd);
+        std::vector<raft::server_id> added {nodes.begin(), nodes.begin() + added_ix};
+        std::vector<raft::server_id> removed {nodes.begin() + added_ix, nodes.end()};
+
+        assert(s.known.size() > 0);
+        auto [res, last] = co_await bouncing{
+                [&added, &removed, timeout = s.timer.now() + timeout, &timer = s.timer, &env = s.env] (raft::server_id id) {
+            return env.modify_config(id, added, removed, timeout, timer);
+        }}(s.timer, s.known, *s.known.begin(), 10, 10_t, 10_t);
+
+        std::visit(make_visitor(
+        [&, last = last] (std::monostate) {
+            tlogger.debug("reconfig successful known {} added {} removed {} by {}", s.known, added, removed, last);
+            s.known.merge(std::unordered_set<raft::server_id>{added.begin(), added.end()});
+            for (auto id: removed) {
+                s.known.erase(id);
+            }
+        },
+        [&, last = last] (raft::not_a_leader& e) {
+            tlogger.debug("reconfig failed, not a leader: {} tried to add {}, remove {} by {}", e, added, removed, last);
+        },
+        [&, last = last] (auto& e) {
+            s.known.merge(std::unordered_set<raft::server_id>{added.begin(), added.end()});
+            tlogger.debug("reconfig failed: {}, tried to add {}, remove {}, after merge {} by {}", e, added, removed, s.known, last);
+        }
+        ), res);
+
+        co_return res;
+    }
+
+    future<result_type> execute_reconfigure(state_type& s, const operation::context&) {
         assert(s.all_servers.size() > 1);
         std::vector<raft::server_id> nodes{s.all_servers.begin(), s.all_servers.end()};
 
@@ -2476,6 +2627,15 @@ struct reconfiguration {
         ), res);
 
         co_return res;
+    }
+
+    future<result_type> execute(state_type& s, const operation::context& ctx) {
+        static std::bernoulli_distribution bdist{0.5};
+        if (bdist(s.rnd)) {
+            return execute_modify_config(s, ctx);
+        } else {
+            return execute_reconfigure(s, ctx);
+        }
     }
 
     friend std::ostream& operator<<(std::ostream& os, const reconfiguration& r) {
@@ -2694,6 +2854,10 @@ struct append_reg_model {
     std::unordered_set<elem_t> returned;
     std::unordered_set<elem_t> in_progress;
 
+    // For each read, the element observed at the end of the model sequence
+    // at the moment the read has started.
+    std::unordered_map<int32_t, elem_t> reads;
+
     void invocation(elem_t x) {
         assert(!index.contains(x));
         assert(!in_progress.contains(x));
@@ -2707,7 +2871,7 @@ struct append_reg_model {
         try {
             completion(x, prev);
         } catch (inconsistency& e) {
-            e.what += format("\nwhen completing elem: {}\nprev: {}\nmodel: {}", x, prev, seq);
+            e.what += format("\nwhen completing append: {}\nprev: {}\nmodel: {}", x, prev, seq);
             throw;
         }
         returned.insert(x);
@@ -2718,6 +2882,38 @@ struct append_reg_model {
         assert(in_progress.contains(x));
         banned.insert(x);
         in_progress.erase(x);
+    }
+
+    void start_read(int32_t id) {
+        auto [_, inserted] = reads.emplace(id, seq.back().elem);
+        assert(inserted);
+    }
+
+    void read_success(int32_t id, append_seq result) {
+        auto read = reads.find(id);
+        assert(read != reads.end());
+
+        size_t idx = 0;
+        for (; idx < result.size(); ++idx) {
+            if (result[idx] == read->second) {
+                break;
+            }
+        }
+
+        if (idx == result.size()) {
+            throw inconsistency{format(
+                "read {} observed last model elem {} at start not present in result: {}",
+                id, read->second, result)};
+        }
+
+        try {
+            auto [prev, x] = result.pop();
+            completion(x, prev);
+        } catch (inconsistency& e) {
+            e.what += format(
+                    "\nwhen completing read id: {}, last model elem at start: {}\nread result: {}",
+                    id, read->second, result);
+        }
     }
 
 private:
@@ -2811,6 +3007,7 @@ std::ostream& operator<<(std::ostream& os, const AppendReg::ret& r) {
 SEASTAR_TEST_CASE(basic_generator_test) {
     using op_type = operation::invocable<operation::either_of<
             raft_call<AppendReg>,
+            raft_read<AppendReg>,
             network_majority_grudge<AppendReg>,
             reconfiguration<AppendReg>,
             stop_crash<AppendReg>
@@ -2855,6 +3052,10 @@ SEASTAR_TEST_CASE(basic_generator_test) {
         // Note: with the default configuration we won't observe any snapshots at all, since the default
         // threshold is 1024 log commands and we perform only 500 ops.
         bool frequent_snapshotting = bdist(random_engine);
+
+        bool nemesis_partitions = true;
+        bool nemesis_reconfigurations = true;
+        bool nemesis_crashes = true;
 
         // TODO: randomize the snapshot thresholds between different servers for more chaos.
         auto srv_cfg = frequent_snapshotting
@@ -2920,6 +3121,12 @@ SEASTAR_TEST_CASE(basic_generator_test) {
             .timer = timer
         };
 
+        raft_read<AppendReg>::state_type read_state {
+            .env = env,
+            .known = known_config,
+            .timer = timer
+        };
+
         network_majority_grudge<AppendReg>::state_type network_majority_grudge_state {
             .env = env,
             .known = known_config,
@@ -2944,6 +3151,7 @@ SEASTAR_TEST_CASE(basic_generator_test) {
 
         auto init_state = op_type::state_type{
             std::move(db_call_state),
+            std::move(read_state),
             std::move(network_majority_grudge_state),
             std::move(reconfiguration_state),
             std::move(crash_state)
@@ -2962,30 +3170,46 @@ SEASTAR_TEST_CASE(basic_generator_test) {
         // ~= [4s, 8s] -> ~1/2 partitions should cause an election
         // we will set request timeout 600_t ~= 6s and partition every 1200_t ~= 12s
 
-        auto gen = op_limit(500,
+        auto num_ops = 500;
+        auto gen = op_limit(num_ops,
             pin(partition_thread,
-                stagger(seed, timer.now() + 200_t, 1200_t, 1200_t,
-                    random(seed, [] (std::mt19937& engine) {
-                        static std::uniform_int_distribution<raft::logical_clock::rep> dist{400, 800};
-                        return op_type{network_majority_grudge<AppendReg>{raft::logical_clock::duration{dist(engine)}}};
-                    })
+                op_limit(nemesis_partitions ? num_ops : 0,
+                    stagger(seed, timer.now() + 200_t, 1200_t, 1200_t,
+                        random(seed, [] (std::mt19937& engine) {
+                            static std::uniform_int_distribution<raft::logical_clock::rep> dist{400, 800};
+                            return op_type{network_majority_grudge<AppendReg>{raft::logical_clock::duration{dist(engine)}}};
+                        })
+                    )
                 ),
                 pin(reconfig_thread,
-                    stagger(seed, timer.now() + 1000_t, 500_t, 500_t,
-                        constant([] () { return op_type{reconfiguration<AppendReg>{500_t}}; })
+                    op_limit(nemesis_reconfigurations ? num_ops : 0,
+                        stagger(seed, timer.now() + 1000_t, 500_t, 500_t,
+                            constant([] () { return op_type{reconfiguration<AppendReg>{500_t}}; })
+                        )
                     ),
                     pin(crash_thread,
-                        stagger(seed, timer.now() + 200_t, 100_t, 200_t,
-                            random(seed, [] (std::mt19937& engine) {
-                                static std::uniform_int_distribution<raft::logical_clock::rep> dist{0, 100};
-                                return op_type{stop_crash<AppendReg>{raft::logical_clock::duration{dist(engine)}}};
-                            })
+                        op_limit(nemesis_crashes ? num_ops : 0,
+                            stagger(seed, timer.now() + 200_t, 100_t, 200_t,
+                                random(seed, [] (std::mt19937& engine) {
+                                    static std::uniform_int_distribution<raft::logical_clock::rep> dist{0, 100};
+                                    return op_type{stop_crash<AppendReg>{raft::logical_clock::duration{dist(engine)}}};
+                                })
+                            )
                         ),
-                        stagger(seed, timer.now(), 0_t, 50_t,
-                            sequence(1, [] (int32_t i) {
-                                assert(i > 0);
-                                return op_type{raft_call<AppendReg>{AppendReg::append{i}, 200_t}};
-                            })
+                        either(
+                            stagger(seed, timer.now(), 0_t, 50_t,
+                                sequence(1, [] (int32_t i) {
+                                    assert(i > 0);
+                                    return op_type{raft_call<AppendReg>{AppendReg::append{i}, 200_t}};
+                                })
+                            ),
+                            op_limit(forwarding ? num_ops : 0 /* only produce raft_reads in forwarding mode */,
+                                stagger(seed, timer.now(), 0_t, 200_t,
+                                    sequence(1, [] (int32_t i) {
+                                        return op_type{raft_read<AppendReg>{i, 200_t}};
+                                    })
+                                )
+                            )
                         )
                     )
                 )
@@ -3011,6 +3235,9 @@ SEASTAR_TEST_CASE(basic_generator_test) {
                 if (auto call_op = std::get_if<raft_call<AppendReg>>(&o.op)) {
                     ++_stats.invocations;
                     _model.invocation(call_op->input.x);
+                } else if (auto read_op = std::get_if<raft_read<AppendReg>>(&o.op)) {
+                    ++_stats.invocations;
+                    _model.start_read(read_op->read_id);
                 }
             }
 
@@ -3040,6 +3267,18 @@ SEASTAR_TEST_CASE(basic_generator_test) {
                         ++_stats.failures;
                     }
                     ), *call_res);
+                } else if (auto read_res = std::get_if<raft_read<AppendReg>::result_type>(res)) {
+                    std::visit(make_visitor(
+                    [this, id = read_res->first] (AppendReg::state_t& s) {
+                        tlogger.debug("read completion id: {} digest: {}", id, s.digest());
+
+                        ++_stats.successes;
+                        _model.read_success(id, std::move(s));
+                    },
+                    [this] (auto&) {
+                        ++_stats.failures;
+                    }
+                    ), read_res->second);
                 } else {
                     tlogger.debug("completion {}", c);
                 }
