@@ -243,6 +243,42 @@ Alternatively
  3. Publish with `git push`.
 
 
+## Relationship between an open-source branch and an enterprise branch
+
+An enterprise branch is based on an open-source branch. `enterprise` is
+based on `master`, and e.g. enterprise `branch-2022.1` is based on
+open-source `branch-5.0`. The base branch can be found in
+`SCYLLA-VERSION-GEN`, `BASE_VERSION` variable (that has a tendency to get
+clobbered in merges).
+
+Patch flow is as follows:
+ - From open-source master to an open-source branch, use cherry-pick, as
+   described above.
+ - From a maintained open-source branch to an enterprise branch based on
+   it, use merging, as described below.
+ - Once an open-source branch is no longer maintained, use cherry-picking
+   from master to the enterprise branch.
+ - Sometimes, a fix is deemed inappropriate for an open-source backported
+   but is desirable for an enterprise branch. In this case the fix can be
+   cherry-picked.
+
+The motivation for this system is to avoid duplication of work. The testing
+and conflict resolution that went into an OSS backport is reused in the
+enterprise branch.
+
+As an example, consider enterprise branches branch-2022.1 (based on OSS 5.0),
+branch-2021.1 (based on end-of-life OSS branch-4.3), and branch-2020.1 (based
+on end-of-like OSS branch-4.0). A fix that lands in master will flow in this way:
+
+ - Cherry-picked into branch-5.0
+    - branch-5.0 is merged into branch-2022.1 with all its fixes
+ - Cherry-picked into branch-2021.1
+ - Cherry-picked into branch-2020.1
+
+It is important not to backport into an older branch while letting a younger
+branch not receive the fix, since that creates a regression for users that
+upgrade to the younger branch.
+
 ## Merging from an open-source branch to an enterprise branch
 
 Periodically, we merge into enterprise branches from their open-source bases.
