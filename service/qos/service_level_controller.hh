@@ -78,6 +78,9 @@ private:
         bool destroy_default_sg;
         // a counter for making unique temp scheduling groups names
         int unique_group_counter;
+        // A flag that indicates that we exhausted all of our scheduling groups
+        // and we can't create new ones.
+        bool scheduling_groups_exhausted = false;
     };
 
     std::unique_ptr<global_controller_data> _global_controller_db;
