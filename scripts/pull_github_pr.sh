@@ -9,6 +9,13 @@
 
 set -e
 
+gh_hosts=~/.config/gh/hosts.yml
+
+if [[ ( -z "$GITHUB_LOGIN" || -z "$GITHUB_TOKEN" ) && -f "$gh_hosts" ]]; then
+	GITHUB_LOGIN=$(awk '/user:/ { print $2 }' "$gh_hosts")
+	GITHUB_TOKEN=$(awk '/oauth_token:/ { print $2 }' "$gh_hosts")
+fi
+
 if [[ -z "$GITHUB_LOGIN" || -z "$GITHUB_TOKEN" ]]; then
     echo 'Please set $GITHUB_LOGIN and $GITHUB_TOKEN'
     exit 1
