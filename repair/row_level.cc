@@ -24,6 +24,7 @@
 #include <seastar/util/bool_class.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/parallel_for_each.hh>
 #include <list>
 #include <vector>
 #include <algorithm>
@@ -47,6 +48,7 @@
 #include "readers/empty_v2.hh"
 #include "readers/evictable.hh"
 #include "readers/queue.hh"
+#include "readers/mutation_fragment_v1_stream.hh"
 #include "repair/hash.hh"
 #include "repair/decorated_key_with_hash.hh"
 #include "repair/row.hh"
@@ -268,32 +270,18 @@ private:
     // Only needed for local readers, the multishard reader takes care
     // of pinning tables on used shards.
     std::optional<utils::phased_barrier::operation> _local_read_op;
-    // Local reader or multishard reader to read the range
-    flat_mutation_reader _reader;
+    // Fragment stream of either local or multishard reader for the range
+    mutation_fragment_v1_stream _reader;
     std::optional<evictable_reader_handle_v2> _reader_handle;
     // Current partition read from disk
     lw_shared_ptr<const decorated_key_with_hash> _current_dk;
     uint64_t _reads_issued = 0;
     uint64_t _reads_finished = 0;
 
-public:
-    repair_reader(
+    flat_mutation_reader_v2 make_reader(
             seastar::sharded<replica::database>& db,
             replica::column_family& cf,
-            schema_ptr s,
-            reader_permit permit,
-            dht::token_range range,
-            const dht::sharder& remote_sharder,
-            unsigned remote_shard,
-            uint64_t seed,
-            is_local_reader local_reader)
-            : _schema(s)
-            , _permit(std::move(permit))
-            , _range(dht::to_partition_range(range))
-            , _sharder(remote_sharder, range, remote_shard)
-            , _seed(seed)
-            , _local_read_op(local_reader ? std::optional(cf.read_in_progress()) : std::nullopt)
-            , _reader(nullptr) {
+            is_local_reader local_reader) {
         if (local_reader) {
             auto ms = mutation_source([&cf] (
                         schema_ptr s,
@@ -316,21 +304,41 @@ public:
                     service::get_local_streaming_priority(),
                     {},
                     mutation_reader::forwarding::no);
-            _reader = downgrade_to_v1(std::move(rd));
+            return rd;
         } else {
             // We can't have two permits with count resource for 1 repair.
             // So we release the one on _permit so the only one is the one the
             // shard reader will obtain.
             _permit.release_base_resources();
-            _reader = downgrade_to_v1(make_multishard_streaming_reader(db, _schema, _permit, [this] {
+            return make_multishard_streaming_reader(db, _schema, _permit, [this] {
                 auto shard_range = _sharder.next();
                 if (shard_range) {
                     return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
                 }
                 return std::optional<dht::partition_range>();
-            }));
+            });
         }
     }
+
+public:
+    repair_reader(
+            seastar::sharded<replica::database>& db,
+            replica::column_family& cf,
+            schema_ptr s,
+            reader_permit permit,
+            dht::token_range range,
+            const dht::sharder& remote_sharder,
+            unsigned remote_shard,
+            uint64_t seed,
+            is_local_reader local_reader)
+            : _schema(s)
+            , _permit(std::move(permit))
+            , _range(dht::to_partition_range(range))
+            , _sharder(remote_sharder, range, remote_shard)
+            , _seed(seed)
+            , _local_read_op(local_reader ? std::optional(cf.read_in_progress()) : std::nullopt)
+            , _reader(make_reader(db, cf, local_reader))
+    { }
 
     future<mutation_fragment_opt>
     read_mutation_fragment() {
@@ -357,7 +365,7 @@ public:
 
     future<> on_end_of_stream() noexcept {
       return _reader.close().then([this] {
-        _reader = downgrade_to_v1(make_empty_flat_reader_v2(_schema, _permit));
+        _reader = mutation_fragment_v1_stream(make_empty_flat_reader_v2(_schema, _permit));
         _reader_handle.reset();
       });
     }
@@ -2690,7 +2698,7 @@ private:
         repair_update_system_table_request req{_ri.id.uuid, _table_id, _ri.keyspace, _cf_name, _range, repair_time};
         auto all_nodes = _all_live_peer_nodes;
         all_nodes.push_back(utils::fb_utilities::get_broadcast_address());
-        co_await parallel_for_each(all_nodes, [this, req] (gms::inet_address node) -> future<> {
+        co_await coroutine::parallel_for_each(all_nodes, [this, req] (gms::inet_address node) -> future<> {
             try {
                 auto& ms = _ri.messaging.local();
                 repair_update_system_table_response resp = co_await ser::partition_checksum_rpc_verbs::send_repair_update_system_table(&ms, netw::messaging_service::msg_addr(node), req);

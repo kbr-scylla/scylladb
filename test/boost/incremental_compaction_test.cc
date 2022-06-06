@@ -36,8 +36,8 @@
 
 using namespace sstables;
 
-static flat_mutation_reader sstable_reader(reader_permit permit, shared_sstable sst, schema_ptr s) {
-    return sst->as_mutation_source().make_reader(s, std::move(permit), query::full_partition_range, s->full_slice());
+static flat_mutation_reader_v2 sstable_reader(reader_permit permit, shared_sstable sst, schema_ptr s) {
+    return sst->as_mutation_source().make_reader_v2(s, std::move(permit), query::full_partition_range, s->full_slice());
 
 }
 
@@ -122,7 +122,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto cm = make_lw_shared<compaction_manager>(compaction_manager::for_testing_tag());
         auto cmt = compaction_manager_test(*cm);
         auto tracker = make_lw_shared<cache_tracker>();
-        auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.manager(), env.semaphore()), replica::column_family::no_commitlog(), *cm, cl_stats, *tracker);
+        auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.semaphore()), replica::column_family::no_commitlog(), *cm, env.manager(), cl_stats, *tracker);
         auto table_s = make_table_state_for_test(*cf);
         cf->mark_ready_for_writes();
         cf->start();
@@ -264,14 +264,14 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             return incremental_compaction_strategy(options);
         }
         static replica::column_family::config make_table_config(test_env& env) {
-            auto config = column_family_test_config(env.manager(), env.semaphore());
+            auto config = column_family_test_config(env.semaphore());
             config.compaction_enforce_min_threshold = true;
             return config;
         }
 
         sag_test(test_env& env, schema_ptr s, double space_amplification_goal)
             : _env(env)
-            , _cf(make_lw_shared<replica::column_family>(s, make_table_config(_env), replica::column_family::no_commitlog(), _cm, _cl_stats, _tracker))
+            , _cf(make_lw_shared<replica::column_family>(s, make_table_config(_env), replica::column_family::no_commitlog(), _cm, env.manager(), _cl_stats, _tracker))
             , _ics(make_ics(space_amplification_goal))
         {
         }

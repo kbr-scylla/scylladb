@@ -36,6 +36,7 @@
 #include "test/lib/log.hh"
 
 #include <boost/range/algorithm/sort.hpp>
+#include "readers/from_fragments_v2.hh"
 
 using namespace sstables;
 using namespace std::chrono_literals;
@@ -509,7 +510,7 @@ SEASTAR_TEST_CASE(broken_ranges_collection) {
   return test_env::do_with_async([] (test_env& env) {
     env.reusable_sst(peers_schema(), "test/resource/sstables/broken_ranges", 2).then([&env] (auto sstp) {
         auto s = peers_schema();
-        return with_closeable(sstp->as_mutation_source().make_reader(s, env.make_reader_permit(), query::full_partition_range), [s] (flat_mutation_reader& reader) {
+        return with_closeable(sstp->as_mutation_source().make_reader_v2(s, env.make_reader_permit(), query::full_partition_range), [s] (auto& reader) {
           return repeat([s, &reader] {
             return read_mutation_from_flat_mutation_reader(reader).then([s] (mutation_opt mut) {
                 auto key_equal = [s, &mut] (sstring ip) {
@@ -1420,13 +1421,13 @@ SEASTAR_TEST_CASE(test_large_index_pages_do_not_cause_large_allocations) {
 
     auto pr = dht::partition_range::make_singular(small_keys[0]);
 
-    mutation expected = *with_closeable(downgrade_to_v1(mt->make_flat_reader(s, env.make_reader_permit(), pr)), [] (flat_mutation_reader& mt_reader) {
+    mutation expected = *with_closeable(mt->make_flat_reader(s, env.make_reader_permit(), pr), [] (auto& mt_reader) {
         return read_mutation_from_flat_mutation_reader(mt_reader);
     }).get0();
 
     auto t0 = std::chrono::steady_clock::now();
     auto large_allocs_before = memory::stats().large_allocations();
-    mutation actual = *with_closeable(sst->as_mutation_source().make_reader(s, env.make_reader_permit(), pr), [] (flat_mutation_reader& sst_reader) {
+    mutation actual = *with_closeable(sst->as_mutation_source().make_reader_v2(s, env.make_reader_permit(), pr), [] (auto& sst_reader) {
         return read_mutation_from_flat_mutation_reader(sst_reader);
     }).get0();
     auto large_allocs_after = memory::stats().large_allocations();
@@ -1622,3 +1623,67 @@ SEASTAR_TEST_CASE(test_static_compact_tables_are_read) {
         }
     });
 }
+
+SEASTAR_TEST_CASE(writer_handles_subsequent_range_tombstone_changes_without_tombstones) {
+    // This test exposes a problem of a peculiar setup of tombstones that trigger
+    // a mutation fragment stream validation exception if stream is compacted.
+    //
+    // Applying tombstones in the order:
+    //
+    // range_tombstone_change pos(ck1), after_all_prefixed, tombstone_timestamp=1
+    // range_tombstone_change pos(ck2), before_all_prefixed, tombstone=NONE
+    // range_tombstone_change pos(NONE), after_all_prefixed, tombstone=NONE
+    //
+    // Can lead to swapping the order of mutations when written and read from
+    // disk via sstable writer. This is caused by conversion of
+    // range_tombstone_change (in memory representation) to range tombstone
+    // marker (on disk representation) and back.
+    //
+    // When this mutation stream is written to disk, the range tombstone
+    // markers type is calculated based on the relationship between
+    // range_tombstone_changes. The RTC series as above produces markers
+    // (start, end, start). When the last marker is loaded from disk, it's kind
+    // gets incorrectly loaded as before_all_prefixed instead of
+    // after_all_prefixed. This leads to incorrect order of mutations.
+    return test_env::do_with_async([] (test_env& env) {
+        for (const auto version : writable_sstable_versions) {
+            schema_ptr s = schema_builder("ks", "cf")
+                .with_column("pk", bytes_type, column_kind::partition_key)
+                .with_column("ck1", bytes_type, column_kind::clustering_key)
+                .with_column("ck2", bytes_type, column_kind::clustering_key)
+                .build();
+            tests::reader_concurrency_semaphore_wrapper sem;
+            partition_key pk{std::vector<bytes>{serialized(make_local_key(s))}};
+            reader_permit p = sem.make_permit();
+            auto make_rtc = [s, p](bound_weight bw, std::vector<bytes>&& ck, tombstone t) {
+                return mutation_fragment_v2(*s, p, range_tombstone_change(
+                    position_in_partition(partition_region::clustered, bw, clustering_key_prefix{std::move(ck)}),
+                    std::move(t)));
+            };
+            std::deque<mutation_fragment_v2> fragments;
+            fragments.emplace_back(*s, p, partition_start(dht::decorate_key(*s, pk), {}));
+            fragments.push_back(make_rtc(bound_weight::after_all_prefixed, {serialized(1l)}, {api::min_timestamp + 1, {}}));
+            fragments.push_back(make_rtc(bound_weight::before_all_prefixed, {serialized(2l)}, {}));
+            fragments.push_back(make_rtc(bound_weight::after_all_prefixed, {}, {}));
+            fragments.emplace_back(*s, p, partition_end{});
+
+            flat_mutation_reader_v2 input_reader = make_flat_mutation_reader_from_fragments(s, p, std::move(fragments));
+            deferred_close dc1{input_reader};
+            sstable_writer_config cfg = env.manager().configure_writer();
+            tmpdir dir;
+            shared_sstable sstable = env.make_sstable(s, dir.path().string(), 0);
+            encoding_stats es;
+            sstable->write_components(std::move(input_reader), 1, s, cfg, es).get();
+            sstable->load().get();
+
+            mutation_fragment_stream_validating_filter f{"mutation_order_violation_test", *s, mutation_fragment_stream_validation_level::clustering_key};
+            auto sstable_reader = sstable->make_reader(s, sem.make_permit(), query::full_partition_range, s->full_slice());
+            deferred_close dc{sstable_reader};
+            sstable_reader.consume_pausable([&f](mutation_fragment_v2 mf) {
+                f(mf);
+                return stop_iteration::no;
+            }).get();
+        }
+    });
+}
+

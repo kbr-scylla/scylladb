@@ -28,6 +28,7 @@
 #include <iterator>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
+#include <seastar/coroutine/parallel_for_each.hh>
 
 #include "dht/sharder.hh"
 #include "types.hh"
@@ -78,6 +79,9 @@
 #include "reader_concurrency_semaphore.hh"
 #include "readers/reversing_v2.hh"
 #include "readers/forwardable_v2.hh"
+
+#include "release.hh"
+#include "utils/build_id.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -1510,9 +1514,10 @@ create_sharding_metadata(schema_ptr schema, const dht::decorated_key& first_key,
 
 // In the beginning of the statistics file, there is a disk_hash used to
 // map each metadata type to its correspondent position in the file.
-void seal_statistics(sstable_version_types v, statistics& s, metadata_collector& collector, const std::set<int>& _compaction_ancestors,
+void seal_statistics(sstable_version_types v, statistics& s, metadata_collector& collector,
         const sstring partitioner, double bloom_filter_fp_chance, schema_ptr schema,
-        const dht::decorated_key& first_key, const dht::decorated_key& last_key, const encoding_stats& enc_stats) {
+        const dht::decorated_key& first_key, const dht::decorated_key& last_key,
+        const encoding_stats& enc_stats, const std::set<int>& compaction_ancestors) {
     validation_metadata validation;
     compaction_metadata compaction;
     stats_metadata stats;
@@ -1522,8 +1527,8 @@ void seal_statistics(sstable_version_types v, statistics& s, metadata_collector&
     s.contents[metadata_type::Validation] = std::make_unique<validation_metadata>(std::move(validation));
 
     collector.construct_compaction(compaction);
-    if (v < sstable_version_types::mc && !_compaction_ancestors.empty()) {
-        compaction.ancestors.elements = utils::chunked_vector<uint32_t>(_compaction_ancestors.begin(), _compaction_ancestors.end());
+    if (v < sstable_version_types::mc && !compaction_ancestors.empty()) {
+        compaction.ancestors.elements = utils::chunked_vector<uint32_t>(compaction_ancestors.begin(), compaction_ancestors.end());
     }
     s.contents[metadata_type::Compaction] = std::make_unique<compaction_metadata>(std::move(compaction));
 
@@ -1594,6 +1599,13 @@ sstable::write_scylla_metadata(const io_priority_class& pc, shard_id shard, ssta
         o.value = bytes(to_bytes_view(sstring_view(origin)));
         _components->scylla_metadata->data.set<scylla_metadata_type::SSTableOrigin>(std::move(o));
     }
+
+    scylla_metadata::scylla_version version;
+    version.value = bytes(to_bytes_view(sstring_view(scylla_version())));
+    _components->scylla_metadata->data.set<scylla_metadata_type::ScyllaVersion>(std::move(version));
+    scylla_metadata::scylla_build_id build_id;
+    build_id.value = bytes(to_bytes_view(sstring_view(get_build_id())));
+    _components->scylla_metadata->data.set<scylla_metadata_type::ScyllaBuildId>(std::move(build_id));
 
     write_simple<component_type::Scylla>(*_components->scylla_metadata, pc);
 }
@@ -2106,7 +2118,7 @@ future<> sstable::move_to_new_dir(sstring new_dir, generation_type new_generatio
     co_await create_links_and_mark_for_removal(new_dir, new_generation);
     _dir = new_dir;
     generation_type old_generation = std::exchange(_generation, new_generation);
-    co_await parallel_for_each(all_components(), [this, old_generation, old_dir] (auto p) {
+    co_await coroutine::parallel_for_each(all_components(), [this, old_generation, old_dir] (auto p) {
         return sstable_write_io_check(remove_mirrored_file, sstable::filename(old_dir, _schema->ks_name(), _schema->cf_name(), _version, old_generation, _format, p.second));
     });
     auto temp_toc = sstable_version_constants::get_component_map(_version).at(component_type::TemporaryTOC);
@@ -2321,10 +2333,10 @@ static future<bool> do_validate_compressed(input_stream<char>& stream, const sst
     uint64_t offset = 0;
     uint32_t actual_full_checksum = ChecksumType::init_checksum();
 
-    for (auto it = c.offsets.begin(); it != c.offsets.end(); ++it) {
-        auto next_it = std::next(it);
-        auto current_pos = *it;
-        auto next_pos = next_it == c.offsets.end() ? c.compressed_file_length() : *next_it;
+    auto accessor = c.offsets.get_accessor();
+    for (size_t i = 0; i < c.offsets.size(); ++i) {
+        auto current_pos = accessor.at(i);
+        auto next_pos = i + 1 == c.offsets.size() ? c.compressed_file_length() : accessor.at(i + 1);
         auto chunk_len = next_pos - current_pos;
         auto buf = co_await stream.read_exactly(chunk_len);
 
@@ -2344,7 +2356,7 @@ static future<bool> do_validate_compressed(input_stream<char>& stream, const sst
         auto expected_checksum = read_be<uint32_t>(buf.get() + compressed_len);
         auto actual_checksum = ChecksumType::checksum(buf.get(), compressed_len);
         if (actual_checksum != expected_checksum) {
-            sstlog.error("Compressed chunk checksum mismatch at offset {}, for chunk of size {}: expected={}, actual={}", offset, chunk_len, expected_checksum, actual_checksum);
+            sstlog.error("Compressed chunk checksum mismatch at offset {}, for chunk #{} of size {}: expected={}, actual={}", offset, i, chunk_len, expected_checksum, actual_checksum);
             valid = false;
         }
 
@@ -2372,7 +2384,8 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
     uint64_t offset = 0;
     uint32_t actual_full_checksum = ChecksumType::init_checksum();
 
-    for (const auto expected_checksum : checksum.checksums) {
+    for (size_t i = 0; i < checksum.checksums.size(); ++i) {
+        const auto expected_checksum = checksum.checksums[i];
         auto buf = co_await stream.read_exactly(checksum.chunk_size);
 
         if (buf.empty()) {
@@ -2384,7 +2397,7 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
         auto actual_checksum = ChecksumType::checksum(buf.get(), buf.size());
 
         if (actual_checksum != expected_checksum) {
-            sstlog.error("Chunk checksum mismatch at offset {}, for chunk of size {}: expected={}, actual={}", offset, checksum.chunk_size, expected_checksum, actual_checksum);
+            sstlog.error("Chunk checksum mismatch at offset {}, for chunk #{} of size {}: expected={}, actual={}", offset, i, checksum.chunk_size, expected_checksum, actual_checksum);
             valid = false;
         }
 
@@ -2710,7 +2723,7 @@ remove_by_toc_name(sstring sstable_toc_name) {
     if (ex) {
         std::rethrow_exception(std::move(ex));
     }
-    co_await parallel_for_each(components, [&prefix] (sstring component) -> future<> {
+    co_await coroutine::parallel_for_each(components, [&prefix] (sstring component) -> future<> {
         if (component.empty()) {
             // eof
             co_return;

@@ -1296,6 +1296,8 @@ const char* to_string(sstables::scylla_metadata_type t) {
         case sstables::scylla_metadata_type::RunIdentifier: return "run_identifier";
         case sstables::scylla_metadata_type::LargeDataStats: return "large_data_stats";
         case sstables::scylla_metadata_type::SSTableOrigin: return "sstable_origin";
+        case sstables::scylla_metadata_type::ScyllaVersion: return "scylla_version";
+        case sstables::scylla_metadata_type::ScyllaBuildId: return "scylla_build_id";
     }
     std::abort();
 }
@@ -1389,7 +1391,8 @@ public:
         }
         _writer.EndObject();
     }
-    void operator()(const sstables::scylla_metadata::sstable_origin& val) const {
+    template <typename Size>
+    void operator()(const sstables::disk_string<Size>& val) const {
         _writer.String(disk_string_to_string(val));
     }
 
@@ -2169,7 +2172,7 @@ $ scylla sstable validate /path/to/md-123456-big-Data.db /path/to/md-123457-big-
                     schema = tools::load_one_schema_from_file(std::filesystem::path(app_config["schema-file"].as<sstring>())).get();
                 }
             } catch (...) {
-                fmt::print(std::cerr, "error: could not load {} '{}': {}", schema_source_opt, app_config[schema_source_opt].as<sstring>(), std::current_exception());
+                fmt::print(std::cerr, "error: could not load {} '{}': {}\n", schema_source_opt, app_config[schema_source_opt].as<sstring>(), std::current_exception());
                 return 1;
             }
 

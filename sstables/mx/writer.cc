@@ -1360,6 +1360,9 @@ stop_iteration writer::consume(range_tombstone_change&& rtc) {
     ensure_tombstone_is_written();
     ensure_static_row_is_written_if_needed();
     position_in_partition_view pos = rtc.position();
+    if (!_current_tombstone && !rtc.tombstone()) {
+        return stop_iteration::no;
+    }
     tombstone prev_tombstone = std::exchange(_current_tombstone, rtc.tombstone());
     if (!prev_tombstone) { // start bound
         auto bv = pos.as_start_bound_view();
@@ -1419,7 +1422,7 @@ void writer::consume_end_of_stream() {
     _sst.set_first_and_last_keys();
 
     _sst._components->statistics.contents[metadata_type::Serialization] = std::make_unique<serialization_header>(std::move(_sst_schema.header));
-    seal_statistics(_sst.get_version(), _sst._components->statistics, _collector, _sst.compaction_ancestors(),
+    seal_statistics(_sst.get_version(), _sst._components->statistics, _collector,
         _sst._schema->get_partitioner().name(), _schema.bloom_filter_fp_chance(),
         _sst._schema, _sst.get_first_decorated_key(), _sst.get_last_decorated_key(), _enc_stats);
     close_data_writer();
