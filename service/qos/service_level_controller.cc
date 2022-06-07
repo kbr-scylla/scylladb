@@ -598,14 +598,23 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             return make_ready_future().then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
                     scheduling_group sg;
-                    sg =  _global_controller_db->deleted_scheduling_groups.front();
-                    _global_controller_db->deleted_scheduling_groups.pop_front();
-                    sl.sg = sg;
-                    return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
-                        scheduling_group non_const_sg = sg;
+                    auto&& it = std::find_if(_global_controller_db->deleted_scheduling_groups.begin()
+                            ,   _global_controller_db->deleted_scheduling_groups.end()
+                            , [sg_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const scheduling_group& sg) {
+                                return (sg.name() == sg_name_to_find);
+                            });
+                    if (it != _global_controller_db->deleted_scheduling_groups.end()) {
+                        sl.sg = *it;
+                        _global_controller_db->deleted_scheduling_groups.erase(it);
+                    } else {
+                        sl.sg = _global_controller_db->deleted_scheduling_groups.front();
+                        _global_controller_db->deleted_scheduling_groups.pop_front();
+                    }
+                    return container().invoke_on_all([&sl] (service_level_controller& service) {
+                        scheduling_group non_const_sg = sl.sg;
                         return non_const_sg.set_shares((float)std::get<int32_t>(sl.slo.shares));
-                    }).then([sg, &sl, &name] {
-                        return rename_scheduling_group(sg, format(scheduling_group_name_pattern, name));
+                    }).then([&sl, &name] {
+                        return rename_scheduling_group(sl.sg, format(scheduling_group_name_pattern, name));
                     });
                 } else if (_global_controller_db->scheduling_groups_exhausted) {
                     return make_exception_future<>(service_level_scheduling_groups_exhausted(name));
@@ -623,12 +632,21 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             }).then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_priority_classes.empty()) {
                     int32_t shares = std::get<int32_t>(sl.slo.shares);
-                    io_priority_class pc = _global_controller_db->deleted_priority_classes.front();
-                    _global_controller_db->deleted_priority_classes.pop_front();
-                    sl.pc = pc;
-                    return container().invoke_on_all([pc, shares] (service_level_controller& service) {
+                    auto it = std::find_if(_global_controller_db->deleted_priority_classes.begin()
+                            , _global_controller_db->deleted_priority_classes.end()
+                            , [pc_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const io_priority_class& pc) {
+                                return (pc.get_name() == pc_name_to_find);
+                            });
+                    if (it != _global_controller_db->deleted_priority_classes.end()) {
+                        sl.pc = *it;
+                        _global_controller_db->deleted_priority_classes.erase(it);
+                    } else {
+                        sl.pc = _global_controller_db->deleted_priority_classes.front();
+                        _global_controller_db->deleted_priority_classes.pop_front();
+                    }
+                    return container().invoke_on_all([pc = sl.pc, shares] (service_level_controller& service) {
                         return engine().update_shares_for_class(pc, shares);
-                    }).then([pc, &sl, &name] () mutable{
+                    }).then([pc = sl.pc, &sl, &name] () mutable{
                         return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
                             return pc.rename(format(scheduling_group_name_pattern, name));
                         });

@@ -219,3 +219,22 @@ SEASTAR_THREAD_TEST_CASE(too_many_service_levels) {
     }
     new_sl_controller.stop().get();
 }
+
+SEASTAR_THREAD_TEST_CASE(add_remove_bad_sequence) {
+    sharded<service_level_controller> sl_controller;
+    sharded<auth::service> auth_service;
+    service_level_options sl_options;
+    sl_options.shares.emplace<int32_t>(1000);
+    scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg3", 1.0).get();
+    sl_controller.start(std::ref(auth_service), sl_options, default_scheduling_group, true).get();
+    service_level_options slo;
+    slo.shares.emplace<int32_t>(500);
+    slo.workload = service_level_options::workload_type::interactive;
+    sl_controller.local().add_service_level("a", slo).get();
+    sl_controller.local().add_service_level("b", slo).get();
+    sl_controller.local().remove_service_level("b", false).get();
+    sl_controller.local().remove_service_level("a", false).get();
+    sl_controller.local().add_service_level("a", slo).get();
+    sl_controller.local().remove_service_level("a", false).get();
+    sl_controller.stop().get();
+}
