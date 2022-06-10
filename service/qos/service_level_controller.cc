@@ -175,7 +175,8 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
             // detects it the scan query done inside this call is failing.
             service_levels = _sl_data_accessor->get_service_levels().get0();
 
-            service_levels_info service_levels_for_add_or_update;
+            service_levels_info service_levels_for_update;
+            service_levels_info service_levels_for_add;
             service_levels_info service_levels_for_delete;
 
             auto current_it = _service_levels_db.begin();
@@ -195,17 +196,7 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
                     if (current_it->second.slo != new_state_it->second) {
                         // The service level configuration is different
                         // in the new state and the old state, meaning it needs to be updated.
-                        int32_t old_shares = 1000;
-                        if (auto old_shares_p = std::get_if<int32_t>(&current_it->second.slo.shares)) {
-                            old_shares = *old_shares_p;
-                        }
-                        int32_t new_shares = 1000;
-                        if (auto new_shares_p = std::get_if<int32_t>(&new_state_it->second.shares)) {
-                            new_shares = *new_shares_p;
-                        }
-                        sl_logger.info("service level \"{}\" was updated from {} to {} shares.",
-                                new_state_it->first.c_str(), old_shares, new_shares);
-                        service_levels_for_add_or_update.insert(*new_state_it);
+                        service_levels_for_update.insert(*new_state_it);
                     }
                     current_it++;
                     new_state_it++;
@@ -214,36 +205,64 @@ future<> service_level_controller::update_service_levels_from_distributed_data()
                     //removed, but only if it is not static since static configurations dont
                     //come from the distributed keyspace but from code.
                     if (!current_it->second.is_static) {
-                        sl_logger.info("service level \"{}\" was deleted.", current_it->first.c_str());
                         service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
                     }
                     current_it++;
                 } else { /*new_it->first < current_it->first */
                     // The service level exits in the new state but not in the old state
                     // so it needs to be added.
-                    sl_logger.info("service level \"{}\" was added.", new_state_it->first.c_str());
-                    service_levels_for_add_or_update.insert(*new_state_it);
+                    service_levels_for_add.insert(*new_state_it);
                     new_state_it++;
                 }
             }
 
             for (; current_it != _service_levels_db.end(); current_it++) {
                 if (!current_it->second.is_static) {
-                    sl_logger.info("service level \"{}\" was deleted.", current_it->first.c_str());
                     service_levels_for_delete.emplace(current_it->first, current_it->second.slo);
                 }
             }
             for (; new_state_it != service_levels.end(); new_state_it++) {
-                sl_logger.info("service level \"{}\" was added.", new_state_it->first.c_str());
-                service_levels_for_add_or_update.emplace(new_state_it->first, new_state_it->second);
+                                service_levels_for_add.emplace(new_state_it->first, new_state_it->second);
             }
 
             for (auto&& sl : service_levels_for_delete) {
                 do_remove_service_level(sl.first, false).get();
+                sl_logger.info("service level \"{}\" was deleted.", sl.first.c_str());
             }
-            for (auto&& sl : service_levels_for_add_or_update) {
+            for (auto&& sl : service_levels_for_update) {
                 do_add_service_level(sl.first, sl.second).get();
+                int32_t new_shares = 1000;
+                if (auto new_shares_p = std::get_if<int32_t>(&sl.second.shares)) {
+                    new_shares = *new_shares_p;
+                }
+                sl_logger.info("service level \"{}\" was updated to {} shares.",
+                                sl.first.c_str(), new_shares);
             }
+            for (auto&& sl : service_levels_for_add) {
+                bool make_room = false;
+                std::map<sstring, service_level>::reverse_iterator it;
+                try {
+                    do_add_service_level(sl.first, sl.second).get();
+                    sl_logger.info("service level \"{}\" was added.", sl.first.c_str());
+                } catch (service_level_scheduling_groups_exhausted &ex) {
+                    it = _service_levels_db.rbegin();
+                    if (it->first == default_service_level_name) {
+                        it++;
+                    }
+                    if (it->first.compare(sl.first) > 0) {
+                        make_room = true;
+                    } else {
+                         sl_logger.warn(ex.what());
+                    }
+                }
+                if (make_room) {
+                    sl_logger.warn("service level \"{}\" will be effectively dropped to make scheduling group available to \"{}\", please consider removing a service level."
+                            , it->first, sl.first );
+                    do_remove_service_level(it->first, false).get();
+                    do_add_service_level(sl.first, sl.second).get();
+                }
+            }
+
         });
     });
 }
@@ -507,14 +526,17 @@ future<bool> service_level_controller::validate_before_service_level_add() {
     assert(this_shard_id() == global_controller);
     if (_global_controller_db->deleted_scheduling_groups.size() > 0) {
         return make_ready_future<bool>(true);
+    } else if (_global_controller_db->scheduling_groups_exhausted) {
+        return make_ready_future<bool>(false);
     } else {
         return create_scheduling_group(format(temp_scheduling_group_name_pattern, _global_controller_db->unique_group_counter++), 1).then_wrapped([this] (future<scheduling_group> new_sg_f) {
-            try {
-                _global_controller_db->deleted_scheduling_groups.emplace_back(new_sg_f.get0());
-                return make_ready_future<bool>(true);
-            } catch (...) {
+            if (new_sg_f.failed()) {
+                new_sg_f.ignore_ready_future();
+                _global_controller_db->scheduling_groups_exhausted = true;
                 return make_ready_future<bool>(false);
             }
+            _global_controller_db->deleted_scheduling_groups.emplace_back(new_sg_f.get0());
+            return make_ready_future<bool>(true);
         });
     }
 }
@@ -576,29 +598,55 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             return make_ready_future().then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
                     scheduling_group sg;
-                    sg =  _global_controller_db->deleted_scheduling_groups.front();
-                    _global_controller_db->deleted_scheduling_groups.pop_front();
-                    sl.sg = sg;
-                    return container().invoke_on_all([sg, &sl] (service_level_controller& service) {
-                        scheduling_group non_const_sg = sg;
+                    auto&& it = std::find_if(_global_controller_db->deleted_scheduling_groups.begin()
+                            ,   _global_controller_db->deleted_scheduling_groups.end()
+                            , [sg_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const scheduling_group& sg) {
+                                return (sg.name() == sg_name_to_find);
+                            });
+                    if (it != _global_controller_db->deleted_scheduling_groups.end()) {
+                        sl.sg = *it;
+                        _global_controller_db->deleted_scheduling_groups.erase(it);
+                    } else {
+                        sl.sg = _global_controller_db->deleted_scheduling_groups.front();
+                        _global_controller_db->deleted_scheduling_groups.pop_front();
+                    }
+                    return container().invoke_on_all([&sl] (service_level_controller& service) {
+                        scheduling_group non_const_sg = sl.sg;
                         return non_const_sg.set_shares((float)std::get<int32_t>(sl.slo.shares));
-                    }).then([sg, &sl, &name] {
-                        return rename_scheduling_group(sg, format(scheduling_group_name_pattern, name));
+                    }).then([&sl, &name] {
+                        return rename_scheduling_group(sl.sg, format(scheduling_group_name_pattern, name));
                     });
+                } else if (_global_controller_db->scheduling_groups_exhausted) {
+                    return make_exception_future<>(service_level_scheduling_groups_exhausted(name));
                 } else {
-                   return create_scheduling_group(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares)).then([&sl] (scheduling_group sg) {
-                       sl.sg = sg;
+                   return create_scheduling_group(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares)).then_wrapped([this, name, &sl] (future<scheduling_group> sg_fut) {
+                       if (sg_fut.failed()) {
+                           sg_fut.ignore_ready_future();
+                           _global_controller_db->scheduling_groups_exhausted = true;
+                           return make_exception_future<>(service_level_scheduling_groups_exhausted(name));
+                       }
+                       sl.sg = sg_fut.get0();
+                       return make_ready_future<>();
                    });
                 }
             }).then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_priority_classes.empty()) {
                     int32_t shares = std::get<int32_t>(sl.slo.shares);
-                    io_priority_class pc = _global_controller_db->deleted_priority_classes.front();
-                    _global_controller_db->deleted_priority_classes.pop_front();
-                    sl.pc = pc;
-                    return container().invoke_on_all([pc, shares] (service_level_controller& service) {
+                    auto it = std::find_if(_global_controller_db->deleted_priority_classes.begin()
+                            , _global_controller_db->deleted_priority_classes.end()
+                            , [pc_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const io_priority_class& pc) {
+                                return (pc.get_name() == pc_name_to_find);
+                            });
+                    if (it != _global_controller_db->deleted_priority_classes.end()) {
+                        sl.pc = *it;
+                        _global_controller_db->deleted_priority_classes.erase(it);
+                    } else {
+                        sl.pc = _global_controller_db->deleted_priority_classes.front();
+                        _global_controller_db->deleted_priority_classes.pop_front();
+                    }
+                    return container().invoke_on_all([pc = sl.pc, shares] (service_level_controller& service) {
                         return engine().update_shares_for_class(pc, shares);
-                    }).then([pc, &sl, &name] () mutable{
+                    }).then([pc = sl.pc, &sl, &name] () mutable{
                         return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
                             return pc.rename(format(scheduling_group_name_pattern, name));
                         });

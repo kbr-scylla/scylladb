@@ -81,4 +81,11 @@ public:
     }
 };
 
+class service_level_scheduling_groups_exhausted : public std::runtime_error {
+public:
+   static constexpr const char* msg = "Can't create scheduling group for {}, consider removing this service level or some other service level";
+   service_level_scheduling_groups_exhausted(sstring name) : std::runtime_error(format(msg, name)) {
+   }
+};
+
 }
