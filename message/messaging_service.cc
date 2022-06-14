@@ -261,9 +261,10 @@ void messaging_service::do_start_listen() {
     //        the first by wrapping its server_socket, but not the second.
     auto limits = rpc_resource_limits(_cfg.rpc_memory_limit);
     limits.isolate_connection = [this] (sstring isolation_cookie) {
-        rpc::isolation_config cfg;
-        cfg.sched_group = scheduling_group_for_isolation_cookie(isolation_cookie);
-        return cfg;
+
+        return scheduling_group_for_isolation_cookie(isolation_cookie).then([] (scheduling_group sg) {
+            return rpc::isolation_config{.sched_group = sg};
+        });
     };
     if (!_server[0] && _cfg.encrypt != encrypt_what::all && _cfg.port) {
         auto listen = [&] (const gms::inet_address& a, rpc::streaming_domain_type sdomain) {
@@ -630,23 +631,25 @@ messaging_service::scheduling_group_for_verb(messaging_verb verb) const {
     return _scheduling_info_for_connection_index[idx].sched_group;
 }
 
-scheduling_group
+future<scheduling_group>
 messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const {
-    scheduling_group ret;
-
     // Once per connection, so a loop is fine.
     for (auto&& info : _scheduling_info_for_connection_index) {
         if (info.isolation_cookie == isolation_cookie) {
-            ret =  info.sched_group;
-            break;
+            return make_ready_future<scheduling_group>(info.sched_group);
         }
     }
 
-    // We first check if this is a statement isolation cookie - it it is we will search for the
-    // appropriate service level in the service_level_controlle since in can be that
+    // We first check if this is a statement isolation cookie - if it is, we will search for the
+    // appropriate service level in the service_level_controller since in can be that
     // _scheduling_info_for_connection_index is not yet updated (drop readd case for example)
     // in the future we will only fall back here for new service levels that havn't been referenced
     // before.
+    // It is safe to assume that an unknown connection type can be rejected since a connection
+    // with an unknown purpose on the inbound side is useless.
+    // However, until we get rid of the backward compatibility code below, we can't reject the
+    // connection since there is a slight chance that this connection comes from an old node that
+    // still doesn't use the "connection type prefix" convention.
     auto tenant_connection = [] (const sstring& isolation_cookie) -> bool {
         for (auto&& connection_prefix : _connection_types_prefix) {
             if(isolation_cookie.find(connection_prefix.data()) == 0) {
@@ -655,17 +658,17 @@ messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolatio
         }
         return false;
     };
+
+    std::string service_level_name = "";
     if (tenant_connection(isolation_cookie)) {
-        // if the statement cookie is not present, the service level controller will return the default service
-        // level scheduling group.
-        std::string service_level_name = isolation_cookie.substr(std::string(isolation_cookie).find_first_of(':') + 1);
-        ret = _sl_controller.get_scheduling_group(service_level_name);
+        // Extract the service level name from the connection isolation cookie.
+        service_level_name = isolation_cookie.substr(std::string(isolation_cookie).find_first_of(':') + 1);
     } else if (_sl_controller.has_service_level(isolation_cookie)) {
         // Backward Compatibility Code - This entire "else if" block should be removed
         // in the major version that follows the one that contains this code.
         // When upgrading from an older enterprise version the isolation cookie is not
-        // prefixed with "statement:", so an isolation cookie that comes from an older node
-        // will simply contain the service level name.
+        // prefixed with "statement:" or any other connection type prefix, so an isolation cookie
+        // that comes from an older node will simply contain the service level name.
         // we do an extra step to be also future proof and make sure it is indeed a service
         // level's name, since if this is the older version and we upgrade to a new one
         // we could have more connection classes (eg: streaming,gossip etc...) and we wouldn't
@@ -673,14 +676,45 @@ messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolatio
         // it is not bulet proof in the sense that if a new tenant class happens to have the exact
         // name as one of the service levels it will be diverted to the default statement scheduling
         // group but it has a small chance of happening.
-        ret =  _sl_controller.get_scheduling_group(isolation_cookie);
+        service_level_name = isolation_cookie;
+        mlogger.info("Trying to allow an rpc connection from an older node for service level {}", service_level_name);
     } else {
         // Client is using a new connection class that the server doesn't recognize yet.
         // Assume it's important, after server upgrade we'll recognize it.
-        ret = default_scheduling_group();
+        service_level_name = isolation_cookie;
+        mlogger.warn("Assuming an unknown cookie is from an older node and represent some not yet discovered service level {} - Trying to allow it.", service_level_name);
     }
 
-    return ret;
+    if (_sl_controller.has_service_level(service_level_name)) {
+        return make_ready_future<scheduling_group>(_sl_controller.get_scheduling_group(service_level_name));
+    } else {
+        mlogger.info("Service level {} is still unknown, will try to create it now and allow the RPC connection.", service_level_name);
+        // If the service level don't exist there are two possibilities, it is either created but still not known by this
+        // node. Or it has been deleted and the initiating node hasn't caught up yet, in both cases it is safe to __try__ and
+        // create a new service level (internally), it will naturally catch up eventually and by creating it here we prevent
+        // an rpc connection for a valid service level to permanently get stuck in the default service level scheduling group.
+        // If we can't create the service level (we already have too many service levels), we will reject the connection by returning
+        // an exeptional future.
+        qos::service_level_options slo;
+        // We put here the minimal ammount of shares for this service level to be functional. When the node catches up it will
+        // be either deleted or the number of shares and other configuration options will be updated.
+        slo.shares.emplace<int32_t>(1);
+        slo.shares_name.emplace(service_level_name);
+        return _sl_controller.add_service_level(service_level_name, slo).then([this, service_level_name] () {
+            if (_sl_controller.has_service_level(service_level_name)) {
+                return make_ready_future<scheduling_group>(_sl_controller.get_scheduling_group(service_level_name));
+            } else {
+                // The code until here is best effort, to provide fast catchup in case the configuration changes very quickly and being used
+                // before this node caught up, or alternatively during startup while the configuration table hasn't been consulted yet.
+                // If for some reason we couldn't add the service level, it is better to wait for the configuration to settle,
+                // this occasion should be rare enough, even if it happen, two paths are possible, either the initiating node will
+                // catch up, figure out the service level has been deleted and will not reattempt this rpc connection, or that this node will
+                // eventually catch up with the correct configuration (mainly some service levels that have been deleted and "made room" for this service level) and
+                // will eventually allow the connection.
+                return make_exception_future<scheduling_group>(std::runtime_error(format("Rejecting RPC connection for service level: {}, probably only a transitional effect", service_level_name)));
+            }
+        });
+    }
 }
 
 
