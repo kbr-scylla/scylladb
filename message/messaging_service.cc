@@ -610,9 +610,9 @@ messaging_service::initial_scheduling_info() const {
     sched_infos.reserve(sched_infos.size() +
         _scheduling_config.statement_tenants.size() * PER_TENANT_CONNECTION_COUNT);
     for (const auto& tenant : _scheduling_config.statement_tenants) {
-        sched_infos.push_back({ tenant.sched_group, "statement:" + tenant.name });
-        sched_infos.push_back({ tenant.sched_group, "statement-ack:" + tenant.name });
-        sched_infos.push_back({ tenant.sched_group, "forward:" + tenant.name });
+        for (auto&& connection_prefix : _connection_types_prefix) {
+            sched_infos.push_back({ tenant.sched_group, sstring(connection_prefix) + tenant.name });
+        }
     }
 
     assert(sched_infos.size() == PER_SHARD_CONNECTION_COUNT +
@@ -647,7 +647,15 @@ messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolatio
     // _scheduling_info_for_connection_index is not yet updated (drop readd case for example)
     // in the future we will only fall back here for new service levels that havn't been referenced
     // before.
-    if (isolation_cookie.find("statement:") == 0 || isolation_cookie.find("statement-ack:") == 0) {
+    auto tenant_connection = [] (const sstring& isolation_cookie) -> bool {
+        for (auto&& connection_prefix : _connection_types_prefix) {
+            if(isolation_cookie.find(connection_prefix.data()) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (tenant_connection(isolation_cookie)) {
         // if the statement cookie is not present, the service level controller will return the default service
         // level scheduling group.
         std::string service_level_name = isolation_cookie.substr(std::string(isolation_cookie).find_first_of(':') + 1);
@@ -1195,23 +1203,23 @@ unsigned messaging_service::add_statement_tenant(sstring tenant_name, scheduling
         _clients.resize(idx);
         _scheduling_info_for_connection_index.resize(scheduling_info_for_connection_index_size);
     });
-    sstring statement_cookie = sstring("statement:") + tenant_name;
-    sstring statement_ack_cookie = sstring("statement-ack:") + tenant_name;
-    sstring forward_cookie = sstring("forward:") + tenant_name;
     _clients.resize(_clients.size() + PER_TENANT_CONNECTION_COUNT);
     // this functions as a way to delete an obsolete tenant with the same name but keeping _clients
     // indexing and _scheduling_info_for_connection_index indexing in sync.
+    sstring first_cookie = sstring(_connection_types_prefix[0]) + tenant_name;
     for (unsigned i = 0; i < _scheduling_info_for_connection_index.size(); i++) {
-        if (_scheduling_info_for_connection_index[i].isolation_cookie == statement_cookie) {
-            _scheduling_info_for_connection_index[i].isolation_cookie = "";
-            _scheduling_info_for_connection_index[i+1].isolation_cookie = "";
-            _scheduling_info_for_connection_index[i+2].isolation_cookie = "";
+        if (_scheduling_info_for_connection_index[i].isolation_cookie == first_cookie) {
+            // remove all connections associated with this tenant, since we are reinserting it.
+            for (size_t j = 0; j < _connection_types_prefix.size() ; j++) {
+                _scheduling_info_for_connection_index[i + j].isolation_cookie = "";
+            }
             break;
         }
     }
-    _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, statement_cookie});
-    _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, statement_ack_cookie});
-    _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, forward_cookie});
+    for (auto&& connection_prefix : _connection_types_prefix) {
+        sstring isolation_cookie = sstring(connection_prefix) + tenant_name;
+        _scheduling_info_for_connection_index.emplace_back(scheduling_info_for_connection_index{sg, isolation_cookie});
+    }
     _dynamic_tenants_to_client_idx.insert_or_assign(tenant_name, idx);
     undo.cancel();
     return idx;
