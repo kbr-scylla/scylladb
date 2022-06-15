@@ -23,6 +23,7 @@
 #include <list>
 #include <vector>
 #include <optional>
+#include <array>
 #include <absl/container/btree_set.h>
 #include <seastar/net/tls.hh>
 
@@ -538,9 +539,10 @@ public:
     std::unique_ptr<rpc_protocol_wrapper>& rpc();
     static msg_addr get_source(const rpc::client_info& client);
     scheduling_group scheduling_group_for_verb(messaging_verb verb) const;
-    scheduling_group scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
+    future<scheduling_group> scheduling_group_for_isolation_cookie(const sstring& isolation_cookie) const;
     std::vector<messaging_service::scheduling_info_for_connection_index> initial_scheduling_info() const;
     unsigned get_rpc_client_idx(messaging_verb verb);
+    static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"};
     unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
 };
 
