@@ -198,6 +198,9 @@ public:
     static raw_value make_value(managed_bytes&& mb) {
         return raw_value{std::move(mb)};
     }
+    static raw_value make_value(managed_bytes_opt&& mbo) {
+        return mbo ? make_value(std::move(*mbo)) : make_null();
+    }
     static raw_value make_value(const managed_bytes& mb) {
         return raw_value{mb};
     }
@@ -224,6 +227,9 @@ public:
     }
     bool is_unset_value() const {
         return std::holds_alternative<unset_value>(_data);
+    }
+    bool is_null_or_unset() const {
+        return !is_value();
     }
     bool is_value() const {
         return _data.index() <= 1;
@@ -261,7 +267,7 @@ public:
             }
         }, std::move(_data));
     }
-    raw_value_view to_view() const;
+    raw_value_view view() const;
     friend class raw_value_view;
 };
 
@@ -282,5 +288,5 @@ inline bytes_opt to_bytes_opt(const cql3::raw_value_view& view) {
 }
 
 inline bytes_opt to_bytes_opt(const cql3::raw_value& value) {
-    return to_bytes_opt(value.to_view());
+    return to_bytes_opt(value.view());
 }

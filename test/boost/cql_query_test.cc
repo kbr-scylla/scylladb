@@ -4540,6 +4540,28 @@ SEASTAR_TEST_CASE(test_like_parameter_marker) {
     });
 }
 
+SEASTAR_TEST_CASE(test_list_parameter_marker) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        cquery_nofail(e, "CREATE TABLE t (k int PRIMARY KEY, v list<int>)");
+        cquery_nofail(e, "INSERT INTO  t (k, v) VALUES (1, [10, 20, 30])");
+
+        const sstring query("UPDATE t SET v=:upd_v WHERE k=1 IF v[:i] in :v");
+
+        auto list_of = [](const std::vector<data_value>& data) -> bytes {
+            auto list_type_int = list_type_impl::get_instance(int32_type, false);
+            return make_list_value(list_type_int, data).serialize_nonnull();
+        };
+
+        prepared_on_shard(e,
+            query,
+            {list_of({100, 200, 300}), I(1), list_of({21, 22, 23})},
+            {{B(false), list_of({10, 20, 30})}});
+        prepared_on_shard(e, query,
+            {list_of({100, 200, 300}), I(1), list_of({20, 21, 22})},
+            {{B(true), list_of({10, 20, 30})}});
+    });
+}
+
 SEASTAR_TEST_CASE(test_select_serial_consistency) {
     return do_with_cql_env_thread([] (cql_test_env& e) {
         cquery_nofail(e, "CREATE TABLE t (a int, b int, primary key (a,b))");
@@ -5084,7 +5106,7 @@ cql3::raw_value make_collection_raw_value(size_t size_to_write, const std::vecto
     for (const cql3::raw_value& val : elements_to_write) {
         serialized_len += collection_value_len(sf);
         if (val.is_value()) {
-            serialized_len += val.to_view().with_value([](const FragmentedView auto& view) {
+            serialized_len += val.view().with_value([](const FragmentedView auto& view) {
                 return view.size_bytes();
             });
         }
@@ -5100,7 +5122,7 @@ cql3::raw_value make_collection_raw_value(size_t size_to_write, const std::vecto
         } else if (val.is_unset_value()) {
                 write_int32(out, -2);
         } else {
-            val.to_view().with_value([&](const FragmentedView auto& val_view) {
+            val.view().with_value([&](const FragmentedView auto& val_view) {
                 write_collection_value(out, sf, linearized(val_view));
             });
         }
@@ -5309,5 +5331,26 @@ SEASTAR_TEST_CASE(test_null_and_unset_in_collections) {
                                 exceptions::invalid_request_exception, check_null_msg());
         BOOST_REQUIRE_EXCEPTION(e.execute_prepared(where_in_list_marker, {list_with_unset}).get(),
                                 exceptions::invalid_request_exception, check_unset_msg());
+    });
+}
+
+SEASTAR_TEST_CASE(test_bind_variable_type_checking) {
+    return do_with_cql_env_thread([](cql_test_env& e) {
+        e.execute_cql("CREATE TABLE tab1 (p int primary key, a int, b text, c int)").get();
+
+        // The predicate that checks the message has to be a lambda to preserve source_location
+        auto check_type_conflict = [](std::experimental::source_location loc = std::experimental::source_location::current()) {
+            return exception_predicate::message_contains("variable :var has type", loc);
+        };
+
+        // Test :var needing to have two conflicting types
+        BOOST_REQUIRE_EXCEPTION(e.prepare("INSERT INTO tab1 (p, a, b) VALUES (0, :var, :var)").get(),
+                                exceptions::invalid_request_exception, check_type_conflict());
+        BOOST_REQUIRE_EXCEPTION(e.prepare("SELECT * FROM tab1 WHERE a = :var AND b = :var ALLOW FILTERING").get(),
+                                exceptions::invalid_request_exception, check_type_conflict());
+
+        // Test :var with a compatible type
+        e.prepare("INSERT INTO tab1 (p, a, c) VALUES (0, :var, :var)").get();
+        e.prepare("SELECT * FROM tab1 WHERE a = :var AND c = :var ALLOW FILTERING").get();
     });
 }

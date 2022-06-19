@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: ScyllaDB-Proprietary
+// Copyright 2021-present ScyllaDB
+
+#pragma once
+
 #include <seastar/rpc/rpc.hh>
 #include "messaging_service.hh"
 #include "serializer.hh"

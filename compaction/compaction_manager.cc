@@ -285,12 +285,20 @@ future<> compaction_manager::perform_task(shared_ptr<compaction_manager::task> t
     }
 }
 
-future<> compaction_manager::task::compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted, can_purge_tombstones can_purge) {
+future<> compaction_manager::task::compact_sstables_and_update_history(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted, can_purge_tombstones can_purge) {
     if (!descriptor.sstables.size()) {
         // if there is nothing to compact, just return.
         co_return;
     }
 
+    bool should_update_history = this->should_update_history(descriptor.options.type());
+    sstables::compaction_result res = co_await compact_sstables(std::move(descriptor), cdata, std::move(release_exhausted), std::move(can_purge));
+
+    if (should_update_history) {
+        co_await update_history(*_compacting_table, res, cdata);
+    }
+}
+future<sstables::compaction_result> compaction_manager::task::compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted, can_purge_tombstones can_purge) {
     replica::table& t = *_compacting_table;
     if (can_purge) {
         descriptor.enable_garbage_collection(t.get_sstable_set());
@@ -308,17 +316,14 @@ future<> compaction_manager::task::compact_sstables(sstables::compaction_descrip
             release_exhausted(desc.old_sstables);
         }
     };
-    auto compaction_type = descriptor.options.type();
-    auto start_size = boost::accumulate(descriptor.sstables | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::data_size)), uint64_t(0));
 
-    sstables::compaction_result res = co_await sstables::compact_sstables(std::move(descriptor), cdata, t.as_table_state());
-    if (compaction_type != sstables::compaction_type::Compaction) {
-        co_return;
-    }
+    co_return co_await sstables::compact_sstables(std::move(descriptor), cdata, t.as_table_state());
+}
+future<> compaction_manager::task::update_history(replica::table& t, const sstables::compaction_result& res, const sstables::compaction_data& cdata) {
     auto ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(res.ended_at.time_since_epoch());
 
     co_return co_await t.as_table_state().update_compaction_history(cdata.compaction_uuid, t.schema()->ks_name(), t.schema()->cf_name(), ended_at,
-                                                                    start_size, res.end_size);
+                                                                    res.start_size, res.end_size);
 }
 
 class compaction_manager::major_compaction_task : public compaction_manager::task {
@@ -335,7 +340,7 @@ protected:
         co_await coroutine::switch_to(_cm._compaction_controller.sg());
 
         switch_state(state::pending);
-        auto units = co_await get_units(_cm._maintenance_ops_sem, 1, _compaction_data.abort);
+        auto units = co_await acquire_semaphore(_cm._maintenance_ops_sem);
         auto lock_holder = co_await _compaction_state.lock.hold_write_lock();
         if (!can_proceed()) {
             co_return;
@@ -356,7 +361,7 @@ protected:
         compaction_backlog_tracker bt(std::make_unique<user_initiated_backlog_tracker>(_cm._compaction_controller.backlog_of_shares(200), _cm._available_memory));
         _cm.register_backlog_tracker(bt);
 
-        co_await compact_sstables(std::move(descriptor), _compaction_data, std::move(release_exhausted));
+        co_await compact_sstables_and_update_history(std::move(descriptor), _compaction_data, std::move(release_exhausted));
 
         finish_compaction();
     }
@@ -384,7 +389,7 @@ protected:
             co_return;
         }
         switch_state(state::pending);
-        auto units = co_await get_units(_cm._maintenance_ops_sem, 1, _compaction_data.abort);
+        auto units = co_await acquire_semaphore(_cm._maintenance_ops_sem);
 
         if (!can_proceed(throw_if_stopping::yes)) {
             co_return;
@@ -549,6 +554,14 @@ sstables::shared_sstable compaction_manager::sstables_task::consume_sstable() {
     --_cm._stats.pending_tasks; // from this point on, switch_state(pending|active) works the same way as any other task
     cmlog.debug("{}", format("consumed {}", sst->get_filename()));
     return sst;
+}
+
+future<semaphore_units<named_semaphore_exception_factory>> compaction_manager::task::acquire_semaphore(named_semaphore& sem, size_t units) {
+    return seastar::get_units(sem, units, _compaction_data.abort).handle_exception_type([this] (const semaphore_aborted& e) {
+        auto s = _compacting_table->schema();
+        return make_exception_future<semaphore_units<named_semaphore_exception_factory>>(
+                sstables::compaction_stopped_exception(s->ks_name(), s->cf_name(), e.what()));
+    });
 }
 
 void compaction_manager::task::setup_new_compaction(utils::UUID output_run_id) {
@@ -878,8 +891,25 @@ protected:
             std::exception_ptr ex;
 
             try {
-                co_await compact_sstables(std::move(descriptor), _compaction_data, std::move(release_exhausted));
+                bool should_update_history = this->should_update_history(descriptor.options.type());
+                sstables::compaction_result res = co_await compact_sstables(std::move(descriptor), _compaction_data, std::move(release_exhausted));
                 finish_compaction();
+                if (should_update_history) {
+                    // update_history can take a long time compared to
+                    // compaction, as a call issued on shard S1 can be
+                    // handled on shard S2. If the other shard is under
+                    // heavy load, we may unnecessarily block kicking off a
+                    // new compaction. Normally it isn't a problem, but there were
+                    // edge cases where the described behaviour caused
+                    // compaction to fail to keep up with excessive
+                    // flushing, leading to too many sstables on disk and
+                    // OOM during a read.  There is no need to wait with
+                    // next compaction until history is updated, so release
+                    // the weight earlier to remove unnecessary
+                    // serialization.
+                    weight_r.deregister();
+                    co_await update_history(*_compacting_table, res, _compaction_data);
+                }
                 _cm.reevaluate_postponed_compactions();
                 continue;
             } catch (...) {
@@ -996,7 +1026,7 @@ protected:
                 co_return;
             }
             switch_state(state::pending);
-            auto units = co_await get_units(_cm._off_strategy_sem, 1, _compaction_data.abort);
+            auto units = co_await acquire_semaphore(_cm._off_strategy_sem);
             if (!can_proceed()) {
                 co_return;
             }
@@ -1044,7 +1074,7 @@ public:
 protected:
     virtual future<> do_run() override {
         switch_state(state::pending);
-        auto maintenance_permit = co_await seastar::get_units(_cm._maintenance_ops_sem, 1, _compaction_data.abort);
+        auto maintenance_permit = co_await acquire_semaphore(_cm._maintenance_ops_sem);
 
         while (!_sstables.empty() && can_proceed()) {
             auto sst = consume_sstable();
@@ -1077,7 +1107,7 @@ private:
 
             std::exception_ptr ex;
             try {
-                co_await compact_sstables(std::move(descriptor), _compaction_data, std::move(release_exhausted), _can_purge);
+                co_await compact_sstables_and_update_history(std::move(descriptor), _compaction_data, std::move(release_exhausted), _can_purge);
                 finish_compaction();
                 _cm.reevaluate_postponed_compactions();
                 co_return;  // done with current sstable
@@ -1206,7 +1236,7 @@ public:
 protected:
     virtual future<> do_run() override {
         switch_state(state::pending);
-        auto maintenance_permit = co_await seastar::get_units(_cm._maintenance_ops_sem, 1, _compaction_data.abort);
+        auto maintenance_permit = co_await acquire_semaphore(_cm._maintenance_ops_sem);
 
         while (!_pending_cleanup_jobs.empty() && can_proceed()) {
             auto active_job = std::move(_pending_cleanup_jobs.back());
@@ -1232,7 +1262,7 @@ private:
             std::exception_ptr ex;
             try {
                 setup_new_compaction(descriptor.run_identifier);
-                co_await compact_sstables(descriptor, _compaction_data,
+                co_await compact_sstables_and_update_history(descriptor, _compaction_data,
                                           std::bind(&cleanup_sstables_compaction_task::release_exhausted, this, std::placeholders::_1));
                 finish_compaction();
                 _cm.reevaluate_postponed_compactions();

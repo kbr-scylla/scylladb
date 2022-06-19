@@ -131,6 +131,8 @@ public:
 
         state switch_state(state new_state);
 
+        future<semaphore_units<named_semaphore_exception_factory>> acquire_semaphore(named_semaphore& sem, size_t units = 1);
+
         // Return true if the task isn't stopped
         // and the compaction manager allows proceeding.
         inline bool can_proceed(throw_if_stopping do_throw_if_stopping = throw_if_stopping::no) const;
@@ -145,8 +147,14 @@ public:
 
         // Compacts set of SSTables according to the descriptor.
         using release_exhausted_func_t = std::function<void(const std::vector<sstables::shared_sstable>& exhausted_sstables)>;
-        future<> compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted,
+        future<> compact_sstables_and_update_history(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted,
                                   can_purge_tombstones can_purge = can_purge_tombstones::yes);
+        future<sstables::compaction_result> compact_sstables(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, release_exhausted_func_t release_exhausted,
+                                  can_purge_tombstones can_purge = can_purge_tombstones::yes);
+        future<> update_history(replica::table& t, const sstables::compaction_result& res, const sstables::compaction_data& cdata);
+        bool should_update_history(sstables::compaction_type ct) {
+            return ct == sstables::compaction_type::Compaction;
+        }
     public:
         future<> run() noexcept;
 

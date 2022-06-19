@@ -92,7 +92,6 @@ storage_service::storage_service(abort_source& abort_source,
     sharded<netw::messaging_service>& ms,
     sharded<repair_service>& repair,
     sharded<streaming::stream_manager>& stream_manager,
-    raft_group_registry& raft_gr,
     endpoint_lifecycle_notifier& elc_notif,
     sharded<db::batchlog_manager>& bm,
     sharded<qos::service_level_controller>& sl_controller)
@@ -100,7 +99,6 @@ storage_service::storage_service(abort_source& abort_source,
         , _feature_service(feature_service)
         , _db(db)
         , _gossiper(gossiper)
-        , _raft_gr(raft_gr)
         , _messaging(ms)
         , _migration_manager(mm)
         , _repair(repair)
@@ -1352,8 +1350,10 @@ future<> storage_service::drain_on_shutdown() {
         _drain_finished.get_future() : do_drain();
 }
 
-future<> storage_service::init_messaging_service_part() {
-    return container().invoke_on_all(&service::storage_service::init_messaging_service);
+future<> storage_service::init_messaging_service_part(sharded<raft_group_registry>& raft_gr) {
+    return container().invoke_on_all([&] (storage_service& local) {
+        return local.init_messaging_service(raft_gr.local());
+    });
 }
 
 future<> storage_service::uninit_messaging_service_part() {
@@ -1361,13 +1361,13 @@ future<> storage_service::uninit_messaging_service_part() {
 }
 
 future<> storage_service::join_cluster(cql3::query_processor& qp, raft_group0_client& client, cdc::generation_service& cdc_gen_service,
-        sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy) {
+        sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, raft_group_registry& raft_gr) {
     assert(this_shard_id() == 0);
 
-    return seastar::async([this, &qp, &client, &cdc_gen_service, &sys_dist_ks, &proxy] {
+    return seastar::async([this, &qp, &client, &cdc_gen_service, &sys_dist_ks, &proxy, &raft_gr] {
         set_mode(mode::STARTING);
 
-        _group0 = std::make_unique<raft_group0>(_abort_source, _raft_gr, _messaging.local(),
+        _group0 = std::make_unique<raft_group0>(_abort_source, raft_gr, _messaging.local(),
             _gossiper, qp, _migration_manager.local(), client);
 
         std::unordered_set<inet_address> loaded_endpoints;
@@ -2756,7 +2756,10 @@ future<std::unordered_multimap<dht::token_range, inet_address>> storage_service:
 }
 
 future<> storage_service::unbootstrap() {
+    slogger.info("Started batchlog replay for decommission");
     co_await get_batchlog_manager().local().do_batch_log_replay();
+    slogger.info("Finished batchlog replay for decommission");
+
     if (is_repair_based_node_ops_enabled(streaming::stream_reason::decommission)) {
         co_await _repair.local().decommission_with_repair(get_token_metadata_ptr());
     } else {
@@ -2778,12 +2781,6 @@ future<> storage_service::unbootstrap() {
         set_mode(mode::LEAVING);
 
         auto stream_success = stream_ranges(ranges_to_stream);
-        // Wait for batch log to complete before streaming hints.
-        slogger.debug("waiting for batch log processing.");
-        // Start with BatchLog replay, which may create hints but no writes since this is no longer a valid endpoint.
-        co_await get_batchlog_manager().local().do_batch_log_replay();
-
-        slogger.info("streaming hints to other nodes");
 
         // wait for the transfer runnables to signal the latch.
         slogger.debug("waiting for stream acks.");
@@ -3242,7 +3239,7 @@ future<> storage_service::update_topology(inet_address endpoint) {
     });
 }
 
-void storage_service::init_messaging_service() {
+void storage_service::init_messaging_service(raft_group_registry& raft_gr) {
     _messaging.local().register_replication_finished([this] (gms::inet_address from) {
         return confirm_replication(from);
     });
@@ -3270,13 +3267,13 @@ void storage_service::init_messaging_service() {
 
     _messaging.local().register_group0_peer_exchange(group0_peer_exchange_impl);
 
-    auto group0_modify_config_impl = [this](const rpc::client_info& cinfo, rpc::opt_time_point timeout,
+    auto group0_modify_config_impl = [this, &raft_gr](const rpc::client_info& cinfo, rpc::opt_time_point timeout,
             raft::group_id gid, std::vector<raft::server_address> add, std::vector<raft::server_id> del) -> future<> {
 
-        return container().invoke_on(0, [gid, add = std::move(add), del = std::move(del)] (
+        return container().invoke_on(0, [&raft_gr, gid, add = std::move(add), del = std::move(del)] (
                 storage_service& self) -> future<> {
 
-            return self._raft_gr.get_server(gid).modify_config(std::move(add), std::move(del));
+            return raft_gr.get_server(gid).modify_config(std::move(add), std::move(del));
         });
     };
     _messaging.local().register_group0_modify_config(group0_modify_config_impl);

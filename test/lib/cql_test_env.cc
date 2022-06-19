@@ -714,7 +714,7 @@ public:
                 std::ref(token_metadata), std::ref(erm_factory), std::ref(ms),
                 std::ref(repair),
                 std::ref(stream_manager),
-                std::ref(raft_gr), std::ref(elc_notif),
+                std::ref(elc_notif),
                 std::ref(bm),
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
@@ -785,7 +785,7 @@ public:
             });
 
             try {
-                ss.local().join_cluster(qp.local(), group0_client, cdc_generation_service.local(), sys_dist_ks, proxy).get();
+                ss.local().join_cluster(qp.local(), group0_client, cdc_generation_service.local(), sys_dist_ks, proxy, raft_gr.local()).get();
             } catch (std::exception& e) {
                 // if any of the defers crashes too, we'll never see
                 // the error
