@@ -6,6 +6,7 @@
 /*
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
+#pragma once
 
 #include "encryption.hh"
 #include "system_key.hh"
@@ -22,7 +23,6 @@ class kmip_host;
 class kmip_system_key : public system_key {
     shared_ptr<symmetric_key> _key;
     shared_ptr<kmip_host> _host;
-    bytes _id;
     sstring _name;
 public:
     kmip_system_key(encryption_context&, const sstring&);

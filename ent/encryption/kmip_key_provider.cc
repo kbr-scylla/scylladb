@@ -92,7 +92,6 @@ kmip_system_key::kmip_system_key(encryption_context& ctxt, const sstring& s) {
 
     _host = ctxt.get_kmip_host(p->first);
     _name = p->second;
-    _id = utils::UUID(_name).serialize();
 }
 
 kmip_system_key::~kmip_system_key() = default;
@@ -105,7 +104,7 @@ future<shared_ptr<symmetric_key>> kmip_system_key::get_key() {
     if (_key) {
         return make_ready_future<shared_ptr<symmetric_key>>(_key);
     }
-    return _host->get_key_by_id(_id).then([this](shared_ptr<symmetric_key> k) {
+    return _host->get_key_by_name(_name).then([this](shared_ptr<symmetric_key> k) {
         _key = k;
         return k;
     });
