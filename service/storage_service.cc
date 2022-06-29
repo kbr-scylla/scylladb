@@ -3101,7 +3101,9 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
             include_only_local_dc
                     ? get_range_to_address_map_in_local_dc(keyspace)
                     : get_range_to_address_map(keyspace);
+    auto tmptr = get_token_metadata_ptr();
     for (auto entry : range_to_address_map) {
+        const auto& topology = tmptr->get_topology();
         auto range = entry.first;
         auto addresses = entry.second;
         token_range_endpoints tr;
@@ -3114,8 +3116,8 @@ storage_service::describe_ring(const sstring& keyspace, bool include_only_local_
         for (auto endpoint : addresses) {
             endpoint_details details;
             details._host = endpoint;
-            details._datacenter = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(endpoint);
-            details._rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(endpoint);
+            details._datacenter = topology.get_datacenter(endpoint);
+            details._rack = topology.get_rack(endpoint);
             tr._rpc_endpoints.push_back(get_rpc_address(endpoint));
             tr._endpoints.push_back(boost::lexical_cast<std::string>(details._host));
             tr._endpoint_details.push_back(details);

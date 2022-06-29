@@ -2114,7 +2114,7 @@ future<> sstable::set_generation(generation_type new_generation) {
 future<> sstable::move_to_new_dir(sstring new_dir, generation_type new_generation, bool do_sync_dirs) {
     sstring old_dir = get_dir();
     sstlog.debug("Moving {} old_generation={} to {} new_generation={} do_sync_dirs={}",
-            get_filename(), old_dir, _generation, new_dir, new_generation, do_sync_dirs);
+            get_filename(), _generation, new_dir, new_generation, do_sync_dirs);
     co_await create_links_and_mark_for_removal(new_dir, new_generation);
     _dir = new_dir;
     generation_type old_generation = std::exchange(_generation, new_generation);
@@ -2257,7 +2257,7 @@ static entry_descriptor make_entry_descriptor(sstring sstdir, sstring fname, sst
     } else {
         throw malformed_sstable_exception(seastar::format("invalid version for file {}. Name doesn't match any known version.", fname));
     }
-    return entry_descriptor(sstdir, ks, cf, boost::lexical_cast<unsigned long>(generation), version, sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
+    return entry_descriptor(sstdir, ks, cf, generation_from_value(boost::lexical_cast<unsigned long>(generation)), version, sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
 }
 
 entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname) {

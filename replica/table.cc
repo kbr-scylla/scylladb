@@ -97,7 +97,7 @@ lw_shared_ptr<sstables::sstable_set> table::make_maintenance_sstable_set() const
     // Level metadata is not used because (level 0) maintenance sstables are disjoint and must be stored for efficient retrieval in the partitioned set
     bool use_level_metadata = false;
     return make_lw_shared<sstables::sstable_set>(
-            sstables::make_partitioned_sstable_set(_schema, make_lw_shared<sstable_list>(sstable_list{}), use_level_metadata));
+            sstables::make_partitioned_sstable_set(_schema, use_level_metadata));
 }
 
 void table::refresh_compound_sstable_set() {
@@ -1063,11 +1063,7 @@ future<bool> table::perform_offstrategy_compaction() {
     // If the user calls trigger_offstrategy_compaction() to trigger
     // off-strategy explicitly, cancel the timeout based automatic trigger.
     _off_strategy_trigger.cancel();
-    if (_maintenance_sstables->all()->empty()) {
-        co_return false;
-    }
-    co_await _compaction_manager.perform_offstrategy(this);
-    co_return true;
+    return _compaction_manager.perform_offstrategy(this);
 }
 
 void table::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
@@ -2116,6 +2112,11 @@ table::query(schema_ptr s,
         }
     }
 
+    std::optional<full_position> last_pos;
+    if (querier_opt && querier_opt->current_position()) {
+        last_pos.emplace(*querier_opt->current_position());
+    }
+
     if (!saved_querier || (querier_opt && !querier_opt->are_limits_reached() && !qs.builder.is_short_read())) {
         co_await querier_opt->close();
         querier_opt = {};
@@ -2124,7 +2125,7 @@ table::query(schema_ptr s,
         *saved_querier = std::move(querier_opt);
     }
 
-    co_return make_lw_shared<query::result>(qs.builder.build());
+    co_return make_lw_shared<query::result>(qs.builder.build(std::move(last_pos)));
 }
 
 future<reconcilable_result>

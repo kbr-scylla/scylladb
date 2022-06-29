@@ -8,6 +8,7 @@
 
 #include "audit/audit_cf_storage_helper.hh"
 #include "utils/UUID_gen.hh"
+#include "utils/class_registrator.hh"
 
 namespace audit {
 

@@ -151,7 +151,7 @@ select_statement::select_statement(schema_ptr schema,
                                    uint32_t bound_terms,
                                    lw_shared_ptr<const parameters> parameters,
                                    ::shared_ptr<selection::selection> selection,
-                                   ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                                   ::shared_ptr<const restrictions::statement_restrictions> restrictions,
                                    ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                                    bool is_reversed,
                                    ordering_comparator_type ordering_comparator,
@@ -360,6 +360,7 @@ select_statement::do_execute(query_processor& qp,
             utils::UUID(),
             query::is_first_page::no,
             options.get_timestamp(state));
+    command->allow_limit = db::allow_per_partition_rate_limit::yes;
 
     int32_t page_size = options.get_page_size();
 
@@ -530,6 +531,7 @@ indexed_table_select_statement::prepare_command_for_base_query(query_processor& 
             utils::UUID(),
             query::is_first_page::no,
             options.get_timestamp(state));
+    cmd->allow_limit = db::allow_per_partition_rate_limit::yes;
     return cmd;
 }
 
@@ -837,14 +839,14 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
     });
 }
 
-::shared_ptr<restrictions::statement_restrictions> select_statement::get_restrictions() const {
+const ::shared_ptr<const restrictions::statement_restrictions> select_statement::get_restrictions() const {
     return _restrictions;
 }
 
 primary_key_select_statement::primary_key_select_statement(schema_ptr schema, uint32_t bound_terms,
                                                            lw_shared_ptr<const parameters> parameters,
                                                            ::shared_ptr<selection::selection> selection,
-                                                           ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                                                           ::shared_ptr<const restrictions::statement_restrictions> restrictions,
                                                            ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                                                            bool is_reversed,
                                                            ordering_comparator_type ordering_comparator,
@@ -919,7 +921,7 @@ indexed_table_select_statement::prepare(data_dictionary::database db,
 indexed_table_select_statement::indexed_table_select_statement(schema_ptr schema, uint32_t bound_terms,
                                                            lw_shared_ptr<const parameters> parameters,
                                                            ::shared_ptr<selection::selection> selection,
-                                                           ::shared_ptr<restrictions::statement_restrictions> restrictions,
+                                                           ::shared_ptr<const restrictions::statement_restrictions> restrictions,
                                                            ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
                                                            bool is_reversed,
                                                            ordering_comparator_type ordering_comparator,
@@ -987,9 +989,9 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
         return paging_state;
     }
 
-    auto&& last_partition_and_clustering_key = result_view.get_last_partition_and_clustering_key();
-    auto& last_base_pk = std::get<0>(last_partition_and_clustering_key);
-    auto& last_base_ck = std::get<1>(last_partition_and_clustering_key);
+    auto&& last_pos = result_view.get_last_position();
+    auto& last_base_pk = last_pos.partition;
+    auto* last_base_ck = last_pos.position.has_key() ? &last_pos.position.key() : nullptr;
 
     bytes_opt indexed_column_value = _used_index_restrictions->value_for(*cdef, options);
 
@@ -1374,7 +1376,7 @@ public:
         uint32_t bound_terms,
         lw_shared_ptr<const parameters> parameters,
         ::shared_ptr<selection::selection> selection,
-        ::shared_ptr<restrictions::statement_restrictions> restrictions,
+        ::shared_ptr<const restrictions::statement_restrictions> restrictions,
         ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
         bool is_reversed,
         ordering_comparator_type ordering_comparator,
@@ -1427,7 +1429,7 @@ parallelized_select_statement::parallelized_select_statement(
     uint32_t bound_terms,
     lw_shared_ptr<const parallelized_select_statement::parameters> parameters,
     ::shared_ptr<selection::selection> selection,
-    ::shared_ptr<restrictions::statement_restrictions> restrictions,
+    ::shared_ptr<const restrictions::statement_restrictions> restrictions,
     ::shared_ptr<std::vector<size_t>> group_by_cell_indices,
     bool is_reversed,
     parallelized_select_statement::ordering_comparator_type ordering_comparator,

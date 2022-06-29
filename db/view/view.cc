@@ -313,7 +313,11 @@ public:
     view_filter_checking_visitor(const schema& base, const view_info& view)
         : _base(base)
         , _view(view)
-        , _selection(cql3::selection::selection::wildcard(_base.shared_from_this()))
+        , _selection(cql3::selection::selection::for_columns(_base.shared_from_this(),
+            boost::copy_range<std::vector<const column_definition*>>(
+                _base.regular_columns() | boost::adaptors::transformed([] (const column_definition& cdef) { return &cdef; }))
+            )
+        )
     {}
 
     void accept_new_partition(const partition_key& key, uint64_t row_count) {
@@ -1177,14 +1181,15 @@ static std::optional<gms::inet_address>
 get_view_natural_endpoint(const sstring& keyspace_name,
         const dht::token& base_token, const dht::token& view_token) {
     auto &db = service::get_local_storage_proxy().local_db();
+    auto& topology = service::get_local_storage_proxy().get_token_metadata_ptr()->get_topology();
     auto& ks = db.find_keyspace(keyspace_name);
     auto erm = ks.get_effective_replication_map();
     auto my_address = utils::fb_utilities::get_broadcast_address();
-    auto my_datacenter = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(my_address);
+    auto my_datacenter = topology.get_datacenter();
     bool network_topology = dynamic_cast<const locator::network_topology_strategy*>(&ks.get_replication_strategy());
     std::vector<gms::inet_address> base_endpoints, view_endpoints;
     for (auto&& base_endpoint : erm->get_natural_endpoints(base_token)) {
-        if (!network_topology || locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(base_endpoint) == my_datacenter) {
+        if (!network_topology || topology.get_datacenter(base_endpoint) == my_datacenter) {
             base_endpoints.push_back(base_endpoint);
         }
     }
@@ -1202,7 +1207,7 @@ get_view_natural_endpoint(const sstring& keyspace_name,
             view_endpoint);
         if (it != base_endpoints.end()) {
             base_endpoints.erase(it);
-        } else if (!network_topology || locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(view_endpoint) == my_datacenter) {
+        } else if (!network_topology || topology.get_datacenter(view_endpoint) == my_datacenter) {
             view_endpoints.push_back(view_endpoint);
         }
     }
@@ -2248,7 +2253,7 @@ void delete_ghost_rows_visitor::accept_new_row(const clustering_key& ck, const q
         auto& row = m.partition().clustered_row(*_view, ck);
         row.apply(tombstone(api::new_timestamp(), gc_clock::now()));
         timeout = db::timeout_clock::now() + _timeout_duration;
-        _proxy.mutate({m}, db::consistency_level::ALL, timeout, _state.get_trace_state(), empty_service_permit()).get();
+        _proxy.mutate({m}, db::consistency_level::ALL, timeout, _state.get_trace_state(), empty_service_permit(), db::allow_per_partition_rate_limit::no).get();
     }
 }
 

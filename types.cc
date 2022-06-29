@@ -27,6 +27,9 @@
 #include <string>
 #include <regex>
 #include <concepts>
+#include <ctime>
+#include <cstdlib>
+#include <fmt/chrono.h>
 #include <boost/iterator/transform_iterator.hpp>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/numeric.hpp>
@@ -67,14 +70,34 @@ requires requires {
 sstring
 time_point_to_string(const T& tp)
 {
-    int64_t count = tp.time_since_epoch().count();
-    auto time = boost::posix_time::from_time_t(0) + boost::posix_time::milliseconds(count);
-    constexpr std::string_view units = "milliseconds";
-  try {
-    return boost::posix_time::to_iso_extended_string(time);
-  } catch (const std::exception& e) {
-    return format("{} {} ({})", count, units, e.what());
-  }
+    auto count = tp.time_since_epoch().count();
+    auto d = std::div(int64_t(count), int64_t(1000));
+    std::time_t seconds = d.quot;
+    std::tm tm;
+    if (!gmtime_r(&seconds, &tm)) {
+        return fmt::format("{} milliseconds (out of range)", count);
+    }
+
+    auto to_string = [] (const std::tm& tm) {
+        auto year_digits = tm.tm_year >= -1900 ? 4 : 5;
+        return fmt::format("{:-0{}d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}",
+                tm.tm_year + 1900, year_digits, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec);
+    };
+
+    auto millis = d.rem;
+    if (!millis) {
+        return fmt::format("{}", to_string(tm));
+    }
+    // adjust seconds for time points earlier than posix epoch
+    // to keep the fractional millis positive
+    if (millis < 0) {
+        millis += 1000;
+        seconds--;
+        gmtime_r(&seconds, &tm);
+    }
+    auto micros = millis * 1000;
+    return fmt::format("{}.{:06d}", to_string(tm), micros);
 }
 
 sstring simple_date_to_string(const uint32_t days_count) {

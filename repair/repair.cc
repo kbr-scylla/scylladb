@@ -45,6 +45,7 @@
 #include <cfloat>
 #include <algorithm>
 
+#include "idl/position_in_partition.dist.hh"
 #include "idl/partition_checksum.dist.hh"
 
 logging::logger rlogger("repair");
@@ -328,10 +329,13 @@ tracker::tracker(size_t max_repair_memory)
 }
 
 void tracker::start(repair_uniq_id id) {
+    _pending_repairs.insert(id.uuid);
     _status[id.id] = repair_status::RUNNING;
 }
 
 void tracker::done(repair_uniq_id id, bool succeeded) {
+    _pending_repairs.erase(id.uuid);
+    _aborted_pending_repairs.erase(id.uuid);
     if (succeeded) {
         _status.erase(id.id);
     } else {
@@ -428,13 +432,17 @@ size_t tracker::nr_running_repair_jobs() {
     return count;
 }
 
+bool tracker::is_aborted(const utils::UUID& uuid) {
+    return _aborted_pending_repairs.contains(uuid);
+}
+
 void tracker::abort_all_repairs() {
-    size_t count = nr_running_repair_jobs();
+    _aborted_pending_repairs = _pending_repairs;
     for (auto& x : _repairs) {
         auto& ri = x.second;
         ri->abort();
     }
-    rlogger.info0("Aborted {} repair job(s)", count);
+    rlogger.info0("Aborted {} repair job(s), aborted={}", _aborted_pending_repairs.size(), _aborted_pending_repairs);
 }
 
 void tracker::abort_repair_node_ops(utils::UUID ops_uuid) {
@@ -676,11 +684,6 @@ static dht::token_range_vector get_primary_ranges(
 static dht::token_range_vector get_primary_ranges_within_dc(
         replica::database& db, sstring keyspace) {
     return db.find_keyspace(keyspace).get_effective_replication_map()->get_primary_ranges_within_dc(utils::fb_utilities::get_broadcast_address());
-}
-
-static sstring get_local_dc() {
-    return locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(
-            utils::fb_utilities::get_broadcast_address());
 }
 
 void repair_stats::add(const repair_stats& o) {
@@ -1000,6 +1003,7 @@ static future<> repair_ranges(lw_shared_ptr<repair_info> ri) {
 // itself does very little (mainly tell other nodes and CPUs what to do).
 int repair_service::do_repair_start(sstring keyspace, std::unordered_map<sstring, sstring> options_map) {
     seastar::sharded<replica::database>& db = get_db();
+    auto& topology = db.local().get_token_metadata().get_topology();
     repair_tracker().check_in_shutdown();
 
     repair_options options(options_map);
@@ -1027,7 +1031,7 @@ int repair_service::do_repair_start(sstring keyspace, std::unordered_map<sstring
         // when "primary_range" option is on, neither data_centers nor hosts
         // may be set, except data_centers may contain only local DC (-local)
         if (options.data_centers.size() == 1 &&
-            options.data_centers[0] == get_local_dc()) {
+            options.data_centers[0] == topology.get_datacenter()) {
             ranges = get_primary_ranges_within_dc(db.local(), keyspace);
         } else if (options.data_centers.size() > 0 || options.hosts.size() > 0) {
             throw std::runtime_error("You need to run primary range repair on all nodes in the cluster.");
@@ -1186,6 +1190,10 @@ int repair_service::do_repair_start(sstring keyspace, std::unordered_map<sstring
             }
         });
 
+        if (repair_tracker().is_aborted(id.uuid)) {
+            throw std::runtime_error("aborted by user request");
+        }
+
         for (auto shard : boost::irange(unsigned(0), smp::count)) {
             auto f = container().invoke_on(shard, [keyspace, table_ids, id, ranges, hints_batchlog_flushed,
                     data_centers = options.data_centers, hosts = options.hosts, ignore_nodes] (repair_service& local_repair) mutable {
@@ -1287,6 +1295,9 @@ future<> repair_service::do_sync_data_using_repair(
         auto table_ids = get_table_ids(db.local(), keyspace, cfs);
         std::vector<future<>> repair_results;
         repair_results.reserve(smp::count);
+        if (repair_tracker().is_aborted(id.uuid)) {
+            throw std::runtime_error("aborted by user request");
+        }
         for (auto shard : boost::irange(unsigned(0), smp::count)) {
             auto f = container().invoke_on(shard, [keyspace, table_ids, id, ranges, neighbors, reason, ops_uuid] (repair_service& local_repair) mutable {
                 auto data_centers = std::vector<sstring>();
@@ -1407,8 +1418,8 @@ future<> repair_service::bootstrap_with_repair(locator::token_metadata_ptr tmptr
                         std::vector<gms::inet_address> mandatory_neighbors;
                         // All neighbors
                         std::vector<inet_address> neighbors;
-                        auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
-                        auto local_dc = get_local_dc();
+                        auto& topology = db.local().get_token_metadata().get_topology();
+                        auto local_dc = topology.get_datacenter();
                         auto get_node_losing_the_ranges = [&] (const std::vector<gms::inet_address>& old_nodes, const std::unordered_set<gms::inet_address>& new_nodes) {
                             // Remove the new nodes from the old nodes list, so
                             // that it contains only the node that will lose
@@ -1436,7 +1447,7 @@ future<> repair_service::bootstrap_with_repair(locator::token_metadata_ptr tmptr
                         auto get_old_endpoints_in_local_dc = [&] () {
                             return boost::copy_range<std::vector<gms::inet_address>>(old_endpoints |
                                 boost::adaptors::filtered([&] (const gms::inet_address& node) {
-                                    return snitch_ptr->get_datacenter(node) == local_dc;
+                                    return topology.get_datacenter(node) == local_dc;
                                 })
                             );
                         };
@@ -1564,8 +1575,8 @@ future<> repair_service::do_decommission_removenode_with_repair(locator::token_m
             }
             std::unordered_map<dht::token_range, repair_neighbors> range_sources;
             dht::token_range_vector ranges_for_removenode;
-            auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
-            auto local_dc = get_local_dc();
+            auto& topology = db.local().get_token_metadata().get_topology();
+            auto local_dc = topology.get_datacenter();
             bool find_node_in_local_dc_only = strat.get_type() == locator::replication_strategy_type::network_topology;
             for (auto&r : ranges) {
                 if (ops) {
@@ -1586,7 +1597,7 @@ future<> repair_service::do_decommission_removenode_with_repair(locator::token_m
                 }
                 auto get_neighbors_set = [&] (const std::vector<inet_address>& nodes) {
                     for (auto& node : nodes) {
-                        if (snitch_ptr->get_datacenter(node) == local_dc) {
+                        if (topology.get_datacenter(node) == local_dc) {
                             return std::unordered_set<inet_address>{node};;
                         }
                     }
@@ -1659,8 +1670,8 @@ future<> repair_service::do_decommission_removenode_with_repair(locator::token_m
                     }
                 }
                 auto neighbors = boost::copy_range<std::vector<gms::inet_address>>(neighbors_set |
-                    boost::adaptors::filtered([&local_dc, &snitch_ptr] (const gms::inet_address& node) {
-                        return snitch_ptr->get_datacenter(node) == local_dc;
+                    boost::adaptors::filtered([&local_dc, &topology] (const gms::inet_address& node) {
+                        return topology.get_datacenter(node) == local_dc;
                     })
                 );
 
@@ -1769,16 +1780,16 @@ future<> repair_service::do_rebuild_replace_with_repair(locator::token_metadata_
                 auto& r = *it;
                 seastar::thread::maybe_yield();
                 auto end_token = r.end() ? r.end()->value() : dht::maximum_token();
-                auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
+                auto& topology = db.local().get_token_metadata().get_topology();
                 auto neighbors = boost::copy_range<std::vector<gms::inet_address>>(strat.calculate_natural_endpoints(end_token, *tmptr).get0() |
-                    boost::adaptors::filtered([myip, &source_dc, &snitch_ptr, &ignore_nodes] (const gms::inet_address& node) {
+                    boost::adaptors::filtered([myip, &source_dc, &topology, &ignore_nodes] (const gms::inet_address& node) {
                         if (node == myip) {
                             return false;
                         }
                         if (std::find(ignore_nodes.begin(), ignore_nodes.end(), node) != ignore_nodes.end()) {
                             return false;
                         }
-                        return source_dc.empty() ? true : snitch_ptr->get_datacenter(node) == source_dc;
+                        return source_dc.empty() ? true : topology.get_datacenter(node) == source_dc;
                     })
                 );
                 rlogger.debug("{}: keyspace={}, range={}, neighbors={}", op, keyspace_name, r, neighbors);
@@ -1811,7 +1822,8 @@ future<> repair_service::do_rebuild_replace_with_repair(locator::token_metadata_
 future<> repair_service::rebuild_with_repair(locator::token_metadata_ptr tmptr, sstring source_dc) {
     auto op = sstring("rebuild_with_repair");
     if (source_dc.empty()) {
-        source_dc = get_local_dc();
+        auto& topology = get_db().local().get_token_metadata().get_topology();
+        source_dc = topology.get_datacenter();
     }
     auto reason = streaming::stream_reason::rebuild;
     co_await do_rebuild_replace_with_repair(std::move(tmptr), std::move(op), std::move(source_dc), reason, {});
@@ -1825,7 +1837,8 @@ future<> repair_service::rebuild_with_repair(locator::token_metadata_ptr tmptr, 
 future<> repair_service::replace_with_repair(locator::token_metadata_ptr tmptr, std::unordered_set<dht::token> replacing_tokens, std::list<gms::inet_address> ignore_nodes) {
     auto cloned_tm = co_await tmptr->clone_async();
     auto op = sstring("replace_with_repair");
-    auto source_dc = get_local_dc();
+    auto& topology = get_db().local().get_token_metadata().get_topology();
+    auto source_dc = topology.get_datacenter();
     auto reason = streaming::stream_reason::replace;
     // update a cloned version of tmptr
     // no need to set the original version

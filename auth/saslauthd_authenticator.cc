@@ -22,6 +22,7 @@
 #include "db/config.hh"
 #include "log.hh"
 #include "seastarx.hh"
+#include "utils/class_registrator.hh"
 
 namespace auth {
 

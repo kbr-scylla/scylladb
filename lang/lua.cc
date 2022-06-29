@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include <boost/date_time/gregorian/greg_date.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include "lua.hh"
 #include "exceptions/exceptions.hh"
 #include "concrete_types.hh"

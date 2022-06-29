@@ -596,6 +596,7 @@ system_distributed_keyspace::insert_cdc_generation(
             db::timeout_clock::now() + 60s,
             nullptr, // trace_state
             empty_service_permit(),
+            db::allow_per_partition_rate_limit::no,
             false // raw_counters
         );
     });
@@ -692,6 +693,7 @@ system_distributed_keyspace::create_cdc_desc(
             db::timeout_clock::now() + 30s,
             nullptr, // trace_state
             empty_service_permit(),
+            db::allow_per_partition_rate_limit::no,
             false // raw_counters
         );
     });
@@ -735,6 +737,7 @@ system_distributed_keyspace::cdc_desc_exists(
             db::timeout_clock::now() + 10s,
             nullptr, // trace_state
             empty_service_permit(),
+            db::allow_per_partition_rate_limit::no,
             false // raw_counters
         );
 

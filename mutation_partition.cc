@@ -1176,8 +1176,18 @@ deletable_row::equal(column_kind kind, const schema& s, const deletable_row& oth
     return _cells.equal(kind, s, other._cells, other_schema);
 }
 
+void deletable_row::apply(const schema& s, const deletable_row& src) {
+    apply_monotonically(s, src);
+}
+
 void deletable_row::apply(const schema& s, deletable_row&& src) {
     apply_monotonically(s, std::move(src));
+}
+
+void deletable_row::apply_monotonically(const schema& s, const deletable_row& src) {
+    _cells.apply(s, column_kind::regular_column, src._cells);
+    _marker.apply(src._marker);
+    _deleted_at.apply(src._deleted_at, _marker);
 }
 
 void deletable_row::apply_monotonically(const schema& s, deletable_row&& src) {
@@ -2192,6 +2202,7 @@ to_data_query_result(const reconcilable_result& r, schema_ptr s, const query::pa
     query::result::builder builder(slice, opts, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size });
     auto consumer = compact_for_query_v2<emit_only_live_rows::yes, query_result_builder>(*s, gc_clock::time_point::min(), slice, max_rows,
             max_partitions, query_result_builder(*s, builder));
+    auto compaction_state = consumer.get_state();
     const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::legacy_half_reverse : consume_in_reverse::no;
 
     // FIXME: frozen_mutation::consume supports only forward consumers
@@ -2215,7 +2226,7 @@ to_data_query_result(const reconcilable_result& r, schema_ptr s, const query::pa
     if (r.is_short_read()) {
         builder.mark_as_short_read();
     }
-    co_return builder.build();
+    co_return builder.build(compaction_state->current_full_position());
 }
 
 query::result
@@ -2223,9 +2234,10 @@ query_mutation(mutation&& m, const query::partition_slice& slice, uint64_t row_l
     query::result::builder builder(slice, opts, query::result_memory_accounter{ query::result_memory_limiter::unlimited_result_size });
     auto consumer = compact_for_query_v2<emit_only_live_rows::yes, query_result_builder>(*m.schema(), now, slice, row_limit,
             query::max_partitions, query_result_builder(*m.schema(), builder));
+    auto compaction_state = consumer.get_state();
     const auto reverse = slice.options.contains(query::partition_slice::option::reversed) ? consume_in_reverse::legacy_half_reverse : consume_in_reverse::no;
     std::move(m).consume(consumer, reverse);
-    return builder.build();
+    return builder.build(compaction_state->current_full_position());
 }
 
 class counter_write_query_result_builder {

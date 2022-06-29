@@ -624,6 +624,11 @@ class BoostTest(UnitTest):
         self.get_junit_etree()
         super().check_log(trim)
 
+    async def run(self, options):
+        if options.random_seed:
+            self.args += ['--random-seed', options.random_seed]
+        return await super().run(options)
+
 def can_connect(address, family=socket.AF_INET):
     s = socket.socket(family)
     try:
@@ -1138,6 +1143,11 @@ def parse_cmd_line():
                         help='Let me manually run the test executable at the moment this script would run it')
     parser.add_argument('--byte-limit', action="store", default=None, type=int,
                         help="Specific byte limit for failure injection (random by default)")
+
+    boost_group = parser.add_argument_group('boost suite options')
+    boost_group.add_argument('--random-seed', action="store",
+                        help="Random number generator seed to be used by boost tests")
+
     args = parser.parse_args()
 
     if not args.jobs:

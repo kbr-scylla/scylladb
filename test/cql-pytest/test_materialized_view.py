@@ -192,3 +192,24 @@ def test_mv_is_not_null(cql, test_keyspace):
             assert list(cql.execute(f"SELECT * FROM {mv}")) == [('cat', 123)]
             cql.execute(f"DELETE v FROM {table} WHERE p=123")
             assert list(cql.execute(f"SELECT * FROM {mv}")) == []
+
+# Refs #10851. The code used to create a wildcard selection for all columns,
+# which erroneously also includes static columns if such are present in the
+# base table. Currently views only operate on regular columns and the filtering
+# code assumes that. Once we implement static column support for materialized
+# views, this test case will be a nice regression test to ensure that everything still
+# works if the static columns are *not* used in the view.
+# This test goes over all combinations of filters for partition, clustering and regular
+# base columns.
+def test_filter_with_unused_static_column(cql, test_keyspace, scylla_only):
+    schema = 'p int, c int, v int, s int static, primary key (p,c)'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        for p_condition in ['p = 42', 'p IS NOT NULL']:
+            for c_condition in ['c = 43', 'c IS NOT NULL']:
+                for v_condition in ['v = 44', 'v IS NOT NULL']:
+                    where = f"{p_condition} AND {c_condition} AND {v_condition}"
+                    with new_materialized_view(cql, table, select='p,c,v', pk='p,c,v', where=where) as mv:
+                        cql.execute(f"INSERT INTO {table} (p,c,v) VALUES (42,43,44)")
+                        cql.execute(f"INSERT INTO {table} (p,c,v) VALUES (1,2,3)")
+                        expected = [(42,43,44)] if '4' in where else [(42,43,44),(1,2,3)]
+                        assert list(cql.execute(f"SELECT * FROM {mv}")) == expected

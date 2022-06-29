@@ -2754,6 +2754,15 @@ class scylla_apply(gdb.Command):
 
 
 class scylla_shard(gdb.Command):
+    """Retrieves information on the current shard and allows switching shards.
+
+    Run without any parameters to print the current thread's shard number.
+    Run with a numeric parameter <N> to switch to the thread which runs shard <N>.
+
+    Example:
+      scylla shard 0
+    """
+
     def __init__(self):
         gdb.Command.__init__(self, 'scylla shard', gdb.COMMAND_USER, gdb.COMPLETE_NONE)
 
@@ -2761,7 +2770,12 @@ class scylla_shard(gdb.Command):
         if arg is None or arg == '':
             gdb.write('Current shard is %d\n' % current_shard())
             return
-        id = int(arg)
+        id = 0
+        try:
+            id = int(arg)
+        except:
+            gdb.write('Error: %s is not a valid shard number\n' % arg)
+            return
         orig = gdb.selected_thread()
         for t in gdb.selected_inferior().threads():
             t.switch()
@@ -2836,6 +2850,9 @@ class seastar_thread_context(object):
     def get_fs_base(self):
         return gdb.parse_and_eval('$fs_base')
 
+    def regs(self):
+        return self.regs_from_jmpbuf(self.thread_ctx['_context']['jmpbuf'])
+
     def regs_from_jmpbuf(self, jmpbuf):
         canary = gdb.Value(self.get_fs_base()).reinterpret_cast(self.ulong_type.pointer())[6]
         result = {}
@@ -2899,9 +2916,10 @@ def seastar_threads_on_current_shard():
 class scylla_thread(gdb.Command):
     """Operations with seastar::threads.
 
-    There are two operations supported:
+    The following operations are supported:
     * Switch to seastar thread (see also `scylla unthread`);
     * Execute command in the context of all existing seastar::threads.
+    * Print saved registers for given thread
 
     Run `scylla thread --help` for more information on usage.
 
@@ -2931,6 +2949,8 @@ class scylla_thread(gdb.Command):
         parser.add_argument("-a", "--apply-all", action="store_true", default=False,
                 help="Execute the command in the context of each seastar::thread."
                 " The command (and its arguments) to execute is expected to be provided as the positional argument.")
+        parser.add_argument("-p", "--print-regs", action="store_true", default=False,
+                help="Print unmangled registers saved in the jump buffer")
         parser.add_argument("arg", nargs='+')
 
         try:
@@ -2938,17 +2958,17 @@ class scylla_thread(gdb.Command):
         except SystemExit:
             return
 
-        if not args.iamsure:
+        if not args.print_regs and not args.iamsure:
             gdb.write("DISCLAIMER: This is a dangerous command with the potential to crash the process if anything goes wrong!"
                     " Please pass the `--iamsure` flag to acknowledge being fine with this risk.\n")
             return
 
-        if args.apply_all and args.switch:
-            gdb.write("Only one of `--apply-all` and `--switch` can be used.\n")
+        if sum([arg for arg in [args.apply_all, args.switch, args.print_regs]]) > 1:
+            gdb.write("Only one of `--apply-all`, `--switch` or `--print-regs` can be used.\n")
             return
 
-        if not args.apply_all and not args.switch:
-            gdb.write("No command specified, need either `--apply-all` or `--switch`.\n")
+        if not args.apply_all and not args.switch and not args.print_regs:
+            gdb.write("No command specified, need one of `--apply-all`, `--switch` or `--print_regs`.\n")
             return
 
         if args.apply_all:
@@ -2961,6 +2981,10 @@ class scylla_thread(gdb.Command):
 
         addr = gdb.parse_and_eval(args.arg[0])
         ctx = addr.reinterpret_cast(gdb.lookup_type('seastar::thread_context').pointer()).dereference()
+        if args.print_regs:
+            for reg, val in seastar_thread_context(ctx).regs().items():
+                gdb.write("%s: 0x%x\n" % (reg, val))
+            return
         exit_thread_context()
         global active_thread_context
         active_thread_context = seastar_thread_context(ctx)
@@ -4487,13 +4511,23 @@ class scylla_compaction_tasks(gdb.Command):
 
         task_list = list(std_list(cm['_tasks']))
         for task in task_list:
-            task = seastar_lw_shared_ptr(task).get().dereference()
             try:
-                schema = schema_ptr(task['compacting_table'].dereference()['_schema'])
+                task = seastar_shared_ptr(task).get().dereference()
             except:
-                schema = schema_ptr(task['compacting_cf'].dereference()['_schema'])
+                task = seastar_lw_shared_ptr(task).get().dereference() # Scylla 5.0 compatibility
 
-            key = 'type={}, running={:5}, {}'.format(task['type'], str(task['compaction_running']), schema.table_name())
+            try:
+                schema = schema_ptr(task['_compacting_table'].dereference()['_schema'])
+            except:
+                try:
+                    schema = schema_ptr(task['compacting_table'].dereference()['_schema']) # Scylla 5.0 compatibility
+                except:
+                    schema = schema_ptr(task['compacting_cf'].dereference()['_schema']) # Scylla 4.6 compatibility
+
+            try:
+                key = 'type={}, state={:5}, {}'.format(task['_type'], str(task['_state']), schema.table_name())
+            except:
+                key = 'type={}, running={:5}, {}'.format(task['type'], str(task['compaction_running']), schema.table_name()) # Scylla 5.0 compatibility
             task_hist.add(key)
 
         task_hist.print_to_console()

@@ -66,6 +66,9 @@
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
 #include "sstables/generation_type.hh"
+#include "db/rate_limiter.hh"
+#include "db/per_partition_rate_limit_info.hh"
+#include "db/operation_type.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
 
 class cell_locker;
@@ -430,7 +433,7 @@ private:
     std::vector<sstables::shared_sstable> _sstables_compacted_but_not_deleted;
     // sstables that should not be compacted (e.g. because they need to be used
     // to generate view updates later)
-    std::unordered_map<uint64_t, sstables::shared_sstable> _sstables_staging;
+    std::unordered_map<sstables::generation_type, sstables::shared_sstable> _sstables_staging;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
     // This semaphore ensures that an operation like snapshot won't have its selected
@@ -457,6 +460,11 @@ private:
     std::vector<view_ptr> _views;
 
     std::unique_ptr<cell_locker> _counter_cell_locks; // Memory-intensive; allocate only when needed.
+
+    // Labels used to identify writes and reads for this table in the rate_limiter structure.
+    db::rate_limiter::label _rate_limiter_label_for_writes;
+    db::rate_limiter::label _rate_limiter_label_for_reads;
+
     void set_metrics();
     seastar::metrics::metric_groups _metrics;
 
@@ -571,24 +579,24 @@ private:
     struct merge_comparator;
 
     // update the sstable generation, making sure that new new sstables don't overwrite this one.
-    void update_sstables_known_generation(unsigned generation) {
+    void update_sstables_known_generation(sstables::generation_type generation) {
         if (!_sstable_generation) {
             _sstable_generation = 1;
         }
-        _sstable_generation = std::max<uint64_t>(*_sstable_generation, generation /  smp::count + 1);
+        _sstable_generation = std::max<uint64_t>(*_sstable_generation, sstables::generation_value(generation) / smp::count + 1);
     }
 
     sstables::generation_type calculate_generation_for_new_table() {
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
-        return (*_sstable_generation)++ * smp::count + this_shard_id();
+        return sstables::generation_from_value((*_sstable_generation)++ * smp::count + this_shard_id());
     }
 
     // inverse of calculate_generation_for_new_table(), used to determine which
     // shard a sstable should be opened at.
-    static int64_t calculate_shard_from_sstable_generation(int64_t sstable_generation) {
-        return sstable_generation % smp::count;
+    static seastar::shard_id calculate_shard_from_sstable_generation(sstables::generation_type sstable_generation) {
+        return sstables::generation_value(sstable_generation) % smp::count;
     }
 public:
     // This will update sstable lists on behalf of off-strategy compaction, where
@@ -665,7 +673,7 @@ public:
     // likely already called. We need to call this explicitly when we are sure we're ready
     // to issue disk operations safely.
     void mark_ready_for_writes() {
-        update_sstables_known_generation(0);
+        update_sstables_known_generation(sstables::generation_from_value(0));
     }
 
     // Creates a mutation reader which covers all data sources for this column family.
@@ -747,6 +755,23 @@ public:
 
     row_cache& get_row_cache() {
         return _cache;
+    }
+
+    db::rate_limiter::label& get_rate_limiter_label_for_op_type(db::operation_type op_type) {
+        switch (op_type) {
+        case db::operation_type::write:
+            return _rate_limiter_label_for_writes;
+        case db::operation_type::read:
+            return _rate_limiter_label_for_reads;
+        }
+    }
+
+    db::rate_limiter::label& get_rate_limiter_label_for_writes() {
+        return _rate_limiter_label_for_writes;
+    }
+
+    db::rate_limiter::label& get_rate_limiter_label_for_reads() {
+        return _rate_limiter_label_for_reads;
     }
 
     future<std::vector<locked_cell>> lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout);
@@ -1257,8 +1282,10 @@ private:
         uint64_t total_writes = 0;
         uint64_t total_writes_failed = 0;
         uint64_t total_writes_timedout = 0;
+        uint64_t total_writes_rate_limited = 0;
         uint64_t total_reads = 0;
         uint64_t total_reads_failed = 0;
+        uint64_t total_reads_rate_limited = 0;
 
         uint64_t short_data_queries = 0;
         uint64_t short_mutation_queries = 0;
@@ -1279,6 +1306,7 @@ private:
     dirty_memory_manager _dirty_memory_manager;
 
     database_config _dbcfg;
+    backlog_controller::scheduling_group _flush_sg;
     flush_controller _memtable_controller;
     drain_progress _drain_progress {};
 
@@ -1298,7 +1326,8 @@ private:
             const frozen_mutation&,
             tracing::trace_state_ptr,
             db::timeout_clock::time_point,
-            db::commitlog_force_sync> _apply_stage;
+            db::commitlog_force_sync,
+            db::per_partition_rate_limit::info> _apply_stage;
 
     flat_hash_map<sstring, keyspace> _keyspaces;
     std::unordered_map<utils::UUID, lw_shared_ptr<column_family>> _column_families;
@@ -1339,6 +1368,8 @@ private:
     std::unique_ptr<wasm::engine> _wasm_engine;
     utils::cross_shard_barrier _stop_barrier;
 
+    db::rate_limiter _rate_limiter;
+
 public:
     data_dictionary::database as_data_dictionary() const;
     std::shared_ptr<data_dictionary::user_types_storage> as_user_types_storage() const noexcept;
@@ -1371,7 +1402,7 @@ private:
     auto sum_read_concurrency_sem_var(std::invocable<reader_concurrency_semaphore&> auto member);
     auto sum_read_concurrency_sem_stat(std::invocable<reader_concurrency_semaphore::stats&> auto stats_member);
 
-    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync);
+    future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync, db::per_partition_rate_limit::info rate_limit_info);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
@@ -1495,14 +1526,28 @@ public:
     future<> stop();
     future<> close_tables(table_kind kind_to_close);
 
+    /// Checks whether per-partition rate limit can be applied to the operation or not.
+    bool can_apply_per_partition_rate_limit(const schema& s, db::operation_type op_type) const;
+
+    /// Tries to account given operation to the rate limit when the coordinator is a replica.
+    /// This function can be called ONLY when rate limiting can be applied to the operation (see `can_apply_per_partition_rate_limit`)
+    /// AND the current node/shard is a replica for the given operation.
+    ///
+    /// nullopt -> the decision should be delegated to replicas
+    /// can_proceed::no -> operation should be rejected
+    /// can_proceed::yes -> operation should be accepted
+    std::optional<db::rate_limiter::can_proceed> account_coordinator_operation_to_rate_limit(table& tbl, const dht::token& token,
+            db::per_partition_rate_limit::account_and_enforce account_and_enforce_info,
+            db::operation_type op_type);
+
     future<std::tuple<lw_shared_ptr<query::result>, cache_temperature>> query(schema_ptr, const query::read_command& cmd, query::result_options opts,
                                                                   const dht::partition_range_vector& ranges, tracing::trace_state_ptr trace_state,
-                                                                  db::timeout_clock::time_point timeout);
+                                                                  db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{});
     future<std::tuple<reconcilable_result, cache_temperature>> query_mutations(schema_ptr, const query::read_command& cmd, const dht::partition_range& range,
                                                 tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout);
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
-    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout);
+    future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{});
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);

@@ -13,6 +13,8 @@
 #include "utils/histogram.hh"
 #include <seastar/core/metrics.hh>
 
+namespace locator { class topology; }
+
 namespace service {
 
 namespace storage_proxy_stats {
@@ -51,7 +53,7 @@ public:
     split_stats(const sstring& category, const sstring& short_description_prefix, const sstring& long_description_prefix, const sstring& op_type, bool auto_register_metrics = true);
 
     void register_metrics_local();
-    void register_metrics_for(gms::inet_address ep);
+    void register_metrics_for(sstring dc, gms::inet_address ep);
 
     /**
      * Get a reference to the statistics counter corresponding to the given
@@ -61,7 +63,7 @@ public:
      *
      * @return a reference to the requested counter
      */
-    uint64_t& get_ep_stat(gms::inet_address ep) noexcept;
+    uint64_t& get_ep_stat(const locator::topology& topo, gms::inet_address ep) noexcept;
 };
 
 struct write_stats {
@@ -75,6 +77,8 @@ struct write_stats {
 
     utils::timed_rate_moving_average write_unavailables;
     utils::timed_rate_moving_average write_timeouts;
+    utils::timed_rate_moving_average write_rate_limited_by_replicas;
+    utils::timed_rate_moving_average write_rate_limited_by_coordinator;
 
     utils::timed_rate_moving_average_and_histogram write;
     utils::time_estimated_histogram estimated_write;
@@ -125,6 +129,8 @@ struct stats : public write_stats {
     seastar::metrics::metric_groups _metrics;
     utils::timed_rate_moving_average read_timeouts;
     utils::timed_rate_moving_average read_unavailables;
+    utils::timed_rate_moving_average read_rate_limited_by_replicas;
+    utils::timed_rate_moving_average read_rate_limited_by_coordinator;
     utils::timed_rate_moving_average range_slice_timeouts;
     utils::timed_rate_moving_average range_slice_unavailables;
 

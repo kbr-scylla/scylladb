@@ -88,6 +88,7 @@
 #include "alternator/controller.hh"
 #include "alternator/ttl.hh"
 #include "tools/entry_point.hh"
+#include "db/per_partition_rate_limit_extension.hh"
 
 #include "service/raft/raft_group_registry.hh"
 #include "service/raft/raft_group0_client.hh"
@@ -461,6 +462,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     ext->add_schema_extension<cdc::cdc_extension>(cdc::cdc_extension::NAME);
     ext->add_schema_extension<db::paxos_grace_seconds_extension>(db::paxos_grace_seconds_extension::NAME);
     ext->add_schema_extension<tombstone_gc_extension>(tombstone_gc_extension::NAME);
+    ext->add_schema_extension<db::per_partition_rate_limit_extension>(db::per_partition_rate_limit_extension::NAME);
 
     auto cfg = make_lw_shared<db::config>(ext);
     auto init = app.get_options_description().add_options();
@@ -685,7 +687,15 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             utils::fb_utilities::set_broadcast_rpc_address(broadcast_rpc_addr);
 
             ctx.api_dir = cfg->api_ui_dir();
+            if (!ctx.api_dir.empty() && ctx.api_dir.back() != '/') {
+                // The api_dir should end with a backslash, add it if it's missing
+                ctx.api_dir.append("/", 1);
+            }
             ctx.api_doc = cfg->api_doc_dir();
+            if (!ctx.api_doc.empty() && ctx.api_doc.back() != '/') {
+                // The api_doc should end with a backslash, add it if it's missing
+                ctx.api_doc.append("/", 1);
+            }
             const auto hinted_handoff_enabled = cfg->hinted_handoff_enabled();
 
             supervisor::notify("starting prometheus API server");
@@ -975,6 +985,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Iteration through column family directory for sstable loading is
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
+            supervisor::notify("loading system sstables");
             replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
@@ -1073,10 +1084,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
-
-            supervisor::notify("loading system sstables");
-
-            replica::distributed_loader::ensure_system_table_directories(db).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();

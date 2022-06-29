@@ -224,9 +224,9 @@ dht::partition_range partitioned_sstable_set::to_partition_range(const dht::ring
     return dht::partition_range::make(std::move(lower_bound), std::move(upper_bound));
 }
 
-partitioned_sstable_set::partitioned_sstable_set(schema_ptr schema, lw_shared_ptr<sstable_list> all, bool use_level_metadata)
+partitioned_sstable_set::partitioned_sstable_set(schema_ptr schema, bool use_level_metadata)
         : _schema(std::move(schema))
-        , _all(std::move(all))
+        , _all(make_lw_shared<sstable_list>())
         , _use_level_metadata(use_level_metadata) {
 }
 
@@ -390,10 +390,15 @@ void time_series_sstable_set::for_each_sstable(std::function<void(const shared_s
 
 // O(log n)
 void time_series_sstable_set::insert(shared_sstable sst) {
+  try {
     auto min_pos = sst->min_position();
     auto max_pos_reversed = sst->max_position().reversed();
     _sstables->emplace(std::move(min_pos), sst);
     _sstables_reversed->emplace(std::move(max_pos_reversed), std::move(sst));
+  } catch (...) {
+    erase(sst);
+    throw;
+  }
 }
 
 // O(n) worst case, but should be close to O(log n) most of the time
@@ -589,19 +594,19 @@ std::unique_ptr<incremental_selector_impl> partitioned_sstable_set::make_increme
 
 std::unique_ptr<sstable_set_impl> compaction_strategy_impl::make_sstable_set(schema_ptr schema) const {
     // with use_level_metadata enabled, L0 sstables will not go to interval map, which suits well STCS.
-    return std::make_unique<partitioned_sstable_set>(schema, make_lw_shared<sstable_list>(), true);
+    return std::make_unique<partitioned_sstable_set>(schema, true);
 }
 
 std::unique_ptr<sstable_set_impl> leveled_compaction_strategy::make_sstable_set(schema_ptr schema) const {
-    return std::make_unique<partitioned_sstable_set>(std::move(schema), make_lw_shared<sstable_list>());
+    return std::make_unique<partitioned_sstable_set>(std::move(schema));
 }
 
 std::unique_ptr<sstable_set_impl> time_window_compaction_strategy::make_sstable_set(schema_ptr schema) const {
     return std::make_unique<time_series_sstable_set>(std::move(schema));
 }
 
-sstable_set make_partitioned_sstable_set(schema_ptr schema, lw_shared_ptr<sstable_list> all, bool use_level_metadata) {
-    return sstable_set(std::make_unique<partitioned_sstable_set>(schema, std::move(all), use_level_metadata), schema);
+sstable_set make_partitioned_sstable_set(schema_ptr schema, bool use_level_metadata) {
+    return sstable_set(std::make_unique<partitioned_sstable_set>(schema, use_level_metadata), schema);
 }
 
 sstable_set
@@ -623,7 +628,7 @@ class incremental_reader_selector : public reader_selector {
     lw_shared_ptr<const sstable_set> _sstables;
     tracing::trace_state_ptr _trace_state;
     std::optional<sstable_set::incremental_selector> _selector;
-    std::unordered_set<int64_t> _read_sstable_gens;
+    std::unordered_set<generation_type> _read_sstable_gens;
     sstable_reader_factory_type _fn;
 
     flat_mutation_reader_v2 create_reader(shared_sstable sst) {

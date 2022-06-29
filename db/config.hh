@@ -20,6 +20,8 @@
 #include "seastarx.hh"
 #include "utils/config_file.hh"
 #include "utils/enum_option.hh"
+#include "utils/UUID.hh"
+#include "gms/inet_address.hh"
 #include "db/hints/host_filter.hh"
 
 namespace seastar {
@@ -105,6 +107,7 @@ public:
 
     // For testing only
     void add_cdc_extension();
+    void add_per_partition_rate_limit_extension();
 
     /// True iff the feature is enabled.
     bool check_experimental(experimental_features_t::feature f) const;

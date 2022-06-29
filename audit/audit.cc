@@ -16,6 +16,7 @@
 #include "audit.hh"
 #include "../db/config.hh"
 #include "utils/fb_utilities.hh"
+#include "utils/class_registrator.hh"
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>

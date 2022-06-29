@@ -506,6 +506,8 @@ scylla_tests = set([
     'test/boost/group0_test',
     'test/boost/exception_container_test',
     'test/boost/result_utils_test',
+    'test/boost/rate_limiter_test',
+    'test/boost/per_partition_rate_limit_test',
     'test/boost/expr_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
@@ -671,6 +673,7 @@ scylla_core = (['replica/database.cc',
                 'replica/table.cc',
                 'replica/distributed_loader.cc',
                 'replica/memtable.cc',
+                'replica/exceptions.cc',
                 'absl-flat_hash_map.cc',
                 'atomic_cell.cc',
                 'caching_options.cc',
@@ -890,6 +893,8 @@ scylla_core = (['replica/database.cc',
                 'db/view/row_locking.cc',
                 'db/sstables-format-selector.cc',
                 'db/snapshot-ctl.cc',
+                'db/rate_limiter.cc',
+                'db/per_partition_rate_limit_options.cc',
                 'index/secondary_index_manager.cc',
                 'index/secondary_index.cc',
                 'utils/UUID_gen.cc',
@@ -1151,6 +1156,9 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/storage_proxy.idl.hh',
         'idl/group0_state_machine.idl.hh',
         'idl/forward_request.idl.hh',
+        'idl/replica_exception.idl.hh',
+        'idl/per_partition_rate_limit_info.idl.hh',
+        'idl/position_in_partition.idl.hh',
         ]
 
 rusts = [
@@ -1303,6 +1311,7 @@ deps['test/boost/linearizing_input_stream_test'] = [
     "test/lib/log.cc",
 ]
 deps['test/boost/expr_test'] = ['test/boost/expr_test.cc'] + scylla_core
+deps['test/boost/rate_limiter_test'] = ['test/boost/rate_limiter_test.cc', 'db/rate_limiter.cc']
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
