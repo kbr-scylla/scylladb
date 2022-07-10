@@ -109,6 +109,7 @@ public:
     gms::feature parallelized_aggregation { *this, "PARALLELIZED_AGGREGATION"sv };
     gms::feature keyspace_storage_options { *this, "KEYSPACE_STORAGE_OPTIONS"sv };
     gms::feature typed_errors_in_read_rpc { *this, "TYPED_ERRORS_IN_READ_RPC"sv };
+    gms::feature schema_commitlog { *this, "SCHEMA_COMMITLOG"sv };
 
     gms::feature in_memory_tables { *this, "IN_MEMORY_TABLES"sv };
     gms::feature workload_prioritization { *this, "WORKLOAD_PRIORITIZATION"sv };

@@ -32,7 +32,7 @@
 #include "test/lib/reader_concurrency_semaphore.hh"
 #include "test/lib/simple_schema.hh"
 #include "utils/error_injection.hh"
-#include "db/commitlog/commitlog.hh"
+#include "test/lib/make_random_string.hh"
 
 static api::timestamp_type next_timestamp() {
     static thread_local api::timestamp_type next_timestamp = 1;
@@ -573,6 +573,74 @@ SEASTAR_THREAD_TEST_CASE(test_tombstone_compaction_during_flush) {
     mt->cleaner().drain().get();
 }
 
+SEASTAR_THREAD_TEST_CASE(test_tombstone_merging_with_multiple_versions) {
+    tests::reader_concurrency_semaphore_wrapper semaphore;
+    simple_schema ss;
+    auto s = ss.schema();
+    auto mt = make_lw_shared<replica::memtable>(ss.schema());
+
+    auto pk = ss.make_pkey(0);
+    auto pr = dht::partition_range::make_singular(pk);
+
+    auto t0 = ss.new_tombstone();
+    auto t1 = ss.new_tombstone();
+    auto t2 = ss.new_tombstone();
+    auto t3 = ss.new_tombstone();
+
+    mutation m1(s, pk);
+    ss.delete_range(m1, *position_range_to_clustering_range(position_range(
+                position_in_partition::before_key(ss.make_ckey(0)),
+                position_in_partition::for_key(ss.make_ckey(3))), *s), t1);
+    ss.add_row(m1, ss.make_ckey(0), "v");
+    ss.add_row(m1, ss.make_ckey(1), "v");
+
+    // Fill so that rd1 stays in the partition snapshot
+    int n_rows = 1000;
+    auto v = make_random_string(512);
+    for (int i = 0; i < n_rows; ++i) {
+        ss.add_row(m1, ss.make_ckey(i), v);
+    }
+
+    mutation m2(s, pk);
+    ss.delete_range(m2, *position_range_to_clustering_range(position_range(
+            position_in_partition::before_key(ss.make_ckey(0)),
+            position_in_partition::before_key(ss.make_ckey(1))), *s), t2);
+    ss.delete_range(m2, *position_range_to_clustering_range(position_range(
+            position_in_partition::before_key(ss.make_ckey(1)),
+            position_in_partition::for_key(ss.make_ckey(3))), *s), t3);
+
+    mutation m3(s, pk);
+    ss.delete_range(m3, *position_range_to_clustering_range(position_range(
+            position_in_partition::before_key(ss.make_ckey(0)),
+            position_in_partition::for_key(ss.make_ckey(4))), *s), t0);
+
+    mt->apply(m1);
+
+    auto rd1 = mt->make_flat_reader(s, semaphore.make_permit(), pr, s->full_slice(), default_priority_class(),
+                                    nullptr, streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
+    auto close_rd1 = defer([&] { rd1.close().get(); });
+
+    rd1.fill_buffer().get();
+    BOOST_REQUIRE(!rd1.is_end_of_stream()); // rd1 must keep the m1 version alive
+
+    mt->apply(m2);
+
+    auto rd2 = mt->make_flat_reader(s, semaphore.make_permit(), pr, s->full_slice(), default_priority_class(),
+                                    nullptr, streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
+    auto close_r2 = defer([&] { rd2.close().get(); });
+
+    rd2.fill_buffer().get();
+    BOOST_REQUIRE(!rd2.is_end_of_stream()); // rd2 must keep the m1 version alive
+
+    mt->apply(m3);
+
+    assert_that(mt->make_flat_reader(s, semaphore.make_permit(), pr))
+        .has_monotonic_positions();
+
+    assert_that(mt->make_flat_reader(s, semaphore.make_permit(), pr))
+        .produces(m1 + m2 + m3);
+}
+
 SEASTAR_THREAD_TEST_CASE(test_range_tombstones_are_compacted_with_data) {
     tests::reader_concurrency_semaphore_wrapper semaphore;
     simple_schema ss;
@@ -936,79 +1004,3 @@ SEASTAR_TEST_CASE(failed_flush_prevents_writes) {
     });
 #endif
 }
-
-SEASTAR_TEST_CASE(flushing_rate_is_reduced_if_compaction_doesnt_keep_up) {
-    BOOST_ASSERT(smp::count == 2);
-    // The test simulates a situation where 2 threads issue flushes to 2
-    // tables. Both issue small flushes, but one has injected reactor stalls.
-    // This can lead to a situation where lots of small sstables accumulate on
-    // disk, and, if compaction never has a chance to keep up, resources can be
-    // exhausted.
-    return do_with_cql_env([](cql_test_env& env) -> future<> {
-        struct flusher {
-            cql_test_env& env;
-            const int num_flushes;
-            const int sleep_ms;
-
-            static sstring cf_name(unsigned thread_id) {
-                return format("cf_{}", thread_id);
-            }
-
-            static sstring ks_name() {
-                return "ks";
-            }
-
-            future<> create_table(schema_ptr s) {
-                service::migration_manager& mm = env.migration_manager().local();
-                auto group0_guard = co_await mm.start_group0_operation();
-                auto ts = group0_guard.write_timestamp();
-                auto announcement = co_await mm.prepare_new_column_family_announcement(s, ts);
-                co_await mm.announce(std::move(announcement), std::move(group0_guard));
-            }
-
-            future<> drop_table() {
-                service::migration_manager& mm = env.migration_manager().local();
-                auto group0_guard = co_await mm.start_group0_operation();
-                auto ts = group0_guard.write_timestamp();
-                auto announcement = co_await mm.prepare_column_family_drop_announcement(ks_name(), cf_name(this_shard_id()), api::new_timestamp());
-                co_await mm.announce(std::move(announcement), std::move(group0_guard));
-            }
-
-            future<> operator()() {
-                const sstring ks_name = this->ks_name();
-                const sstring cf_name = this->cf_name(this_shard_id());
-                random_mutation_generator gen{
-                    random_mutation_generator::generate_counters::no,
-                    local_shard_only::yes,
-                    random_mutation_generator::generate_uncompactable::no,
-                    std::nullopt,
-                    ks_name.c_str(),
-                    cf_name.c_str()
-                };
-                schema_ptr s = gen.schema();
-
-                co_await create_table(s);
-                replica::database& db = env.local_db();
-                replica::table& t = db.find_column_family(ks_name, cf_name);
-
-                for (int value : boost::irange<int>(0, num_flushes)) {
-                    ::usleep(sleep_ms * 1000);
-                    co_await db.apply(t.schema(), freeze(gen()), tracing::trace_state_ptr(), db::commitlog::force_sync::yes, db::no_timeout);
-                    co_await t.flush();
-                    BOOST_ASSERT(t.sstables_count() < t.schema()->max_compaction_threshold() * 2);
-                }
-                co_await drop_table();
-            }
-        };
-
-        int sleep_ms = 2;
-        for (int i : boost::irange<int>(8)) {
-            future<> f0 = smp::submit_to(0, flusher{.env=env, .num_flushes=100, .sleep_ms=0});
-            future<> f1 = smp::submit_to(1, flusher{.env=env, .num_flushes=3, .sleep_ms=sleep_ms});
-            co_await std::move(f0);
-            co_await std::move(f1);
-            sleep_ms *= 2;
-        }
-    });
-}
-

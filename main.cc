@@ -92,6 +92,7 @@
 
 #include "service/raft/raft_group_registry.hh"
 #include "service/raft/raft_group0_client.hh"
+#include "service/raft/raft_group0.hh"
 
 #include <boost/algorithm/string/join.hpp>
 
@@ -986,7 +987,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
-            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
+            auto system_keyspace_sel = db::table_selector::all_in_keyspace(db::system_keyspace::NAME);
+            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg, *system_keyspace_sel).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -1026,7 +1028,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // engine().at_exit([&proxy] { return proxy.stop(); });
 
             raft_gr.start(cfg->check_experimental(db::experimental_features_t::RAFT),
-                std::ref(messaging), std::ref(gossiper), std::ref(feature_service), std::ref(fd)).get();
+                std::ref(messaging), std::ref(gossiper), std::ref(fd)).get();
 
             // gropu0 client exists only on shard 0
             // The client has to be created before `stop_raft` since during
@@ -1055,7 +1057,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             cql3::query_processor::memory_config qp_mcfg = {get_available_memory() / 256, get_available_memory() / 2560};
             debug::the_query_processor = &qp;
             auto local_data_dict = seastar::sharded_parameter([] (const replica::database& db) { return db.as_data_dictionary(); }, std::ref(db));
-            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
+
+            utils::loading_cache_config auth_prep_cache_config;
+            auth_prep_cache_config.max_size = qp_mcfg.authorized_prepared_cache_size;
+            auth_prep_cache_config.expiry = std::min(std::chrono::milliseconds(cfg->permissions_validity_in_ms()),
+                                                     std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
+            auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
+
+            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
@@ -1082,17 +1091,25 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 sst_format_selector.stop().get();
             });
 
+            // Re-enable previously enabled features on node startup.
+            // This should be done before commitlog starts replaying
+            // since some features affect storage.
+            db::system_keyspace::enable_features_on_startup(feature_service).get();
+
+            db.local().before_schema_keyspace_init();
+
+            // Init schema tables only after enable_features_on_startup()
+            // because table construction consults enabled features.
+            // Needs to be before system_keyspace::setup(), which writes to schema tables.
+            supervisor::notify("loading system_schema sstables");
+            auto schema_keyspace_sel = db::table_selector::all_in_keyspace(db::schema_tables::NAME);
+            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg, *schema_keyspace_sel).get();
+
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();
-
-            supervisor::notify("loading non-system sstables");
-            replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
-
-            supervisor::notify("starting view update generator");
-            view_update_generator.start(std::ref(db)).get();
 
             supervisor::notify("setting up system keyspace");
             // FIXME -- should happen in start(), but
@@ -1101,10 +1118,52 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // 3. need to check if it depends on any of the above steps
             sys_ks.local().setup(messaging).get();
 
-            // Re-enable previously enabled features on node startup.
-            // This should be done before commitlog starts replaying
-            // since some features affect storage.
-            db::system_keyspace::enable_features_on_startup(feature_service).get();
+            supervisor::notify("starting schema commit log");
+
+            // Check there is no truncation record for schema tables.
+            // Needs to happen before replaying the schema commitlog, which interprets
+            // replay position in the truncation record.
+            // Needs to happen before system_keyspace::setup(), which reads truncation records.
+            for (auto&& e : db.local().get_column_families()) {
+                auto table_ptr = e.second;
+                if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
+                    if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
+                        // replay_position stored in the truncation record may belong to
+                        // the old (default) commitlog domain. It's not safe to interpret
+                        // that replay position in the schema commitlog domain.
+                        // Refuse to boot in this case. We assume no one truncated schema tables.
+                        // We will hit this during rolling upgrade, in which case the user will
+                        // roll back and let us know.
+                        throw std::runtime_error(format("Schema table {}.{} has a truncation record. Booting is not safe.",
+                                                        table_ptr->schema()->ks_name(), table_ptr->schema()->cf_name()));
+                    }
+                }
+            }
+
+            auto sch_cl = db.local().schema_commitlog();
+            if (sch_cl != nullptr) {
+                auto paths = sch_cl->get_segments_to_replay();
+                if (!paths.empty()) {
+                    supervisor::notify("replaying schema commit log");
+                    auto rp = db::commitlog_replayer::create_replayer(db).get0();
+                    rp.recover(paths, db::schema_tables::COMMITLOG_FILENAME_PREFIX).get();
+                    supervisor::notify("replaying schema commit log - flushing memtables");
+                    db.invoke_on_all([] (replica::database& db) {
+                        return db.flush_all_memtables();
+                    }).get();
+                    supervisor::notify("replaying schema commit log - removing old commitlog segments");
+                    //FIXME: discarded future
+                    (void)sch_cl->delete_segments(std::move(paths));
+                }
+            }
+
+            db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
+
+            supervisor::notify("loading non-system sstables");
+            replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
+
+            supervisor::notify("starting view update generator");
+            view_update_generator.start(std::ref(db)).get();
 
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
@@ -1243,7 +1302,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             supervisor::notify("starting storage service", true);
-            ss.local().init_messaging_service_part(raft_gr).get();
+            ss.local().init_messaging_service_part().get();
             auto stop_ss_msg = defer_verbose_shutdown("storage service messaging", [&ss] {
                 ss.local().uninit_messaging_service_part().get();
             });
@@ -1299,12 +1358,19 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
              */
             db.local().enable_autocompaction_toggle();
 
+            service::raft_group0 group0_service{
+                    stop_signal.as_local_abort_source(), raft_gr.local(), messaging.local(),
+                    gossiper.local(), qp.local(), mm.local(), group0_client};
+            auto stop_group0_service = defer_verbose_shutdown("group 0 service", [&group0_service] {
+                group0_service.abort().get();
+            });
+
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return messaging.invoke_on_all(&netw::messaging_service::start_listen);
             }).get();
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
-                return ss.local().join_cluster(qp.local(), group0_client, cdc_generation_service.local(), sys_dist_ks, proxy, raft_gr.local());
+                return ss.local().join_cluster(cdc_generation_service.local(), sys_dist_ks, proxy, group0_service);
             }).get();
 
             sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
@@ -1324,10 +1390,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
 
             supervisor::notify("starting auth service");
-            auth::permissions_cache_config perm_cache_config;
-            perm_cache_config.max_entries = cfg->permissions_cache_max_entries();
-            perm_cache_config.validity_period = std::chrono::milliseconds(cfg->permissions_validity_in_ms());
-            perm_cache_config.update_period = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
+            utils::loading_cache_config perm_cache_config;
+            perm_cache_config.max_size = cfg->permissions_cache_max_entries();
+            perm_cache_config.expiry = std::chrono::milliseconds(cfg->permissions_validity_in_ms());
+            perm_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
             const qualified_name qualified_authorizer_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authorizer());
             const qualified_name qualified_authenticator_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authenticator());
@@ -1338,7 +1404,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auth_config.authenticator_java_name = qualified_authenticator_name;
             auth_config.role_manager_java_name = qualified_role_manager_name;
 
-            auth_service.start(perm_cache_config, std::ref(qp), std::ref(mm_notifier), std::ref(mm), auth_config).get();
+            auth_service.start(std::move(perm_cache_config), std::ref(qp), std::ref(mm_notifier), std::ref(mm), auth_config).get();
 
             auth_service.invoke_on_all([&mm] (auth::service& auth) {
                 return auth.start(mm.local());
@@ -1348,6 +1414,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 auth_service.stop().get();
             });
 
+            api::set_server_authorization_cache(ctx, auth_service).get();
+            auto stop_authorization_cache_api = defer_verbose_shutdown("authorization cache api", [&ctx] {
+                api::unset_server_authorization_cache(ctx).get();
+            });
 
             snapshot_ctl.start(std::ref(db)).get();
             auto stop_snapshot_ctl = defer_verbose_shutdown("snapshots", [&snapshot_ctl] {

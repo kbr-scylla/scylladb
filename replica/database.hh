@@ -122,8 +122,9 @@ class rp_handle;
 class data_listeners;
 class large_data_handler;
 class system_keyspace;
+class table_selector;
 
-future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
+future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
 
 }
 
@@ -508,7 +509,6 @@ private:
 
     class table_state;
     std::unique_ptr<table_state> _table_state;
-    condition_variable _sstables_changed;
 public:
     data_dictionary::table as_data_dictionary() const;
 
@@ -573,7 +573,6 @@ private:
     void backlog_tracker_adjust_charges(const std::vector<sstables::shared_sstable>& old_sstables, const std::vector<sstables::shared_sstable>& new_sstables);
     lw_shared_ptr<memtable> new_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt, sstable_write_permit&& permit);
-    future<> maybe_wait_for_sstable_count_reduction();
     // Caller must keep m alive.
     future<> update_cache(lw_shared_ptr<memtable> m, std::vector<sstables::shared_sstable> ssts);
     struct merge_comparator;
@@ -1335,6 +1334,7 @@ private:
         flat_hash_map<std::pair<sstring, sstring>, utils::UUID, utils::tuple_hash, string_pair_eq>;
     ks_cf_to_uuid_t _ks_cf_to_uuid;
     std::unique_ptr<db::commitlog> _commitlog;
+    std::unique_ptr<db::commitlog> _schema_commitlog;
     utils::updateable_value_source<utils::UUID> _version;
     uint32_t _schema_change_count = 0;
     // compaction_manager object is referenced by all column families of a database.
@@ -1343,6 +1343,7 @@ private:
     bool _enable_incremental_backups = false;
     bool _shutdown = false;
     bool _enable_autocompaction_toggle = false;
+    bool _uses_schema_commitlog = false;
     query::querier_cache _querier_cache;
 
     std::unique_ptr<db::large_data_handler> _large_data_handler;
@@ -1358,6 +1359,7 @@ private:
 
     service::migration_notifier& _mnotifier;
     gms::feature_service& _feat;
+    std::vector<std::any> _listeners;
     const locator::shared_token_metadata& _shared_token_metadata;
 
     sharded<semaphore>& _sst_dir_semaphore;
@@ -1395,7 +1397,7 @@ private:
 
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
-    friend future<> db::system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg);
+    friend future<> db::system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
     reader_concurrency_semaphore& read_concurrency_sem();
@@ -1403,6 +1405,7 @@ private:
     auto sum_read_concurrency_sem_stat(std::invocable<reader_concurrency_semaphore::stats&> auto stats_member);
 
     future<> do_apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog_force_sync sync, db::per_partition_rate_limit::info rate_limit_info);
+    future<> do_apply_many(const std::vector<frozen_mutation>&, db::timeout_clock::time_point timeout);
     future<> apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout);
 
     future<mutation> do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema, db::timeout_clock::time_point timeout,
@@ -1458,6 +1461,9 @@ public:
     db::commitlog* commitlog() const {
         return _commitlog.get();
     }
+    db::commitlog* schema_commitlog() const {
+        return _schema_commitlog.get();
+    }
     replica::cf_stats* cf_stats() {
         return &_cf_stats;
     }
@@ -1479,6 +1485,7 @@ public:
     const service::migration_notifier& get_notifier() const { return _mnotifier; }
 
     void add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg);
+    void before_schema_keyspace_init();
     future<> add_column_family_and_make_directory(schema_ptr schema);
 
     /* throws no_such_column_family if missing */
@@ -1548,6 +1555,13 @@ public:
     // Apply the mutation atomically.
     // Throws timed_out_error when timeout is reached.
     future<> apply(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::commitlog_force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info = std::monostate{});
+    // Apply mutations atomically.
+    // On restart, either all mutations will be replayed or none of them.
+    // All mutations must belong to the same commitlog domain.
+    // All mutations must be owned by the current shard (in terms of dht::shard_of).
+    // Mutations may be partially visible to reads during the call.
+    // Mutations may be partially visible to reads until restart on exception (FIXME).
+    future<> apply(const std::vector<frozen_mutation>&, db::timeout_clock::time_point timeout);
     future<> apply_hint(schema_ptr, const frozen_mutation&, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout);
     future<mutation> apply_counter_update(schema_ptr, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
@@ -1687,6 +1701,10 @@ public:
 
     sharded<semaphore>& get_sharded_sst_dir_semaphore() {
         return _sst_dir_semaphore;
+    }
+
+    bool uses_schema_commitlog() const {
+        return _uses_schema_commitlog;
     }
 
     /** This callback is going to be called just before the service level is available **/

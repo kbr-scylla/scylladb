@@ -63,6 +63,7 @@
 #include "debug.hh"
 #include "db/schema_tables.hh"
 #include "service/raft/raft_group0_client.hh"
+#include "service/raft/raft_group0.hh"
 
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -619,7 +620,7 @@ public:
             });
 
             raft_gr.start(cfg->check_experimental(db::experimental_features_t::RAFT),
-                std::ref(ms), std::ref(gossiper), std::ref(feature_service), std::ref(fd)).get();
+                std::ref(ms), std::ref(gossiper), std::ref(fd)).get();
             auto stop_raft_gr = deferred_stop(raft_gr);
             raft_gr.invoke_on_all(&service::raft_group_registry::start).get();
 
@@ -691,7 +692,15 @@ public:
                 qp_mcfg = {memory::stats().total_memory() / 256, memory::stats().total_memory() / 2560};
             }
             auto local_data_dict = seastar::sharded_parameter([] (const replica::database& db) { return db.as_data_dictionary(); }, std::ref(db));
-            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config)).get();
+
+            utils::loading_cache_config auth_prep_cache_config;
+            auth_prep_cache_config.max_size = qp_mcfg.authorized_prepared_cache_size;
+            auth_prep_cache_config.expiry = std::min(std::chrono::milliseconds(cfg->permissions_validity_in_ms()),
+                                                     std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
+            auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
+
+
+            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), auth_prep_cache_config).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             sys_ks.invoke_on_all(&db::system_keyspace::start).get();
@@ -720,7 +729,7 @@ public:
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
-            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg).get();
+            replica::distributed_loader::init_system_keyspace(db, ss, gossiper, *cfg, db::table_selector::all()).get();
 
             auto& ks = db.local().find_keyspace(db::system_keyspace::NAME);
             parallel_for_each(ks.metadata()->cf_meta_data(), [&ks] (auto& pair) {
@@ -785,8 +794,15 @@ public:
                 cdc.stop().get();
             });
 
+            service::raft_group0 group0_service{
+                    abort_sources.local(), raft_gr.local(), ms.local(),
+                    gossiper.local(), qp.local(), mm.local(), group0_client};
+            auto stop_group0_service = defer([&group0_service] {
+                group0_service.abort().get();
+            });
+
             try {
-                ss.local().join_cluster(qp.local(), group0_client, cdc_generation_service.local(), sys_dist_ks, proxy, raft_gr.local()).get();
+                ss.local().join_cluster(cdc_generation_service.local(), sys_dist_ks, proxy, group0_service).get();
             } catch (std::exception& e) {
                 // if any of the defers crashes too, we'll never see
                 // the error
@@ -794,10 +810,10 @@ public:
                 throw;
             }
 
-            auth::permissions_cache_config perm_cache_config;
-            perm_cache_config.max_entries = cfg->permissions_cache_max_entries();
-            perm_cache_config.validity_period = std::chrono::milliseconds(cfg->permissions_validity_in_ms());
-            perm_cache_config.update_period = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
+            utils::loading_cache_config perm_cache_config;
+            perm_cache_config.max_size = cfg->permissions_cache_max_entries();
+            perm_cache_config.expiry = std::chrono::milliseconds(cfg->permissions_validity_in_ms());
+            perm_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
             const qualified_name qualified_authorizer_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authorizer());
             const qualified_name qualified_authenticator_name(auth::meta::AUTH_PACKAGE_NAME, cfg->authenticator());

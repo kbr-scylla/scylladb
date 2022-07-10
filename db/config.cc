@@ -374,7 +374,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\n"
         "Related information: Initializing a multiple node cluster (single data center) and Initializing a multiple node cluster (multiple data centers).")
     /* Common compaction settings */
-    , compaction_throughput_mb_per_sec(this, "compaction_throughput_mb_per_sec", value_status::Unused, 16,
+    , compaction_throughput_mb_per_sec(this, "compaction_throughput_mb_per_sec", liveness::LiveUpdate, value_status::Unused, 0,
         "Throttles compaction to the specified total throughput across the entire system. The faster you insert data, the faster you need to compact in order to keep the SSTable count down. The recommended Value is 16 to 32 times the rate of write throughput (in MBs/second). Setting the value to 0 disables compaction throttling.\n"
         "Related information: Configuring compaction")
     , compaction_large_partition_warning_threshold_mb(this, "compaction_large_partition_warning_threshold_mb", value_status::Used, 1000,
@@ -724,13 +724,13 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "The available role-managers are:\n"
         "\torg.apache.cassandra.auth.CassandraRoleManager : Stores role data in the system_auth keyspace;\n"
         "\tcom.scylladb.auth.LDAPRoleManager : Fetches role data from an LDAP server;")
-    , permissions_validity_in_ms(this, "permissions_validity_in_ms", value_status::Used, 10000,
+    , permissions_validity_in_ms(this, "permissions_validity_in_ms", liveness::LiveUpdate, value_status::Used, 10000,
         "How long permissions in cache remain valid. Depending on the authorizer, such as CassandraAuthorizer, fetching permissions can be resource intensive. Permissions caching is disabled when this property is set to 0 or when AllowAllAuthorizer is used. The cached value is considered valid as long as both its value is not older than the permissions_validity_in_ms "
         "and the cached value has been read at least once during the permissions_validity_in_ms time frame. If any of these two conditions doesn't hold the cached value is going to be evicted from the cache.\n"
         "Related information: Object permissions")
-    , permissions_update_interval_in_ms(this, "permissions_update_interval_in_ms", value_status::Used, 2000,
+    , permissions_update_interval_in_ms(this, "permissions_update_interval_in_ms", liveness::LiveUpdate, value_status::Used, 2000,
         "Refresh interval for permissions cache (if enabled). After this interval, cache entries become eligible for refresh. An async reload is scheduled every permissions_update_interval_in_ms time period and the old value is returned until it completes. If permissions_validity_in_ms has a non-zero value, then this property must also have a non-zero value. It's recommended to set this value to be at least 3 times smaller than the permissions_validity_in_ms.")
-    , permissions_cache_max_entries(this, "permissions_cache_max_entries", value_status::Used, 1000,
+    , permissions_cache_max_entries(this, "permissions_cache_max_entries", liveness::LiveUpdate, value_status::Used, 1000,
         "Maximum cached permission entries. Must have a non-zero value if permissions caching is enabled (see a permissions_validity_in_ms description).")
     , server_encryption_options(this, "server_encryption_options", value_status::Used, {/*none*/},
         "Enable or disable inter-node encryption. You must also generate keys and provide the appropriate key and trust store locations and passwords. The available options are:\n"
@@ -898,6 +898,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Flush tables in the system_schema keyspace after schema modification. This is required for crash recovery, but slows down tests and can be disabled for them")
     , restrict_replication_simplestrategy(this, "restrict_replication_simplestrategy", liveness::LiveUpdate, value_status::Used, db::tri_mode_restriction_t::mode::FALSE, "Controls whether to disable SimpleStrategy replication. Can be true, false, or warn.")
     , restrict_dtcs(this, "restrict_dtcs", liveness::LiveUpdate, value_status::Used, db::tri_mode_restriction_t::mode::WARN, "Controls whether to prevent setting DateTieredCompactionStrategy. Can be true, false, or warn.")
+    , ignore_truncation_record(this, "unsafe_ignore_truncation_record", value_status::Used, false,
+        "Ignore truncation record stored in system tables as if tables were never truncated.")
+    , force_schema_commit_log(this, "force_schema_commit_log", value_status::Used, false,
+        "Use separate schema commit log unconditionally rater than after restart following discovery of cluster-wide support for it.")
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
         "\n"

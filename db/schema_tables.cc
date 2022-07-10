@@ -839,7 +839,8 @@ future<mutation> query_partition_mutation(service::storage_proxy& proxy,
     } else if (partitions.size() == 1) {
         co_return partitions[0].mut().unfreeze(s);
     } else {
-        co_return coroutine::make_exception(std::invalid_argument("Results must have at most one partition"));
+        auto&& ex = std::make_exception_ptr(std::invalid_argument("Results must have at most one partition"));
+        co_return coroutine::exception(std::move(ex));
     }
 }
 
@@ -930,6 +931,13 @@ future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks
  */
 future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, gms::feature_service& feat, std::vector<mutation> mutations)
 {
+    if (this_shard_id() != 0) {
+        // mutations must be applied on the owning shard (0).
+        co_await smp::submit_to(0, [&, fmuts = freeze(mutations)] () mutable -> future<> {
+            return merge_schema(sys_ks, proxy, feat, unfreeze(fmuts));
+        });
+        co_return;
+    }
     co_await with_merge_lock([&] () mutable -> future<> {
         bool flush_schema = proxy.local().get_db().local().get_config().flush_schema_tables_after_modification();
         co_await do_merge_schema(proxy, std::move(mutations), flush_schema);
@@ -1091,13 +1099,17 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     auto old_functions = co_await read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces);
     auto old_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
 
-    co_await proxy.local().mutate_locally(std::move(mutations), tracing::trace_state_ptr());
+    if (proxy.local().get_db().local().uses_schema_commitlog()) {
+        co_await proxy.local().get_db().local().apply(freeze(mutations), db::no_timeout);
+    } else {
+        co_await proxy.local().mutate_locally(std::move(mutations), tracing::trace_state_ptr());
 
-    if (do_flush) {
-        auto& db = proxy.local().local_db();
-        co_await coroutine::parallel_for_each(column_families, [&db] (const utils::UUID& id) -> future<> {
-            return db.flush_on_all(id);
-        });
+        if (do_flush) {
+            auto& db = proxy.local().local_db();
+            co_await coroutine::parallel_for_each(column_families, [&db] (const utils::UUID& id) -> future<> {
+                return db.flush_on_all(id);
+            });
+        }
     }
 
     // with new data applied
@@ -1131,7 +1143,7 @@ future<lw_shared_ptr<query::result_set>> extract_scylla_specific_keyspace_info(d
     if (proxy.local().features().cluster_schema_features().contains<schema_feature::SCYLLA_KEYSPACES>()) {
         auto&& rs = partition.second;
         if (rs->empty()) {
-            co_return coroutine::make_exception(std::runtime_error("query result has no rows"));
+            co_await coroutine::return_exception(std::runtime_error("query result has no rows"));
         }
         auto&& row = rs->row(0);
         auto keyspace_name = row.get_nonnull<sstring>("keyspace_name");
@@ -1800,12 +1812,8 @@ std::vector<mutation> make_drop_keyspace_mutations(schema_features features, lw_
         m.partition().apply(tombstone{timestamp, gc_clock::now()});
         mutations.emplace_back(std::move(m));
     }
-    auto&& schema = db::system_keyspace::built_indexes();
-    auto pkey = partition_key::from_exploded(*schema, {utf8_type->decompose(keyspace->name())});
-    mutation m{schema, pkey};
-    m.partition().apply(tombstone{timestamp, gc_clock::now()});
-    mutations.emplace_back(std::move(m));
     if (features.contains<schema_feature::SCYLLA_KEYSPACES>()) {
+        auto pkey = partition_key::from_exploded(*scylla_keyspaces(), {utf8_type->decompose(keyspace->name())});
         mutation km{scylla_keyspaces(), pkey};
         km.partition().apply(tombstone{timestamp, gc_clock::now()});
         mutations.emplace_back(std::move(km));
@@ -2471,7 +2479,7 @@ future<schema_ptr> create_table_from_name(distributed<service::storage_proxy>& p
     auto qn = qualified_name(keyspace, table);
     auto sm = co_await read_table_mutations(proxy, qn, tables());
     if (!sm.live()) {
-        co_return coroutine::make_exception(std::runtime_error(format("{}:{} not found in the schema definitions keyspace.", qn.keyspace_name, qn.table_name)));
+        co_await coroutine::return_exception(std::runtime_error(format("{}:{} not found in the schema definitions keyspace.", qn.keyspace_name, qn.table_name)));
     }
     co_return create_table_from_mutations(proxy, std::move(sm));
 }
@@ -2978,7 +2986,7 @@ static future<view_ptr> create_view_from_table_row(distributed<service::storage_
     qualified_name qn(row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("view_name"));
     schema_mutations sm = co_await read_table_mutations(proxy, qn, views());
     if (!sm.live()) {
-        co_return coroutine::make_exception(std::runtime_error(format("{}:{} not found in the view definitions keyspace.", qn.keyspace_name, qn.table_name)));
+        co_await coroutine::return_exception(std::runtime_error(format("{}:{} not found in the view definitions keyspace.", qn.keyspace_name, qn.table_name)));
     }
     co_return create_view_from_mutations(proxy, std::move(sm));
 }
@@ -3340,7 +3348,7 @@ future<column_mapping> get_column_mapping(utils::UUID table_id, table_schema_ver
         // If we don't have a stored column_mapping for an obsolete schema version
         // then it means it's way too old and been cleaned up already.
         // Fail the whole learn stage in this case.
-        co_return coroutine::make_exception(std::runtime_error(
+        co_await coroutine::return_exception(std::runtime_error(
             format("Failed to look up column mapping for schema version {}",
                 version)));
     }

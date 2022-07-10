@@ -132,16 +132,22 @@ public:
 
     impl(encryption_context& ctxt, const sstring& name, const host_options& options)
                     : _ctxt(ctxt), _name(name), _options(options), _attr_cache(
-                                    std::numeric_limits<size_t>::max(),
-                                    options.key_cache_expiry.value_or(
+                                    utils::loading_cache_config{
+                                        .max_size = std::numeric_limits<size_t>::max(),
+                                        .expiry = options.key_cache_expiry.value_or(
                                                     default_expiry),
-                                    default_refresh, kmip_log,
+                                        .refresh = default_refresh},
+                                    kmip_log,
                                     std::bind(&impl::create_key, this,
-                                                    std::placeholders::_1)), _id_cache(
-                                    std::numeric_limits<size_t>::max(),
-                                    options.key_cache_expiry.value_or(
+                                                    std::placeholders::_1)),
+                      _id_cache(
+                                utils::loading_cache_config{
+                                    .max_size = std::numeric_limits<size_t>::max(),
+                                    .expiry = options.key_cache_expiry.value_or(
                                                     default_expiry),
-                                    default_refresh, kmip_log,
+                                    .refresh = default_refresh,
+                                    },
+                                kmip_log,
                                     std::bind(&impl::find_key, this,
                                                     std::placeholders::_1)),
                                     _max_retry(std::max(size_t(min_num_cmd_retry), options.max_command_retries.value_or(default_num_cmd_retry)))

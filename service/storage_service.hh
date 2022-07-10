@@ -47,9 +47,6 @@ class node_ops_cmd_response;
 class node_ops_info;
 enum class node_ops_cmd : uint32_t;
 class repair_service;
-namespace service {
-class raft_group_registry;
-}
 
 namespace cql3 { class query_processor; }
 
@@ -93,7 +90,6 @@ class storage_service;
 class storage_proxy;
 class migration_manager;
 class raft_group0;
-class raft_group0_client;
 
 enum class disk_error { regular, commit };
 
@@ -151,18 +147,22 @@ private:
     gms::feature_service& _feature_service;
     distributed<replica::database>& _db;
     gms::gossiper& _gossiper;
-    std::unique_ptr<service::raft_group0> _group0;
     sharded<netw::messaging_service>& _messaging;
     sharded<service::migration_manager>& _migration_manager;
     sharded<repair_service>& _repair;
     sharded<streaming::stream_manager>& _stream_manager;
     sharded<qos::service_level_controller>& _sl_controller;
+
+    // Engaged on shard 0 after `join_cluster`.
+    service::raft_group0* _group0;
+
     sstring _operation_in_progress;
     seastar::metrics::metric_groups _metrics;
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<protocol_server*> _protocol_servers;
     std::vector<std::any> _listeners;
     gms::feature::listener_registration _workload_prioritization_registration;
+    gate _async_gate;
 
     std::unordered_map<utils::UUID, node_ops_meta_data> _node_ops;
     std::list<std::optional<utils::UUID>> _node_ops_abort_queue;
@@ -192,7 +192,7 @@ public:
 
     // Needed by distributed<>
     future<> stop();
-    void init_messaging_service(raft_group_registry& raft_gr);
+    void init_messaging_service();
     future<> uninit_messaging_service();
 
 private:
@@ -332,7 +332,7 @@ public:
      * API.
      * \see init_server_without_the_messaging_service_part
      */
-    future<> init_messaging_service_part(sharded<raft_group_registry>& raft_gr);
+    future<> init_messaging_service_part();
     /*!
      * \brief Uninit the messaging service part of the service.
      */
@@ -350,8 +350,8 @@ public:
      *
      * \see init_messaging_service_part
      */
-    future<> join_cluster(cql3::query_processor& qp, raft_group0_client& client, cdc::generation_service& cdc_gen_service,
-            sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, raft_group_registry& raft_gr);
+    future<> join_cluster(cdc::generation_service& cdc_gen_service,
+            sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, service::raft_group0&);
 
     future<> drain_on_shutdown();
 
@@ -742,7 +742,7 @@ public:
 
 private:
     promise<> _drain_finished;
-    std::optional<shared_promise<>> _transport_stopped;
+    std::optional<shared_future<>> _transport_stopped;
     future<> do_drain();
     /**
      * Seed data to the endpoints that will be responsible for it at the future

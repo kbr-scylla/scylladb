@@ -66,6 +66,17 @@ static wasmtime::Val call_func(wasmtime::Store& store, wasmtime::Func func, std:
     return std::move(result_vec[0]);
 }
 
+static void call_void_func(wasmtime::Store& store, wasmtime::Func func, std::vector<wasmtime::Val> argv) {
+    auto result = func.call(store, argv);
+    if (!result) {
+        throw wasm::exception("Calling wasm function failed: " + result.err().message());
+    }
+    std::vector<wasmtime::Val> result_vec = std::move(result).unwrap();
+    if (result_vec.size() != 0) {
+        throw wasm::exception(format("Unexpected number of returned values: {} (expected: 0)", result_vec.size()));
+    }
+}
+
 static std::pair<wasmtime::Instance, wasmtime::Func> create_instance_and_func(context& ctx, wasmtime::Store& store) {
     auto linker = wasmtime::Linker(ctx.engine_ptr->get());
     auto wasi_def = linker.define_wasi();
@@ -264,7 +275,7 @@ struct from_val_visitor {
 
         if (get_abi(instance, store, mem_base) == 2) {
             auto free_func = import_func(instance, store, "_scylla_free");
-            call_func(store, free_func, {val.i32()});
+            call_void_func(store, free_func, {wasmtime::Val((int32_t)val.i64())});
         }
 
         return ret;
@@ -294,7 +305,7 @@ seastar::future<bytes_opt> run_script(context& ctx, const std::vector<data_type>
     // Replenish the store with initial amount of fuel
     auto added = store.context().add_fuel(ctx.engine_ptr->initial_fuel_amount());
     if (!added) {
-        co_return coroutine::make_exception(wasm::exception(added.err().message()));
+        co_await coroutine::return_exception(wasm::exception(added.err().message()));
     }
     auto [instance, func] = create_instance_and_func(ctx, store);
     std::vector<wasmtime::Val> argv;
@@ -308,7 +319,7 @@ seastar::future<bytes_opt> run_script(context& ctx, const std::vector<data_type>
         } else if (param) {
             visit(type, init_arg_visitor{param, argv, store, instance});
         } else {
-            co_return coroutine::make_exception(wasm::exception(format("Function {} cannot be called on null values", ctx.function_name)));
+            co_await coroutine::return_exception(wasm::exception(format("Function {} cannot be called on null values", ctx.function_name)));
         }
     }
     uint64_t fuel_before = *store.context().fuel_consumed();
@@ -319,11 +330,11 @@ seastar::future<bytes_opt> run_script(context& ctx, const std::vector<data_type>
     wasm_logger.debug("Consumed {} fuel units", consumed);
 
     if (!result) {
-        co_return coroutine::make_exception(wasm::exception("Calling wasm function failed: " + result.err().message()));
+        co_await coroutine::return_exception(wasm::exception("Calling wasm function failed: " + result.err().message()));
     }
     std::vector<wasmtime::Val> result_vec = std::move(result).unwrap();
     if (result_vec.size() != 1) {
-      co_return coroutine::make_exception(wasm::exception(format("Unexpected number of returned values: {} (expected: 1)", result_vec.size())));
+      co_await coroutine::return_exception(wasm::exception(format("Unexpected number of returned values: {} (expected: 1)", result_vec.size())));
     }
 
     // TODO: ABI for return values is experimental and subject to change in the future.
