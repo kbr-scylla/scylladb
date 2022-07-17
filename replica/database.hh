@@ -602,11 +602,10 @@ public:
     // input files will be removed from the maintenance set and output files will
     // be inserted into the main set.
     future<>
-    update_sstable_lists_on_off_strategy_completion(const std::vector<sstables::shared_sstable>& old_maintenance_sstables,
-                                                    const std::vector<sstables::shared_sstable>& new_main_sstables);
+    update_sstable_lists_on_off_strategy_completion(sstables::compaction_completion_desc desc);
 
     // Rebuild sstable set, delete input sstables right away, and update row cache and statistics.
-    void on_compaction_completion(sstables::compaction_completion_desc& desc);
+    void on_compaction_completion(sstables::compaction_completion_desc desc);
 private:
     void rebuild_statistics();
 
@@ -817,7 +816,7 @@ public:
         tracing::trace_state_ptr trace_state,
         query::result_memory_limiter& memory_limiter,
         db::timeout_clock::time_point timeout,
-        std::optional<query::data_querier>* saved_querier = { });
+        std::optional<query::querier>* saved_querier = { });
 
     // Performs a query on given data source returning data in reconcilable form.
     //
@@ -843,7 +842,7 @@ public:
             tracing::trace_state_ptr trace_state,
             query::result_memory_accounter accounter,
             db::timeout_clock::time_point timeout,
-            std::optional<query::mutation_querier>* saved_querier = { });
+            std::optional<query::querier>* saved_querier = { });
 
     void start();
     future<> stop();
@@ -1507,6 +1506,7 @@ public:
     future<> update_keyspace(sharded<service::storage_proxy>& proxy, const sstring& name);
     void drop_keyspace(const sstring& name);
     std::vector<sstring> get_non_system_keyspaces() const;
+    std::vector<sstring> get_user_keyspaces() const;
     std::vector<sstring> get_all_keyspaces() const;
     column_family& find_column_family(std::string_view ks, std::string_view name);
     const column_family& find_column_family(std::string_view ks, std::string_view name) const;

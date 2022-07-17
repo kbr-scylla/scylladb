@@ -78,7 +78,11 @@ request_timeout_in_ms: 300000
 # and other modules dependent on it: e.g. service levels
 
 authenticator: PasswordAuthenticator
+authorizer: CassandraAuthorizer
 strict_allow_filtering: true
+
+permissions_update_interval_in_ms: 100
+permissions_validity_in_ms: 100
 """
 
 # Seastar options can not be passed through scylla.yaml, use command line

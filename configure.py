@@ -77,6 +77,7 @@ i18n_xlat = {
 
 python3_dependencies = subprocess.run('./install-dependencies.sh --print-python3-runtime-packages', shell=True, capture_output=True, encoding='utf-8').stdout.strip()
 pip_dependencies = subprocess.run('./install-dependencies.sh --print-pip-runtime-packages', shell=True, capture_output=True, encoding='utf-8').stdout.strip()
+pip_symlinks = subprocess.run('./install-dependencies.sh --print-pip-symlinks', shell=True, capture_output=True, encoding='utf-8').stdout.strip()
 node_exporter_filename = subprocess.run('./install-dependencies.sh --print-node-exporter-filename', shell=True, capture_output=True, encoding='utf-8').stdout.strip()
 node_exporter_dirname = os.path.basename(node_exporter_filename).rstrip('.tar.gz')
 
@@ -509,6 +510,8 @@ scylla_tests = set([
     'test/boost/rate_limiter_test',
     'test/boost/per_partition_rate_limit_test',
     'test/boost/expr_test',
+    'test/boost/exceptions_optimized_test',
+    'test/boost/exceptions_fallback_test',
     'test/boost/encrypted_file_test',
     'test/boost/mirror_file_test',
     'test/manual/ec2_snitch_test',
@@ -765,7 +768,7 @@ scylla_core = (['replica/database.cc',
                 'cql3/maps.cc',
                 'cql3/values.cc',
                 'cql3/expr/expression.cc',
-                'cql3/expr/to_restriction.cc',
+                'cql3/expr/restrictions.cc',
                 'cql3/expr/prepare_expr.cc',
                 'cql3/functions/user_function.cc',
                 'cql3/functions/functions.cc',
@@ -1314,6 +1317,8 @@ deps['test/boost/linearizing_input_stream_test'] = [
 ]
 deps['test/boost/expr_test'] = ['test/boost/expr_test.cc'] + scylla_core
 deps['test/boost/rate_limiter_test'] = ['test/boost/rate_limiter_test.cc', 'db/rate_limiter.cc']
+deps['test/boost/exceptions_optimized_test'] = ['test/boost/exceptions_optimized_test.cc', 'utils/exceptions.cc']
+deps['test/boost/exceptions_fallback_test'] = ['test/boost/exceptions_fallback_test.cc', 'utils/exceptions.cc']
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
@@ -2218,7 +2223,7 @@ with open(buildfile, 'w') as f:
 
         build tools/python3/build/{scylla_product}-python3-{arch}-package.tar.gz: build-submodule-reloc | build/SCYLLA-PRODUCT-FILE build/SCYLLA-VERSION-FILE build/SCYLLA-RELEASE-FILE
           reloc_dir = tools/python3
-          args = --packages "{python3_dependencies}" --pip-packages "{pip_dependencies}"
+          args = --packages "{python3_dependencies}" --pip-packages "{pip_dependencies}" --pip-symlinks "{pip_symlinks}"
         build dist-python3-rpm: build-submodule-rpm tools/python3/build/{scylla_product}-python3-{arch}-package.tar.gz
           dir = tools/python3
           artifact = $builddir/{scylla_product}-python3-{arch}-package.tar.gz

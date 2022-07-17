@@ -164,6 +164,10 @@ bool compaction_manager::can_register_compaction(replica::table* t, int weight, 
     if (!t->get_compaction_strategy().parallel_compaction() && has_table_ongoing_compaction(t)) {
         return false;
     }
+    // Weightless compaction doesn't have to be serialized, and won't dillute overall efficiency.
+    if (!weight) {
+        return true;
+    }
     // TODO: Maybe allow only *smaller* compactions to start? That can be done
     // by returning true only if weight is not in the set and is lower than any
     // entry in the set.
@@ -310,10 +314,11 @@ future<sstables::compaction_result> compaction_manager::task::compact_sstables(s
     descriptor.replacer = [this, &t, release_exhausted] (sstables::compaction_completion_desc desc) {
         t.get_compaction_strategy().notify_completion(desc.old_sstables, desc.new_sstables);
         _cm.propagate_replacement(&t, desc.old_sstables, desc.new_sstables);
-        t.on_compaction_completion(desc);
+        auto old_sstables = desc.old_sstables;
+        t.on_compaction_completion(std::move(desc));
         // Calls compaction manager's task for this compaction to release reference to exhausted SSTables.
         if (release_exhausted) {
-            release_exhausted(desc.old_sstables);
+            release_exhausted(old_sstables);
         }
     };
 
@@ -337,7 +342,7 @@ protected:
     // it cannot be the other way around, or minor compaction for this table would be
     // prevented while an ongoing major compaction doesn't release the semaphore.
     virtual future<> do_run() override {
-        co_await coroutine::switch_to(_cm._compaction_sg.cpu);
+        co_await coroutine::switch_to(_cm._maintenance_sg.cpu);
 
         switch_state(state::pending);
         auto units = co_await acquire_semaphore(_cm._maintenance_ops_sem);
@@ -360,6 +365,11 @@ protected:
         cmlog.info0("User initiated compaction started on behalf of {}.{}", t->schema()->ks_name(), t->schema()->cf_name());
         compaction_backlog_tracker bt(std::make_unique<user_initiated_backlog_tracker>(_cm._compaction_controller.backlog_of_shares(200), _cm._available_memory));
         _cm.register_backlog_tracker(bt);
+
+        // Now that the sstables for major compaction are registered
+        // and the user_initiated_backlog_tracker is set up
+        // the exclusive lock can be freed to let regular compaction run in parallel to major
+        lock_holder.return_all();
 
         co_await compact_sstables_and_update_history(std::move(descriptor), _compaction_data, std::move(release_exhausted));
 
@@ -984,23 +994,21 @@ public:
             }
         });
 
-        for (;;) {
+        auto get_next_job = [&] () -> std::optional<sstables::compaction_descriptor> {
             auto& iop = service::get_local_streaming_priority(); // run reshape in maintenance mode
             auto desc = t.get_compaction_strategy().get_reshaping_job(reshape_candidates, t.schema(), iop, sstables::reshape_mode::strict);
-            if (desc.sstables.empty()) {
-                // at this moment reshape_candidates contains a set of sstables ready for integration into main set
-                co_await t.update_sstable_lists_on_off_strategy_completion(old_sstables, reshape_candidates);
-                break;
-            }
+            return desc.sstables.size() ? std::make_optional(std::move(desc)) : std::nullopt;
+        };
 
-            desc.creator = [this, &new_unused_sstables, &t] (shard_id dummy) {
+        while (auto desc = get_next_job()) {
+            desc->creator = [this, &new_unused_sstables, &t] (shard_id dummy) {
                 auto sst = t.make_sstable();
                 new_unused_sstables.insert(sst);
                 return sst;
             };
-            auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.sstables);
+            auto input = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc->sstables);
 
-            auto ret = co_await sstables::compact_sstables(std::move(desc), cdata, t.as_table_state());
+            auto ret = co_await sstables::compact_sstables(std::move(*desc), cdata, t.as_table_state());
             _performed = true;
 
             // update list of reshape candidates without input but with output added to it
@@ -1022,6 +1030,13 @@ public:
                 }
             }
         }
+
+        // at this moment reshape_candidates contains a set of sstables ready for integration into main set
+        auto completion_desc = sstables::compaction_completion_desc{
+            .old_sstables = std::move(old_sstables),
+            .new_sstables = std::move(reshape_candidates)
+        };
+        co_await t.update_sstable_lists_on_off_strategy_completion(std::move(completion_desc));
 
         cleanup_new_unused_sstables_on_failure.cancel();
         // By marking input sstables for deletion instead, the ones which require view building will stay in the staging
@@ -1109,7 +1124,6 @@ private:
 
         for (;;) {
             switch_state(state::active);
-            replica::table& t = *_compacting_table;
             auto sstable_level = sst->get_sstable_level();
             auto run_identifier = sst->run_identifier();
             // FIXME: this compaction should run with maintenance priority.

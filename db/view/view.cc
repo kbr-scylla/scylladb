@@ -380,7 +380,6 @@ static query::partition_slice make_partition_slice(const schema& s) {
 class data_query_result_builder {
 public:
     using result_type = query::result;
-    static constexpr emit_only_live_rows only_live = emit_only_live_rows::yes;
 
 private:
     query::result::builder _res_builder;
@@ -1294,7 +1293,7 @@ future<> mutate_MV(
             auto mut_ptr = remote_endpoints.empty() ? std::make_unique<frozen_mutation>(std::move(mut.fm)) : std::make_unique<frozen_mutation>(mut.fm);
             tracing::trace(tr_state, "Locally applying view update for {}.{}; base token = {}; view token = {}",
                     mut.s->ks_name(), mut.s->cf_name(), base_token, view_token);
-            local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, std::move(tr_state), db::commitlog::force_sync::no).then_wrapped(
+            local_view_update = service::get_local_storage_proxy().mutate_locally(mut.s, *mut_ptr, tr_state, db::commitlog::force_sync::no).then_wrapped(
                     [s = mut.s, &stats, &cf_stats, tr_state, base_token, view_token, my_address, mut_ptr = std::move(mut_ptr),
                             units = sem_units.split(sem_units.count())] (future<>&& f) {
                 --stats.writes;
@@ -1958,8 +1957,11 @@ public:
         return stop_iteration::no;
     }
 
-    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) {
+    stop_iteration consume(clustering_row&& cr, row_tombstone, bool is_live) {
         inject_failure("view_builder_consume_clustering_row");
+        if (!is_live) {
+            return stop_iteration::no;
+        }
         if (_views_to_build.empty() || _builder._as.abort_requested()) {
             return stop_iteration::yes;
         }
@@ -2034,7 +2036,7 @@ public:
 // Called in the context of a seastar::thread.
 void view_builder::execute(build_step& step, exponential_backoff_retry r) {
     gc_clock::time_point now = gc_clock::now();
-    auto consumer = compact_for_query_v2<emit_only_live_rows::yes, view_builder::consumer>(
+    auto consumer = compact_for_query_v2<view_builder::consumer>(
             *step.reader.schema(),
             now,
             step.pslice,

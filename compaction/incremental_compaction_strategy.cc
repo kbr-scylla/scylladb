@@ -187,7 +187,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(table_state& t, str
     size_t min_threshold = t.min_compaction_threshold();
     size_t max_threshold = t.schema()->max_compaction_threshold();
 
-    auto buckets = get_buckets(t.get_sstable_set().select_sstable_runs(candidates));
+    auto buckets = get_buckets(t.main_sstable_set().select_sstable_runs(candidates));
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
@@ -266,12 +266,12 @@ int64_t incremental_compaction_strategy::estimated_pending_compactions(table_sta
     std::vector<sstables::shared_sstable> sstables;
     int64_t n = 0;
 
-    sstables.reserve(t.get_sstable_set().all()->size());
-    for (auto all_sstables = t.get_sstable_set(); auto entry : *all_sstables.all()) {
+    sstables.reserve(t.main_sstable_set().all()->size());
+    for (auto all_sstables = t.main_sstable_set(); auto entry : *all_sstables.all()) {
         sstables.push_back(entry);
     }
 
-    for (auto& bucket : get_buckets(t.get_sstable_set().select_sstable_runs(sstables))) {
+    for (auto& bucket : get_buckets(t.main_sstable_set().select_sstable_runs(sstables))) {
         if (bucket.size() >= min_threshold) {
             n += (bucket.size() + max_threshold - 1) / max_threshold;
         }

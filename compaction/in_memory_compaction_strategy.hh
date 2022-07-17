@@ -73,13 +73,13 @@ in_memory_compaction_strategy::get_sstables_for_compaction(table_state& cfs, str
     // compact everything into one sstable
     if (candidates.size() > 1) {
         auto cd = sstables::compaction_descriptor(std::move(candidates), service::get_local_compaction_priority());
-        cd.enable_garbage_collection(cfs.get_sstable_set());
+        cd.enable_garbage_collection(cfs.main_sstable_set());
         return cd;
     }
     return sstables::compaction_descriptor();
 }
 
 inline int64_t in_memory_compaction_strategy::estimated_pending_compactions(table_state& cf) const {
-    return cf.get_sstable_set().all()->size() > 1;
+    return cf.main_sstable_set().all()->size() > 1;
 }
 }

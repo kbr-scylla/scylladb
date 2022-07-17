@@ -21,6 +21,7 @@
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
+#include <seastar/coroutine/as_future.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/metrics.hh>
 #include <boost/algorithm/string/erase.hpp>
@@ -1103,6 +1104,16 @@ std::vector<sstring>  database::get_non_system_keyspaces() const {
     return res;
 }
 
+std::vector<sstring> database::get_user_keyspaces() const {
+    std::vector<sstring> res;
+    for (auto const& i : _keyspaces) {
+        if (!is_internal_keyspace(i.first)) {
+            res.push_back(i.first);
+        }
+    }
+    return res;
+}
+
 std::vector<sstring> database::get_all_keyspaces() const {
     std::vector<sstring> res;
     res.reserve(_keyspaces.size());
@@ -1478,7 +1489,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     auto& semaphore = get_reader_concurrency_semaphore();
     auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_unlimited_query_max_result_size();
 
-    std::optional<query::data_querier> querier_opt;
+    std::optional<query::querier> querier_opt;
     lw_shared_ptr<query::result> result;
     std::exception_ptr ex;
 
@@ -1498,17 +1509,21 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     try {
         auto op = cf.read_in_progress();
 
+        future<> f = make_ready_future<>();
         if (querier_opt) {
-            co_await semaphore.with_ready_permit(querier_opt->permit(), read_func);
+            f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            co_await semaphore.with_permit(s.get(), "data-query", cf.estimate_read_memory_cost(), timeout, read_func);
+            f = co_await coroutine::as_future(semaphore.with_permit(s.get(), "data-query", cf.estimate_read_memory_cost(), timeout, read_func));
         }
 
-        if (cmd.query_uuid != utils::UUID{} && querier_opt) {
-            _querier_cache.insert(cmd.query_uuid, std::move(*querier_opt), std::move(trace_state));
+        if (!f.failed()) {
+            if (cmd.query_uuid != utils::UUID{} && querier_opt) {
+                _querier_cache.insert_data_querier(cmd.query_uuid, std::move(*querier_opt), std::move(trace_state));
+            }
+        } else {
+            ex = f.get_exception();
         }
     } catch (...) {
-        ++semaphore.get_stats().total_failed_reads;
         ex = std::current_exception();
     }
 
@@ -1516,6 +1531,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
         co_await querier_opt->close();
     }
     if (ex) {
+        ++semaphore.get_stats().total_failed_reads;
         co_return coroutine::exception(std::move(ex));
     }
 
@@ -1539,7 +1555,7 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     auto accounter = co_await get_result_memory_limiter().new_mutation_read(max_result_size, short_read_allwoed);
     column_family& cf = find_column_family(cmd.cf_id);
 
-    std::optional<query::mutation_querier> querier_opt;
+    std::optional<query::querier> querier_opt;
     reconcilable_result result;
     std::exception_ptr ex;
 
@@ -1559,18 +1575,22 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     try {
         auto op = cf.read_in_progress();
 
+        future<> f = make_ready_future<>();
         if (querier_opt) {
-            co_await semaphore.with_ready_permit(querier_opt->permit(), read_func);
+            f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            co_await semaphore.with_permit(s.get(), "mutation-query", cf.estimate_read_memory_cost(), timeout, read_func);
+            f = co_await coroutine::as_future(semaphore.with_permit(s.get(), "mutation-query", cf.estimate_read_memory_cost(), timeout, read_func));
         }
 
-        if (cmd.query_uuid != utils::UUID{} && querier_opt) {
-            _querier_cache.insert(cmd.query_uuid, std::move(*querier_opt), std::move(trace_state));
+        if (!f.failed()) {
+            if (cmd.query_uuid != utils::UUID{} && querier_opt) {
+                _querier_cache.insert_mutation_querier(cmd.query_uuid, std::move(*querier_opt), std::move(trace_state));
+            }
+        } else {
+            ex = f.get_exception();
         }
 
     } catch (...) {
-        ++semaphore.get_stats().total_failed_reads;
         ex = std::current_exception();
     }
 
@@ -1578,6 +1598,7 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
         co_await querier_opt->close();
     }
     if (ex) {
+        ++semaphore.get_stats().total_failed_reads;
         co_return coroutine::exception(std::move(ex));
     }
 
@@ -1887,27 +1908,38 @@ public:
 
 // see above (#9919)
 template<typename T = std::runtime_error>
-static void throw_commitlog_add_error(schema_ptr s, const frozen_mutation& m) {
+static std::exception_ptr wrap_commitlog_add_error(schema_ptr s, const frozen_mutation& m, std::exception_ptr eptr) {
     // it is tempting to do a full pretty print here, but the mutation is likely
     // humungous if we got an error, so just tell us where and pk...
-    std::throw_with_nested(T(format("Could not write mutation {}:{} ({}) to commitlog"
+    return make_nested_exception_ptr(T(format("Could not write mutation {}:{} ({}) to commitlog"
         , s->ks_name(), s->cf_name()
         , m.key()
-    )));
+    )), std::move(eptr));
 }
 
 future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout) {
     db::rp_handle h;
     if (cf.commitlog() != nullptr && cf.durable_writes()) {
         auto fm = freeze(m);
+        std::exception_ptr ex;
         try {
             commitlog_entry_writer cew(m.schema(), fm, db::commitlog::force_sync::no);
-            h = co_await cf.commitlog()->add_entry(m.schema()->id(), cew, timeout);
-        } catch (timed_out_error&) {
-            // see above (#9919)
-            throw_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), fm);
+            auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(m.schema()->id(), cew, timeout));
+            if (!f_h.failed()) {
+                h = f_h.get();
+            } else {
+                ex = f_h.get_exception();
+            }
         } catch (...) {
-            throw_commitlog_add_error<>(cf.schema(), fm);
+            ex = std::current_exception();
+        }
+        if (ex) {
+            if (try_catch<timed_out_error>(ex)) {
+                ex = wrap_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), fm, std::move(ex));
+            } else {
+                ex = wrap_commitlog_add_error<>(cf.schema(), fm, std::move(ex));
+            }
+            co_await coroutine::exception(std::move(ex));
         }
     }
     try {
@@ -2006,14 +2038,25 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     db::rp_handle h;
     auto cl = cf.commitlog();
     if (cl != nullptr && cf.durable_writes()) {
+        std::exception_ptr ex;
         try {
             commitlog_entry_writer cew(s, m, sync);
-            h = co_await cf.commitlog()->add_entry(uuid, cew, timeout);
-        } catch (timed_out_error&) {
-            // see above (#9919)
-            throw_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), m);
+            auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(uuid, cew, timeout));
+            if (!f_h.failed()) {
+                h = f_h.get();
+            } else {
+                ex = f_h.get_exception();
+            }
         } catch (...) {
-            throw_commitlog_add_error<>(s, m);
+            ex = std::current_exception();
+        }
+        if (ex) {
+            if (try_catch<timed_out_error>(ex)) {
+                ex = wrap_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), m, std::move(ex));
+            } else {
+                ex = wrap_commitlog_add_error<>(s, m, std::move(ex));
+            }
+            co_await coroutine::exception(std::move(ex));
         }
     }
     try {
@@ -2032,12 +2075,8 @@ Future database::update_write_metrics(Future&& f) {
             auto ep = f.get_exception();
             if (is_timeout_exception(ep)) {
                 ++s->total_writes_timedout;
-            }
-            try {
-                std::rethrow_exception(ep);
-            } catch (replica::rate_limit_exception&) {
+            } else if (try_catch<replica::rate_limit_exception>(ep)) {
                 ++s->total_writes_rate_limited;
-            } catch (...) {
             }
             return futurize<Future>::make_exception_future(std::move(ep));
         }
