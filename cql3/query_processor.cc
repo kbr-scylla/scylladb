@@ -70,14 +70,13 @@ public:
     }
 };
 
-query_processor::query_processor(service::storage_proxy& proxy, service::forward_service& forwarder, data_dictionary::database db, service::migration_notifier& mn, service::migration_manager& mm, query_processor::memory_config mcfg, cql_config& cql_cfg, utils::loading_cache_config auth_prep_cache_cfg, service::raft_group0_client& group0_client, std::optional<wasm::startup_context> wasm_ctx)
+query_processor::query_processor(service::storage_proxy& proxy, data_dictionary::database db, service::migration_notifier& mn, query_processor::memory_config mcfg, cql_config& cql_cfg, utils::loading_cache_config auth_prep_cache_cfg, std::optional<wasm::startup_context> wasm_ctx)
         : _migration_subscriber{std::make_unique<migration_subscriber>(this)}
         , _proxy(proxy)
         , _db(db)
         , _mnotifier(mn)
         , _mcfg(mcfg)
         , _cql_config(cql_cfg)
-        , _remote(std::make_unique<struct remote>(mm, forwarder, group0_client))
         , _internal_state(new internal_state())
         , _prepared_cache(prep_cache_log, _mcfg.prepared_statment_cache_size)
         , _authorized_prepared_cache(std::move(auth_prep_cache_cfg), authorized_prepared_statements_cache_log)
@@ -475,6 +474,20 @@ query_processor::query_processor(service::storage_proxy& proxy, service::forward
 }
 
 query_processor::~query_processor() {
+    assert(!_remote);
+}
+
+void query_processor::start_remote(service::migration_manager& mm, service::forward_service& forwarder,
+                                  service::raft_group0_client& group0_client) {
+    _remote = std::make_unique<struct remote>(mm, forwarder, group0_client);
+}
+
+future<> query_processor::stop_remote() {
+    // FIXME: we should make sure that the references stored in `_remote` are no longer used when we return.
+    // We could return a gate from `get_migration_manager()` etc., requiring the caller to hold the gate
+    // until they finish the operation, and close the gate here.
+    _remote = nullptr;
+    co_return;
 }
 
 future<> query_processor::stop() {
@@ -665,13 +678,17 @@ query_processor::parse_statements(std::string_view queries) {
 }
 
 service::migration_manager& query_processor::get_migration_manager() noexcept {
-    assert(_remote);
-    return _remote->mm;
+    if (_remote) {
+        return _remote->mm;
+    }
+    on_internal_error(log, "get_migration_manager(): tried to access `remote` object when it's unavailable");
 }
 
 service::forward_service& query_processor::forwarder() {
-    assert(_remote);
-    return _remote->forwarder;
+    if (_remote) {
+        return _remote->forwarder;
+    }
+    on_internal_error(log, "forwarder(): tried to access `remote` object when it's unavailable");
 }
 
 service::raft_group0_client& query_processor::get_group0_client() {
