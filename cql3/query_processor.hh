@@ -31,6 +31,7 @@
 
 
 namespace service {
+class forward_service;
 class migration_manager;
 class query_state;
 class forward_service;
@@ -95,13 +96,13 @@ public:
 private:
     std::unique_ptr<migration_subscriber> _migration_subscriber;
     service::storage_proxy& _proxy;
-    service::forward_service& _forwarder;
     data_dictionary::database _db;
     service::migration_notifier& _mnotifier;
-    service::migration_manager& _mm;
     memory_config _mcfg;
     const cql_config& _cql_config;
-    service::raft_group0_client& _group0_client;
+
+    struct remote;
+    std::unique_ptr<remote> _remote;
 
     struct stats {
         uint64_t prepare_invocations = 0;
@@ -160,9 +161,7 @@ public:
         return _proxy;
     }
 
-    service::forward_service& forwarder() {
-        return _forwarder;
-    }
+    service::forward_service& forwarder();
 
     cql_stats& get_cql_stats() {
         return _cql_stats;
@@ -209,9 +208,7 @@ public:
         return _prepared_cache.find(key);
     }
 
-    service::raft_group0_client& get_group0_client() {
-        return _group0_client;
-    }
+    service::raft_group0_client& get_group0_client();
 
     inline
     future<::shared_ptr<cql_transport::messages::result_message>>

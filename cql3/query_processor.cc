@@ -42,6 +42,15 @@ const sstring query_processor::CQL_VERSION = "3.3.1";
 
 const std::chrono::minutes prepared_statements_cache::entry_expiry = std::chrono::minutes(60);
 
+struct query_processor::remote {
+    remote(service::migration_manager& mm, service::forward_service& fwd, service::raft_group0_client& group0_client)
+            : mm(mm), forwarder(fwd), group0_client(group0_client) {}
+
+    service::migration_manager& mm;
+    service::forward_service& forwarder;
+    service::raft_group0_client& group0_client;
+};
+
 class query_processor::internal_state {
     service::query_state _qs;
 public:
@@ -64,13 +73,11 @@ public:
 query_processor::query_processor(service::storage_proxy& proxy, service::forward_service& forwarder, data_dictionary::database db, service::migration_notifier& mn, service::migration_manager& mm, query_processor::memory_config mcfg, cql_config& cql_cfg, utils::loading_cache_config auth_prep_cache_cfg, service::raft_group0_client& group0_client, std::optional<wasm::startup_context> wasm_ctx)
         : _migration_subscriber{std::make_unique<migration_subscriber>(this)}
         , _proxy(proxy)
-        , _forwarder(forwarder)
         , _db(db)
         , _mnotifier(mn)
-        , _mm(mm)
         , _mcfg(mcfg)
         , _cql_config(cql_cfg)
-        , _group0_client(group0_client)
+        , _remote(std::make_unique<struct remote>(mm, forwarder, group0_client))
         , _internal_state(new internal_state())
         , _prepared_cache(prep_cache_log, _mcfg.prepared_statment_cache_size)
         , _authorized_prepared_cache(std::move(auth_prep_cache_cfg), authorized_prepared_statements_cache_log)
@@ -658,7 +665,18 @@ query_processor::parse_statements(std::string_view queries) {
 }
 
 service::migration_manager& query_processor::get_migration_manager() noexcept {
-    return _mm;
+    assert(_remote);
+    return _remote->mm;
+}
+
+service::forward_service& query_processor::forwarder() {
+    assert(_remote);
+    return _remote->forwarder;
+}
+
+service::raft_group0_client& query_processor::get_group0_client() {
+    assert(_remote);
+    return _remote->group0_client;
 }
 
 query_options query_processor::make_internal_options(
