@@ -42,10 +42,12 @@ static flat_mutation_reader_v2 sstable_reader(reader_permit permit, shared_sstab
 }
 
 class table_state_for_test : public table_state {
+    test_env& _env;
     replica::table* _t;
 public:
-    explicit table_state_for_test(replica::table& t)
-        : _t(&t)
+    explicit table_state_for_test(test_env& env, replica::table& t)
+        : _env(env)
+        , _t(&t)
     {
     }
     const schema_ptr& schema() const noexcept override {
@@ -59,6 +61,9 @@ public:
     }
     const sstables::sstable_set& main_sstable_set() const override {
         return _t->get_sstable_set();
+    }
+    const sstables::sstable_set& maintenance_sstable_set() const override {
+        return _t->maintenance_sstable_set();
     }
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point compaction_time) const override {
         return sstables::get_fully_expired_sstables(*this, sstables, compaction_time - schema()->gc_grace_seconds());
@@ -82,10 +87,22 @@ public:
     future<> update_compaction_history(utils::UUID compaction_id, sstring ks_name, sstring cf_name, std::chrono::milliseconds ended_at, int64_t bytes_in, int64_t bytes_out)  override {
         return make_ready_future<>();
     }
+    future<> on_compaction_completion(sstables::compaction_completion_desc desc, sstables::offstrategy offstrategy) override {
+        return _t->as_table_state().on_compaction_completion(std::move(desc), offstrategy);
+    }
+    bool is_auto_compaction_disabled_by_user() const noexcept override {
+        return false;
+    }
+    sstables::sstables_manager& get_sstables_manager() noexcept override {
+        return _env.manager();
+    }
+    sstables::shared_sstable make_sstable() const override {
+        return _t->make_sstable();
+    }
 };
 
-static std::unique_ptr<table_state> make_table_state_for_test(replica::column_family& t) {
-    return std::make_unique<table_state_for_test>(t);
+static std::unique_ptr<table_state> make_table_state_for_test(test_env& env, replica::column_family& t) {
+    return std::make_unique<table_state_for_test>(env, t);
 }
 
 class strategy_control_for_test : public strategy_control {
@@ -123,7 +140,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto cmt = compaction_manager_test(*cm);
         auto tracker = make_lw_shared<cache_tracker>();
         auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.semaphore()), replica::column_family::no_commitlog(), *cm, env.manager(), cl_stats, *tracker);
-        auto table_s = make_table_state_for_test(*cf);
+        auto table_s = make_table_state_for_test(env, *cf);
         cf->mark_ready_for_writes();
         cf->start();
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
@@ -303,10 +320,10 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
         }
 
         void run() {
-            auto table_s = make_table_state_for_test(*_cf);
+            auto table_s = make_table_state_for_test(_env, *_cf);
             auto control = make_strategy_control_for_test(false);
             for (;;) {
-                auto desc = _ics.get_sstables_for_compaction(*table_s, *control, _cf->in_strategy_sstables());
+                auto desc = _ics.get_sstables_for_compaction(*table_s, *control, in_strategy_sstables(_cf->as_table_state()));
                 // no more jobs, bailing out...
                 if (desc.sstables.empty()) {
                     break;
@@ -374,7 +391,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
         }
 
         column_family_for_tests cf(env.manager(), s);
-        auto table_s = make_table_state_for_test(*cf);
+        auto table_s = make_table_state_for_test(env, *cf);
         auto close_cf = deferred_stop(cf);
 
         auto creator = [&, gen = make_lw_shared<unsigned>(1)] {
