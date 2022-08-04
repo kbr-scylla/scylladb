@@ -268,13 +268,6 @@ private:
 
 public:
     std::chrono::milliseconds get_ring_delay();
-private:
-
-    std::unordered_set<inet_address> _replicating_nodes;
-
-    std::optional<inet_address> _removing_node;
-
-public:
     enum class mode { NONE, STARTING, JOINING, BOOTSTRAP, NORMAL, LEAVING, DECOMMISSIONED, MOVING, DRAINING, DRAINED };
 private:
     mode _operation_mode = mode::NONE;
@@ -589,10 +582,6 @@ private:
      * @return multimap of addresses to ranges the address is responsible for
      */
     std::unordered_multimap<inet_address, dht::token_range> get_new_source_ranges(const sstring& keyspaceName, const dht::token_range_vector& ranges) const;
-public:
-    future<> confirm_replication(inet_address node);
-
-private:
 
     /**
      * Sends a notification to a node indicating we have finished replicating data.
@@ -618,6 +607,7 @@ private:
     // needs to be modified to accept either a keyspace or ARS.
     future<std::unordered_multimap<dht::token_range, inet_address>> get_changed_ranges_for_leaving(sstring keyspace_name, inet_address endpoint);
 
+    future<> maybe_reconnect_to_preferred_ip(inet_address ep, inet_address local_ip);
 public:
 
     sstring get_release_version();

@@ -89,6 +89,7 @@
 #include "alternator/ttl.hh"
 #include "tools/entry_point.hh"
 #include "db/per_partition_rate_limit_extension.hh"
+#include "lang/wasm_instance_cache.hh"
 
 #include "service/raft/raft_group_registry.hh"
 #include "service/raft/raft_group0_client.hh"
@@ -435,6 +436,39 @@ static int scylla_main(int ac, char** av) {
         exit(1);
     }
 
+    // Even on the environment which causes error during initalize Scylla,
+    // "scylla --version" should be able to run without error.
+    // To do so, we need to parse and execute these options before
+    // initializing Scylla/Seastar classes.
+    bpo::options_description preinit_description("Scylla options");
+    bpo::variables_map preinit_vm;
+    preinit_description.add_options()
+        ("version", bpo::bool_switch(), "print version number and exit")
+        ("build-id", bpo::bool_switch(), "print build-id and exit")
+        ("build-mode", bpo::bool_switch(), "print build mode and exit")
+        ("list-tools", bpo::bool_switch(), "list included tools and exit");
+    auto preinit_parsed_opts = bpo::command_line_parser(ac, av).options(preinit_description).allow_unregistered().run();
+    bpo::store(preinit_parsed_opts, preinit_vm);
+    if (preinit_vm["version"].as<bool>()) {
+        fmt::print("{}\n", scylla_version());
+        return 0;
+    }
+    if (preinit_vm["build-id"].as<bool>()) {
+        fmt::print("{}\n", get_build_id());
+        return 0;
+    }
+    if (preinit_vm["build-mode"].as<bool>()) {
+        fmt::print("{}\n", scylla_build_mode());
+        return 0;
+    }
+    if (preinit_vm["list-tools"].as<bool>()) {
+        fmt::print(
+                "types - a command-line tool to examine values belonging to scylla types\n"
+                "sstable - a multifunctional command-line tool to examine the content of sstables\n"
+        );
+        return 0;
+    }
+
   try {
     runtime::init_uptime();
     std::setvbuf(stdout, nullptr, _IOLBF, 1000);
@@ -493,32 +527,13 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     bpo::variables_map vm;
     auto parsed_opts = bpo::command_line_parser(ac, av).options(app.get_options_description()).allow_unregistered().run();
     bpo::store(parsed_opts, vm);
-    if (vm["version"].as<bool>()) {
-        fmt::print("{}\n", scylla_version());
-        return 0;
-    }
-    if (vm["build-id"].as<bool>()) {
-        fmt::print("{}\n", get_build_id());
-        return 0;
-    }
-    if (vm["build-mode"].as<bool>()) {
-        fmt::print("{}\n", scylla_build_mode());
-        return 0;
-    }
-    if (vm["list-tools"].as<bool>()) {
-        fmt::print(
-                "types - a command-line tool to examine values belonging to scylla types\n"
-                "sstable - a multifunctional command-line tool to examine the content of sstables\n"
-        );
-        return 0;
-    }
-
     print_starting_message(ac, av, parsed_opts);
 
     sharded<locator::shared_token_metadata> token_metadata;
     sharded<locator::effective_replication_map_factory> erm_factory;
     sharded<service::migration_notifier> mm_notifier;
     sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
+    sharded<compaction_manager> cm;
     distributed<replica::database> db;
     extern sharded<replica::database>* hack_database_for_encryption;
     hack_database_for_encryption = &db;
@@ -573,7 +588,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
         tcp_syncookies_sanity();
 
-        return seastar::async([&app, cfg, ext, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
+        return seastar::async([&app, cfg, ext, &cm, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
                 &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager] {
@@ -962,10 +977,36 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
             view_hints_dir_initializer.ensure_created_and_verified().get();
 
+            static sharded<wasm::instance_cache> wasm_instance_cache;
+            auto udf_enabled = cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF);
+            std::any stop_udf_cache_handlers;
+            if (udf_enabled) {
+                supervisor::notify("starting wasm udf cache");
+                wasm_instance_cache.start(128*1024*1024, std::chrono::seconds(5)).get();
+                stop_udf_cache_handlers = defer_verbose_shutdown("udf cache", [] {
+                    wasm_instance_cache.stop().get();
+                });
+            }
+
+            supervisor::notify("starting compaction_manager");
+            // get_cm_cfg is called on each shard when starting a sharded<compaction_manager>
+            // we need the getter since updateable_value is not shard-safe (#7316)
+            auto get_cm_cfg = sharded_parameter([&] {
+                return compaction_manager::config {
+                    .compaction_sched_group = compaction_manager::scheduling_group{dbcfg.compaction_scheduling_group, service::get_local_compaction_priority()},
+                    .maintenance_sched_group = compaction_manager::scheduling_group{dbcfg.streaming_scheduling_group, service::get_local_streaming_priority()},
+                    .available_memory = dbcfg.available_memory,
+                    .static_shares = cfg->compaction_static_shares,
+                    .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
+                };
+            });
+            cm.start(std::move(get_cm_cfg), std::ref(stop_signal.as_sharded_abort_source())).get();
+            auto stop_cm = deferred_stop(cm);
+
             supervisor::notify("starting database");
             debug::the_database = &db;
             db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata),
-                    std::ref(stop_signal.as_sharded_abort_source()), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
+                    std::ref(cm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -1069,6 +1110,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
+            if (udf_enabled) {
+                qp.invoke_on_all([&] (cql3::query_processor& qp) {
+                    qp.set_wasm_instance_cache(&wasm_instance_cache.local());
+                }).get();
+            }
             supervisor::notify("initializing batchlog manager");
             db::batchlog_manager_config bm_cfg;
             bm_cfg.write_request_timeout = cfg->write_request_timeout_in_ms() * 1ms;

@@ -1496,7 +1496,7 @@ SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
 
         auto ret = compact_sstables(cf.get_compaction_manager(), sstables::compaction_descriptor(ssts, default_priority_class()), *cf, sst_gen).get0();
         BOOST_REQUIRE(ret.new_sstables.empty());
-        BOOST_REQUIRE(ret.end_size == 0);
+        BOOST_REQUIRE(ret.stats.end_size == 0);
     });
 }
 
@@ -2180,7 +2180,7 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
             cf->mark_ready_for_writes();
             cf->start();
 
-            dht::token_range_vector local_ranges = db.get_keyspace_local_ranges(ks_name);
+            auto local_ranges = compaction::make_owned_ranges_ptr(db.get_keyspace_local_ranges(ks_name));
             auto descriptor = sstables::compaction_descriptor({std::move(sst)}, default_priority_class(), compaction_descriptor::default_level,
                 compaction_descriptor::default_max_sstable_bytes, run_identifier, compaction_type_options::make_cleanup(std::move(local_ranges)));
             auto ret = compact_sstables(db.get_compaction_manager(), std::move(descriptor), *cf, sst_gen).get0();
@@ -2421,8 +2421,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_partition_start(2));
         frags.emplace_back(make_partition_end());
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_EQUAL(errors, 0);
     }
 
     BOOST_TEST_MESSAGE("out-of-order clustering row");
@@ -2432,8 +2432,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_clustering_row(0));
         frags.emplace_back(make_partition_end());
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(!valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_NE(errors, 0);
     }
 
     BOOST_TEST_MESSAGE("out-of-order static row");
@@ -2443,8 +2443,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_static_row());
         frags.emplace_back(make_partition_end());
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(!valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_NE(errors, 0);
     }
 
     BOOST_TEST_MESSAGE("out-of-order partition start");
@@ -2454,8 +2454,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_partition_start(2));
         frags.emplace_back(make_partition_end());
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(!valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_NE(errors, 0);
     }
 
     BOOST_TEST_MESSAGE("out-of-order partition");
@@ -2466,8 +2466,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_partition_start(0));
         frags.emplace_back(make_partition_end());
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(!valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_NE(errors, 0);
     }
 
     BOOST_TEST_MESSAGE("missing end-of-partition at EOS");
@@ -2475,8 +2475,8 @@ SEASTAR_THREAD_TEST_CASE(scrub_validate_mode_validate_reader_test) {
         frags.emplace_back(make_partition_start(0));
         frags.emplace_back(make_clustering_row(0));
 
-        const auto valid = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
-        BOOST_REQUIRE(!valid);
+        const auto errors = scrub_validate_mode_validate_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(frags)), *info).get();
+        BOOST_REQUIRE_NE(errors, 0);
     }
 }
 
@@ -2557,7 +2557,7 @@ SEASTAR_TEST_CASE(sstable_scrub_skip_mode_test) {
             // We expect the scrub with mode=srub::mode::abort to stop on the first invalid fragment.
             sstables::compaction_type_options::scrub opts = {};
             opts.operation_mode = sstables::compaction_type_options::scrub::mode::abort;
-            compaction_manager.perform_sstable_scrub(table->as_table_state(), opts).get();
+            BOOST_REQUIRE_THROW(compaction_manager.perform_sstable_scrub(table->as_table_state(), opts).get(), sstables::compaction_aborted_exception);
 
             BOOST_REQUIRE(in_strategy_sstables(table->as_table_state()).size() == 1);
             verify_fragments(sst, corrupt_fragments);
@@ -2654,7 +2654,7 @@ SEASTAR_TEST_CASE(sstable_scrub_segregate_mode_test) {
             // We expect the scrub with mode=srub::mode::abort to stop on the first invalid fragment.
             sstables::compaction_type_options::scrub opts = {};
             opts.operation_mode = sstables::compaction_type_options::scrub::mode::abort;
-            compaction_manager.perform_sstable_scrub(table->as_table_state(), opts).get();
+            BOOST_REQUIRE_THROW(compaction_manager.perform_sstable_scrub(table->as_table_state(), opts).get(), sstables::compaction_aborted_exception);
 
             BOOST_REQUIRE(in_strategy_sstables(table->as_table_state()).size() == 1);
             verify_fragments(sst, corrupt_fragments);
@@ -2896,8 +2896,9 @@ SEASTAR_THREAD_TEST_CASE(test_scrub_segregate_stack) {
 
     std::list<std::deque<mutation_fragment_v2>> segregated_fragment_streams;
 
+    uint64_t validation_errors = 0;
     mutation_writer::segregate_by_partition(
-            make_scrubbing_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(all_fragments)), sstables::compaction_type_options::scrub::mode::segregate),
+            make_scrubbing_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(all_fragments)), sstables::compaction_type_options::scrub::mode::segregate, validation_errors),
             mutation_writer::segregate_config{default_priority_class(), 100000},
             [&schema, &segregated_fragment_streams] (flat_mutation_reader_v2 rd) {
         return async([&schema, &segregated_fragment_streams, rd = std::move(rd)] () mutable {
@@ -3037,8 +3038,9 @@ SEASTAR_THREAD_TEST_CASE(sstable_scrub_reader_test) {
     add_fragment(make_clustering_row(3));
     scrubbed_fragments.emplace_back(*schema, permit, partition_end{}); // missing partition-end - at EOS
 
+    uint64_t validation_errors = 0;
     auto r = assert_that(make_scrubbing_reader(make_flat_mutation_reader_from_fragments(schema, permit, std::move(corrupt_fragments)),
-                compaction_type_options::scrub::mode::skip));
+                compaction_type_options::scrub::mode::skip, validation_errors));
     for (const auto& mf : scrubbed_fragments) {
        testlog.info("Expecting {}", mutation_fragment_v2::printer(*schema, mf));
        r.produces(*schema, mf);

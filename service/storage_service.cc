@@ -1129,9 +1129,7 @@ future<> storage_service::handle_state_removing(inet_address endpoint, std::vect
             // restore_replica_count to complete which can take a long time,
             // since when it completes, this node will send notification to
             // tell the removal_coordinator with IP address notify_endpoint
-            // that the restore process is finished on this node. This node
-            // will be removed from _replicating_nodes on the
-            // removal_coordinator.
+            // that the restore process is finished on this node.
             auto notify_endpoint = ep.value();
             // OK to discard future since _async_gate is closed on stop()
             (void)with_gate(_async_gate, [this, endpoint, notify_endpoint] {
@@ -1215,8 +1213,26 @@ future<> storage_service::on_change(inet_address endpoint, application_state sta
             if (state == application_state::RPC_READY) {
                 slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
                 co_await notify_cql_change(endpoint, ep_state->is_cql_ready());
+            } else if (state == application_state::INTERNAL_IP) {
+                co_await maybe_reconnect_to_preferred_ip(endpoint, inet_address(value.value));
             }
         }
+    }
+}
+
+future<> storage_service::maybe_reconnect_to_preferred_ip(inet_address ep, inet_address local_ip) {
+    auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
+    if (!snitch->prefer_local()) {
+        co_return;
+    }
+
+    const auto& topo = get_token_metadata().get_topology();
+    if (topo.get_datacenter() == topo.get_datacenter(ep) && _messaging.local().get_preferred_ip(ep) != local_ip) {
+        slogger.debug("Initiated reconnect to an Internal IP {} for the {}", local_ip, ep);
+        co_await _messaging.invoke_on_all([ep, local_ip] (auto& local_ms) {
+            local_ms.cache_preferred_ip(ep, local_ip);
+            local_ms.remove_rpc_client(netw::msg_addr(ep));
+        });
     }
 }
 
@@ -1261,6 +1277,16 @@ future<> storage_service::do_update_system_peers_table(gms::inet_address endpoin
         co_await update_table(endpoint, "data_center", value.value);
     } else if (state == application_state::RACK) {
         co_await update_table(endpoint, "rack", value.value);
+    } else if (state == application_state::INTERNAL_IP) {
+        auto col = sstring("preferred_ip");
+        inet_address ep;
+        try {
+            ep = gms::inet_address(value.value);
+        } catch (...) {
+            slogger.error("fail to update {} for {}: invalid address {}", col, endpoint, value.value);
+            co_return;
+        }
+        co_await update_table(endpoint, col, ep.addr());
     } else if (state == application_state::RPC_ADDRESS) {
         auto col = sstring("rpc_address");
         inet_address ep;
@@ -2958,21 +2984,6 @@ future<> storage_service::send_replication_notification(inet_address remote) {
     );
 }
 
-future<> storage_service::confirm_replication(inet_address node) {
-    return run_with_no_api_lock([node] (storage_service& ss) {
-        auto removing_node = bool(ss._removing_node) ? format("{}", *ss._removing_node) : "NONE";
-        slogger.info("Got confirm_replication from {}, removing_node {}", node, removing_node);
-        // replicatingNodes can be empty in the case where this node used to be a removal coordinator,
-        // but restarted before all 'replication finished' messages arrived. In that case, we'll
-        // still go ahead and acknowledge it.
-        if (!ss._replicating_nodes.empty()) {
-            ss._replicating_nodes.erase(node);
-        } else {
-            slogger.info("Received unexpected REPLICATION_FINISHED message from {}. Was this node recently a removal coordinator?", node);
-        }
-    });
-}
-
 future<> storage_service::leave_ring() {
     co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::NEEDS_BOOTSTRAP);
     co_await mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
@@ -3243,7 +3254,8 @@ future<> storage_service::update_topology(inet_address endpoint) {
 
 void storage_service::init_messaging_service() {
     _messaging.local().register_replication_finished([this] (gms::inet_address from) {
-        return confirm_replication(from);
+        slogger.info("Got confirm_replication from {}", from);
+        return make_ready_future<>();
     });
 
     _messaging.local().register_node_ops_cmd([this] (const rpc::client_info& cinfo, node_ops_cmd_request req) {
@@ -3281,16 +3293,7 @@ future<> storage_service::isolate() {
 
 future<sstring> storage_service::get_removal_status() {
     return run_with_no_api_lock([] (storage_service& ss) {
-        if (!ss._removing_node) {
-            return make_ready_future<sstring>(sstring("No token removals in process."));
-        }
-        auto tokens = ss.get_token_metadata().get_tokens(*ss._removing_node);
-        if (tokens.empty()) {
-            return make_ready_future<sstring>(sstring("Node has no token"));
-        }
-        auto status = format("Removing token ({}). Waiting for replication confirmation from [{}].",
-                tokens.front(), join(",", ss._replicating_nodes));
-        return make_ready_future<sstring>(status);
+        return make_ready_future<sstring>(sstring("No token removals in process."));
     });
 }
 
@@ -3310,9 +3313,9 @@ future<> storage_service::force_remove_completion() {
 
         try {
             const auto& tm = ss.get_token_metadata();
-            if (!ss._replicating_nodes.empty() || !tm.get_leaving_endpoints().empty()) {
+            if (!tm.get_leaving_endpoints().empty()) {
                 auto leaving = tm.get_leaving_endpoints();
-                slogger.warn("Removal not confirmed for {}, Leaving={}", join(",", ss._replicating_nodes), leaving);
+                slogger.warn("Removal not confirmed, Leaving={}", leaving);
                 for (auto endpoint : leaving) {
                     utils::UUID host_id;
                     auto tokens = tm.get_tokens(endpoint);
@@ -3330,8 +3333,6 @@ future<> storage_service::force_remove_completion() {
                     assert(ss._group0);
                     co_await ss._group0->remove_from_group0(endpoint);
                 }
-                ss._replicating_nodes.clear();
-                ss._removing_node = std::nullopt;
             } else {
                 slogger.warn("No tokens to force removal on, call 'removenode' first");
             }
