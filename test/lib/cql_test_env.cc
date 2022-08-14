@@ -285,7 +285,7 @@ public:
     }
 
     virtual future<> create_table(std::function<schema(std::string_view)> schema_maker) override {
-        auto id = utils::UUID_gen::get_time_UUID();
+        auto id = table_id(utils::UUID_gen::get_time_UUID());
         schema_builder builder(make_lw_shared<schema>(schema_maker(ks_name)));
         builder.set_uuid(id);
         auto s = builder.build(schema_builder::compact_storage::no);
@@ -492,8 +492,8 @@ public:
             cfg->ring_delay_ms.set(500);
             cfg->shutdown_announce_in_ms.set(0);
             cfg->broadcast_to_all_shards().get();
-            if (cfg->host_id == utils::UUID{}) {
-                cfg->host_id = utils::make_random_uuid();
+            if (!cfg->host_id) {
+                cfg->host_id = locator::host_id::create_random_id();
             }
             create_directories((data_dir_path + "/system").c_str());
             create_directories(cfg->commitlog_directory().c_str());

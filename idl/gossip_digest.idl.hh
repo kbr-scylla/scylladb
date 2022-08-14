@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "gms/inet_address_serializer.hh"
+
 namespace gms {
 enum class application_state:int {
         STATUS = 0,

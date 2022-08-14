@@ -1,3 +1,16 @@
+/*
+ * Copyright 2022-present ScyllaDB
+ */
+
+/*
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
+ */
+
+#include "dht/i_partitioner.hh"
+
+#include "idl/read_command.idl.hh"
+#include "idl/consistency_level.idl.hh"
+
 namespace db {
 namespace functions {
 class function_name {

@@ -20,7 +20,7 @@
 #include "seastarx.hh"
 #include "utils/config_file.hh"
 #include "utils/enum_option.hh"
-#include "utils/UUID.hh"
+#include "locator/host_id.hh"
 #include "gms/inet_address.hh"
 #include "db/hints/host_filter.hh"
 
@@ -225,6 +225,7 @@ public:
     named_value<uint32_t> counter_cache_keys_to_save;
     named_value<uint32_t> tombstone_warn_threshold;
     named_value<uint32_t> tombstone_failure_threshold;
+    named_value<uint64_t> query_tombstone_page_limit;
     named_value<uint32_t> range_request_timeout_in_ms;
     named_value<uint32_t> read_request_timeout_in_ms;
     named_value<uint32_t> counter_write_request_timeout_in_ms;
@@ -395,7 +396,7 @@ public:
 
     const db::extensions& extensions() const;
 
-    utils::UUID host_id;
+    locator::host_id host_id;
 
     bool create_role_attributes_table = true; // Some upgrade tests don't want enterprise-only tables
     bool create_service_levels_table = true; // Some upgrade tests don't want enterprise-only tables

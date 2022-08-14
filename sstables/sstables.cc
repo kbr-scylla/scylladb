@@ -231,7 +231,7 @@ future<> parse(const schema&, sstable_version_types, random_access_reader& in, d
     return in.read_exactly(sizeof(double)).then([&d] (auto buf) {
         check_buf_size(buf, sizeof(double));
         unsigned long nr = read_unaligned<unsigned long>(buf.get());
-        d = bit_cast<double>(net::ntoh(nr));
+        d = std::bit_cast<double>(net::ntoh(nr));
         return make_ready_future<>();
     });
 }
@@ -273,6 +273,15 @@ future<> parse(const schema&, sstable_version_types, random_access_reader& in, u
 
         uuid = utils::UUID_gen::get_UUID(const_cast<int8_t*>(reinterpret_cast<const int8_t*>(buf.get())));
     });
+}
+
+template <typename Tag>
+future<> parse(const schema& s, sstable_version_types v, random_access_reader& in, utils::tagged_uuid<Tag>& id) {
+    // Read directly into tha tagged_uuid `id` member
+    // This is ugly, but save an allocation or reimplementation
+    // of parse(..., utils::UUID&)
+    utils::UUID& uuid = *const_cast<utils::UUID*>(&id.uuid());
+    return parse(s, v, in, uuid);
 }
 
 // For all types that take a size, we provide a template that takes the type
@@ -1822,7 +1831,7 @@ void sstable::validate_originating_host_id() const {
     }
 
     auto local_host_id = _manager.get_local_host_id();
-    if (local_host_id == utils::UUID{}) {
+    if (!local_host_id) {
         // we don't know the local host id before it is loaded from
         // (or generated and written to) system.local, but some system
         // sstable reads must happen before the bootstrap process gets

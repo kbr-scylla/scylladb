@@ -55,7 +55,6 @@
 #include "utils/latency.hh"
 #include "schema.hh"
 #include "schema_registry.hh"
-#include "utils/joinpoint.hh"
 #include <seastar/util/lazy.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/execution_stage.hh>
@@ -81,10 +80,6 @@
 #include "db/virtual_table.hh"
 #include "canonical_mutation.hh"
 #include "schema_mutations.hh"
-#include "serializer_impl.hh"
-#include "serialization_visitors.hh"
-#include "idl/uuid.dist.hh"
-#include "idl/uuid.dist.impl.hh"
 #include "idl/frozen_schema.dist.hh"
 #include "idl/frozen_schema.dist.impl.hh"
 #include "idl/storage_proxy.dist.hh"
@@ -276,20 +271,20 @@ public:
         co_return rpc::tuple{make_foreign(::make_lw_shared<query::result>(std::move(result))), hit_rate.value_or(cache_temperature::invalid())};
     }
 
-    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>>
+    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>>
     send_read_digest(
             netw::msg_addr addr, storage_proxy::clock_type::time_point timeout, tracing::trace_state_ptr tr_state,
             const query::read_command& cmd, const dht::partition_range& pr,
             query::digest_algorithm digest_algo, db::per_partition_rate_limit::info rate_limit_info) {
         tracing::trace(tr_state, "read_digest: sending a message to /{}", addr.addr);
-        auto&& [d, t, hit_rate, opt_exception] =
+        auto&& [d, t, hit_rate, opt_exception, opt_last_pos] =
             co_await ser::storage_proxy_rpc_verbs::send_read_digest(&_ms, addr, timeout, cmd, pr, digest_algo, rate_limit_info);
         if (opt_exception.has_value() && *opt_exception) {
             co_await coroutine::return_exception_ptr((*opt_exception).into_exception_ptr());
         }
 
         tracing::trace(tr_state, "read_digest: got response from /{}", addr.addr);
-        co_return rpc::tuple{d, t ? t.value() : api::missing_timestamp, hit_rate.value_or(cache_temperature::invalid())};
+        co_return rpc::tuple{d, t ? t.value() : api::missing_timestamp, hit_rate.value_or(cache_temperature::invalid()), opt_last_pos ? std::move(*opt_last_pos) : std::nullopt};
     }
 
     future<> send_truncate(
@@ -323,7 +318,7 @@ public:
 
     future<> send_paxos_prune(
             netw::msg_addr addr, storage_proxy::clock_type::time_point timeout, tracing::trace_state_ptr tr_state,
-            utils::UUID schema_id, const partition_key& key, utils::UUID ballot) {
+            table_schema_version schema_id, const partition_key& key, utils::UUID ballot) {
         return ser::storage_proxy_rpc_verbs::send_paxos_prune(&_ms, addr, timeout, schema_id, key, ballot, tracing::make_trace_info(tr_state));
     }
 
@@ -398,7 +393,7 @@ private:
 
     future<rpc::no_wait_type> handle_write(
             netw::messaging_service::msg_addr src_addr, rpc::opt_time_point t,
-            utils::UUID schema_version, auto in, inet_address_vector_replica_set forward, gms::inet_address reply_to,
+            auto schema_version, auto in, inet_address_vector_replica_set forward, gms::inet_address reply_to,
             unsigned shard, storage_proxy::response_id_type response_id, std::optional<tracing::trace_info> trace_info,
             auto&& apply_fn, auto&& forward_fn) {
         tracing::trace_state_ptr trace_state_ptr;
@@ -504,7 +499,7 @@ private:
         auto src_addr = netw::messaging_service::get_source(cinfo);
         auto rate_limit_info = rate_limit_info_opt.value_or(std::monostate());
 
-        utils::UUID schema_version = in.schema_version();
+        auto schema_version = in.schema_version();
         return handle_write(src_addr, t, schema_version, std::move(in), std::move(forward), reply_to, shard, response_id,
                 trace_info ? *trace_info : std::nullopt,
                 /* apply_fn */ [smp_grp, rate_limit_info] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s, const frozen_mutation& m,
@@ -525,7 +520,7 @@ private:
         tracing::trace_state_ptr trace_state_ptr;
         auto src_addr = netw::messaging_service::get_source(cinfo);
 
-        utils::UUID schema_version = decision.update.schema_version();
+        auto schema_version = decision.update.schema_version();
         return handle_write(src_addr, t, schema_version, std::move(decision), std::move(forward), reply_to, shard,
                 response_id, trace_info,
                /* apply_fn */ [] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s,
@@ -652,7 +647,7 @@ private:
         });
     }
 
-    future<rpc::tuple<query::result_digest, long, cache_temperature, replica::exception_variant>>
+    future<rpc::tuple<query::result_digest, long, cache_temperature, replica::exception_variant, std::optional<full_position>>>
     handle_read_digest(
             const rpc::client_info& cinfo, rpc::opt_time_point t,
             query::read_command cmd, ::compat::wrapping_partition_range pr,
@@ -682,19 +677,31 @@ private:
                 }
                 auto timeout = t ? *t : db::no_timeout;
                 return p->query_result_local_digest(std::move(s), cmd, std::move(pr2.first), trace_state_ptr, timeout, da, rate_limit_info);
-            }).then_wrapped([&p, &trace_state_ptr, src_ip] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> f) mutable {
+            }).then_wrapped([this, p, &trace_state_ptr, src_ip] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>> f) mutable {
                 tracing::trace(trace_state_ptr, "read_digest handling is done, sending a response to /{}", src_ip);
-                return encode_replica_exception_for_rpc(p->features(), std::move(f), [] { return std::make_tuple(query::result_digest(), api::missing_timestamp, cache_temperature::invalid()); });
+
+                using final_tuple_type = rpc::tuple<query::result_digest, long, cache_temperature, replica::exception_variant, std::optional<full_position>>;
+
+                if (!f.failed()) {
+                    auto&& [d, t, c, p] = f.get();
+                    return make_ready_future<final_tuple_type>(d, t, std::move(c), replica::exception_variant(), std::move(p));
+                }
+
+                std::exception_ptr eptr = f.get_exception();
+                if (p->features().typed_errors_in_read_rpc) {
+                    replica::exception_variant ex = replica::try_encode_replica_exception(eptr);
+                    if (ex) {
+                        return make_ready_future<final_tuple_type>(std::tuple(query::result_digest(), api::missing_timestamp, cache_temperature::invalid(), replica::exception_variant(std::move(ex)), std::nullopt));
+                    }
+                }
+
+                return make_exception_future<final_tuple_type>(std::move(eptr));
             });
         });
     }
 
     future<> handle_truncate(rpc::opt_time_point timeout, sstring ksname, sstring cfname) {
-        return do_with(utils::make_joinpoint([] { return db_clock::now();}), [this, ksname, cfname] (auto& tsf) {
-            return _sp.container().invoke_on_all(_sp._write_smp_service_group, [ksname, cfname, &tsf] (storage_proxy& sp) {
-                return sp._db.local().truncate(ksname, cfname, [&tsf] { return tsf.value(); });
-            });
-        });
+        return replica::database::truncate_table_on_all_shards(_sp._db, ksname, cfname);
     }
 
     future<foreign_ptr<std::unique_ptr<service::paxos::prepare_response>>>
@@ -767,7 +774,7 @@ private:
 
     future<rpc::no_wait_type> handle_paxos_prune(
             const rpc::client_info& cinfo, rpc::opt_time_point timeout,
-            utils::UUID schema_id, partition_key key, utils::UUID ballot, std::optional<tracing::trace_info> trace_info) {
+            table_schema_version schema_id, partition_key key, utils::UUID ballot, std::optional<tracing::trace_info> trace_info) {
         static thread_local uint16_t pruning = 0;
         static constexpr uint16_t pruning_limit = 1000; // since PRUNE verb is one way replica side has its own queue limit
         auto src_addr = netw::messaging_service::get_source(cinfo);
@@ -1088,6 +1095,7 @@ protected:
     storage_proxy::response_id_type _id;
     promise<result<>> _ready; // available when cl is achieved
     shared_ptr<storage_proxy> _proxy;
+    locator::effective_replication_map_ptr _effective_replication_map_ptr;
     tracing::trace_state_ptr _trace_state;
     db::consistency_level _cl;
     size_t _total_block_for = 0;
@@ -1122,17 +1130,21 @@ protected:
     }
 
 public:
-    abstract_write_response_handler(shared_ptr<storage_proxy> p, replica::keyspace& ks, db::consistency_level cl, db::write_type type,
+    abstract_write_response_handler(shared_ptr<storage_proxy> p,
+            locator::effective_replication_map_ptr erm,
+            db::consistency_level cl, db::write_type type,
             std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets, tracing::trace_state_ptr trace_state,
             storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info, size_t pending_endpoints = 0,
             inet_address_vector_topology_change dead_endpoints = {})
-            : _id(p->get_next_response_id()), _proxy(std::move(p)), _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
+            : _id(p->get_next_response_id()), _proxy(std::move(p))
+            , _effective_replication_map_ptr(std::move(erm))
+            , _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
               _dead_endpoints(std::move(dead_endpoints)), _stats(stats), _expire_timer([this] { timeout_cb(); }), _permit(std::move(permit)),
               _rate_limit_info(rate_limit_info) {
         // original comment from cassandra:
         // during bootstrap, include pending endpoints in the count
         // or we may fail the consistency level guarantees (see #833, #8058)
-        _total_block_for = db::block_for(ks, _cl) + pending_endpoints;
+        _total_block_for = db::block_for(*_effective_replication_map_ptr, _cl) + pending_endpoints;
         ++_stats.writes;
     }
     virtual ~abstract_write_response_handler() {
@@ -1273,7 +1285,7 @@ public:
             }
             if (_cl_achieved) { // For CL=ANY this can still be false
                 for (auto&& ep : get_targets()) {
-                    ++stats().background_replica_writes_failed.get_ep_stat(_proxy->get_token_metadata_ptr()->get_topology(), ep);
+                    ++stats().background_replica_writes_failed.get_ep_stat(_effective_replication_map_ptr->get_topology(), ep);
                 }
                 stats().background_writes_failed += int(!_targets.empty());
             }
@@ -1372,19 +1384,21 @@ public:
 
 class datacenter_write_response_handler : public abstract_write_response_handler {
     bool waited_for(gms::inet_address from) override {
-        const auto& topo = _proxy->get_token_metadata_ptr()->get_topology();
+        const auto& topo = _effective_replication_map_ptr->get_topology();
         return fbu::is_me(from) || (topo.get_datacenter(from) == topo.get_datacenter());
     }
 
 public:
-    datacenter_write_response_handler(shared_ptr<storage_proxy> p, replica::keyspace& ks, db::consistency_level cl, db::write_type type,
+    datacenter_write_response_handler(shared_ptr<storage_proxy> p,
+            locator::effective_replication_map_ptr ermp,
+            db::consistency_level cl, db::write_type type,
             std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info) :
-                abstract_write_response_handler(p, ks, cl, type, std::move(mh),
+                abstract_write_response_handler(p, ermp, cl, type, std::move(mh), // can't move ermp, it's used below
                         std::move(targets), std::move(tr_state), stats, std::move(permit), rate_limit_info,
-                        p->get_token_metadata_ptr()->get_topology().count_local_endpoints(pending_endpoints), std::move(dead_endpoints)) {
-        _total_endpoints = p->get_token_metadata_ptr()->get_topology().count_local_endpoints(_targets);
+                        ermp->get_topology().count_local_endpoints(pending_endpoints), std::move(dead_endpoints)) {
+        _total_endpoints = _effective_replication_map_ptr->get_topology().count_local_endpoints(_targets);
     }
 };
 
@@ -1393,11 +1407,13 @@ class write_response_handler : public abstract_write_response_handler {
         return true;
     }
 public:
-    write_response_handler(shared_ptr<storage_proxy> p, replica::keyspace& ks, db::consistency_level cl, db::write_type type,
+    write_response_handler(shared_ptr<storage_proxy> p,
+            locator::effective_replication_map_ptr ermp,
+            db::consistency_level cl, db::write_type type,
             std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info) :
-                abstract_write_response_handler(std::move(p), ks, cl, type, std::move(mh),
+                abstract_write_response_handler(std::move(p), std::move(ermp), cl, type, std::move(mh),
                         std::move(targets), std::move(tr_state), stats, std::move(permit), rate_limit_info, pending_endpoints.size(), std::move(dead_endpoints)) {
         _total_endpoints = _targets.size();
     }
@@ -1405,11 +1421,13 @@ public:
 
 class view_update_write_response_handler : public write_response_handler, public bi::list_base_hook<bi::link_mode<bi::auto_unlink>> {
 public:
-    view_update_write_response_handler(shared_ptr<storage_proxy> p, replica::keyspace& ks, db::consistency_level cl,
+    view_update_write_response_handler(shared_ptr<storage_proxy> p,
+            locator::effective_replication_map_ptr ermp,
+            db::consistency_level cl,
             std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
             storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info):
-                write_response_handler(p, ks, cl, db::write_type::VIEW, std::move(mh),
+                write_response_handler(p, std::move(ermp), cl, db::write_type::VIEW, std::move(mh),
                         std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info) {
         register_in_intrusive_list(*p);
     }
@@ -1474,7 +1492,7 @@ class datacenter_sync_write_response_handler : public abstract_write_response_ha
     };
     std::unordered_map<sstring, dc_info> _dc_responses;
     bool waited_for(gms::inet_address from) override {
-        auto& topology = _proxy->get_token_metadata_ptr()->get_topology();
+        auto& topology = _effective_replication_map_ptr->get_topology();
         sstring data_center = topology.get_datacenter(from);
         auto dc_resp = _dc_responses.find(data_center);
 
@@ -1485,12 +1503,13 @@ class datacenter_sync_write_response_handler : public abstract_write_response_ha
         return false;
     }
 public:
-    datacenter_sync_write_response_handler(shared_ptr<storage_proxy> p, replica::keyspace& ks, db::consistency_level cl, db::write_type type,
+    datacenter_sync_write_response_handler(shared_ptr<storage_proxy> p, locator::effective_replication_map_ptr ermp, db::consistency_level cl, db::write_type type,
             std::unique_ptr<mutation_holder> mh, inet_address_vector_replica_set targets, const inet_address_vector_topology_change& pending_endpoints,
             inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state, storage_proxy::write_stats& stats, service_permit permit,
             db::per_partition_rate_limit::info rate_limit_info) :
-        abstract_write_response_handler(std::move(p), ks, cl, type, std::move(mh), targets, std::move(tr_state), stats, std::move(permit), rate_limit_info, 0, dead_endpoints) {
-        auto& topology = _proxy->get_token_metadata_ptr()->get_topology();
+        abstract_write_response_handler(std::move(p), std::move(ermp), cl, type, std::move(mh), targets, std::move(tr_state), stats, std::move(permit), rate_limit_info, 0, dead_endpoints) {
+        auto* erm = _effective_replication_map_ptr.get();
+        auto& topology = erm->get_topology();
 
         for (auto& target : targets) {
             auto dc = topology.get_datacenter(target);
@@ -1502,13 +1521,13 @@ public:
                 size_t total_endpoints_for_dc = boost::range::count_if(targets, [&topology, &dc] (const gms::inet_address& ep){
                     return topology.get_datacenter(ep) == dc;
                 });
-                _dc_responses.emplace(dc, dc_info{0, db::local_quorum_for(ks, dc) + pending_for_dc, total_endpoints_for_dc, 0});
+                _dc_responses.emplace(dc, dc_info{0, db::local_quorum_for(*erm, dc) + pending_for_dc, total_endpoints_for_dc, 0});
                 _total_block_for += pending_for_dc;
             }
         }
     }
     bool failure(gms::inet_address from, size_t count, error err) override {
-        auto& topology = _proxy->get_token_metadata_ptr()->get_topology();
+        auto& topology = _effective_replication_map_ptr->get_topology();
         const sstring& dc = topology.get_datacenter(from);
         auto dc_resp = _dc_responses.find(dc);
 
@@ -2040,7 +2059,7 @@ bool paxos_response_handler::learned(gms::inet_address ep) {
 }
 
 static inet_address_vector_replica_set
-replica_ids_to_endpoints(const locator::token_metadata& tm, const std::vector<utils::UUID>& replica_ids) {
+replica_ids_to_endpoints(const locator::token_metadata& tm, const std::vector<locator::host_id>& replica_ids) {
     inet_address_vector_replica_set endpoints;
     endpoints.reserve(replica_ids.size());
 
@@ -2053,9 +2072,9 @@ replica_ids_to_endpoints(const locator::token_metadata& tm, const std::vector<ut
     return endpoints;
 }
 
-static std::vector<utils::UUID>
+static std::vector<locator::host_id>
 endpoints_to_replica_ids(const locator::token_metadata& tm, const inet_address_vector_replica_set& endpoints) {
-    std::vector<utils::UUID> replica_ids;
+    std::vector<locator::host_id> replica_ids;
     replica_ids.reserve(endpoints.size());
 
     for (const auto& endpoint : endpoints) {
@@ -2080,6 +2099,14 @@ query::max_result_size storage_proxy::get_max_result_size(const query::partition
     } else {
         return query::max_result_size(query::result_memory_limiter::maximum_result_size);
     }
+}
+
+query::tombstone_limit storage_proxy::get_tombstone_limit() const {
+    auto& db = _db.local();
+    if (!db.is_internal_query() && _features.empty_replica_pages) {
+        return query::tombstone_limit(db.get_config().query_tombstone_page_limit());
+    }
+    return query::tombstone_limit::max;
 }
 
 bool storage_proxy::need_throttle_writes() const {
@@ -2170,21 +2197,22 @@ future<result<>> storage_proxy::response_wait(storage_proxy::response_id_type id
         return _response_handlers.find(id)->second;
 }
 
-result<storage_proxy::response_id_type> storage_proxy::create_write_response_handler(replica::keyspace& ks, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m,
+result<storage_proxy::response_id_type> storage_proxy::create_write_response_handler(locator::effective_replication_map_ptr ermp,
+                             db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m,
                              inet_address_vector_replica_set targets, const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change dead_endpoints, tracing::trace_state_ptr tr_state,
                              storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info)
 {
     shared_ptr<abstract_write_response_handler> h;
-    auto& rs = ks.get_replication_strategy();
+    auto& rs = ermp->get_replication_strategy();
 
     if (db::is_datacenter_local(cl)) {
-        h = ::make_shared<datacenter_write_response_handler>(shared_from_this(), ks, cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
+        h = ::make_shared<datacenter_write_response_handler>(shared_from_this(), std::move(ermp), cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
     } else if (cl == db::consistency_level::EACH_QUORUM && rs.get_type() == locator::replication_strategy_type::network_topology){
-        h = ::make_shared<datacenter_sync_write_response_handler>(shared_from_this(), ks, cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
+        h = ::make_shared<datacenter_sync_write_response_handler>(shared_from_this(), std::move(ermp), cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
     } else if (type == db::write_type::VIEW) {
-        h = ::make_shared<view_update_write_response_handler>(shared_from_this(), ks, cl, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
+        h = ::make_shared<view_update_write_response_handler>(shared_from_this(), std::move(ermp), cl, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
     } else {
-        h = ::make_shared<write_response_handler>(shared_from_this(), ks, cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
+        h = ::make_shared<write_response_handler>(shared_from_this(), std::move(ermp), cl, type, std::move(m), std::move(targets), pending_endpoints, std::move(dead_endpoints), std::move(tr_state), stats, std::move(permit), rate_limit_info);
     }
     return bo::success(register_response_handler(std::move(h)));
 }
@@ -2220,9 +2248,10 @@ void storage_proxy_stats::write_stats::register_split_metrics_local() {
 void storage_proxy_stats::write_stats::register_stats() {
     namespace sm = seastar::metrics;
     _metrics.add_group(COORDINATOR_STATS_CATEGORY, {
+            sm::make_summary("write_latency_summary", sm::description("Write latency summary"), [this] {return to_metrics_summary(write.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
             sm::make_histogram("write_latency", sm::description("The general write latency histogram"),
                     {storage_proxy_stats::current_scheduling_group_label()},
-                    [this]{return to_metrics_histogram(estimated_write);}),
+                    [this]{return to_metrics_histogram(write.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
             sm::make_queue_length("foreground_writes", [this] { return writes - background_writes; },
                            sm::description("number of currently pending foreground write requests"),
@@ -2242,40 +2271,40 @@ void storage_proxy_stats::write_stats::register_stats() {
 
             sm::make_total_operations("throttled_writes", throttled_writes,
                                       sm::description("number of throttled write requests"),
-                                      {storage_proxy_stats::current_scheduling_group_label()}),
+                                      {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("write_timeouts", [this]{return write_timeouts.count();},
                            sm::description("number of write request failed due to a timeout"),
-                           {storage_proxy_stats::current_scheduling_group_label()}),
+                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("write_unavailable", [this]{return write_unavailables.count();},
                            sm::description("number write requests failed due to an \"unavailable\" error"),
-                           {storage_proxy_stats::current_scheduling_group_label()}),
+                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("write_rate_limited", [this]{return write_rate_limited_by_replicas.count();},
                            sm::description("number of write requests which were rejected by replicas because rate limit for the partition was reached."),
-                           {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(false)}),
+                           {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(false)}).set_skip_when_empty(),
 
             sm::make_total_operations("write_rate_limited", [this]{return write_rate_limited_by_coordinator.count();},
                            sm::description("number of write requests which were rejected directly on the coordinator because rate limit for the partition was reached."),
-                           {storage_proxy_stats::current_scheduling_group_label(),storage_proxy_stats::rejected_by_coordinator_label(true)}),
+                           {storage_proxy_stats::current_scheduling_group_label(),storage_proxy_stats::rejected_by_coordinator_label(true)}).set_skip_when_empty(),
 
             sm::make_total_operations("background_writes_failed", background_writes_failed,
                            sm::description("number of write requests that failed after CL was reached"),
-                           {storage_proxy_stats::current_scheduling_group_label()}),
+                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("writes_coordinator_outside_replica_set", writes_coordinator_outside_replica_set,
                     sm::description("number of CQL write requests which arrived to a non-replica and had to be forwarded to a replica"),
-                    {storage_proxy_stats::current_scheduling_group_label()}),
+                    {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("reads_coordinator_outside_replica_set", reads_coordinator_outside_replica_set,
                     sm::description("number of CQL read requests which arrived to a non-replica and had to be forwarded to a replica"),
-                    {storage_proxy_stats::current_scheduling_group_label()}),
+                    {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("writes_failed_due_to_too_many_in_flight_hints", writes_failed_due_to_too_many_in_flight_hints,
                     sm::description("number of CQL write requests which failed because the hinted handoff mechanism is overloaded "
                     "and cannot store any more in-flight hints"),
-                    {storage_proxy_stats::current_scheduling_group_label()}),
+                    {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
         });
 }
 
@@ -2308,9 +2337,10 @@ void storage_proxy_stats::stats::register_stats() {
     namespace sm = seastar::metrics;
     write_stats::register_stats();
     _metrics.add_group(COORDINATOR_STATS_CATEGORY, {
+        sm::make_summary("read_latency_summary", sm::description("Read latency summary"), [this] {return to_metrics_summary(read.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
         sm::make_histogram("read_latency", sm::description("The general read latency histogram"),
                 {storage_proxy_stats::current_scheduling_group_label()},
-                [this]{ return to_metrics_histogram(estimated_read);}),
+                [this]{ return to_metrics_histogram(read.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_queue_length("foreground_reads", foreground_reads,
                 sm::description("number of currently pending foreground read requests"),
@@ -2322,104 +2352,107 @@ void storage_proxy_stats::stats::register_stats() {
 
         sm::make_total_operations("read_retries", read_retries,
                        sm::description("number of read retry attempts"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("canceled_read_repairs", global_read_repairs_canceled_due_to_concurrent_write,
                        sm::description("number of global read repairs canceled due to a concurrent write"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("foreground_read_repairs", read_repair_repaired_blocking,
                       sm::description("number of foreground read repairs"),
-                      {storage_proxy_stats::current_scheduling_group_label()}),
+                      {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("background_read_repairs", read_repair_repaired_background,
                        sm::description("number of background read repairs"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("read_timeouts", [this]{return read_timeouts.count(); },
                        sm::description("number of read request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("read_unavailable", [this]{return read_unavailables.count(); },
                        sm::description("number read requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("read_rate_limited", [this]{return read_rate_limited_by_replicas.count(); },
                        sm::description("number of read requests which were rejected by replicas because rate limit for the partition was reached."),
-                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(false)}),
+                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(false)}).set_skip_when_empty(),
 
         sm::make_total_operations("read_rate_limited", [this]{return read_rate_limited_by_coordinator.count(); },
                        sm::description("number of read requests which were rejected directly on the coordinator because rate limit for the partition was reached."),
-                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(true)}),
+                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::rejected_by_coordinator_label(true)}).set_skip_when_empty(),
 
         sm::make_total_operations("range_timeouts", [this]{return range_slice_timeouts.count(); },
                        sm::description("number of range read operations failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("range_unavailable", [this]{return range_slice_unavailables.count(); },
                        sm::description("number of range read operations failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("speculative_digest_reads", speculative_digest_reads,
                        sm::description("number of speculative digest read requests that were sent"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("speculative_data_reads", speculative_data_reads,
                        sm::description("number of speculative data read requests that were sent"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+
+        sm::make_summary("cas_read_latency_summary", sm::description("CAS read latency summary"), [this] {return to_metrics_summary(cas_read.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
+        sm::make_summary("cas_write_latency_summary", sm::description("CAS write latency summary"), [this] {return to_metrics_summary(cas_write.summary());})(storage_proxy_stats::current_scheduling_group_label()).set_skip_when_empty(),
 
         sm::make_histogram("cas_read_latency", sm::description("Transactional read latency histogram"),
                 {storage_proxy_stats::current_scheduling_group_label()},
-                [this]{ return to_metrics_histogram(estimated_cas_read);}),
+                [this]{ return to_metrics_histogram(cas_read.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_histogram("cas_write_latency", sm::description("Transactional write latency histogram"),
                 {storage_proxy_stats::current_scheduling_group_label()},
-                [this]{return to_metrics_histogram(estimated_cas_write);}),
+                [this]{return to_metrics_histogram(cas_write.histogram());}).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_timeouts", [this]{return cas_write_timeouts.count(); },
                        sm::description("number of transactional write request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_unavailable", [this]{return cas_write_unavailables.count(); },
                        sm::description("number of transactional write requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_read_timeouts", [this]{return cas_read_timeouts.count(); },
                        sm::description("number of transactional read request failed due to a timeout"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_read_unavailable", [this]{return cas_read_unavailables.count(); },
                        sm::description("number of transactional read requests failed due to an \"unavailable\" error"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
 
         sm::make_total_operations("cas_read_unfinished_commit", cas_read_unfinished_commit,
                        sm::description("number of transaction commit attempts that occurred on read"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_unfinished_commit", cas_write_unfinished_commit,
                        sm::description("number of transaction commit attempts that occurred on write"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_condition_not_met", cas_write_condition_not_met,
                        sm::description("number of transaction preconditions that did not match current values"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_write_timeout_due_to_uncertainty", cas_write_timeout_due_to_uncertainty,
                        sm::description("how many times write timeout was reported because of uncertainty in the result"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_failed_read_round_optimization", cas_failed_read_round_optimization,
                        sm::description("CAS read rounds issued only if previous value is missing on some replica"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_histogram("cas_read_contention", sm::description("how many contended reads were encountered"),
                        {storage_proxy_stats::current_scheduling_group_label()},
-                       [this]{ return cas_read_contention.get_histogram(1, 8);}),
+                       [this]{ return cas_read_contention.get_histogram(1, 8);}).set_skip_when_empty(),
 
         sm::make_histogram("cas_write_contention", sm::description("how many contended writes were encountered"),
                        {storage_proxy_stats::current_scheduling_group_label()},
-                       [this]{ return cas_write_contention.get_histogram(1, 8);}),
+                       [this]{ return cas_write_contention.get_histogram(1, 8);}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_prune", cas_prune,
                        sm::description("how many times paxos prune was done after successful cas operation"),
@@ -2427,57 +2460,57 @@ void storage_proxy_stats::stats::register_stats() {
 
         sm::make_total_operations("cas_dropped_prune", cas_coordinator_dropped_prune,
                        sm::description("how many times a coordinator did not perfom prune after cas"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_total_operations", cas_total_operations,
                        sm::description("number of total paxos operations executed (reads and writes)"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_gauge("cas_foreground", cas_foreground,
                         sm::description("how many paxos operations that did not yet produce a result are running"),
-                        {storage_proxy_stats::current_scheduling_group_label()}),
+                        {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_gauge("cas_background", [this] { return cas_total_running - cas_foreground; },
                         sm::description("how many paxos operations are still running after a result was alredy returned"),
-                        {storage_proxy_stats::current_scheduling_group_label()}),
+                        {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
     });
 
     _metrics.add_group(REPLICA_STATS_CATEGORY, {
         sm::make_total_operations("received_counter_updates", received_counter_updates,
                        sm::description("number of counter updates received by this node acting as an update leader"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("received_mutations", received_mutations,
                        sm::description("number of mutations received by a replica Node"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("forwarded_mutations", forwarded_mutations,
                        sm::description("number of mutations forwarded to other replica Nodes"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("forwarding_errors", forwarding_errors,
                        sm::description("number of errors during forwarding mutations to other replica Nodes"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("reads", replica_data_reads,
                        sm::description("number of remote data read requests this Node received"),
-                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("data")}),
+                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("data")}).set_skip_when_empty(),
 
         sm::make_total_operations("reads", replica_mutation_data_reads,
                        sm::description("number of remote mutation data read requests this Node received"),
-                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("mutation_data")}),
+                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("mutation_data")}).set_skip_when_empty(),
 
         sm::make_total_operations("reads", replica_digest_reads,
                        sm::description("number of remote digest read requests this Node received"),
-                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("digest")}),
+                       {storage_proxy_stats::current_scheduling_group_label(), storage_proxy_stats::op_type_label("digest")}).set_skip_when_empty(),
 
         sm::make_total_operations("cross_shard_ops", replica_cross_shard_ops,
                        sm::description("number of operations that crossed a shard boundary"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
         sm::make_total_operations("cas_dropped_prune", cas_replica_dropped_prune,
                        sm::description("how many times a coordinator did not perfom prune after cas"),
-                       {storage_proxy_stats::current_scheduling_group_label()}),
+                       {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
     });
 }
 
@@ -2516,7 +2549,8 @@ void storage_proxy_stats::split_stats::register_metrics_for(sstring dc, gms::ine
     if (auto [ignored, added] = _dc_stats.try_emplace(dc); added) {
         _metrics.add_group(_category, {
             sm::make_counter(_short_description_prefix + sstring("_remote_node"), [this, dc] { return _dc_stats[dc].val; },
-                            sm::description(seastar::format("{} when communicating with external Nodes in DC {}", _long_description_prefix, dc)), {storage_proxy_stats::current_scheduling_group_label(), datacenter_label(dc), op_type_label(_op_type)})
+                            sm::description(seastar::format("{} when communicating with external Nodes in another DC", _long_description_prefix)), {storage_proxy_stats::current_scheduling_group_label(), datacenter_label(dc), op_type_label(_op_type)})
+                                .set_skip_when_empty()
         });
     }
 }
@@ -2748,9 +2782,9 @@ storage_proxy::create_write_response_handler_helper(schema_ptr s, const dht::tok
     slogger.trace("creating write handler with live: {} dead: {}", live_endpoints, dead_endpoints);
     tracing::trace(tr_state, "Creating write handler with live: {} dead: {}", live_endpoints, dead_endpoints);
 
-    db::assure_sufficient_live_nodes(cl, ks, live_endpoints, pending_endpoints);
+    db::assure_sufficient_live_nodes(cl, *erm, live_endpoints, pending_endpoints);
 
-    return create_write_response_handler(ks, cl, type, std::move(mh), std::move(live_endpoints), pending_endpoints,
+    return create_write_response_handler(std::move(erm), cl, type, std::move(mh), std::move(live_endpoints), pending_endpoints,
             std::move(dead_endpoints), std::move(tr_state), get_stats(), std::move(permit), rate_limit_info);
 }
 
@@ -2785,9 +2819,10 @@ storage_proxy::create_write_response_handler(const std::unordered_map<gms::inet_
 
     auto keyspace_name = mh->schema()->ks_name();
     replica::keyspace& ks = _db.local().find_keyspace(keyspace_name);
+    auto ermp = ks.get_effective_replication_map();
 
     // No rate limiting for read repair
-    return create_write_response_handler(ks, cl, type, std::move(mh), std::move(endpoints), inet_address_vector_topology_change(), inet_address_vector_topology_change(), std::move(tr_state), get_stats(), std::move(permit), std::monostate());
+    return create_write_response_handler(std::move(ermp), cl, type, std::move(mh), std::move(endpoints), inet_address_vector_topology_change(), inet_address_vector_topology_change(), std::move(tr_state), get_stats(), std::move(permit), std::monostate());
 }
 
 result<storage_proxy::response_id_type>
@@ -2809,9 +2844,10 @@ storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxo
 
     auto keyspace_name = s->ks_name();
     replica::keyspace& ks = _db.local().find_keyspace(keyspace_name);
+    auto ermp = ks.get_effective_replication_map();
 
     // No rate limiting for paxos (yet)
-    return create_write_response_handler(ks, cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s, nullptr), std::move(endpoints),
+    return create_write_response_handler(std::move(ermp), cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s, nullptr), std::move(endpoints),
                     inet_address_vector_topology_change(), inet_address_vector_topology_change(), std::move(tr_state), get_stats(), std::move(permit), std::monostate());
 }
 
@@ -2904,7 +2940,6 @@ future<result<>> storage_proxy::mutate_begin(unique_response_handler_vector ids,
 future<result<>> storage_proxy::mutate_end(future<result<>> mutate_result, utils::latency_counter lc, write_stats& stats, tracing::trace_state_ptr trace_state) {
     assert(mutate_result.available());
     stats.write.mark(lc.stop().latency());
-    stats.estimated_write.add(lc.latency());
 
     return utils::result_futurize_try([&] {
         auto&& res = mutate_result.get();
@@ -2948,10 +2983,11 @@ future<result<>> storage_proxy::mutate_end(future<result<>> mutate_result, utils
 
 gms::inet_address storage_proxy::find_leader_for_counter_update(const mutation& m, db::consistency_level cl) {
     auto& ks = _db.local().find_keyspace(m.schema()->ks_name());
-    auto live_endpoints = get_live_endpoints(ks, m.token());
+    auto erm = ks.get_effective_replication_map();
+    auto live_endpoints = get_live_endpoints(*erm, m.token());
 
     if (live_endpoints.empty()) {
-        throw exceptions::unavailable_exception(cl, block_for(ks, cl), 0);
+        throw exceptions::unavailable_exception(cl, block_for(*erm, cl), 0);
     }
 
     const auto my_address = utils::fb_utilities::get_broadcast_address();
@@ -2962,7 +2998,7 @@ gms::inet_address storage_proxy::find_leader_for_counter_update(const mutation& 
     }
 
     const auto local_endpoints = boost::copy_range<inet_address_vector_replica_set>(live_endpoints
-        | boost::adaptors::filtered(get_token_metadata_ptr()->get_topology().get_local_dc_filter()));
+        | boost::adaptors::filtered(erm->get_topology().get_local_dc_filter()));
 
     if (local_endpoints.empty()) {
         // FIXME: O(n log n) to get maximum
@@ -3005,14 +3041,15 @@ future<> storage_proxy::mutate_counters(Range&& mutations, db::consistency_level
         // Let's just use the schema of the first mutation in a vector.
         auto handle_error = [this, sp = this->shared_from_this(), s = endpoint_and_mutations.second[0].s, cl, permit] (std::exception_ptr exp) {
             auto& ks = _db.local().find_keyspace(s->ks_name());
+            auto erm = ks.get_effective_replication_map();
             try {
                 std::rethrow_exception(std::move(exp));
             } catch (rpc::timeout_error&) {
-                return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
+                return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(*erm, cl), db::write_type::COUNTER));
             } catch (timed_out_error&) {
-                return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(ks, cl), db::write_type::COUNTER));
+                return make_exception_future<>(mutation_write_timeout_exception(s->ks_name(), s->cf_name(), cl, 0, db::block_for(*erm, cl), db::write_type::COUNTER));
             } catch (rpc::closed_error&) {
-                return make_exception_future<>(mutation_write_failure_exception(s->ks_name(), s->cf_name(), cl, 0, 1, db::block_for(ks, cl), db::write_type::COUNTER));
+                return make_exception_future<>(mutation_write_failure_exception(s->ks_name(), s->cf_name(), cl, 0, 1, db::block_for(*erm, cl), db::write_type::COUNTER));
             }
         };
 
@@ -3045,7 +3082,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const dht::token &
     inet_address_vector_topology_change pending_endpoints = erm->get_token_metadata_ptr()->pending_endpoints_for(token, ks_name);
 
     if (cl_for_paxos == db::consistency_level::LOCAL_SERIAL) {
-        auto local_dc_filter = get_token_metadata_ptr()->get_topology().get_local_dc_filter();
+        auto local_dc_filter = erm->get_topology().get_local_dc_filter();
         auto itend = boost::range::remove_if(natural_endpoints, std::not_fn(std::cref(local_dc_filter)));
         natural_endpoints.erase(itend, natural_endpoints.end());
         itend = boost::range::remove_if(pending_endpoints, std::not_fn(std::cref(local_dc_filter)));
@@ -3326,7 +3363,8 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
         future<result<>> send_batchlog_mutation(mutation m, db::consistency_level cl = db::consistency_level::ONE) {
             return _p.mutate_prepare<>(std::array<mutation, 1>{std::move(m)}, cl, db::write_type::BATCH_LOG, _permit, [this] (const mutation& m, db::consistency_level cl, db::write_type type, service_permit permit) {
                 auto& ks = _p._db.local().find_keyspace(m.schema()->ks_name());
-                return _p.create_write_response_handler(ks, cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats, std::move(permit), std::monostate());
+                auto ermp = ks.get_effective_replication_map();
+                return _p.create_write_response_handler(std::move(ermp), cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats, std::move(permit), std::monostate());
             }).then(utils::result_wrap([this, cl] (unique_response_handler_vector ids) {
                 _p.register_cdc_operation_result_tracker(ids, _cdc_tracker);
                 return _p.mutate_begin(std::move(ids), cl, _trace_state, _timeout);
@@ -3456,10 +3494,11 @@ future<> storage_proxy::send_to_endpoint(
                 std::back_inserter(dead_endpoints),
                 std::bind_front(&storage_proxy::is_alive, this));
         auto& ks = _db.local().find_keyspace(m->schema()->ks_name());
+        auto erm = ks.get_effective_replication_map();
         slogger.trace("Creating write handler with live: {}; dead: {}", targets, dead_endpoints);
-        db::assure_sufficient_live_nodes(cl, ks, targets, pending_endpoints);
+        db::assure_sufficient_live_nodes(cl, *erm, targets, pending_endpoints);
         return create_write_response_handler(
-            ks,
+            std::move(erm),
             cl,
             type,
             std::move(m),
@@ -3572,7 +3611,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
     auto& stats = handler_ptr->stats();
     auto& handler = *handler_ptr;
     auto& global_stats = handler._proxy->_global_stats;
-    auto& topology = get_token_metadata_ptr()->get_topology();
+    auto& topology = handler_ptr->_effective_replication_map_ptr->get_topology();
     auto local_dc = topology.get_datacenter();
 
     for(auto dest: handler.get_targets()) {
@@ -3625,9 +3664,9 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
             got_response(response_id, coordinator, std::nullopt);
         } else {
             if (!handler.read_repair_write()) {
-                ++stats.writes_attempts.get_ep_stat(get_token_metadata_ptr()->get_topology(), coordinator);
+                ++stats.writes_attempts.get_ep_stat(handler_ptr->_effective_replication_map_ptr->get_topology(), coordinator);
             } else {
-                ++stats.read_repair_write_attempts.get_ep_stat(get_token_metadata_ptr()->get_topology(), coordinator);
+                ++stats.read_repair_write_attempts.get_ep_stat(handler_ptr->_effective_replication_map_ptr->get_topology(), coordinator);
             }
 
             if (coordinator == my_address) {
@@ -3639,7 +3678,7 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
 
         // Waited on indirectly.
         (void)f.handle_exception([response_id, forward_size, coordinator, handler_ptr, p = shared_from_this(), &stats] (std::exception_ptr eptr) {
-            ++stats.writes_errors.get_ep_stat(p->get_token_metadata_ptr()->get_topology(), coordinator);
+            ++stats.writes_errors.get_ep_stat(handler_ptr->_effective_replication_map_ptr->get_topology(), coordinator);
             error err = error::FAILURE;
             std::optional<sstring> msg;
             if (try_catch<replica::rate_limit_exception>(eptr)) {
@@ -3771,13 +3810,23 @@ struct digest_read_result {
 };
 
 class digest_read_resolver : public abstract_read_resolver {
+    struct digest_and_last_pos {
+        query::result_digest digest;
+        std::optional<full_position> last_pos;
+
+        digest_and_last_pos(query::result_digest digest, std::optional<full_position> last_pos)
+            : digest(std::move(digest)), last_pos(std::move(last_pos))
+        { }
+    };
+private:
     shared_ptr<storage_proxy> _proxy;
+    locator::effective_replication_map_ptr _effective_replication_map_ptr;
     size_t _block_for;
     size_t _cl_responses = 0;
     promise<result<digest_read_result>> _cl_promise; // cl is reached
     bool _cl_reported = false;
     foreign_ptr<lw_shared_ptr<query::result>> _data_result;
-    utils::small_vector<query::result_digest, 3> _digest_results;
+    utils::small_vector<digest_and_last_pos, 3> _digest_results;
     api::timestamp_type _last_modified = api::missing_timestamp;
     size_t _target_count_for_cl; // _target_count_for_cl < _targets_count if CL=LOCAL and RRD.GLOBAL
 
@@ -3792,20 +3841,23 @@ class digest_read_resolver : public abstract_read_resolver {
         _data_result = foreign_ptr<lw_shared_ptr<query::result>>();
         _digest_results.clear();
     }
-    virtual size_t response_count() const override {
-        return _digest_results.size();
-    }
 public:
-    digest_read_resolver(shared_ptr<storage_proxy> proxy, schema_ptr schema, db::consistency_level cl, size_t block_for, size_t target_count_for_cl, storage_proxy::clock_type::time_point timeout)
+    digest_read_resolver(shared_ptr<storage_proxy> proxy,
+            locator::effective_replication_map_ptr ermp,
+            schema_ptr schema, db::consistency_level cl, size_t block_for, size_t target_count_for_cl, storage_proxy::clock_type::time_point timeout)
         : abstract_read_resolver(std::move(schema), cl, 0, timeout)
         , _proxy(std::move(proxy))
+        , _effective_replication_map_ptr(std::move(ermp))
         , _block_for(block_for)
         , _target_count_for_cl(target_count_for_cl)
     {}
+    virtual size_t response_count() const override {
+        return _digest_results.size();
+    }
     void add_data(gms::inet_address from, foreign_ptr<lw_shared_ptr<query::result>> result) {
         if (!_request_failed) {
             // if only one target was queried digest_check() will be skipped so we can also skip digest calculation
-            _digest_results.emplace_back(_targets_count == 1 ? query::result_digest() : *result->digest());
+            _digest_results.emplace_back(_targets_count == 1 ? query::result_digest() : *result->digest(), result->last_position());
             _last_modified = std::max(_last_modified, result->last_modified());
             if (!_data_result) {
                 _data_result = std::move(result);
@@ -3813,9 +3865,9 @@ public:
             got_response(from);
         }
     }
-    void add_digest(gms::inet_address from, query::result_digest digest, api::timestamp_type last_modified) {
+    void add_digest(gms::inet_address from, query::result_digest digest, api::timestamp_type last_modified, std::optional<full_position> last_pos) {
         if (!_request_failed) {
-            _digest_results.emplace_back(std::move(digest));
+            _digest_results.emplace_back(std::move(digest), std::move(last_pos));
             _last_modified = std::max(_last_modified, last_modified);
             got_response(from);
         }
@@ -3826,11 +3878,20 @@ public:
             return true;
         }
         auto& first = *_digest_results.begin();
-        return std::find_if(_digest_results.begin() + 1, _digest_results.end(), [&first] (query::result_digest digest) { return digest != first; }) == _digest_results.end();
+        return std::find_if(_digest_results.begin() + 1, _digest_results.end(), [&first] (const digest_and_last_pos& digest) { return digest.digest != first.digest; }) == _digest_results.end();
+    }
+    const std::optional<full_position>& min_position() const {
+        return std::min_element(_digest_results.begin(), _digest_results.end(), [this] (const digest_and_last_pos& a, const digest_and_last_pos& b) {
+            // last_pos can be disengaged when there are not results whatsoever
+            if (!a.last_pos || !b.last_pos) {
+                return bool(a.last_pos) < bool(b.last_pos);
+            }
+            return full_position::cmp(*_schema, *a.last_pos, *b.last_pos) < 0;
+        })->last_pos;
     }
 private:
     bool waiting_for(gms::inet_address ep) {
-        const auto& topo = _proxy->get_token_metadata_ptr()->get_topology();
+        const auto& topo = _effective_replication_map_ptr->get_topology();
         return db::is_datacenter_local(_cl) ? fbu::is_me(ep) || (topo.get_datacenter(ep) == topo.get_datacenter()) : true;
     }
     void got_response(gms::inet_address ep) {
@@ -4392,6 +4453,7 @@ protected:
 
     schema_ptr _schema;
     shared_ptr<storage_proxy> _proxy;
+    locator::effective_replication_map_ptr _effective_replication_map_ptr;
     lw_shared_ptr<query::read_command> _cmd;
     lw_shared_ptr<query::read_command> _retry_cmd;
     dht::partition_range _partition_range;
@@ -4415,13 +4477,17 @@ private:
     }
 
     const locator::topology& get_topology() const noexcept {
-        return _proxy->get_token_metadata_ptr()->get_topology();
+        return _effective_replication_map_ptr->get_topology();
     }
 
 public:
-    abstract_read_executor(schema_ptr s, lw_shared_ptr<replica::column_family> cf, shared_ptr<storage_proxy> proxy, lw_shared_ptr<query::read_command> cmd, dht::partition_range pr, db::consistency_level cl, size_t block_for,
+    abstract_read_executor(schema_ptr s, lw_shared_ptr<replica::column_family> cf, shared_ptr<storage_proxy> proxy,
+            locator::effective_replication_map_ptr ermp,
+            lw_shared_ptr<query::read_command> cmd, dht::partition_range pr, db::consistency_level cl, size_t block_for,
             inet_address_vector_replica_set targets, tracing::trace_state_ptr trace_state, service_permit permit, db::per_partition_rate_limit::info rate_limit_info) :
-                           _schema(std::move(s)), _proxy(std::move(proxy)), _cmd(std::move(cmd)), _partition_range(std::move(pr)), _cl(cl), _block_for(block_for), _targets(std::move(targets)), _trace_state(std::move(trace_state)),
+                           _schema(std::move(s)), _proxy(std::move(proxy))
+                         , _effective_replication_map_ptr(std::move(ermp))
+                         , _cmd(std::move(cmd)), _partition_range(std::move(pr)), _cl(cl), _block_for(block_for), _targets(std::move(targets)), _trace_state(std::move(trace_state)),
                            _cf(std::move(cf)), _permit(std::move(permit)), _rate_limit_info(rate_limit_info) {
         _proxy->get_stats().reads++;
         _proxy->get_stats().foreground_reads++;
@@ -4461,7 +4527,7 @@ protected:
             return _proxy->remote().send_read_data(netw::messaging_service::msg_addr{ep, 0}, timeout, _trace_state, *_cmd, _partition_range, opts.digest_algo, _rate_limit_info);
         }
     }
-    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> make_digest_request(gms::inet_address ep, clock_type::time_point timeout) {
+    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>> make_digest_request(gms::inet_address ep, clock_type::time_point timeout) {
         ++_proxy->get_stats().digest_read_attempts.get_ep_stat(get_topology(), ep);
         if (fbu::is_me(ep)) {
             tracing::trace(_trace_state, "read_digest: querying locally");
@@ -4529,13 +4595,13 @@ protected:
         auto start = latency_clock::now();
         for (const gms::inet_address& ep : boost::make_iterator_range(begin, end)) {
             // Waited on indirectly, shared_from_this keeps `this` alive
-            (void)make_digest_request(ep, timeout).then_wrapped([this, resolver, ep, start, exec = shared_from_this()] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> f) {
+            (void)make_digest_request(ep, timeout).then_wrapped([this, resolver, ep, start, exec = shared_from_this()] (future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>> f) {
                 std::exception_ptr ex;
                 try {
                   if (!f.failed()) {
                     auto v = f.get0();
                     _cf->set_hit_rate(ep, std::get<2>(v));
-                    resolver->add_digest(ep, std::get<0>(v), std::get<1>(v));
+                    resolver->add_digest(ep, std::get<0>(v), std::get<1>(v), std::get<3>(std::move(v)));
                     ++_proxy->get_stats().digest_read_completed.get_ep_stat(get_topology(), ep);
                     _used_targets.push_back(ep);
                     register_request_latency(latency_clock::now() - start);
@@ -4685,8 +4751,8 @@ public:
             // Return an empty result in this case
             return make_ready_future<result<foreign_ptr<lw_shared_ptr<query::result>>>>(make_foreign(make_lw_shared(query::result())));
         }
-        digest_resolver_ptr digest_resolver = ::make_shared<digest_read_resolver>(_proxy, _schema, _cl, _block_for,
-                db::is_datacenter_local(_cl) ? _proxy->get_token_metadata_ptr()->get_topology().count_local_endpoints(_targets): _targets.size(), timeout);
+        digest_resolver_ptr digest_resolver = ::make_shared<digest_read_resolver>(_proxy, _effective_replication_map_ptr, _schema, _cl, _block_for,
+                db::is_datacenter_local(_cl) ? _effective_replication_map_ptr->get_topology().count_local_endpoints(_targets): _targets.size(), timeout);
         auto exec = shared_from_this();
 
         make_requests(digest_resolver, timeout);
@@ -4705,6 +4771,13 @@ public:
                 auto&& [result, digests_match] = res.value();
 
                 if (digests_match) {
+                    if (exec->_proxy->features().empty_replica_pages && digest_resolver->response_count() > 1) {
+                        auto& mp = digest_resolver->min_position();
+                        auto& lp = result->last_position();
+                        if (!mp || bool(lp) < bool(mp) || full_position::cmp(*exec->_schema, *mp, *lp) < 0) {
+                            result->set_last_position(mp);
+                        }
+                    }
                     exec->_result_promise.set_value(std::move(result));
                     if (exec->_block_for < exec->_targets.size()) { // if there are more targets then needed for cl, check digest in background
                         background_repair_check = true;
@@ -4720,7 +4793,7 @@ public:
                         if (std::abs(delta) <= write_timeout) {
                             exec->_proxy->get_stats().global_read_repairs_canceled_due_to_concurrent_write++;
                             // if CL is local and non matching data is modified less then write_timeout ms ago do only local repair
-                            auto local_dc_filter = exec->_proxy->get_token_metadata_ptr()->get_topology().get_local_dc_filter();
+                            auto local_dc_filter = exec->_effective_replication_map_ptr->get_topology().get_local_dc_filter();
                             auto i = boost::range::remove_if(exec->_targets, std::not_fn(std::cref(local_dc_filter)));
                             exec->_targets.erase(i, exec->_targets.end());
                         }
@@ -4778,9 +4851,11 @@ private:
 
 class never_speculating_read_executor : public abstract_read_executor {
 public:
-    never_speculating_read_executor(schema_ptr s, lw_shared_ptr<replica::column_family> cf, shared_ptr<storage_proxy> proxy, lw_shared_ptr<query::read_command> cmd, dht::partition_range pr, db::consistency_level cl, inet_address_vector_replica_set targets, tracing::trace_state_ptr trace_state, service_permit permit,
+    never_speculating_read_executor(schema_ptr s, lw_shared_ptr<replica::column_family> cf, shared_ptr<storage_proxy> proxy,
+            locator::effective_replication_map_ptr ermp,
+            lw_shared_ptr<query::read_command> cmd, dht::partition_range pr, db::consistency_level cl, inet_address_vector_replica_set targets, tracing::trace_state_ptr trace_state, service_permit permit,
             db::per_partition_rate_limit::info rate_limit_info) :
-                                        abstract_read_executor(std::move(s), std::move(cf), std::move(proxy), std::move(cmd), std::move(pr), cl, 0, std::move(targets), std::move(trace_state), std::move(permit), rate_limit_info) {
+                                        abstract_read_executor(std::move(s), std::move(cf), std::move(proxy), std::move(ermp), std::move(cmd), std::move(pr), cl, 0, std::move(targets), std::move(trace_state), std::move(permit), rate_limit_info) {
         _block_for = _targets.size();
     }
 };
@@ -4878,10 +4953,11 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
         service_permit permit) {
     const dht::token& token = pr.start()->value().token();
     replica::keyspace& ks = _db.local().find_keyspace(schema->ks_name());
+    auto erm = ks.get_effective_replication_map();
     speculative_retry::type retry_type = schema->speculative_retry().get_type();
     gms::inet_address extra_replica;
 
-    inet_address_vector_replica_set all_replicas = get_live_sorted_endpoints(ks, token);
+    inet_address_vector_replica_set all_replicas = get_live_sorted_endpoints(*erm, token);
     // Check for a non-local read before heat-weighted load balancing
     // reordering of endpoints happens. The local endpoint, if
     // present, is always first in the list, as get_live_sorted_endpoints()
@@ -4890,7 +4966,7 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
 
     auto cf = _db.local().find_column_family(schema).shared_from_this();
     auto& gossiper = _remote->gossiper();
-    inet_address_vector_replica_set target_replicas = db::filter_for_query(cl, ks, all_replicas, preferred_endpoints, repair_decision,
+    inet_address_vector_replica_set target_replicas = db::filter_for_query(cl, *erm, all_replicas, preferred_endpoints, repair_decision,
             gossiper,
             retry_type == speculative_retry::type::NONE ? nullptr : &extra_replica,
             _db.local().get_config().cache_hit_rate_read_balancing() ? &*cf : nullptr);
@@ -4900,7 +4976,7 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
 
     // Throw UAE early if we don't have enough replicas.
     try {
-        db::assure_sufficient_live_nodes(cl, ks, target_replicas);
+        db::assure_sufficient_live_nodes(cl, *erm, target_replicas);
     } catch (exceptions::unavailable_exception& ex) {
         slogger.debug("Read unavailable: cl={} required {} alive {}", ex.consistency, ex.required, ex.alive);
         get_stats().read_unavailables.mark();
@@ -4911,7 +4987,7 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
         get_stats().read_repair_attempts++;
     }
 
-    size_t block_for = db::block_for(ks, cl);
+    size_t block_for = db::block_for(*erm, cl);
     auto p = shared_from_this();
 
     db::per_partition_rate_limit::info rate_limit_info;
@@ -4928,22 +5004,22 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
     // Speculative retry is disabled *OR* there are simply no extra replicas to speculate.
     if (retry_type == speculative_retry::type::NONE || block_for == all_replicas.size()
             || (repair_decision == db::read_repair_decision::DC_LOCAL && is_datacenter_local(cl) && block_for == target_replicas.size())) {
-        return ::make_shared<never_speculating_read_executor>(schema, cf, p, cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
+        return ::make_shared<never_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 
     if (target_replicas.size() == all_replicas.size()) {
         // CL.ALL, RRD.GLOBAL or RRD.DC_LOCAL and a single-DC.
         // We are going to contact every node anyway, so ask for 2 full data requests instead of 1, for redundancy
         // (same amount of requests in total, but we turn 1 digest request into a full blown data request).
-        return ::make_shared<always_speculating_read_executor>(schema, cf, p, cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
+        return ::make_shared<always_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 
     // RRD.NONE or RRD.DC_LOCAL w/ multiple DCs.
     if (target_replicas.size() == block_for) { // If RRD.DC_LOCAL extra replica may already be present
-        auto local_dc_filter = get_token_metadata_ptr()->get_topology().get_local_dc_filter();
+        auto local_dc_filter = erm->get_topology().get_local_dc_filter();
         if (is_datacenter_local(cl) && !local_dc_filter(extra_replica)) {
             slogger.trace("read executor no extra target to speculate");
-            return ::make_shared<never_speculating_read_executor>(schema, cf, p, cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
+            return ::make_shared<never_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
         } else {
             target_replicas.push_back(extra_replica);
             slogger.trace("creating read executor with extra target {}", extra_replica);
@@ -4951,17 +5027,17 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
     }
 
     if (retry_type == speculative_retry::type::ALWAYS) {
-        return ::make_shared<always_speculating_read_executor>(schema, cf, p, cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
+        return ::make_shared<always_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     } else {// PERCENTILE or CUSTOM.
-        return ::make_shared<speculating_read_executor>(schema, cf, p, cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
+        return ::make_shared<speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 }
 
-future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>>
+future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>>
 storage_proxy::query_result_local_digest(schema_ptr s, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr, tracing::trace_state_ptr trace_state, storage_proxy::clock_type::time_point timeout, query::digest_algorithm da, db::per_partition_rate_limit::info rate_limit_info) {
     return query_result_local(std::move(s), std::move(cmd), pr, query::result_options::only_digest(da), std::move(trace_state), timeout, rate_limit_info).then([] (rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature> result_and_hit_rate) {
         auto&& [result, hit_rate] = result_and_hit_rate;
-        return make_ready_future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>>(rpc::tuple(*result->digest(), result->last_modified(), hit_rate));
+        return make_ready_future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>>(rpc::tuple(*result->digest(), result->last_modified(), hit_rate, result->last_position()));
     });
 }
 
@@ -5135,6 +5211,7 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         service_permit permit) {
     schema_ptr schema = local_schema_registry().get(cmd->schema_version);
     replica::keyspace& ks = _db.local().find_keyspace(schema->ks_name());
+    auto erm = ks.get_effective_replication_map();
     std::vector<::shared_ptr<abstract_read_executor>> exec;
     auto p = shared_from_this();
     auto& cf= _db.local().find_column_family(schema);
@@ -5164,9 +5241,9 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
     auto& gossiper = _remote->gossiper();
     while (i != ranges.end()) {
         dht::partition_range& range = *i;
-        inet_address_vector_replica_set live_endpoints = get_live_sorted_endpoints(ks, end_token(range));
+        inet_address_vector_replica_set live_endpoints = get_live_sorted_endpoints(*erm, end_token(range));
         inet_address_vector_replica_set merged_preferred_replicas = preferred_replicas_for_range(*i);
-        inet_address_vector_replica_set filtered_endpoints = filter_for_query(cl, ks, live_endpoints, merged_preferred_replicas, gossiper, pcf);
+        inet_address_vector_replica_set filtered_endpoints = filter_for_query(cl, *erm, live_endpoints, merged_preferred_replicas, gossiper, pcf);
         std::vector<dht::token_range> merged_ranges{to_token_range(range)};
         ++i;
 
@@ -5177,8 +5254,8 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         {
             const auto current_range_preferred_replicas = preferred_replicas_for_range(*i);
             dht::partition_range& next_range = *i;
-            inet_address_vector_replica_set next_endpoints = get_live_sorted_endpoints(ks, end_token(next_range));
-            inet_address_vector_replica_set next_filtered_endpoints = filter_for_query(cl, ks, next_endpoints, current_range_preferred_replicas, gossiper, pcf);
+            inet_address_vector_replica_set next_endpoints = get_live_sorted_endpoints(*erm, end_token(next_range));
+            inet_address_vector_replica_set next_filtered_endpoints = filter_for_query(cl, *erm, next_endpoints, current_range_preferred_replicas, gossiper, pcf);
 
             // Origin has this to say here:
             // *  If the current range right is the min token, we should stop merging because CFS.getRangeSlice
@@ -5219,11 +5296,11 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
             inet_address_vector_replica_set current_merged_preferred_replicas = intersection(merged_preferred_replicas, current_range_preferred_replicas);
 
             // Check if there is enough endpoint for the merge to be possible.
-            if (!is_sufficient_live_nodes(cl, ks, merged)) {
+            if (!is_sufficient_live_nodes(cl, *erm, merged)) {
                 break;
             }
 
-            inet_address_vector_replica_set filtered_merged = filter_for_query(cl, ks, merged, current_merged_preferred_replicas, gossiper, pcf);
+            inet_address_vector_replica_set filtered_merged = filter_for_query(cl, *erm, merged, current_merged_preferred_replicas, gossiper, pcf);
 
             // Estimate whether merging will be a win or not
             if (!locator::i_endpoint_snitch::get_local_snitch_ptr()->is_worth_merging_for_range_query(filtered_merged, filtered_endpoints, next_filtered_endpoints)) {
@@ -5260,14 +5337,14 @@ storage_proxy::query_partition_key_range_concurrent(storage_proxy::clock_type::t
         }
         slogger.trace("creating range read executor with targets {}", filtered_endpoints);
         try {
-            db::assure_sufficient_live_nodes(cl, ks, filtered_endpoints);
+            db::assure_sufficient_live_nodes(cl, *erm, filtered_endpoints);
         } catch(exceptions::unavailable_exception& ex) {
             slogger.debug("Read unavailable: cl={} required {} alive {}", ex.consistency, ex.required, ex.alive);
             get_stats().range_slice_unavailables.mark();
             throw;
         }
 
-        exec.push_back(::make_shared<never_speculating_read_executor>(schema, cf.shared_from_this(), p, cmd, std::move(range), cl, std::move(filtered_endpoints), trace_state, permit, std::monostate()));
+        exec.push_back(::make_shared<never_speculating_read_executor>(schema, cf.shared_from_this(), p, erm, cmd, std::move(range), cl, std::move(filtered_endpoints), trace_state, permit, std::monostate()));
         ranges_per_exec.emplace(exec.back().get(), std::move(merged_ranges));
     }
 
@@ -5466,7 +5543,6 @@ storage_proxy::do_query(schema_ptr s,
                         cl,
                         std::move(query_options)).finally([lc, p] () mutable {
                     p->get_stats().read.mark(lc.stop().latency());
-                    p->get_stats().estimated_read.add(lc.latency());
                 });
             } catch (const replica::no_such_column_family&) {
                 get_stats().read.mark(lc.stop().latency());
@@ -5479,7 +5555,6 @@ storage_proxy::do_query(schema_ptr s,
                 cl,
                 std::move(query_options)).finally([lc, p] () mutable {
             p->get_stats().range.mark(lc.stop().latency());
-            p->get_stats().estimated_range.add(lc.latency());
         });
     }
 }
@@ -5527,7 +5602,7 @@ static lw_shared_ptr<query::read_command> read_nothing_read_command(schema_ptr s
     // storage_proxy::query() returns immediately - without any networking.
     auto partition_slice = query::partition_slice({}, {}, {}, query::partition_slice::option_set());
     return ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice,
-            query::max_result_size(query::result_memory_limiter::unlimited_result_size));
+            query::max_result_size(query::result_memory_limiter::unlimited_result_size), query::tombstone_limit::max);
 }
 
 static read_timeout_exception write_timeout_to_read(schema_ptr s, mutation_write_timeout_exception& ex) {
@@ -5631,8 +5706,6 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
         auto update_stats = seastar::defer ([&] {
             get_stats().cas_foreground--;
             write ? get_stats().cas_write.mark(lc.stop().latency()) : get_stats().cas_read.mark(lc.stop().latency());
-            write ? get_stats().estimated_cas_write.add(lc.latency()) :
-                    get_stats().estimated_cas_read.add(lc.latency());
             if (contentions > 0) {
                 write ? get_stats().cas_write_contention.add(contentions) : get_stats().cas_read_contention.add(contentions);
             }
@@ -5748,9 +5821,8 @@ future<bool> storage_proxy::cas(schema_ptr schema, shared_ptr<cas_request> reque
     co_return condition_met;
 }
 
-inet_address_vector_replica_set storage_proxy::get_live_endpoints(replica::keyspace& ks, const dht::token& token) const {
-    auto erm = ks.get_effective_replication_map();
-    inet_address_vector_replica_set eps = erm->get_natural_endpoints_without_node_being_replaced(token);
+inet_address_vector_replica_set storage_proxy::get_live_endpoints(const locator::effective_replication_map& erm, const dht::token& token) const {
+    inet_address_vector_replica_set eps = erm.get_natural_endpoints_without_node_being_replaced(token);
     auto itend = boost::range::remove_if(eps, std::not_fn(std::bind_front(&storage_proxy::is_alive, this)));
     eps.erase(itend, eps.end());
     return eps;
@@ -5765,8 +5837,8 @@ void storage_proxy::sort_endpoints_by_proximity(inet_address_vector_replica_set&
     }
 }
 
-inet_address_vector_replica_set storage_proxy::get_live_sorted_endpoints(replica::keyspace& ks, const dht::token& token) const {
-    auto eps = get_live_endpoints(ks, token);
+inet_address_vector_replica_set storage_proxy::get_live_sorted_endpoints(const locator::effective_replication_map& erm, const dht::token& token) const {
+    auto eps = get_live_endpoints(erm, token);
     sort_endpoints_by_proximity(eps);
     return eps;
 }
@@ -5920,7 +5992,7 @@ future<db::hints::sync_point> storage_proxy::create_hint_sync_point(const std::v
 }
 
 future<> storage_proxy::wait_for_hint_sync_point(const db::hints::sync_point spoint, clock_type::time_point deadline) {
-    const utils::UUID my_host_id = _db.local().get_config().host_id;
+    const auto my_host_id = _db.local().get_config().host_id;
     if (spoint.host_id != my_host_id) {
         throw std::runtime_error(format("The hint sync point was created on another node, with host ID {}. This node's host ID is {}",
                 spoint.host_id, my_host_id));

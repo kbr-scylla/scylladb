@@ -6,6 +6,10 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "tracing/tracing.hh"
+
+#include "idl/uuid.idl.hh"
+
 namespace tracing {
 enum class trace_type : uint8_t {
     NONE,

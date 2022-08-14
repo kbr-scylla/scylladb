@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "idl/keys.idl.hh"
+
 enum class bound_weight : int8_t {
     before_all_prefixed = -1,
     equal = 0,

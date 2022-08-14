@@ -6,6 +6,10 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "raft/raft.hh"
+
+#include "idl/uuid.idl.hh"
+
 namespace raft {
 
 namespace internal {

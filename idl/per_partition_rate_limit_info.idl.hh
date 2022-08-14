@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "db/per_partition_rate_limit_info.hh"
+
 namespace db {
 
 namespace per_partition_rate_limit {

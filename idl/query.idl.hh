@@ -1,3 +1,13 @@
+/*
+ * Copyright 2016-present ScyllaDB
+ */
+
+/*
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
+ */
+
+#include "idl/keys.idl.hh"
+
 namespace query {
 
 class qr_cell stub [[writable]] {

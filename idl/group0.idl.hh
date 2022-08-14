@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "idl/raft_storage.idl.hh"
+
 namespace service {
 
 struct group0_info {

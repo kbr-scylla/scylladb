@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "idl/result.idl.hh"
+
 namespace service {
 namespace paxos {
 

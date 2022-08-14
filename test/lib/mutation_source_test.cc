@@ -2013,6 +2013,11 @@ public:
         _blobs =  boost::copy_range<std::vector<bytes>>(keys | boost::adaptors::transformed([this] (sstring& k) { return to_bytes(k); }));
     }
 
+    void set_key_cardinality(size_t n_keys) {
+        assert(n_keys <= n_blobs);
+        _ck_index_dist = std::uniform_int_distribution<size_t>{0, n_keys - 1};
+    }
+
     bytes random_blob() {
         return _blobs[std::min(_blobs.size() - 1, std::max<size_t>(0, _ck_index_dist(_gen)))];
     }
@@ -2134,7 +2139,7 @@ public:
 
         std::map<counter_id, std::set<int64_t>> counter_used_clock_values;
         std::vector<counter_id> counter_ids;
-        std::generate_n(std::back_inserter(counter_ids), 8, counter_id::generate_random);
+        std::generate_n(std::back_inserter(counter_ids), 8, counter_id::create_random_id);
 
         auto random_counter_cell = [&] {
             std::uniform_int_distribution<size_t> shard_count_dist(1, counter_ids.size());
@@ -2330,6 +2335,10 @@ clustering_key random_mutation_generator::make_random_key() {
 
 std::vector<query::clustering_range> random_mutation_generator::make_random_ranges(unsigned n_ranges) {
     return _impl->make_random_ranges(n_ranges);
+}
+
+void random_mutation_generator::set_key_cardinality(size_t n_keys) {
+    _impl->set_key_cardinality(n_keys);
 }
 
 void for_each_schema_change(std::function<void(schema_ptr, const std::vector<mutation>&,

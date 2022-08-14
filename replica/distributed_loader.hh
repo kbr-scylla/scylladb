@@ -85,7 +85,7 @@ public:
     // Each entry with index of idx should be accessed on shard idx only.
     // Each entry contains a vector of sstables for this shard.
     // The table UUID is returned too.
-    static future<std::tuple<utils::UUID, std::vector<std::vector<sstables::shared_sstable>>>>
+    static future<std::tuple<table_id, std::vector<std::vector<sstables::shared_sstable>>>>
             get_sstables_from_upload_dir(distributed<replica::database>& db, sstring ks, sstring cf);
     /**
      * Marks a keyspace (by name) as "prioritized" on bootstrap.

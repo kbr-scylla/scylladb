@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "idl/replay_position.idl.hh"
+
 namespace db {
 
 struct truncation_record {

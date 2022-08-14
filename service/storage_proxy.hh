@@ -48,6 +48,7 @@
 #include "exceptions/coordinator_result.hh"
 #include "replica/exceptions.hh"
 #include "db/per_partition_rate_limit_info.hh"
+#include "locator/host_id.hh"
 
 class reconcilable_result;
 class frozen_mutation_and_schema;
@@ -91,7 +92,7 @@ class mutation_holder;
 class view_update_write_response_handler;
 struct hint_wrapper;
 
-using replicas_per_token_range = std::unordered_map<dht::token_range, std::vector<utils::UUID>>;
+using replicas_per_token_range = std::unordered_map<dht::token_range, std::vector<locator::host_id>>;
 
 struct query_partition_key_range_concurrent_result {
     std::vector<foreign_ptr<lw_shared_ptr<query::result>>> result;
@@ -225,7 +226,8 @@ public:
     locator::token_metadata_ptr get_token_metadata_ptr() const noexcept;
 
     query::max_result_size get_max_result_size(const query::partition_slice& slice) const;
-    inet_address_vector_replica_set get_live_endpoints(replica::keyspace& ks, const dht::token& token) const;
+    query::tombstone_limit get_tombstone_limit() const;
+    inet_address_vector_replica_set get_live_endpoints(const locator::effective_replication_map& erm, const dht::token& token) const;
 
 private:
     distributed<replica::database>& _db;
@@ -312,7 +314,7 @@ private:
     result<response_id_type> create_write_response_handler_helper(schema_ptr s, const dht::token& token,
             std::unique_ptr<mutation_holder> mh, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state,
             service_permit permit, db::allow_per_partition_rate_limit allow_limit);
-    result<response_id_type> create_write_response_handler(replica::keyspace& ks, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m, inet_address_vector_replica_set targets,
+    result<response_id_type> create_write_response_handler(locator::effective_replication_map_ptr ermp, db::consistency_level cl, db::write_type type, std::unique_ptr<mutation_holder> m, inet_address_vector_replica_set targets,
             const inet_address_vector_topology_change& pending_endpoints, inet_address_vector_topology_change, tracing::trace_state_ptr tr_state, storage_proxy::write_stats& stats, service_permit permit, db::per_partition_rate_limit::info rate_limit_info);
     result<response_id_type> create_write_response_handler(const mutation&, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
     result<response_id_type> create_write_response_handler(const hint_wrapper&, db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit);
@@ -331,7 +333,7 @@ private:
     bool hints_enabled(db::write_type type) const noexcept;
     db::hints::manager& hints_manager_for(db::write_type type);
     static void sort_endpoints_by_proximity(inet_address_vector_replica_set& eps);
-    inet_address_vector_replica_set get_live_sorted_endpoints(replica::keyspace& ks, const dht::token& token) const;
+    inet_address_vector_replica_set get_live_sorted_endpoints(const locator::effective_replication_map& erm, const dht::token& token) const;
     bool is_alive(const gms::inet_address&) const;
     db::read_repair_decision new_read_repair_decision(const schema& s);
     result<::shared_ptr<abstract_read_executor>> get_read_executor(lw_shared_ptr<query::read_command> cmd,
@@ -348,11 +350,14 @@ private:
                                                                            tracing::trace_state_ptr trace_state,
                                                                            clock_type::time_point timeout,
                                                                            db::per_partition_rate_limit::info rate_limit_info);
-    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature>> query_result_local_digest(schema_ptr, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr,
-                                                                                                   tracing::trace_state_ptr trace_state,
-                                                                                                   clock_type::time_point timeout,
-                                                                                                   query::digest_algorithm da,
-                                                                                                   db::per_partition_rate_limit::info rate_limit_info);
+    future<rpc::tuple<query::result_digest, api::timestamp_type, cache_temperature, std::optional<full_position>>> query_result_local_digest(
+            schema_ptr,
+            lw_shared_ptr<query::read_command> cmd,
+            const dht::partition_range& pr,
+            tracing::trace_state_ptr trace_state,
+            clock_type::time_point timeout,
+            query::digest_algorithm da,
+            db::per_partition_rate_limit::info rate_limit_info);
     future<result<coordinator_query_result>> query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
             dht::partition_range_vector partition_ranges,
             db::consistency_level cl,

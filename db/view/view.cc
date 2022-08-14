@@ -58,6 +58,7 @@
 #include "readers/from_fragments_v2.hh"
 #include "readers/evictable.hh"
 #include "delete_ghost_rows_visitor.hh"
+#include "locator/host_id.hh"
 
 using namespace std::chrono_literals;
 
@@ -389,7 +390,7 @@ private:
 
 public:
     data_query_result_builder(const schema& s, const query::partition_slice& slice)
-        : _res_builder(slice, query::result_options::only_result(), query::result_memory_accounter{query::result_memory_limiter::unlimited_result_size})
+        : _res_builder(slice, query::result_options::only_result(), query::result_memory_accounter{query::result_memory_limiter::unlimited_result_size}, query::max_tombstones)
         , _builder(s, _res_builder) { }
 
     void consume_new_partition(const dht::decorated_key& dk) { _builder.consume_new_partition(dk); }
@@ -1486,7 +1487,7 @@ future<> view_builder::drain() {
         }).handle_exception_type([] (const semaphore_timed_out&) {
             // ignored
         }).finally([this] {
-            return parallel_for_each(_base_to_build_step, [] (std::pair<const utils::UUID, build_step>& p) {
+            return parallel_for_each(_base_to_build_step, [] (std::pair<const table_id, build_step>& p) {
                 return p.second.reader.close();
             });
         });
@@ -1498,7 +1499,7 @@ future<> view_builder::stop() {
     return drain();
 }
 
-view_builder::build_step& view_builder::get_or_create_build_step(utils::UUID base_id) {
+view_builder::build_step& view_builder::get_or_create_build_step(table_id base_id) {
     auto it = _base_to_build_step.find(base_id);
     if (it == _base_to_build_step.end()) {
         auto base = _db.find_column_family(base_id).shared_from_this();
@@ -1526,7 +1527,7 @@ future<> view_builder::initialize_reader_at_current_token(build_step& step) {
   });
 }
 
-void view_builder::load_view_status(view_builder::view_build_status status, std::unordered_set<utils::UUID>& loaded_views) {
+void view_builder::load_view_status(view_builder::view_build_status status, std::unordered_set<table_id>& loaded_views) {
     if (!status.next_token) {
         // No progress was made on this view, so we'll treat it as new.
         return;
@@ -1544,14 +1545,14 @@ void view_builder::load_view_status(view_builder::view_build_status status, std:
 
 void view_builder::reshard(
         std::vector<std::vector<view_builder::view_build_status>> view_build_status_per_shard,
-        std::unordered_set<utils::UUID>& loaded_views) {
+        std::unordered_set<table_id>& loaded_views) {
     // We must reshard. We aim for a simple algorithm, a step above not starting from scratch.
     // Shards build entries at different paces, so both first and last tokens will differ. We
     // want to be conservative when selecting the range that has been built. To do that, we
     // select the intersection of all the previous shard's ranges for each view.
     struct view_ptr_hash {
         std::size_t operator()(const view_ptr& v) const noexcept {
-            return std::hash<utils::UUID>()(v->id());
+            return std::hash<table_id>()(v->id());
         }
     };
     struct view_ptr_equals {
@@ -1646,7 +1647,7 @@ void view_builder::setup_shard_build_step(
         return view_ptr(nullptr);
     };
 
-    vbi.built_views = boost::copy_range<std::unordered_set<utils::UUID>>(built
+    vbi.built_views = boost::copy_range<std::unordered_set<table_id>>(built
             | boost::adaptors::transformed(maybe_fetch_view)
             | boost::adaptors::filtered([] (const view_ptr& v) { return bool(v); })
             | boost::adaptors::transformed([] (const view_ptr& v) { return v->id(); }));
@@ -1683,7 +1684,7 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
             return false;
         }
     };
-    std::unordered_set<utils::UUID> loaded_views;
+    std::unordered_set<table_id> loaded_views;
     if (vbi.status_per_shard.size() != smp::count) {
         reshard(std::move(vbi.status_per_shard), loaded_views);
     } else if (!vbi.status_per_shard.empty()) {
@@ -1721,10 +1722,10 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
 
 future<std::unordered_map<sstring, sstring>>
 view_builder::view_build_statuses(sstring keyspace, sstring view_name) const {
-    return _sys_dist_ks.view_status(std::move(keyspace), std::move(view_name)).then([this] (std::unordered_map<utils::UUID, sstring> status) {
+    return _sys_dist_ks.view_status(std::move(keyspace), std::move(view_name)).then([this] (std::unordered_map<locator::host_id, sstring> status) {
         auto& endpoint_to_host_id = service::get_local_storage_proxy().get_token_metadata_ptr()->get_endpoint_to_host_id_map_for_reading();
         return boost::copy_range<std::unordered_map<sstring, sstring>>(endpoint_to_host_id
-                | boost::adaptors::transformed([&status] (const std::pair<gms::inet_address, utils::UUID>& p) {
+                | boost::adaptors::transformed([&status] (const std::pair<gms::inet_address, locator::host_id>& p) {
                     auto it = status.find(p.second);
                     auto s = it != status.end() ? std::move(it->second) : "UNKNOWN";
                     return std::pair(p.first.to_sstring(), std::move(s));
@@ -2147,7 +2148,7 @@ update_backlog node_update_backlog::add_fetch(unsigned shard, update_backlog bac
 }
 
 future<bool> check_view_build_ongoing(db::system_distributed_keyspace& sys_dist_ks, const sstring& ks_name, const sstring& cf_name) {
-    return sys_dist_ks.view_status(ks_name, cf_name).then([] (std::unordered_map<utils::UUID, sstring>&& view_statuses) {
+    return sys_dist_ks.view_status(ks_name, cf_name).then([] (std::unordered_map<locator::host_id, sstring>&& view_statuses) {
         return boost::algorithm::any_of(view_statuses | boost::adaptors::map_values, [] (const sstring& view_status) {
             return view_status == "STARTED";
         });
@@ -2265,7 +2266,8 @@ void delete_ghost_rows_visitor::accept_new_row(const clustering_key& ck, const q
 
     std::vector<query::clustering_range> bounds{query::clustering_range::make_singular(base_ck)};
     query::partition_slice partition_slice(std::move(bounds), {},  {}, selection->get_query_options());
-    auto command = ::make_lw_shared<query::read_command>(_base_schema->id(), _base_schema->version(), partition_slice, _proxy.get_max_result_size(partition_slice));
+    auto command = ::make_lw_shared<query::read_command>(_base_schema->id(), _base_schema->version(), partition_slice,
+            _proxy.get_max_result_size(partition_slice), query::tombstone_limit(_proxy.get_tombstone_limit()));
     auto timeout = db::timeout_clock::now() + _timeout_duration;
     service::storage_proxy::coordinator_query_options opts{timeout, _state.get_permit(), _state.get_client_state(), _state.get_trace_state()};
     auto base_qr = _proxy.query(_base_schema, command, std::move(partition_ranges), db::consistency_level::ALL, opts).get0();
