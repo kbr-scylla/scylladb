@@ -23,8 +23,8 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
     int64_t _total_backlog_bytes = 0;
     unsigned _threshold = 0;
     double _sstables_backlog_contribution = 0.0f;
-    std::unordered_set<utils::UUID> _sstable_runs_contributing_backlog;
-    std::unordered_map<utils::UUID, sstable_run> _all;
+    std::unordered_set<sstables::run_id> _sstable_runs_contributing_backlog;
+    std::unordered_map<sstables::run_id, sstable_run> _all;
 
     struct inflight_component {
         int64_t total_bytes = 0;

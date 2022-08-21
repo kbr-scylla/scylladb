@@ -86,6 +86,8 @@ public:
     size_t size();
     void foreach_semaphore(std::function<void(scheduling_group, reader_concurrency_semaphore&)> func);
 
+    future<> foreach_semaphore_async(std::function<future<> (scheduling_group, reader_concurrency_semaphore&)> func);
+
     auto sum_read_concurrency_sem_var(std::invocable<reader_concurrency_semaphore&> auto member) {
         using ret_type = std::invoke_result_t<decltype(member), reader_concurrency_semaphore&>;
         return boost::accumulate(_semaphores | boost::adaptors::map_values | boost::adaptors::transformed([=] (weighted_reader_concurrency_semaphore& wrcs) { return std::invoke(member, wrcs.sem); }), ret_type(0));

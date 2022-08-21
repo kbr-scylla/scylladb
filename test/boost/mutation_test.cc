@@ -488,7 +488,7 @@ SEASTAR_TEST_CASE(test_multiple_memtables_one_partition) {
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type);
 
     auto cf_stats = make_lw_shared<replica::cf_stats>();
-    replica::column_family::config cfg = column_family_test_config(env.semaphore());
+    replica::column_family::config cfg = env.make_table_config();
     cfg.enable_disk_reads = false;
     cfg.enable_disk_writes = false;
     cfg.enable_incremental_backups = false;
@@ -540,7 +540,7 @@ SEASTAR_TEST_CASE(test_flush_in_the_middle_of_a_scan) {
 
     auto cf_stats = make_lw_shared<replica::cf_stats>();
 
-    replica::column_family::config cfg = column_family_test_config(env.semaphore());
+    replica::column_family::config cfg = env.make_table_config();
     cfg.enable_disk_reads = true;
     cfg.enable_disk_writes = true;
     cfg.enable_cache = true;
@@ -622,7 +622,7 @@ SEASTAR_TEST_CASE(test_multiple_memtables_multiple_partitions) {
 
     auto cf_stats = make_lw_shared<replica::cf_stats>();
 
-    replica::column_family::config cfg = column_family_test_config(env.semaphore());
+    replica::column_family::config cfg = env.make_table_config();
     cfg.enable_disk_reads = false;
     cfg.enable_disk_writes = false;
     cfg.enable_incremental_backups = false;
@@ -1848,6 +1848,29 @@ SEASTAR_TEST_CASE(test_continuity_merging_of_complete_mutations) {
     mutation m3 = m1 + m2;
 
     assert_that(m3).is_continuous(position_range::all_clustered_rows(), is_continuous::yes);
+
+    return make_ready_future<>();
+}
+
+SEASTAR_TEST_CASE(test_commutativity_and_associativity) {
+    random_mutation_generator gen(random_mutation_generator::generate_counters::no);
+    gen.set_key_cardinality(7);
+
+    for (int i = 0; i < 10; ++i) {
+        mutation m1 = gen();
+        m1.partition().make_fully_continuous();
+        mutation m2 = gen();
+        m2.partition().make_fully_continuous();
+        mutation m3 = gen();
+        m3.partition().make_fully_continuous();
+
+        assert_that(m1 + m2 + m3)
+            .is_equal_to(m1 + m3 + m2)
+            .is_equal_to(m2 + m1 + m3)
+            .is_equal_to(m2 + m3 + m1)
+            .is_equal_to(m3 + m1 + m2)
+            .is_equal_to(m3 + m2 + m1);
+    }
 
     return make_ready_future<>();
 }

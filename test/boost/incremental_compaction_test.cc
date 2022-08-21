@@ -139,7 +139,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto cm = make_lw_shared<compaction_manager>(compaction_manager::for_testing_tag());
         auto cmt = compaction_manager_test(*cm);
         auto tracker = make_lw_shared<cache_tracker>();
-        auto cf = make_lw_shared<replica::column_family>(s, column_family_test_config(env.semaphore()), replica::column_family::no_commitlog(), *cm, env.manager(), cl_stats, *tracker);
+        auto cf = make_lw_shared<replica::column_family>(s, env.make_table_config(), replica::column_family::no_commitlog(), *cm, env.manager(), cl_stats, *tracker);
         auto table_s = make_table_state_for_test(env, *cf);
         cf->mark_ready_for_writes();
         cf->start();
@@ -209,7 +209,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             if (desc.sstables.empty()) {
                 return {};
             }
-            std::unordered_set<utils::UUID> run_ids;
+            std::unordered_set<sstables::run_id> run_ids;
             bool incremental_enabled = std::any_of(desc.sstables.begin(), desc.sstables.end(), [&run_ids] (shared_sstable& sst) {
                 return !run_ids.insert(sst->run_identifier()).second;
             });
@@ -281,7 +281,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             return incremental_compaction_strategy(options);
         }
         static replica::column_family::config make_table_config(test_env& env) {
-            auto config = column_family_test_config(env.semaphore());
+            auto config = env.make_table_config();
             config.compaction_enforce_min_threshold = true;
             return config;
         }
