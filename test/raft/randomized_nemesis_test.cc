@@ -1381,6 +1381,11 @@ public:
         auto fd_ep_map = std::make_unique<direct_fd_endpoint_map>();
         auto fd_service = std::make_unique<sharded<direct_failure_detector::failure_detector>>();
         auto update_fd_server = [&fd = *fd_service, &ep_map = *fd_ep_map] (raft::server_id id, bool added) {
+            if (!fd.local_is_initialized()) {
+                // We're stopping.
+                return;
+            }
+
             auto ep = ep_map.allocate(id);
             if (added) {
                 fd.local().add_endpoint(ep);
@@ -2353,22 +2358,32 @@ SEASTAR_TEST_CASE(removed_follower_with_forwarding_learns_about_removal) {
     });
 }
 
+// Regression test for #10010, #11235.
 SEASTAR_TEST_CASE(remove_leader_with_forwarding_finishes) {
+    auto seed = tests::random::get_int<int32_t>();
+    std::mt19937 random_engine{seed};
+
     logical_timer timer;
     environment_config cfg {
-            .rnd{0},
-            .network_delay{1, 1},
-            .fd_convict_threshold = 10_t,
+            .rnd{seed},
+            .network_delay{0, 6},
+            .fd_convict_threshold = 50_t,
     };
-    co_await with_env_and_ticker<ExReg>(cfg, [&timer] (environment<ExReg>& env, ticker& t) -> future<> {
-        t.start([&] (uint64_t tick) {
+
+    co_await with_env_and_ticker<ExReg>(cfg, [&] (environment<ExReg>& env, ticker& t) -> future<> {
+        t.start([&, dist = std::uniform_int_distribution<size_t>(0, 9)] (uint64_t tick) mutable {
             env.tick_network();
             timer.tick();
-            if (tick % 10 == 0) {
-                env.tick_servers();
-            }
+            env.for_each_server([&] (raft::server_id, raft_server<ExReg>* srv) {
+                // Tick each server with probability 1/10.
+                // Thus each server is ticked, on average, once every 10 timer/network ticks.
+                // On the other hand, we now have servers running at different speeds.
+                if (srv && dist(random_engine) == 0) {
+                    srv->tick();
+                }
+            });
             return ping_shards();
-        }, 10'000);
+        }, 20'000);
 
         raft::server::configuration cfg {
                 .enable_forwarding = true,
@@ -2378,12 +2393,12 @@ SEASTAR_TEST_CASE(remove_leader_with_forwarding_finishes) {
         assert(co_await wait_for_leader<ExReg>{}(env, {id1}, timer, timer.now() + 1000_t) == id1);
         auto id2 = co_await env.new_server(false, cfg);
         assert(std::holds_alternative<std::monostate>(
-                co_await env.reconfigure(id1, {id1, id2}, timer.now() + 100_t, timer)));
+                co_await env.reconfigure(id1, {id1, id2}, timer.now() + 200_t, timer)));
         // Server 2 forwards the entry that removes server 1 to server 1.
         // We want server 2 to either learn from server 1 about the removal,
         // or become a leader and learn from itself; in both cases the call should finish (no timeout).
-        auto result = co_await env.modify_config(id2, std::vector<raft::server_id>{}, {id1}, timer.now() + 100_t, timer);
-        tlogger.trace("env.modify_config result {}", result);
+        auto result = co_await env.modify_config(id2, std::vector<raft::server_id>{}, {id1}, timer.now() + 200_t, timer);
+        tlogger.info("env.modify_config result {}", result);
         assert(std::holds_alternative<std::monostate>(result));
     });
 }
@@ -2433,18 +2448,20 @@ struct bouncing {
                 if (n_a_l->leader) {
                     if (n_a_l->leader == srv_id || !tried.contains(n_a_l->leader)) {
                         co_await timer.sleep(known_leader_delay);
+                        tlogger.trace("bouncing call: got `not_a_leader` from {}, rerouting to {}", srv_id, n_a_l->leader);
                         srv_id = n_a_l->leader;
-                        tlogger.trace("bouncing call: got `not_a_leader`, rerouted to {}", srv_id);
                         continue;
                     }
                 }
 
                 if (!known.empty()) {
+                    auto prev = srv_id;
                     srv_id = *known.begin();
                     if (n_a_l->leader) {
-                        tlogger.trace("bouncing call: got `not_a_leader`, rerouted to {}, but already tried it; trying {}", n_a_l->leader, srv_id);
+                        tlogger.trace("bouncing call: got `not_a_leader` from {}, rerouted to {}, but already tried it; trying {}",
+                                prev, n_a_l->leader, srv_id);
                     } else {
-                        tlogger.trace("bouncing call: got `not_a_leader`, no reroute, trying {}", srv_id);
+                        tlogger.trace("bouncing call: got `not_a_leader` from {}, no reroute, trying {}", prev, srv_id);
                     }
                     continue;
                 }
@@ -2623,7 +2640,8 @@ struct reconfiguration {
 
     using result_type = reconfigure_result_t;
 
-    future<result_type> execute_modify_config(state_type& s, std::vector<raft::server_id> nodes, size_t members_end, size_t voters_end) {
+    future<result_type> execute_modify_config(
+            state_type& s, const operation::context& ctx, std::vector<raft::server_id> nodes, size_t members_end, size_t voters_end) {
         std::vector<std::pair<raft::server_id, bool>> added;
         for (size_t i = 0; i < voters_end; ++i) {
             added.emplace_back(nodes[i], true);
@@ -2633,12 +2651,16 @@ struct reconfiguration {
         }
 
         std::vector<raft::server_id> removed {nodes.begin() + members_end, nodes.end()};
+        auto contact = *s.known.begin();
+
+        tlogger.debug("reconfig modify_config start add {} remove {} start tid {} start time {} current time {} contact {}",
+                added, removed, ctx.thread, ctx.start, s.timer.now(), contact);
 
         assert(s.known.size() > 0);
         auto [res, last] = co_await bouncing{
                 [&added, &removed, timeout = s.timer.now() + timeout, &timer = s.timer, &env = s.env] (raft::server_id id) {
             return env.modify_config(id, added, removed, timeout, timer);
-        }}(s.timer, s.known, *s.known.begin(), 10, 10_t, 10_t);
+        }}(s.timer, s.known, contact, 10, 10_t, 10_t);
 
         std::visit(make_visitor(
         [&, last = last] (std::monostate) {
@@ -2657,10 +2679,14 @@ struct reconfiguration {
         }
         ), res);
 
+        tlogger.debug("reconfig modify_config end add {} remove {} start tid {} start time {} current time {} last contact {}",
+                added, removed, ctx.thread, ctx.start, s.timer.now(), last);
+
         co_return res;
     }
 
-    future<result_type> execute_reconfigure(state_type& s, std::vector<raft::server_id> nodes, size_t members_end, size_t voters_end) {
+    future<result_type> execute_reconfigure(
+            state_type& s, const operation::context& ctx, std::vector<raft::server_id> nodes, size_t members_end, size_t voters_end) {
         std::vector<std::pair<raft::server_id, bool>> nodes_voters;
         nodes_voters.reserve(members_end);
         for (size_t i = 0; i < voters_end; ++i) {
@@ -2670,10 +2696,15 @@ struct reconfiguration {
             nodes_voters.emplace_back(nodes[i], false);
         }
 
+        auto contact = *s.known.begin();
+
+        tlogger.debug("reconfig set_configuration start nodes {} start tid {} start time {} current time {} contact {}",
+                nodes_voters, ctx.thread, ctx.start, s.timer.now(), contact);
+
         assert(s.known.size() > 0);
         auto [res, last] = co_await bouncing{[&nodes_voters, timeout = s.timer.now() + timeout, &timer = s.timer, &env = s.env] (raft::server_id id) {
             return env.reconfigure(id, nodes_voters, timeout, timer);
-        }}(s.timer, s.known, *s.known.begin(), 10, 10_t, 10_t);
+        }}(s.timer, s.known, contact, 10, 10_t, 10_t);
 
         std::visit(make_visitor(
         [&, last = last] (std::monostate) {
@@ -2691,6 +2722,9 @@ struct reconfiguration {
         }
         ), res);
 
+        tlogger.debug("reconfig set_configuration end nodes {} start tid {} start time {} current time {} last contact {}",
+                nodes_voters, ctx.thread, ctx.start, s.timer.now(), last);
+
         co_return res;
     }
 
@@ -2705,9 +2739,9 @@ struct reconfiguration {
         size_t voters_end = std::uniform_int_distribution<size_t>{1, members_end}(s.rnd);
 
         if (bdist(s.rnd)) {
-            return execute_modify_config(s, std::move(nodes), members_end, voters_end);
+            return execute_modify_config(s, ctx, std::move(nodes), members_end, voters_end);
         } else {
-            return execute_reconfigure(s, std::move(nodes), members_end, voters_end);
+            return execute_reconfigure(s, ctx, std::move(nodes), members_end, voters_end);
         }
     }
 

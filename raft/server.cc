@@ -41,6 +41,11 @@ struct awaited_index {
     optimized_optional<abort_source::subscription> abort;
 };
 
+struct awaited_conf_change {
+    promise<> promise;
+    optimized_optional<abort_source::subscription> abort;
+};
+
 static const seastar::metrics::label server_id_label("id");
 static const seastar::metrics::label log_entry_type("log_entry_type");
 static const seastar::metrics::label message_type("message_type");
@@ -102,7 +107,7 @@ private:
     server::configuration _config;
     std::optional<promise<>> _stepdown_promise;
     std::optional<shared_promise<>> _leader_promise;
-    std::optional<promise<>> _non_joint_conf_commit_promise;
+    std::optional<awaited_conf_change> _non_joint_conf_commit_promise;
     // Index of the last entry applied to `_state_machine`.
     index_t _applied_idx;
     std::list<active_read> _reads;
@@ -115,7 +120,13 @@ private:
     condition_variable _applied_index_changed;
 
     struct stop_apply_fiber{}; // exception to send when apply fiber is needs to be stopepd
-    queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>> _apply_entries = queue<std::variant<std::vector<log_entry_ptr>, snapshot_descriptor>>(10);
+
+    struct removed_from_config{}; // sent to applier_fiber when we're not a leader and we're outside the current configuration
+    using applier_fiber_message = std::variant<
+        std::vector<log_entry_ptr>,
+        snapshot_descriptor,
+        removed_from_config>;
+    queue<applier_fiber_message> _apply_entries = queue<applier_fiber_message>(10);
 
     struct stats {
         uint64_t add_command = 0;
@@ -471,6 +482,11 @@ future<add_entry_reply> server_impl::execute_add_entry(server_id from, command c
 }
 
 future<> server_impl::add_entry(command command, wait_type type, seastar::abort_source* as) {
+    if (_config.max_command_size > 0 && command.size() > _config.max_command_size) {
+        logger.trace("[{}] add_entry command size exceeds the limit: {} > {}",
+                     id(), command.size(), _config.max_command_size);
+        throw command_is_too_big_error(command.size(), _config.max_command_size);
+    }
     _stats.add_command++;
     server_id leader = _fsm->current_leader();
     logger.trace("[{}] an entry is submitted", id());
@@ -884,7 +900,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
                     for (const auto& e: batch.committed) {
                         const auto* cfg = get_if<raft::configuration>(&e->data);
                         if (cfg != nullptr && !cfg->is_joint()) {
-                            std::exchange(_non_joint_conf_commit_promise, std::nullopt)->set_value();
+                            std::exchange(_non_joint_conf_commit_promise, std::nullopt)->promise.set_value();
                             break;
                         }
                     }
@@ -905,9 +921,13 @@ future<> server_impl::io_fiber(index_t last_stable) {
                     std::exchange(_stepdown_promise, std::nullopt)->set_value();
                 }
                 if (!_current_rpc_config.contains(_id)) {
-                    // If the node is no longer part of a config and no longer the leader
-                    // it will never know the status of entries it submitted
-                    drop_waiters();
+                    // - It's important we push this after we pushed committed entries above. It
+                    // will cause `applier_fiber` to drop waiters, which should be done after we
+                    // notify all waiters for entries committed in this batch.
+                    // - This may happen multiple times if `io_fiber` gets multiple batches when
+                    // we're outside the configuration, but it should eventually (and generally
+                    // quickly) stop happening (we're outside the config after all).
+                    co_await _apply_entries.push_eventually(removed_from_config{});
                 }
                 // request aborts of snapshot transfers
                 abort_snapshot_transfers();
@@ -987,11 +1007,11 @@ future<> server_impl::applier_fiber() {
         while (true) {
             auto v = co_await _apply_entries.pop_eventually();
 
-            if (std::holds_alternative<std::vector<log_entry_ptr>>(v)) {
-                auto& batch = std::get<0>(v);
+            co_await std::visit(make_visitor(
+            [this] (std::vector<log_entry_ptr>& batch) -> future<> {
                 if (batch.empty()) {
                     logger.trace("[{}] applier fiber: received empty batch", _id);
-                    continue;
+                    co_return;
                 }
 
                 // Completion notification code assumes that previous snapshot is applied
@@ -1052,8 +1072,8 @@ future<> server_impl::applier_fiber() {
                    }
                    _stats.snapshots_taken++;
                }
-            } else {
-                snapshot_descriptor& snp = std::get<1>(v);
+            },
+            [this] (snapshot_descriptor& snp) -> future<> {
                 assert(snp.idx >= _applied_idx);
                 // Apply snapshot it to the state machine
                 logger.trace("[{}] apply_fiber applying snapshot {}", _id, snp.id);
@@ -1062,7 +1082,15 @@ future<> server_impl::applier_fiber() {
                 _applied_idx = snp.idx;
                 _applied_index_changed.broadcast();
                 _stats.sm_load_snapshot++;
+            },
+            [this] (const removed_from_config&) -> future<> {
+                // If the node is no longer part of a config and no longer the leader
+                // it may never know the status of entries it submitted.
+                drop_waiters();
+                co_return;
             }
+            ), v);
+
             signal_applied();
         }
     } catch(stop_apply_fiber& ex) {
@@ -1240,7 +1268,7 @@ future<> server_impl::abort() {
     _awaited_commits.clear();
     _awaited_applies.clear();
     if (_non_joint_conf_commit_promise) {
-        std::exchange(_non_joint_conf_commit_promise, std::nullopt)->set_exception(stopped_error());
+        std::exchange(_non_joint_conf_commit_promise, std::nullopt)->promise.set_exception(stopped_error());
     }
 
     // Complete all read attempts with not_a_leader
@@ -1285,6 +1313,13 @@ future<> server_impl::set_configuration(config_member_set c_new, seastar::abort_
     }
 
     _stats.add_config++;
+
+    if (_non_joint_conf_commit_promise) {
+        logger.warn("[{}] set_configuration: a configuration change is still in progress (at index: {}, config: {})",
+            _id, _fsm->log_last_conf_idx(), cfg);
+        throw conf_change_in_progress{};
+    }
+
     const auto& e = _fsm->add_entry(raft::configuration{std::move(c_new)});
 
     // We've just submitted a joint configuration to be committed.
@@ -1295,10 +1330,21 @@ future<> server_impl::set_configuration(config_member_set c_new, seastar::abort_
     // would be the one corresponding to our joint configuration,
     // no matter if the leader changed in the meantime.
 
-    auto f = _non_joint_conf_commit_promise.emplace().get_future();
+    auto f = _non_joint_conf_commit_promise.emplace().promise.get_future();
+    if (as) {
+        _non_joint_conf_commit_promise->abort = as->subscribe([this] () noexcept {
+            // If we're inside this callback, the subscription wasn't destroyed yet.
+            // The subscription is destroyed when the field is reset, so if we're here, the field must be engaged.
+            assert(_non_joint_conf_commit_promise);
+            // Whoever resolves the promise must reset the field. Thus, if we're here, the promise is not resolved.
+            std::exchange(_non_joint_conf_commit_promise, std::nullopt)->promise.set_exception(request_aborted{});
+        });
+    }
+
     try {
         co_await wait_for_entry({.term = e.term, .idx = e.idx}, wait_type::committed, as);
     } catch (...) {
+        _non_joint_conf_commit_promise.reset();
         // We need to 'observe' possible exceptions in f, otherwise they will be
         // considered unhandled and cause a warning.
         (void)f.handle_exception([id = _id] (auto e) {
