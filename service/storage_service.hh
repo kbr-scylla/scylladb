@@ -93,10 +93,6 @@ class raft_group0;
 
 enum class disk_error { regular, commit };
 
-struct storage_service_config {
-    size_t available_memory;
-};
-
 class node_ops_meta_data {
     utils::UUID _ops_uuid;
     gms::inet_address _coordinator;
@@ -179,7 +175,6 @@ public:
         gms::gossiper& gossiper,
         sharded<db::system_keyspace>&,
         gms::feature_service& feature_service,
-        storage_service_config config,
         sharded<service::migration_manager>& mm,
         locator::shared_token_metadata& stm,
         locator::effective_replication_map_factory& erm_factory,
@@ -300,7 +295,10 @@ private:
     future<> shutdown_protocol_servers();
 
     // Tokens and the CDC streams timestamp of the replaced node.
-    using replacement_info = std::unordered_set<token>;
+    struct replacement_info {
+        std::unordered_set<token> tokens;
+        locator::endpoint_dc_rack dc_rack;
+    };
     future<replacement_info> prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes,
             const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features);
 
@@ -498,6 +496,7 @@ private:
     future<> do_update_system_peers_table(gms::inet_address endpoint, const application_state& state, const versioned_value& value);
 
     std::unordered_set<token> get_tokens_for(inet_address endpoint);
+    locator::endpoint_dc_rack get_dc_rack_for(inet_address endpoint);
 private:
     // Should be serialized under token_metadata_lock.
     future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
