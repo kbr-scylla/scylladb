@@ -212,9 +212,8 @@ void reader_concurrency_semaphore_group::foreach_semaphore(std::function<void(sc
 
 future<>
 reader_concurrency_semaphore_group::foreach_semaphore_async(std::function<future<> (scheduling_group, reader_concurrency_semaphore&)> func) {
-    co_await with_semaphore(_operations_serializer, 1, [&] () -> future<> {
-        for (auto& [sg, wsem] : _semaphores) {
-            co_await func(sg, wsem.sem);
-        }
-    });
+    auto units = co_await get_units(_operations_serializer, 1);
+    for (auto& [sg, wsem] : _semaphores) {
+        co_await func(sg, wsem.sem);
+    }
 }
