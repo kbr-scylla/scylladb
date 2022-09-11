@@ -14,6 +14,7 @@
 #include "cql3/column_identifier.hh"
 #include "cql3/column_condition.hh"
 #include "cql3/attributes.hh"
+#include "cql3/cql_statement.hh"
 
 #include <seastar/core/shared_ptr.hh>
 
@@ -43,6 +44,7 @@ protected:
 
 public:
     virtual std::unique_ptr<prepared_statement> prepare(data_dictionary::database db, cql_stats& stats) override;
+    ::shared_ptr<cql_statement_opt_metadata> prepare_statement(data_dictionary::database db, prepare_context& ctx, cql_stats& stats);
     ::shared_ptr<cql3::statements::modification_statement> prepare(data_dictionary::database db, prepare_context& ctx, cql_stats& stats) const;
     void add_raw(sstring&& raw) { _raw_cql = std::move(raw); }
     const sstring& get_raw_cql() const { return _raw_cql; }

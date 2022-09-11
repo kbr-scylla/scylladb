@@ -807,7 +807,7 @@ storage_service::get_range_to_address_map_in_local_dc(
     for (auto entry : orig_map) {
         auto& addresses = filtered_map[entry.first];
         addresses.reserve(entry.second.size());
-        std::copy_if(entry.second.begin(), entry.second.end(), std::back_inserter(addresses), local_dc_filter);
+        std::copy_if(entry.second.begin(), entry.second.end(), std::back_inserter(addresses), std::cref(local_dc_filter));
         co_await coroutine::maybe_yield();
     }
 
@@ -902,7 +902,6 @@ future<> storage_service::handle_state_bootstrap(inet_address endpoint) {
         tmptr->remove_endpoint(endpoint);
     }
 
-    tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
     tmptr->add_bootstrap_tokens(tokens, endpoint);
     if (_gossiper.uses_host_id(endpoint)) {
         tmptr->update_host_id(_gossiper.get_host_id(endpoint), endpoint);
@@ -2012,7 +2011,7 @@ future<> storage_service::decommission() {
                     throw std::runtime_error(msg);
                 }
                 if (!nodes_down.empty()) {
-                    auto msg = format("decommission[{}]: Nodes={} needed for decommission operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, run nodetool decommission --ignore-dead-nodes <list_of_dead_nodes>. E.g., nodetool decommission --ignore-dead-nodes 127.0.0.1,127.0.0.2", uuid, nodes_down);
+                    auto msg = format("decommission[{}]: Nodes={} needed for decommission operation are down. It is highly recommended to fix the down nodes and try again.", uuid, nodes_down);
                     slogger.warn("{}", msg);
                     throw std::runtime_error(msg);
                 }
@@ -2156,7 +2155,7 @@ void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tok
             throw std::runtime_error(msg);
         }
         if (!nodes_down.empty()) {
-            auto msg = format("bootstrap[{}]: Nodes={} needed for bootstrap operation are down. It is highly recommended to fix the down nodes and try again. To proceed with best-effort mode which might cause data inconsistency, add --ignore-dead-nodes <list_of_dead_nodes>. E.g., scylla --ignore-dead-nodes 127.0.0.1,127.0.0.2", uuid, nodes_down);
+            auto msg = format("bootstrap[{}]: Nodes={} needed for bootstrap operation are down. It is highly recommended to fix the down nodes and try again.", uuid, nodes_down);
             slogger.warn("{}", msg);
             throw std::runtime_error(msg);
         }
@@ -3112,15 +3111,15 @@ storage_service::get_new_source_ranges(locator::effective_replication_map_ptr er
     std::unordered_multimap<inet_address, dht::token_range> source_ranges;
 
     // find alive sources for our new ranges
+    auto tmptr = erm->get_token_metadata_ptr();
     for (auto r : ranges) {
-        inet_address_vector_replica_set possible_nodes;
+        inet_address_vector_replica_set sources;
         auto it = range_addresses.find(r);
         if (it != range_addresses.end()) {
-            possible_nodes = it->second;
+            sources = it->second;
         }
 
-        auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
-        inet_address_vector_replica_set sources = snitch->get_sorted_list_by_proximity(my_address, possible_nodes);
+        tmptr->get_topology().sort_by_proximity(my_address, sources);
 
         if (std::find(sources.begin(), sources.end(), my_address) != sources.end()) {
             auto err = format("get_new_source_ranges: sources={}, my_address={}", sources, my_address);

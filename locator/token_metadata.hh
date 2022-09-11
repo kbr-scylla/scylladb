@@ -65,23 +65,10 @@ public:
      */
     bool has_endpoint(inet_address) const;
 
-    std::unordered_map<sstring,
-                       std::unordered_set<inet_address>>&
-    get_datacenter_endpoints() {
-        return _dc_endpoints;
-    }
-
     const std::unordered_map<sstring,
                            std::unordered_set<inet_address>>&
     get_datacenter_endpoints() const {
         return _dc_endpoints;
-    }
-
-    std::unordered_map<sstring,
-                       std::unordered_map<sstring,
-                                          std::unordered_set<inet_address>>>&
-    get_datacenter_racks() {
-        return _dc_racks;
     }
 
     const std::unordered_map<sstring,
@@ -97,15 +84,34 @@ public:
     sstring get_datacenter() const;
     sstring get_datacenter(inet_address ep) const;
 
-    std::function<bool(inet_address)> get_local_dc_filter() const noexcept;
+    auto get_local_dc_filter() const noexcept {
+        return [ this, local_dc = get_datacenter() ] (inet_address ep) {
+            return get_datacenter(ep) == local_dc;
+        };
+    };
 
     template <std::ranges::range Range>
     inline size_t count_local_endpoints(const Range& endpoints) const {
-        auto filter = get_local_dc_filter();
-        return std::count_if(endpoints.begin(), endpoints.end(), filter);
+        return std::count_if(endpoints.begin(), endpoints.end(), get_local_dc_filter());
+    }
+
+    /**
+     * This method will sort the <tt>List</tt> by proximity to the given
+     * address.
+     */
+    void sort_by_proximity(inet_address address, inet_address_vector_replica_set& addresses) const;
+
+    void disable_proximity_sorting() noexcept {
+        _sort_by_proximity = false;
     }
 
 private:
+    /**
+     * compares two endpoints in relation to the target endpoint, returning as
+     * Comparator.compare would
+     */
+    int compare_endpoints(const inet_address& address, const inet_address& a1, const inet_address& a2) const;
+
     /** multi-map: DC -> endpoints in that DC */
     std::unordered_map<sstring,
                        std::unordered_set<inet_address>>
@@ -119,6 +125,8 @@ private:
 
     /** reverse-lookup map: endpoint -> current known dc/rack assignment */
     std::unordered_map<inet_address, endpoint_dc_rack> _current_locations;
+
+    bool _sort_by_proximity = true;
 };
 
 class token_metadata_impl;

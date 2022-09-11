@@ -44,6 +44,7 @@ static flat_mutation_reader_v2 sstable_reader(reader_permit permit, shared_sstab
 class table_state_for_test : public table_state {
     test_env& _env;
     replica::table* _t;
+    tombstone_gc_state _tombstone_gc_state { nullptr };
 public:
     explicit table_state_for_test(test_env& env, replica::table& t)
         : _env(env)
@@ -98,6 +99,9 @@ public:
     }
     sstables::shared_sstable make_sstable() const override {
         return _t->make_sstable();
+    }
+    const tombstone_gc_state& get_tombstone_gc_state() const noexcept override {
+        return _tombstone_gc_state;
     }
 };
 
