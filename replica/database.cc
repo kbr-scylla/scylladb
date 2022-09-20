@@ -374,8 +374,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
               _cfg.compaction_large_cell_warning_threshold_mb()*1024*1024,
               _cfg.compaction_rows_count_warning_threshold()))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
-    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker))
-    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker))
+    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
+    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
     , _mnotifier(mn)
@@ -2363,10 +2363,14 @@ future<> database::stop() {
     }
     // try to ensure that CL has done disk flushing
     if (_commitlog) {
+        dblog.info("Shutting down commitlog");
         co_await _commitlog->shutdown();
+        dblog.info("Shutting down commitlog complete");
     }
     if (_schema_commitlog) {
+        dblog.info("Shutting down schema commitlog");
         co_await _schema_commitlog->shutdown();
+        dblog.info("Shutting down schema commitlog complete");
     }
     co_await _view_update_concurrency_sem.wait(max_memory_pending_view_updates());
     if (_commitlog) {

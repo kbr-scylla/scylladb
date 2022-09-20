@@ -9,6 +9,7 @@
 #include <functional>
 
 #include <seastar/util/closeable.hh>
+#include "tasks/task_manager.hh"
 #include "utils/build_id.hh"
 #include "supervisor.hh"
 #include "replica/database.hh"
@@ -513,7 +514,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<service::migration_manager> mm;
     extern sharded<service::migration_manager>* hack_migration_manager_for_encryption;
     hack_migration_manager_for_encryption = &mm;
-    api::http_context ctx(db, proxy, load_meter, token_metadata);
+    sharded<tasks::task_manager> task_manager;
+    api::http_context ctx(db, proxy, load_meter, token_metadata, task_manager);
     httpd::http_server_control prometheus_server;
     std::optional<utils::directories> dirs = {};
     sharded<gms::feature_service> feature_service;
@@ -558,7 +560,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
         return seastar::async([&app, cfg, ext, &cm, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager] {
+                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager] {
           try {
             // disable reactor stall detection during startup
             auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
@@ -577,6 +579,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             ser::gc_clock_using_3_1_0_serialization = cfg->enable_3_1_0_compatibility_mode();
 
             cfg->broadcast_to_all_shards().get();
+
+            // We pass this piece of config through a global as a temporary hack.
+            // See the comment at the definition of sstables::global_cache_index_pages.
+            smp::invoke_on_all([&cfg] {
+                sstables::global_cache_index_pages = cfg->cache_index_pages.operator utils::updateable_value<bool>();
+            }).get();
 
             ::sighup_handler sighup_handler(opts, *cfg);
             auto stop_sighup_handler = defer_verbose_shutdown("sighup", [&] {
@@ -791,8 +799,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             mscfg.rpc_memory_limit = std::max<size_t>(0.08 * memory::stats().total_memory(), mscfg.rpc_memory_limit);
 
             const auto& seo = cfg->server_encryption_options();
+            auto encrypt = utils::get_or_default(seo, "internode_encryption", "none");
+
             if (utils::is_true(utils::get_or_default(seo, "require_client_auth", "false"))) {
-                auto encrypt = utils::get_or_default(seo, "internode_encryption", "none");
                 if (encrypt == "dc" || encrypt == "rack") {
                     startlog.warn("Setting require_client_auth is incompatible with 'rack' and 'dc' internode_encryption values."
                         " To ensure that mutual TLS authentication is enforced, please set internode_encryption to 'all'. Continuing with"
@@ -806,6 +815,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 mscfg.compress = netw::messaging_service::compress_what::all;
             } else if (compress_what == "dc") {
                 mscfg.compress = netw::messaging_service::compress_what::dc;
+            }
+
+            if (encrypt == "all") {
+                mscfg.encrypt = netw::messaging_service::encrypt_what::all;
+            } else if (encrypt == "dc") {
+                mscfg.encrypt = netw::messaging_service::encrypt_what::dc;
+            } else if (encrypt == "rack") {
+                mscfg.encrypt = netw::messaging_service::encrypt_what::rack;
             }
 
             if (!cfg->inter_dc_tcp_nodelay()) {
@@ -835,9 +852,17 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             scfg.gossip = dbcfg.gossip_scheduling_group;
 
             debug::the_messaging_service = &messaging;
-            netw::init_messaging_service(messaging, sl_controller, std::move(mscfg), std::move(scfg), *cfg);
+
+            std::shared_ptr<seastar::tls::credentials_builder> creds;
+            if (mscfg.encrypt != netw::messaging_service::encrypt_what::none) {
+                creds = std::make_shared<seastar::tls::credentials_builder>();
+                utils::configure_tls_creds_builder(*creds, cfg->server_encryption_options()).get();
+            }
+
+            // Delay listening messaging_service until gossip message handlers are registered
+            messaging.start(std::ref(sl_controller), mscfg, scfg, creds).get();
             auto stop_ms = defer_verbose_shutdown("messaging service", [&messaging] {
-                netw::uninit_messaging_service(messaging).get();
+                messaging.invoke_on_all(&netw::messaging_service::stop).get();
             });
 
             static sharded<db::system_distributed_keyspace> sys_dist_ks;
@@ -973,6 +998,16 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     wasm_instance_cache.stop().get();
                 });
             }
+
+            auto get_tm_cfg = sharded_parameter([&] {
+                return tasks::task_manager::config {
+                    .task_ttl = cfg->task_ttl_seconds,
+                };
+            });
+            task_manager.start(std::move(get_tm_cfg), std::ref(stop_signal.as_sharded_abort_source())).get();
+            auto stop_task_manager = defer_verbose_shutdown("task_manager", [&task_manager] {
+                task_manager.stop().get();
+            });
 
             supervisor::notify("starting compaction_manager");
             // get_cm_cfg is called on each shard when starting a sharded<compaction_manager>
@@ -1355,6 +1390,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_repair(ctx).get();
             });
 
+            api::set_server_task_manager(ctx).get();
+#ifndef SCYLLA_BUILD_MODE_RELEASE
+            api::set_server_task_manager_test(ctx, cfg).get();
+#endif
             supervisor::notify("starting sstables loader");
             sst_loader.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging)).get();
             auto stop_sst_loader = defer_verbose_shutdown("sstables loader", [&sst_loader] {

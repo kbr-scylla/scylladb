@@ -64,7 +64,7 @@ public:
         return _t->get_sstable_set();
     }
     const sstables::sstable_set& maintenance_sstable_set() const override {
-        return _t->maintenance_sstable_set();
+        return _t->as_table_state().maintenance_sstable_set();
     }
     std::unordered_set<sstables::shared_sstable> fully_expired_sstables(const std::vector<sstables::shared_sstable>& sstables, gc_clock::time_point compaction_time) const override {
         return sstables::get_fully_expired_sstables(*this, sstables, compaction_time - schema()->gc_grace_seconds());
@@ -175,7 +175,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
                 BOOST_REQUIRE(!sstables.count(new_sst));
                 sstables.insert(new_sst);
             }
-            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables);
+            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables).get();
             cmt.propagate_replacement(&*cf, old_sstables, new_sstables);
         };
 
@@ -246,7 +246,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             auto sst = make_sstable_containing(sst_gen, { make_insert(tokens[i]) });
             sst->set_sstable_level(1);
             BOOST_REQUIRE(sst->get_sstable_level() == 1);
-            column_family_test(cf).add_sstable(sst);
+            column_family_test(cf).add_sstable(sst).get();
             sstables.insert(std::move(sst));
             do_compaction(4, 4);
         }
@@ -306,15 +306,14 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
         shared_sstable make_sstable_with_size(size_t sstable_data_size) {
             static thread_local unsigned gen = 0;
             auto sst = _env.make_sstable(_cf->schema(), "", gen++, sstable_version_types::md, big);
-            sstables::test(sst).set_data_file_size(sstable_data_size);
-            sstables::test(sst).set_values("z", "a", stats_metadata{});
+            sstables::test(sst).set_values("z", "a", stats_metadata{}, sstable_data_size);
             return sst;
         }
 
         void populate(double target_space_amplification) {
             auto add_sstable = [this] (unsigned sst_data_size) {
                 auto sst = make_sstable_with_size(sst_data_size);
-                column_family_test(_cf).add_sstable(sst);
+                column_family_test(_cf).add_sstable(sst).get();
             };
 
             add_sstable(data_set_size);
@@ -334,7 +333,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
                 }
                 auto total = boost::accumulate(desc.sstables | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
                 std::vector<shared_sstable> new_ssts = { make_sstable_with_size(std::min(total, data_set_size)) };
-                column_family_test(_cf).rebuild_sstable_list(new_ssts, desc.sstables);
+                column_family_test(_cf).rebuild_sstable_list(new_ssts, desc.sstables).get();
             }
         }
     };
@@ -403,7 +402,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             return sst;
         };
         auto sst = make_sstable_containing(creator, std::move(mutations));
-        column_family_test(cf).add_sstable(sst);
+        column_family_test(cf).add_sstable(sst).get();
 
         const auto& stats = sst->get_stats_metadata();
         BOOST_REQUIRE(stats.estimated_tombstone_drop_time.bin.size() == sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE);

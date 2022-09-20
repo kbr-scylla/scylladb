@@ -9,6 +9,7 @@
 import asyncio
 from asyncio.subprocess import Process
 from contextlib import asynccontextmanager
+from collections import ChainMap
 import itertools
 import logging
 import os
@@ -22,6 +23,9 @@ from io import BufferedWriter
 from test.pylib.pool import Pool
 import aiohttp
 import aiohttp.web
+import yaml
+import signal
+
 from cassandra import InvalidRequest                    # type: ignore
 from cassandra import OperationTimedOut                 # type: ignore
 from cassandra.auth import PlainTextAuthProvider        # type: ignore
@@ -32,70 +36,56 @@ from cassandra.cluster import ExecutionProfile  # pylint: disable=no-name-in-mod
 from cassandra.cluster import EXEC_PROFILE_DEFAULT  # pylint: disable=no-name-in-module
 from cassandra.policies import WhiteListRoundRobinPolicy  # type: ignore
 
-#
-# Put all Scylla options in a template file. Sic: if you make a typo in the
-# configuration file, Scylla will boot fine and ignore the setting.
-# Always check the error log after modifying the template.
-#
-SCYLLA_CONF_TEMPLATE = """cluster_name: {cluster_name}
-developer_mode: true
 
-# Allow testing experimental features. Following issue #9467, we need
-# to add here specific experimental features as they are introduced.
+def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str], cluster_name: str) -> dict[str, object]:
+    return {
+        'cluster_name': cluster_name,
+        'workdir': str(workdir.resolve()),
+        'listen_address': host_addr,
+        'rpc_address': host_addr,
+        'api_address': host_addr,
+        'prometheus_address': host_addr,
+        'alternator_address': host_addr,
+        'seed_provider': [{
+            'class_name': 'org.apache.cassandra.locator.SimpleSeedProvider',
+            'parameters': [{
+                'seeds': '{}'.format(','.join(seed_addrs))
+                }]
+            }],
 
-enable_user_defined_functions: true
-experimental: true
-experimental_features:
-    - raft
-    - udf
+        'developer_mode': True,
 
-data_file_directories:
-    - {workdir}/data
-commitlog_directory: {workdir}/commitlog
-hints_directory: {workdir}/hints
-view_hints_directory: {workdir}/view_hints
+        # Allow testing experimental features. Following issue #9467, we need
+        # to add here specific experimental features as they are introduced.
+        'enable_user_defined_functions': True,
+        'experimental': True,
+        'experimental_features': ['raft', 'udf'],
 
-listen_address: {host}
-rpc_address: {host}
-api_address: {host}
-prometheus_address: {host}
-alternator_address: {host}
+        'skip_wait_for_gossip_to_settle': 0,
+        'ring_delay_ms': 0,
+        'num_tokens': 16,
+        'flush_schema_tables_after_modification': False,
+        'auto_snapshot': False,
 
-seed_provider:
-    - class_name: org.apache.cassandra.locator.simple_seed_provider
-      parameters:
-          - seeds: {seeds}
+        # Significantly increase default timeouts to allow running tests
+        # on a very slow setup (but without network losses). Note that these
+        # are server-side timeouts: The client should also avoid timing out
+        # its own requests - for this reason we increase the CQL driver's
+        # client-side timeout in conftest.py.
 
-skip_wait_for_gossip_to_settle: 0
-ring_delay_ms: 0
-num_tokens: 16
-flush_schema_tables_after_modification: false
-auto_snapshot: false
+        'range_request_timeout_in_ms': 300000,
+        'read_request_timeout_in_ms': 300000,
+        'counter_write_request_timeout_in_ms': 300000,
+        'cas_contention_timeout_in_ms': 300000,
+        'truncate_request_timeout_in_ms': 300000,
+        'write_request_timeout_in_ms': 300000,
+        'request_timeout_in_ms': 300000,
 
-# Significantly increase default timeouts to allow running tests
-# on a very slow setup (but without network losses). Note that these
-# are server-side timeouts: The client should also avoid timing out
-# its own requests - for this reason we increase the CQL driver's
-# client-side timeout in conftest.py.
+        'strict_allow_filtering': True,
 
-range_request_timeout_in_ms: 300000
-read_request_timeout_in_ms: 300000
-counter_write_request_timeout_in_ms: 300000
-cas_contention_timeout_in_ms: 300000
-truncate_request_timeout_in_ms: 300000
-write_request_timeout_in_ms: 300000
-request_timeout_in_ms: 300000
-
-# Set up authentication in order to allow testing this module
-# and other modules dependent on it: e.g. service levels
-
-authenticator: {authenticator}
-authorizer: {authorizer}
-strict_allow_filtering: true
-
-permissions_update_interval_in_ms: 100
-permissions_validity_in_ms: 100
-"""
+        'permissions_update_interval_in_ms': 100,
+        'permissions_validity_in_ms': 100,
+    }
 
 # Seastar options can not be passed through scylla.yaml, use command line
 # for them. Keep everything else in the configuration file to make
@@ -141,8 +131,10 @@ class ScyllaServer:
         self.log_savepoint = 0
         self.control_cluster: Optional[Cluster] = None
         self.control_connection: Optional[Session] = None
-        self.authenticator: str = config_options["authenticator"]
-        self.authorizer: str = config_options["authorizer"]
+        self.config_options = config_options
+        # Sum of basic server configuration and the user-provided config options (self.config_options).
+        # Calculated in `install` as only then we know the seed servers.
+        self.config: Dict[str, object] = {}
 
         async def stop_server() -> None:
             if self.is_running:
@@ -214,18 +206,27 @@ class ScyllaServer:
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.config_filename.parent.mkdir(parents=True, exist_ok=True)
         # Create a configuration file.
-        fmt = {
-              "cluster_name": self.cluster_name,
-              "host": self.hostname,
-              "seeds": ",".join(self.seeds),
-              "workdir": self.workdir,
-              "authenticator": self.authenticator,
-              "authorizer": self.authorizer
-        }
-        with self.config_filename.open('w') as config_file:
-            config_file.write(SCYLLA_CONF_TEMPLATE.format(**fmt))
+        self.config = make_scylla_conf(
+                workdir = self.workdir,
+                host_addr = self.hostname,
+                seed_addrs = self.seeds,
+                cluster_name = self.cluster_name) \
+            | self.config_options
+        self._write_config_file()
 
         self.log_file = self.log_filename.open("wb")
+
+    def get_config(self) -> dict[str, object]:
+        """Return the contents of conf/scylla.yaml as a dict."""
+        return self.config
+
+    def update_config(self, key: str, value: object) -> None:
+        """Update conf/scylla.yaml by setting `value` under `key`.
+           If we're running, reload the config with a SIGHUP."""
+        self.config[key] = value
+        self._write_config_file()
+        if self.cmd:
+            self.cmd.send_signal(signal.SIGHUP)
 
     def take_log_savepoint(self) -> None:
         """Save the server current log size when a test starts so that if
@@ -448,15 +449,20 @@ class ScyllaServer:
     def __str__(self):
         return self.hostname
 
+    def _write_config_file(self) -> None:
+        with self.config_filename.open('w') as config_file:
+            yaml.dump(self.config, config_file)
+
 
 class ScyllaCluster:
     """A cluster of Scylla servers providing an API for changes"""
     # pylint: disable=too-many-instance-attributes
 
     class ActionReturn(NamedTuple):
-        """Return status and message for API requests"""
+        """Return status, message, and data (where applicable, otherwise empty) for API requests."""
         success: bool
-        msg: str
+        msg: str = ""
+        data: dict = {}
 
     def __init__(self, replicas: int,
                  create_server: Callable[[str, Optional[List[str]]], ScyllaServer]) -> None:
@@ -632,8 +638,10 @@ class ScyllaCluster:
 
     async def server_restart(self, server_id: str) -> ActionReturn:
         """Restart a running server"""
+        logging.info("Cluster %s restarting server %s", self, server_id)
         ret = await self.server_stop(server_id, gracefully=True)
         if not ret.success:
+            logging.error("Cluster %s failed to stop server %s", self, server_id)
             return ret
         return await self.server_start(server_id)
 
@@ -652,16 +660,28 @@ class ScyllaCluster:
         self.removed.add(server_id)
         return ScyllaCluster.ActionReturn(success=True, msg=f"Server {server_id} removed")
 
-    async def start_stopped(self) -> ActionReturn:
-        """Start a stopped server"""
-        logging.info("Cluster %s starting all stopped servers", self)
-        if not self.stopped:
-            return ScyllaCluster.ActionReturn(success=True, msg=f"No stopped servers")
-        ids = list(self.stopped.keys())
-        await asyncio.gather(*(server.start() for server in self.stopped.values()))
-        self.running.update(self.stopped)
-        self.stopped.clear()
-        return ScyllaCluster.ActionReturn(success=True, msg=f"Re-started servers {','.join(ids)}")
+    def get_config(self, server_id: str) -> ActionReturn:
+        """Get conf/scylla.yaml of the given server as a dictionary.
+           Fails if the server cannot be found."""
+        server = self._find_server(server_id)
+        if not server:
+            return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} unknown")
+        return ScyllaCluster.ActionReturn(success=True, data=server.get_config())
+
+    def update_config(self, server_id: str, key: str, value: object) -> ActionReturn:
+        """Update conf/scylla.yaml of the given server by setting `value` under `key`.
+           If the server is running, reload the config with a SIGHUP.
+           Marks the cluster as dirty.
+           Fails if the server cannot be found."""
+        server = self._find_server(server_id)
+        if not server:
+            return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} unknown")
+        self.is_dirty = True
+        server.update_config(key, value)
+        return ScyllaCluster.ActionReturn(success=True)
+
+    def _find_server(self, id: str) -> Optional[ScyllaServer]:
+        return ChainMap(self.running, self.stopped).get(id)
 
 
 class ScyllaClusterManager:
@@ -698,6 +718,7 @@ class ScyllaClusterManager:
 
     async def _before_test(self, test_name: str) -> None:
         if self.cluster.is_dirty:
+            await self.clusters.steal()
             await self.cluster.stop()
             await self._get_cluster()
         logging.info("Leasing Scylla cluster %s for test %s", self.cluster, test_name)
@@ -707,11 +728,15 @@ class ScyllaClusterManager:
 
     async def stop(self) -> None:
         """Stop, cycle last cluster if not dirty and present"""
+        logging.info("ScyllaManager stopping for test %s", self.test_name)
         await self.site.stop()
         if not self.cluster.is_dirty:
-            logging.info("Returning Scylla cluster %s", self.cluster)
+            logging.info("Returning Scylla cluster %s for test %s", self.cluster, self.test_name)
             await self.clusters.put(self.cluster)
         else:
+            logging.info("ScyllaManager: Scylla cluster %s is dirty after %s, stopping it",
+                            self.cluster, self.test_name)
+            await self.clusters.steal()
             await self.cluster.stop()
         del self.cluster
         if os.path.exists(self.manager_dir):
@@ -738,7 +763,8 @@ class ScyllaClusterManager:
         self.app.router.add_get('/cluster/server/{id}/restart', self._cluster_server_restart)
         self.app.router.add_get('/cluster/addserver', self._cluster_server_add)
         self.app.router.add_get('/cluster/removeserver/{id}', self._cluster_server_remove)
-        self.app.router.add_get('/cluster/start_stopped', self._cluster_start_stopped)
+        self.app.router.add_get('/cluster/server/{id}/get_config', self._server_get_config)
+        self.app.router.add_put('/cluster/server/{id}/update_config', self._server_update_config)
 
     async def _manager_up(self, _request) -> aiohttp.web.Response:
         return aiohttp.web.Response(text=f"{self.is_running}")
@@ -823,13 +849,24 @@ class ScyllaClusterManager:
             return aiohttp.web.Response(status=500, text=f"Host {server_id} not found")
         return aiohttp.web.Response(text="OK")
 
-    async def _cluster_start_stopped(self, _request) -> aiohttp.web.Response:
-        """Start all previously stopped servers"""
+    async def _server_get_config(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Get conf/scylla.yaml of the given server as a dictionary."""
         assert self.cluster
-        resp = await self.cluster.start_stopped()
-        if not resp.success:
-            return aiohttp.web.Response(status=500, text="Error")
-        return aiohttp.web.Response(status=200, text="OK")
+        ret = self.cluster.get_config(request.match_info['id'])
+        if not ret.success:
+            return aiohttp.web.Response(status=404, text=ret.msg)
+        return aiohttp.web.json_response(ret.data)
+
+    async def _server_update_config(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        """Update conf/scylla.yaml of the given server by setting `value` under `key`.
+           If the server is running, reload the config with a SIGHUP.
+           Marks the cluster as dirty."""
+        assert self.cluster
+        data = await request.json()
+        ret = self.cluster.update_config(request.match_info['id'], data['key'], data['value'])
+        if not ret.success:
+            return aiohttp.web.Response(status=404, text=ret.msg)
+        return aiohttp.web.Response()
 
 
 @asynccontextmanager

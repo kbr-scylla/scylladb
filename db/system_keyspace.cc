@@ -1346,10 +1346,14 @@ future<> system_keyspace::setup(sharded<netw::messaging_service>& ms) {
     // #2514 - make sure "system" is written to system_schema.keyspaces.
     co_await db::schema_tables::save_system_schema(_qp.local(), NAME);
     co_await cache_truncation_record();
-    auto preferred_ips = co_await get_preferred_ips();
-    co_await ms.invoke_on_all([&preferred_ips] (auto& ms) {
-        return ms.init_local_preferred_ip_cache(preferred_ips);
-    });
+
+    auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
+    if (snitch->prefer_local()) {
+        auto preferred_ips = co_await get_preferred_ips();
+        co_await ms.invoke_on_all([&preferred_ips] (auto& ms) {
+            return ms.init_local_preferred_ip_cache(preferred_ips);
+        });
+    }
 }
 
 struct truncation_record {
@@ -1746,13 +1750,13 @@ future<std::unordered_set<dht::token>> system_keyspace::get_local_tokens() {
 
 future<> system_keyspace::update_cdc_generation_id(cdc::generation_id gen_id) {
     co_await std::visit(make_visitor(
-    [] (cdc::generation_id_v1 id) -> future<> {
-        co_await qctx->execute_cql(
+    [this] (cdc::generation_id_v1 id) -> future<> {
+        co_await execute_cql(
                 format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)", v3::CDC_LOCAL),
                 sstring(v3::CDC_LOCAL), id.ts);
     },
-    [] (cdc::generation_id_v2 id) -> future<> {
-        co_await qctx->execute_cql(
+    [this] (cdc::generation_id_v2 id) -> future<> {
+        co_await execute_cql(
                 format("INSERT INTO system.{} (key, streams_timestamp, uuid) VALUES (?, ?, ?)", v3::CDC_LOCAL),
                 sstring(v3::CDC_LOCAL), id.ts, id.id);
     }
@@ -1762,7 +1766,7 @@ future<> system_keyspace::update_cdc_generation_id(cdc::generation_id gen_id) {
 }
 
 future<std::optional<cdc::generation_id>> system_keyspace::get_cdc_generation_id() {
-    auto msg = co_await qctx->execute_cql(
+    auto msg = co_await execute_cql(
             format("SELECT streams_timestamp, uuid FROM system.{} WHERE key = ?", v3::CDC_LOCAL),
             sstring(v3::CDC_LOCAL));
 
@@ -1789,12 +1793,12 @@ static const sstring CDC_REWRITTEN_KEY = "rewritten";
 
 future<> system_keyspace::cdc_set_rewritten(std::optional<cdc::generation_id_v1> gen_id) {
     if (gen_id) {
-        return qctx->execute_cql(
+        return execute_cql(
                 format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)", v3::CDC_LOCAL),
                 CDC_REWRITTEN_KEY, gen_id->ts).discard_result();
     } else {
         // Insert just the row marker.
-        return qctx->execute_cql(
+        return execute_cql(
                 format("INSERT INTO system.{} (key) VALUES (?)", v3::CDC_LOCAL),
                 CDC_REWRITTEN_KEY).discard_result();
     }
@@ -1802,7 +1806,7 @@ future<> system_keyspace::cdc_set_rewritten(std::optional<cdc::generation_id_v1>
 
 future<bool> system_keyspace::cdc_is_rewritten() {
     // We don't care about the actual timestamp; it's additional information for debugging purposes.
-    return qctx->execute_cql(format("SELECT key FROM system.{} WHERE key = ?", v3::CDC_LOCAL), CDC_REWRITTEN_KEY)
+    return execute_cql(format("SELECT key FROM system.{} WHERE key = ?", v3::CDC_LOCAL), CDC_REWRITTEN_KEY)
             .then([] (::shared_ptr<cql3::untyped_result_set> msg) {
         return !msg->empty();
     });
@@ -3164,7 +3168,7 @@ future<> system_keyspace::enable_features_on_startup(sharded<gms::feature_servic
         co_return;
     }
     gms::feature_service& local_feat_srv = feat.local();
-    const auto known_features = local_feat_srv.known_feature_set();
+    const auto known_features = local_feat_srv.supported_feature_set();
     const auto& registered_features = local_feat_srv.registered_features();
     const auto persisted_features = gms::feature_service::to_feature_set(*pre_enabled_features);
     for (auto&& f : persisted_features) {

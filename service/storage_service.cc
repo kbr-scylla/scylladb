@@ -336,7 +336,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     } else if (should_bootstrap()) {
         co_await check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features);
     } else {
-        auto local_features = _feature_service.known_feature_set();
+        auto local_features = _feature_service.supported_feature_set();
         slogger.info("Checking remote features with gossip, initial_contact_nodes={}", initial_contact_nodes);
         co_await _gossiper.do_shadow_round(initial_contact_nodes);
         _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
@@ -371,7 +371,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         tmptr->update_topology(get_broadcast_address(), _sys_ks.local().local_dc_rack());
         co_await tmptr->update_normal_tokens(my_tokens, get_broadcast_address());
 
-        cdc_gen_id = co_await db::system_keyspace::get_cdc_generation_id();
+        cdc_gen_id = co_await _sys_ks.local().get_cdc_generation_id();
         if (!cdc_gen_id) {
             // We could not have completed joining if we didn't generate and persist a CDC streams timestamp,
             // unless we are restarting after upgrading from non-CDC supported version.
@@ -555,7 +555,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 
         // Don't try rewriting CDC stream description tables.
         // See cdc.md design notes, `Streams description table V1 and rewriting` section, for explanation.
-        co_await db::system_keyspace::cdc_set_rewritten(std::nullopt);
+        co_await _sys_ks.local().cdc_set_rewritten(std::nullopt);
     }
 
     // now, that the system distributed keyspace is initialized and started,
@@ -611,7 +611,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 
     // Persist the CDC streams timestamp before we persist bootstrap_state = COMPLETED.
     if (cdc_gen_id) {
-        co_await db::system_keyspace::update_cdc_generation_id(*cdc_gen_id);
+        co_await _sys_ks.local().update_cdc_generation_id(*cdc_gen_id);
     }
     // If we crash now, we will choose a new CDC streams timestamp anyway (because we will also choose a new set of tokens).
     // But if we crash after setting bootstrap_state = COMPLETED, we will keep using the persisted CDC streams timestamp after restarting.
@@ -1581,7 +1581,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
     return seastar::async([this, initial_contact_nodes, loaded_peer_features] {
         auto t = gms::gossiper::clk::now();
         bool found_bootstrapping_node = false;
-        auto local_features = _feature_service.known_feature_set();
+        auto local_features = _feature_service.supported_feature_set();
         do {
             slogger.info("Checking remote features with gossip");
             _gossiper.do_shadow_round(initial_contact_nodes).get();
@@ -1652,7 +1652,7 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
     // make magic happen
     slogger.info("Checking remote features with gossip");
     co_await _gossiper.do_shadow_round(initial_contact_nodes);
-    auto local_features = _feature_service.known_feature_set();
+    auto local_features = _feature_service.supported_feature_set();
     _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
 
     // now that we've gossiped at least once, we should be able to find the node we're replacing
@@ -1871,7 +1871,7 @@ future<> storage_service::start_gossiping() {
             co_await ss._gossiper.container().invoke_on_all(&gms::gossiper::start);
             bool should_stop_gossiper = false; // undo action
             try {
-                auto cdc_gen_ts = co_await db::system_keyspace::get_cdc_generation_id();
+                auto cdc_gen_ts = co_await ss._sys_ks.local().get_cdc_generation_id();
                 if (!cdc_gen_ts) {
                     cdc_log.warn("CDC generation timestamp missing when starting gossip");
                 }
@@ -3572,6 +3572,7 @@ future<> storage_service::notify_joined(inet_address endpoint) {
     }
 
     co_await container().invoke_on_all([endpoint] (auto&& ss) {
+        ss._messaging.local().remove_rpc_client_with_ignored_topology(netw::msg_addr{endpoint, 0});
         return ss._lifecycle_notifier.notify_joined(endpoint);
     });
     slogger.debug("Notify node {} has joined the cluster", endpoint);

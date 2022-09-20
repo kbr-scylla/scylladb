@@ -227,8 +227,9 @@ public:
     static constexpr int32_t current_version = 0;
 
     struct shard_info {
-        shard_info(shared_ptr<rpc_protocol_client_wrapper>&& client);
+        shard_info(shared_ptr<rpc_protocol_client_wrapper>&& client, bool topology_ignored);
         shared_ptr<rpc_protocol_client_wrapper> rpc_client;
+        const bool topology_ignored;
         rpc::stats get_stats() const;
     };
 
@@ -505,7 +506,9 @@ public:
 
     void foreach_server_connection_stats(std::function<void(const rpc::client_info&, const rpc::stats&)>&& f) const;
 private:
-    bool remove_rpc_client_one(clients_map& clients, msg_addr id, bool dead_only);
+    template <typename Fn>
+    requires std::is_invocable_r_v<bool, Fn, const shard_info&>
+    void find_and_remove_client(clients_map& clients, msg_addr id, Fn&& filter);
     void do_start_listen();
 
     bool is_same_dc(inet_address ep) const;
@@ -515,6 +518,7 @@ public:
     // Return rpc::protocol::client for a shard which is a ip + cpuid pair.
     shared_ptr<rpc_protocol_client_wrapper> get_rpc_client(messaging_verb verb, msg_addr id);
     void remove_error_rpc_client(messaging_verb verb, msg_addr id);
+    void remove_rpc_client_with_ignored_topology(msg_addr id);
     void remove_rpc_client(msg_addr id);
     connection_drop_registration_t when_connection_drops(connection_drop_slot_t& slot) {
         return _connection_dropped.connect(slot);
@@ -528,10 +532,5 @@ public:
     static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"};
     unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
 };
-
-void init_messaging_service(sharded<messaging_service>& ms,
-        sharded<qos::service_level_controller>& sl_controller,
-        messaging_service::config cfg, messaging_service::scheduling_config scheduling_config, const db::config& db_config);
-future<> uninit_messaging_service(sharded<messaging_service>& ms);
 
 } // namespace netw
