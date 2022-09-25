@@ -349,6 +349,37 @@ It is important not to backport into an older branch while letting a younger
 branch not receive the fix, since that creates a regression for users that
 upgrade to the younger branch.
 
+## Creating an enterprise branch
+
+An enterprise branch has the following relationship with an
+open-source branch:
+
+ - it includes ALL commits in that open-source branch (as child commits,
+   not backports)
+ - it does not include ANY open-source commits that aren't included in that
+   open-source branch as child commits (some such commits may be included
+   as backports)
+
+Therefore, to create an enterprise branch we must find the last merge
+point where we merged from master to enterprise, where that merge point
+is before the open-source branch was created.
+
+To figure this out, run this command (assuming you want to create an
+enterprise branch corresponding to branch-5.1):
+
+    git name-rev --refs=enterprise/enterprise $(git merge-base enterprise/enterprise origin/branch-5.1)
+
+This generates a path of the form
+
+    785ea869fb3c440bf791c6940ed29339cc98ed38 enterprise/enterprise~8^2~2
+
+The part of the path before `^` indicates the last merge. So one would
+create a branch at commit `enterprise/enterprise~8` and then merge
+`branch-5.1` to merge any commits that were added after the last merge.
+
+It is customary to merge the branch point to enterprise ahead of time, so
+this last merge is empty.
+
 ## Merging from an open-source branch to an enterprise branch
 
 Periodically, we merge into enterprise branches from their open-source bases.
