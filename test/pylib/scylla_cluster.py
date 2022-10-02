@@ -465,13 +465,12 @@ class ScyllaCluster:
         data: dict = {}
 
     def __init__(self, replicas: int,
-                 create_server: Callable[[str, Optional[List[str]]], ScyllaServer]) -> None:
+                 create_server: Callable[[str, List[str]], ScyllaServer]) -> None:
         self.name = str(uuid.uuid1())
         self.replicas = replicas
         self.create_server = create_server
         self.running: Dict[str, ScyllaServer] = {}  # started servers
         self.stopped: Dict[str, ScyllaServer] = {}  # servers no longer running but present
-        self.removed: Set[str] = set()              # servers stopped and uninstalled (can't return)
         # cluster is started (but it might not have running servers)
         self.is_running: bool = False
         # cluster was modified in a way it should not be used in subsequent tests
@@ -606,8 +605,6 @@ class ScyllaCluster:
         if server_id in self.stopped:
             return ScyllaCluster.ActionReturn(success=True,
                                               msg=f"Server {server_id} already stopped")
-        if server_id in self.removed:
-            return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} removed")
         if server_id not in self.running:
             return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} unknown")
         self.is_dirty = True
@@ -625,8 +622,6 @@ class ScyllaCluster:
         if server_id in self.running:
             return ScyllaCluster.ActionReturn(success=True,
                                               msg=f"Server {server_id} already started")
-        if server_id in self.removed:
-            return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} removed")
         if server_id not in self.stopped:
             return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} unknown")
         self.is_dirty = True
@@ -647,18 +642,7 @@ class ScyllaCluster:
 
     async def server_remove(self, server_id: str) -> ActionReturn:
         """Remove a specified server"""
-        self.is_dirty = True
-        logging.info("Cluster %s removing server %s", self, server_id)
-        if server_id in self.running:
-            server = self.running.pop(server_id)
-            await server.stop_gracefully()
-        elif server_id in self.stopped:
-            server = self.stopped.pop(server_id)
-        else:
-            return ScyllaCluster.ActionReturn(success=False, msg=f"Server {server_id} unknown")
-        await server.uninstall()
-        self.removed.add(server_id)
-        return ScyllaCluster.ActionReturn(success=True, msg=f"Server {server_id} removed")
+        raise NotImplementedError
 
     def get_config(self, server_id: str) -> ActionReturn:
         """Get conf/scylla.yaml of the given server as a dictionary.
@@ -710,6 +694,9 @@ class ScyllaClusterManager:
 
     async def start(self) -> None:
         """Get first cluster, setup API"""
+        if self.is_running:
+            logging.warning("ScyllaClusterManager already running")
+            return
         await self._get_cluster()
         await self.runner.setup()
         self.site = aiohttp.web.UnixSite(self.runner, path=self.sock_path)
@@ -741,6 +728,7 @@ class ScyllaClusterManager:
         del self.cluster
         if os.path.exists(self.manager_dir):
             shutil.rmtree(self.manager_dir)
+        self.is_running = False
 
     async def _get_cluster(self) -> None:
         self.cluster = await self.clusters.get()
@@ -875,7 +863,6 @@ async def get_cluster_manager(test_name: str, clusters: Pool[ScyllaCluster], tes
     """Create a temporary manager for the active cluster used in a test
        and provide the cluster to the caller."""
     manager = ScyllaClusterManager(test_name, clusters, test_path)
-    await manager.start()
     try:
         yield manager
     finally:
