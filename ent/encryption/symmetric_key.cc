@@ -12,6 +12,9 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#if OPENSSL_VERSION_NUMBER >= (3<<28)
+#   include <openssl/provider.h>
+#endif
 
 #include <seastar/core/align.hh>
 #include <seastar/core/print.hh>
@@ -19,7 +22,14 @@
 #include "symmetric_key.hh"
 #include "utils/hash.hh"
 
-static const bool inited = [] { OpenSSL_add_all_ciphers(); return true; }();
+static const bool inited = [] {
+    OpenSSL_add_all_ciphers();
+#if OPENSSL_VERSION_NUMBER >= (3<<28)
+    OSSL_PROVIDER_load(NULL, "legacy");
+    OSSL_PROVIDER_load(NULL, "default");
+#endif
+    return true;
+}();
 
 std::ostream& encryption::operator<<(std::ostream& os, const key_info& info) {
     return os << info.alg << ":" << info.len;
