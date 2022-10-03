@@ -12,6 +12,8 @@
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/err.h>
+
 #if OPENSSL_VERSION_NUMBER >= (3<<28)
 #   include <openssl/provider.h>
 #endif
@@ -33,6 +35,16 @@ static const bool inited = [] {
 
 std::ostream& encryption::operator<<(std::ostream& os, const key_info& info) {
     return os << info.alg << ":" << info.len;
+}
+
+static void throw_evp_error(std::string msg) {
+    auto e = ERR_get_error();
+    if (e != 0) {
+        char buf[512];
+        ERR_error_string_n(e, buf, sizeof(buf));
+        msg += "(" + std::string(buf) + ")";
+    }
+    throw std::runtime_error(msg);
 }
 
 bool encryption::key_info::compatible(const key_info& rhs) const {
@@ -143,14 +155,14 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         cipher = EVP_get_cipherbyname(str.c_str());
     }
     if (!cipher) {
-        throw std::invalid_argument("Invalid algorithm: " + info.alg);
+        throw_evp_error("Invalid algorithm: " + info.alg);
     }
 
     size_t len = EVP_CIPHER_key_length(cipher);
 
     if ((_info.len/8) != len) {
         if (!EVP_CipherInit_ex(*this, cipher, nullptr, nullptr, nullptr, 0)) {
-            throw std::runtime_error("Could not initialize cipher");
+            throw_evp_error("Could not initialize cipher");
         }
         auto dlen = _info.len/8;
         // Openssl describes des-56 length as 64 (counts parity),
@@ -162,7 +174,7 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
         // if we had to find a cipher without explicit key length (like rc2),
         // try to set the key length to the desired strength.
         if (!EVP_CIPHER_CTX_set_key_length(*this, dlen)) {
-            throw std::invalid_argument(fmt::format("Invalid length {} for resolved type {} (wanted {})", len*8, str, _info.len));
+            throw_evp_error(fmt::format("Invalid length {} for resolved type {} (wanted {})", len*8, str, _info.len));
         }
 
         len = EVP_CIPHER_key_length(cipher);
@@ -172,7 +184,7 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
     if (_key.empty()) {
         _key.resize(len);
         if (!RAND_bytes(reinterpret_cast<uint8_t*>(_key.data()), _key.size())) {
-            throw std::runtime_error("Could not generate key: " + info.alg);
+            throw_evp_error(fmt::format("Could not generate key: {}", info.alg));
         }
     }
     if (_key.size() < len) {
@@ -182,7 +194,7 @@ encryption::symmetric_key::symmetric_key(const key_info& info, const bytes& key)
     if (!EVP_CipherInit_ex(*this, cipher, nullptr,
                     reinterpret_cast<const uint8_t*>(_key.data()), nullptr,
                     0)) {
-        throw std::runtime_error("Could not initialize cipher");
+        throw_evp_error("Could not initialize cipher from key materiel");
     }
 
     _iv_len = EVP_CIPHER_CTX_iv_length(*this);
@@ -196,7 +208,7 @@ void encryption::symmetric_key::generate_iv_impl(uint8_t* dst, size_t s) const {
         throw std::invalid_argument("Buffer underflow");
     }
     if (!RAND_bytes(dst, s)) {
-        throw std::runtime_error("Could not generate initialization vector");
+        throw_evp_error("Could not generate initialization vector");
     }
 }
 
@@ -204,10 +216,10 @@ void encryption::symmetric_key::transform_unpadded_impl(const uint8_t* input,
                 size_t input_len, uint8_t* output, const uint8_t* iv, mode m) const {
     if (!EVP_CipherInit_ex(*this, nullptr, nullptr,
                     reinterpret_cast<const uint8_t*>(_key.data()), iv, int(m))) {
-        throw std::runtime_error("Could not initialize cipher");
+        throw_evp_error("Could not initialize cipher (transform)");
     }
     if (!EVP_CIPHER_CTX_set_padding(*this, 0)) {
-        throw std::runtime_error("Could not disable padding");
+        throw_evp_error("Could not disable padding");
     }
 
     if (input_len & (_block_size - 1)) {
@@ -231,10 +243,10 @@ size_t encryption::symmetric_key::decrypt_impl(const uint8_t* input,
                 const uint8_t* iv) const {
     if (!EVP_CipherInit_ex(*this, nullptr, nullptr,
                     reinterpret_cast<const uint8_t*>(_key.data()), iv, 0)) {
-        throw std::runtime_error("Could not initialize cipher");
+        throw_evp_error("Could not initialize cipher (decrypt)");
     }
     if (!EVP_CIPHER_CTX_set_padding(*this, int(_padding))) {
-        throw std::runtime_error("Could not initialize padding");
+        throw_evp_error("Could not initialize padding");
     }
 
     // normal case, caller provides output enough to deal with any padding.
@@ -244,10 +256,10 @@ size_t encryption::symmetric_key::decrypt_impl(const uint8_t* input,
         int outl = 0;
         int finl = 0;
         if (!EVP_DecryptUpdate(*this, output, &outl, input, int(input_len))) {
-            throw std::runtime_error("decryption failed");
+            throw_evp_error("decryption failed");
         }
         if (!EVP_DecryptFinal(*this, output + outl, &finl)) {
-            throw std::runtime_error("decryption failed");
+            throw_evp_error("decryption failed");
         }
 
         return outl + finl;
@@ -299,19 +311,19 @@ size_t encryption::symmetric_key::encrypt_impl(const uint8_t* input,
 
     if (!EVP_CipherInit_ex(*this, nullptr, nullptr,
                     reinterpret_cast<const uint8_t*>(_key.data()), iv, 1)) {
-        throw std::runtime_error("Could not initialize cipher");
+        throw_evp_error("Could not initialize cipher (encrypt)");
     }
     if (!EVP_CIPHER_CTX_set_padding(*this, int(_padding))) {
-        throw std::runtime_error("Could not initialize padding");
+        throw_evp_error("Could not initialize padding");
     }
 
     int outl = 0;
     int finl = 0;
     if (!EVP_EncryptUpdate(*this, output, &outl, input, int(input_len))) {
-        throw std::runtime_error("encryption failed");
+        throw_evp_error("encryption failed");
     }
     if (!EVP_EncryptFinal(*this, output + outl, &finl)) {
-        throw std::runtime_error("encryption failed");
+        throw_evp_error("encryption failed");
     }
     return outl + finl;
 }
