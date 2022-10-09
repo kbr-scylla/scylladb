@@ -87,7 +87,7 @@ namespace replica {
 inline
 flush_controller
 make_flush_controller(const db::config& cfg, backlog_controller::scheduling_group& sg, std::function<double()> fn) {
-    return flush_controller(sg, cfg.memtable_flush_static_shares(), 50ms, cfg.virtual_dirty_soft_limit(), std::move(fn));
+    return flush_controller(sg, cfg.memtable_flush_static_shares(), 50ms, cfg.unspooled_dirty_soft_limit(), std::move(fn));
 }
 
 keyspace::keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg, locator::effective_replication_map_factory& erm_factory)
@@ -209,10 +209,10 @@ void database::setup_scylla_memory_diagnostics_producer() {
 
         writeln(" Regular:\n");
         writeln("  real dirty: {}\n", utils::to_hr_size(_dirty_memory_manager.real_dirty_memory()));
-        writeln("  virt dirty: {}\n", utils::to_hr_size(_dirty_memory_manager.virtual_dirty_memory()));
+        writeln("  virt dirty: {}\n", utils::to_hr_size(_dirty_memory_manager.unspooled_dirty_memory()));
         writeln(" System:\n");
         writeln("  real dirty: {}\n", utils::to_hr_size(_system_dirty_memory_manager.real_dirty_memory()));
-        writeln("  virt dirty: {}\n\n", utils::to_hr_size(_system_dirty_memory_manager.virtual_dirty_memory()));
+        writeln("  virt dirty: {}\n\n", utils::to_hr_size(_system_dirty_memory_manager.unspooled_dirty_memory()));
 
         writeln("Replica:\n");
 
@@ -338,12 +338,12 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
     // Allow system tables a pool of 10 MB memory to write, but never block on other regions.
-    , _system_dirty_memory_manager(*this, 10 << 20, cfg.virtual_dirty_soft_limit(), default_scheduling_group())
-    , _dirty_memory_manager(*this, dbcfg.available_memory * 0.50, cfg.virtual_dirty_soft_limit(), dbcfg.statement_scheduling_group)
+    , _system_dirty_memory_manager(*this, 10 << 20, cfg.unspooled_dirty_soft_limit(), default_scheduling_group())
+    , _dirty_memory_manager(*this, dbcfg.available_memory * 0.50, cfg.unspooled_dirty_soft_limit(), dbcfg.statement_scheduling_group)
     , _dbcfg(dbcfg)
     , _flush_sg(backlog_controller::scheduling_group{dbcfg.memtable_scheduling_group, service::get_local_memtable_flush_priority()})
     , _memtable_controller(make_flush_controller(_cfg, _flush_sg, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
-        auto backlog = (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+        auto backlog = (_dirty_memory_manager.unspooled_dirty_memory()) / limit;
         if (_dirty_memory_manager.has_extraneous_flushes_requested()) {
             backlog = std::max(backlog, _memtable_controller.backlog_of_shares(200));
         }
@@ -369,10 +369,12 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _version(empty_version)
     , _compaction_manager(cm)
     , _enable_incremental_backups(cfg.incremental_backups())
-    , _large_data_handler(std::make_unique<db::cql_table_large_data_handler>(_cfg.compaction_large_partition_warning_threshold_mb()*1024*1024,
-              _cfg.compaction_large_row_warning_threshold_mb()*1024*1024,
-              _cfg.compaction_large_cell_warning_threshold_mb()*1024*1024,
-              _cfg.compaction_rows_count_warning_threshold()))
+    , _large_data_handler(std::make_unique<db::cql_table_large_data_handler>(feat,
+              _cfg.compaction_large_partition_warning_threshold_mb,
+              _cfg.compaction_large_row_warning_threshold_mb,
+              _cfg.compaction_large_cell_warning_threshold_mb,
+              _cfg.compaction_rows_count_warning_threshold,
+              _cfg.compaction_collection_elements_count_warning_threshold))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
     , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
@@ -470,11 +472,13 @@ void backlog_controller::update_controller(float shares) {
 
 
 dirty_memory_manager::dirty_memory_manager(replica::database& db, size_t threshold, double soft_limit, scheduling_group deferred_work_sg)
-    : dirty_memory_manager_logalloc::region_group_reclaimer(threshold / 2, threshold * soft_limit / 2)
-    , _real_dirty_reclaimer(threshold)
-    , _db(&db)
-    , _real_region_group("memtable", _real_dirty_reclaimer, deferred_work_sg)
-    , _virtual_region_group("memtable (virtual)", &_real_region_group, *this, deferred_work_sg)
+    : _db(&db)
+    , _region_group("memtable (unspooled)", dirty_memory_manager_logalloc::reclaim_config{
+            .unspooled_hard_limit = threshold / 2,
+            .unspooled_soft_limit = threshold * soft_limit / 2,
+            .real_hard_limit = threshold,
+            .start_reclaiming = std::bind_front(&dirty_memory_manager::start_reclaiming, this)
+      }, deferred_work_sg)
     , _flush_serializer(1)
     , _waiting_flush(flush_when_needed()) {}
 
@@ -486,9 +490,9 @@ dirty_memory_manager::setup_collectd(sstring namestr) {
         sm::make_gauge(namestr + "_dirty_bytes", [this] { return real_dirty_memory(); },
                        sm::description("Holds the current size of a all non-free memory in bytes: used memory + released memory that hasn't been returned to a free memory pool yet. "
                                        "Total memory size minus this value represents the amount of available memory. "
-                                       "If this value minus virtual_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
+                                       "If this value minus unspooled_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
 
-        sm::make_gauge(namestr +"_virtual_dirty_bytes", [this] { return virtual_dirty_memory(); },
+        sm::make_gauge(namestr +"_unspooled_dirty_bytes", [this] { return unspooled_dirty_memory(); },
                        sm::description("Holds the size of used memory in bytes. Compare it to \"dirty_bytes\" to see how many memory is wasted (neither used nor available).")),
     });
 }
@@ -518,9 +522,9 @@ database::setup_metrics() {
         sm::make_gauge("dirty_bytes", [this] { return _dirty_memory_manager.real_dirty_memory() + _system_dirty_memory_manager.real_dirty_memory(); },
                        sm::description("Holds the current size of all (\"regular\", \"system\" and \"streaming\") non-free memory in bytes: used memory + released memory that hasn't been returned to a free memory pool yet. "
                                        "Total memory size minus this value represents the amount of available memory. "
-                                       "If this value minus virtual_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
+                                       "If this value minus unspooled_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
 
-        sm::make_gauge("virtual_dirty_bytes", [this] { return _dirty_memory_manager.virtual_dirty_memory() + _system_dirty_memory_manager.virtual_dirty_memory(); },
+        sm::make_gauge("unspooled_dirty_bytes", [this] { return _dirty_memory_manager.unspooled_dirty_memory() + _system_dirty_memory_manager.unspooled_dirty_memory(); },
                        sm::description("Holds the size of all (\"regular\", \"system\" and \"streaming\") used memory in bytes. Compare it to \"dirty_bytes\" to see how many memory is wasted (neither used nor available).")),
     });
 
@@ -1766,9 +1770,7 @@ future<> dirty_memory_manager::shutdown() {
     _db_shutdown_requested = true;
     _should_flush.signal();
     return std::move(_waiting_flush).then([this] {
-        return _virtual_region_group.shutdown().then([this] {
-            return _real_region_group.shutdown();
-        });
+        return _region_group.shutdown();
     });
 }
 
@@ -1846,7 +1848,7 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // memtable. The advantage of doing this is that this is objectively the one that will
                 // release the biggest amount of memory and is less likely to be generating tiny
                 // SSTables.
-                memtable& candidate_memtable = memtable::from_region(*(this->_virtual_region_group.get_largest_region()));
+                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
                 memtable_list& mtlist = *(candidate_memtable.get_memtable_list());
 
                 if (!candidate_memtable.region().evictable_occupancy()) {

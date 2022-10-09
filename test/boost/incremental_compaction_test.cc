@@ -71,7 +71,7 @@ public:
     }
 
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
-        return _t->compacted_undeleted_sstables();
+        return _t->as_table_state().compacted_undeleted_sstables();
     }
     sstables::compaction_strategy& get_compaction_strategy() const noexcept override {
         return _t->get_compaction_strategy();
@@ -151,7 +151,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         auto compact = [&, s] (std::vector<shared_sstable> all, auto replacer) -> std::vector<shared_sstable> {
             auto desc = sstables::compaction_descriptor(std::move(all), service::get_local_compaction_priority(), 1, 0);
             desc.enable_garbage_collection(cf->get_sstable_set());
-            return compact_sstables(*cm, std::move(desc), *cf, sst_gen, replacer).get0().new_sstables;
+            return compact_sstables(*cm, std::move(desc), cf->as_table_state(), sst_gen, replacer).get0().new_sstables;
         };
         auto make_insert = [&] (auto p) {
             auto key = partition_key::from_exploded(*s, {to_bytes(p.first)});
@@ -175,8 +175,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
                 BOOST_REQUIRE(!sstables.count(new_sst));
                 sstables.insert(new_sst);
             }
-            column_family_test(cf).rebuild_sstable_list(new_sstables, old_sstables).get();
-            cmt.propagate_replacement(&*cf, old_sstables, new_sstables);
+            column_family_test(cf).rebuild_sstable_list(cf->as_table_state(), new_sstables, old_sstables).get();
+            cmt.propagate_replacement(cf->as_table_state(), old_sstables, new_sstables);
         };
 
         auto do_incremental_replace = [&] (auto old_sstables, auto new_sstables, auto& expected_sst, auto& closed_sstables_tracker) {
@@ -333,7 +333,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
                 }
                 auto total = boost::accumulate(desc.sstables | boost::adaptors::transformed(std::mem_fn(&sstable::data_size)), uint64_t(0));
                 std::vector<shared_sstable> new_ssts = { make_sstable_with_size(std::min(total, data_set_size)) };
-                column_family_test(_cf).rebuild_sstable_list(new_ssts, desc.sstables).get();
+                column_family_test(_cf).rebuild_sstable_list(_cf->as_table_state(), new_ssts, desc.sstables).get();
             }
         }
     };
@@ -393,7 +393,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             mutations.push_back(make_insert(to_bytes("key" + to_sstring(i)), 3600, expiration_time));
         }
 
-        column_family_for_tests cf(env.manager(), s);
+        table_for_tests cf(env.manager(), s);
         auto table_s = make_table_state_for_test(env, *cf);
         auto close_cf = deferred_stop(cf);
 
@@ -414,7 +414,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
 
         auto cd = sstables::compaction_descriptor({ sst }, default_priority_class());
         cd.enable_garbage_collection(cf->get_sstable_set());
-        auto info = compact_sstables(cf.get_compaction_manager(), std::move(cd), *cf, creator).get0();
+        auto info = compact_sstables(cf.get_compaction_manager(), std::move(cd), cf->as_table_state(), creator).get0();
         auto uncompacted_size = sst->data_size();
         BOOST_REQUIRE(info.new_sstables.size() == 1);
         BOOST_REQUIRE(info.new_sstables.front()->estimate_droppable_tombstone_ratio(gc_before) == 0.0f);

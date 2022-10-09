@@ -377,14 +377,16 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , compaction_throughput_mb_per_sec(this, "compaction_throughput_mb_per_sec", liveness::LiveUpdate, value_status::Used, 0,
         "Throttles compaction to the specified total throughput across the entire system. The faster you insert data, the faster you need to compact in order to keep the SSTable count down. The recommended Value is 16 to 32 times the rate of write throughput (in MBs/second). Setting the value to 0 disables compaction throttling.\n"
         "Related information: Configuring compaction")
-    , compaction_large_partition_warning_threshold_mb(this, "compaction_large_partition_warning_threshold_mb", value_status::Used, 1000,
+    , compaction_large_partition_warning_threshold_mb(this, "compaction_large_partition_warning_threshold_mb", liveness::LiveUpdate, value_status::Used, 1000,
         "Log a warning when writing partitions larger than this value")
-    , compaction_large_row_warning_threshold_mb(this, "compaction_large_row_warning_threshold_mb", value_status::Used, 10,
+    , compaction_large_row_warning_threshold_mb(this, "compaction_large_row_warning_threshold_mb", liveness::LiveUpdate, value_status::Used, 10,
         "Log a warning when writing rows larger than this value")
-    , compaction_large_cell_warning_threshold_mb(this, "compaction_large_cell_warning_threshold_mb", value_status::Used, 1,
+    , compaction_large_cell_warning_threshold_mb(this, "compaction_large_cell_warning_threshold_mb", liveness::LiveUpdate, value_status::Used, 1,
         "Log a warning when writing cells larger than this value")
-    , compaction_rows_count_warning_threshold(this, "compaction_rows_count_warning_threshold", value_status::Used, 100000,
+    , compaction_rows_count_warning_threshold(this, "compaction_rows_count_warning_threshold", liveness::LiveUpdate, value_status::Used, 100000,
         "Log a warning when writing a number of rows larger than this value")
+    , compaction_collection_elements_count_warning_threshold(this, "compaction_collection_elements_count_warning_threshold", liveness::LiveUpdate, value_status::Used, 10000,
+        "Log a warning when writing a collection containing more elements than this value")
     /* Common memtable settings */
     , memtable_total_space_in_mb(this, "memtable_total_space_in_mb", value_status::Invalid, 0,
         "Specifies the total memory used for all memtables on a node. This replaces the per-table storage settings memtable_operations_in_millions and memtable_throughput_in_mb.")
@@ -813,7 +815,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , prometheus_prefix(this, "prometheus_prefix", value_status::Used, "scylla", "Set the prefix of the exported Prometheus metrics. Changing this will break Scylla's dashboard compatibility, do not change unless you know what you are doing.")
     , abort_on_lsa_bad_alloc(this, "abort_on_lsa_bad_alloc", value_status::Used, false, "Abort when allocation in LSA region fails")
     , murmur3_partitioner_ignore_msb_bits(this, "murmur3_partitioner_ignore_msb_bits", value_status::Used, 12, "Number of most siginificant token bits to ignore in murmur3 partitioner; increase for very large clusters")
-    , virtual_dirty_soft_limit(this, "virtual_dirty_soft_limit", value_status::Used, 0.6, "Soft limit of virtual dirty memory expressed as a portion of the hard limit")
+    , unspooled_dirty_soft_limit(this, "unspooled_dirty_soft_limit", value_status::Used, 0.6, "Soft limit of unspooled dirty memory expressed as a portion of the hard limit")
     , sstable_summary_ratio(this, "sstable_summary_ratio", value_status::Used, 0.0005, "Enforces that 1 byte of summary is written for every N (2000 by default) "
         "bytes written to data file. Value must be between 0 and 1.")
     , large_memory_allocation_warning_threshold(this, "large_memory_allocation_warning_threshold", value_status::Used, size_t(1) << 20, "Warn about memory allocations above this size; set to zero to disable")

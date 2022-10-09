@@ -36,12 +36,10 @@
 #include "schema_fwd.hh"
 #include "db/view/view.hh"
 #include "db/snapshot-ctl.hh"
-#include "gms/feature.hh"
 #include "memtable.hh"
 #include "row_cache.hh"
 #include "compaction/compaction_strategy.hh"
 #include "utils/estimated_histogram.hh"
-#include "sstables/sstable_set.hh"
 #include <seastar/core/metrics_registration.hh>
 #include "tracing/trace_state.hh"
 #include "db/view/view_stats.hh"
@@ -53,20 +51,16 @@
 #include "reader_concurrency_semaphore_group.hh"
 #include "db/timeout_clock.hh"
 #include "querier.hh"
-#include "mutation_query.hh"
 #include "cache_temperature.hh"
 #include <unordered_set>
-#include "utils/disk-error-handler.hh"
 #include "utils/updateable_value.hh"
 #include "data_dictionary/user_types_metadata.hh"
 #include "data_dictionary/keyspace_metadata.hh"
 #include "data_dictionary/data_dictionary.hh"
-#include "query_class_config.hh"
 #include "absl-flat_hash_map.hh"
 #include "utils/cross-shard-barrier.hh"
 #include "sstables/generation_type.hh"
 #include "db/rate_limiter.hh"
-#include "db/per_partition_rate_limit_info.hh"
 #include "db/operation_type.hh"
 #include "utils/serialized_action.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
@@ -97,6 +91,7 @@ class compaction_descriptor;
 class compaction_completion_desc;
 class sstables_manager;
 class compaction_data;
+class sstable_set;
 
 }
 
@@ -123,7 +118,7 @@ class large_data_handler;
 class system_keyspace;
 class table_selector;
 
-future<> system_keyspace_make(distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
+future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
 
 }
 
@@ -421,10 +416,6 @@ private:
     std::unique_ptr<compaction_group> _compaction_group;
     // Compound SSTable set for all the compaction groups, which is useful for operations spanning all of them.
     lw_shared_ptr<sstables::sstable_set> _sstables;
-    // sstables that have been compacted (so don't look up in query) but
-    // have not been deleted yet, so must not GC any tombstones in other sstables
-    // that may delete data in these sstables:
-    std::vector<sstables::shared_sstable> _sstables_compacted_but_not_deleted;
     // Control background fibers waiting for sstables to be deleted
     seastar::gate _sstable_deletion_gate;
     // This semaphore ensures that an operation like snapshot won't have its selected
@@ -899,7 +890,6 @@ public:
     const sstables::sstable_set& get_sstable_set() const;
     lw_shared_ptr<const sstable_list> get_sstables() const;
     lw_shared_ptr<const sstable_list> get_sstables_including_compacted_undeleted() const;
-    const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const;
     std::vector<sstables::shared_sstable> select_sstables(const dht::partition_range& range) const;
     size_t sstables_count() const;
     std::vector<uint64_t> sstable_count_per_level() const;
@@ -1400,7 +1390,7 @@ private:
 
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
-    friend future<> db::system_keyspace_make(distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
+    friend future<> db::system_keyspace_make(db::system_keyspace& sys_ks, distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
     reader_concurrency_semaphore& read_concurrency_sem();

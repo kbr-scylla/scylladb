@@ -71,6 +71,7 @@ class raft_group0 {
     cql3::query_processor& _qp;
     service::migration_manager& _mm;
     gms::feature_service& _feat;
+    db::system_keyspace& _sys_ks;
     raft_group0_client& _client;
 
     // Status of leader discovery. Initially there is no group 0,
@@ -102,6 +103,7 @@ public:
         cql3::query_processor& qp,
         migration_manager& mm,
         gms::feature_service& feat,
+        db::system_keyspace& sys_ks,
         raft_group0_client& client);
 
     // Call before destroying the object.
@@ -235,6 +237,9 @@ private:
     // if we want to handle crashes of the group 0 server without crashing the entire Scylla process
     // (we could then try restarting the server internally).
     future<> start_server_for_group0(raft::group_id group0_id);
+
+    // Remove the node from raft config, retries raft::commit_status_unknown.
+    future<> remove_from_raft_config(raft::server_id id);
 };
 
 } // end of namespace service

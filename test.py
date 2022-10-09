@@ -1023,7 +1023,7 @@ class TopologyTest(PythonTest):
     async def run(self, options: argparse.Namespace) -> Test:
 
         test_path = os.path.join(self.suite.options.tmpdir, self.mode)
-        async with get_cluster_manager(self.shortname, self.suite.clusters, test_path) as manager:
+        async with get_cluster_manager(self.uname, self.suite.clusters, test_path) as manager:
             self.args.insert(0, "--manager-api={}".format(manager.sock_path))
 
             try:
@@ -1494,10 +1494,10 @@ def write_consolidated_boost_junit_xml(tmpdir: str, mode: str) -> None:
     et.write(f'{tmpdir}/{mode}/xml/boost.xunit.xml', encoding='unicode')
 
 
-def open_log(tmpdir: str, log_level: str) -> None:
+def open_log(tmpdir: str, log_file_name: str, log_level: str) -> None:
     pathlib.Path(tmpdir).mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
-        filename=os.path.join(tmpdir, "test.py.log"),
+        filename=os.path.join(tmpdir, log_file_name),
         filemode="w",
         level=log_level,
         format="%(asctime)s.%(msecs)03d %(levelname)s> %(message)s",
@@ -1510,7 +1510,7 @@ async def main() -> int:
 
     options = parse_cmd_line()
 
-    open_log(options.tmpdir, options.log_level)
+    open_log(options.tmpdir, f"test.py.{'-'.join(options.modes)}.log", options.log_level)
 
     await find_tests(options)
     if options.list_tests:

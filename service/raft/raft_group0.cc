@@ -90,8 +90,9 @@ raft_group0::raft_group0(seastar::abort_source& abort_source,
         cql3::query_processor& qp,
         service::migration_manager& mm,
         gms::feature_service& feat,
+        db::system_keyspace& sys_ks,
         raft_group0_client& client)
-    : _abort_source(abort_source), _raft_gr(raft_gr), _ms(ms), _gossiper(gs), _qp(qp), _mm(mm), _feat(feat), _client(client)
+    : _abort_source(abort_source), _raft_gr(raft_gr), _ms(ms), _gossiper(gs), _qp(qp), _mm(mm), _feat(feat), _sys_ks(sys_ks), _client(client)
     , _status_for_monitoring(_raft_gr.is_enabled() ? status_for_monitoring::normal : status_for_monitoring::disabled)
 {
     init_rpc_verbs();
@@ -599,7 +600,7 @@ future<> raft_group0::leave_group0() {
 
     // Note: if this gets stuck due to a failure, the DB admin can abort.
     // FIXME: this gets stuck without failures if we're the leader (#10833)
-    co_return co_await _raft_gr.group0().modify_config({}, {my_id}, &_abort_source);
+    co_return co_await remove_from_raft_config(my_id);
 }
 
 future<> raft_group0::remove_from_group0(gms::inet_address node) {
@@ -685,8 +686,27 @@ future<> raft_group0::remove_from_group0(gms::inet_address node) {
         "remove_from_group0({}): found the node in group 0 configuration, Raft ID: {}. Proceeding with the remove...",
         node, *their_id);
 
-    // TODO: add a timeout+retry mechanism? This could get stuck (and _abort_source is only called on shutdown).
-    co_return co_await _raft_gr.group0().modify_config({}, {*their_id}, &_abort_source);
+    co_await remove_from_raft_config(*their_id);
+}
+
+future<> raft_group0::remove_from_raft_config(raft::server_id id) {
+    static constexpr auto max_retry_period = std::chrono::seconds{1};
+    auto retry_period = std::chrono::milliseconds{10};
+
+    // TODO: add a timeout mechanism? This could get stuck (and _abort_source is only called on shutdown).
+    while (true) {
+        try {
+            co_await _raft_gr.group0().modify_config({}, {id}, &_abort_source);
+            break;
+        } catch (const raft::commit_status_unknown& e) {
+            group0_log.info("remove_from_raft_config({}): modify_config returned \"{}\", retrying", id, e);
+        }
+        retry_period *= 2;
+        if (retry_period > max_retry_period) {
+            retry_period = max_retry_period;
+        }
+        co_await sleep_abortable(retry_period, _abort_source);
+    }
 }
 
 bool raft_group0::joined_group0() const {
@@ -1353,8 +1373,6 @@ future<> raft_group0::upgrade_to_group0() {
 future<> raft_group0::do_upgrade_to_group0(group0_upgrade_state start_state) {
     assert(this_shard_id() == 0);
 
-    auto& sys_ks = _gossiper.get_system_keyspace().local();
-
     // Check if every peer knows about the upgrade procedure.
     //
     // In a world in which post-conditions and invariants are respected, the fact that `SUPPORTS_RAFT` feature
@@ -1370,11 +1388,11 @@ future<> raft_group0::do_upgrade_to_group0(group0_upgrade_state start_state) {
     // step, on the other hand, allows nodes to leave and will unblock as soon as all remaining peers are
     // ready to answer.
     upgrade_log.info("Waiting until everyone is ready to start upgrade...");
-    co_await check_remote_group0_upgrade_state_dry_run(std::bind_front(&db::system_keyspace::load_peers, &sys_ks), _ms, _abort_source);
+    co_await check_remote_group0_upgrade_state_dry_run(std::bind_front(&db::system_keyspace::load_peers, &_sys_ks), _ms, _abort_source);
 
     if (!joined_group0()) {
         upgrade_log.info("Joining group 0...");
-        co_await join_group0(co_await get_peers_as_raft_infos(sys_ks), true);
+        co_await join_group0(co_await get_peers_as_raft_infos(_sys_ks), true);
     } else {
         upgrade_log.info(
             "We're already a member of group 0."
@@ -1392,7 +1410,7 @@ future<> raft_group0::do_upgrade_to_group0(group0_upgrade_state start_state) {
     auto& group0_server = _raft_gr.group0();
 
     upgrade_log.info("Waiting until every peer has joined Raft group 0...");
-    co_await wait_until_every_peer_joined_group0(sys_ks, group0_server, _abort_source);
+    co_await wait_until_every_peer_joined_group0(_sys_ks, group0_server, _abort_source);
     upgrade_log.info("Every peer is a member of Raft group 0.");
 
     if (start_state == group0_upgrade_state::use_pre_raft_procedures) {

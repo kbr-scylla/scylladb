@@ -163,6 +163,7 @@ public:
     named_value<uint32_t> compaction_large_row_warning_threshold_mb;
     named_value<uint32_t> compaction_large_cell_warning_threshold_mb;
     named_value<uint32_t> compaction_rows_count_warning_threshold;
+    named_value<uint32_t> compaction_collection_elements_count_warning_threshold;
     named_value<uint32_t> memtable_total_space_in_mb;
     named_value<uint32_t> concurrent_reads;
     named_value<uint32_t> concurrent_writes;
@@ -316,7 +317,7 @@ public:
     named_value<sstring> prometheus_prefix;
     named_value<bool> abort_on_lsa_bad_alloc;
     named_value<unsigned> murmur3_partitioner_ignore_msb_bits;
-    named_value<double> virtual_dirty_soft_limit;
+    named_value<double> unspooled_dirty_soft_limit;
     named_value<double> sstable_summary_ratio;
     named_value<size_t> large_memory_allocation_warning_threshold;
     named_value<bool> enable_deprecated_partitioners;

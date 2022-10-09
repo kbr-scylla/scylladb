@@ -657,7 +657,19 @@ table::seal_active_memtable(compaction_group& cg, flush_permit&& flush_permit) n
             } catch (...) {
                 ex = std::current_exception();
                 _config.cf_stats->failed_memtables_flushes_count++;
-                auto abort_on_error = [ex] () {
+
+                if (try_catch<std::bad_alloc>(ex)) {
+                    // There is a chance something else will free the memory, so we can try again
+                    allowed_retries--;
+                } else if (auto ep = try_catch<std::system_error>(ex)) {
+                    allowed_retries = ep->code().value() == ENOSPC ? default_retries : 0;
+                } else if (auto ep = try_catch<storage_io_error>(ex)) {
+                    allowed_retries = ep->code().value() == ENOSPC ? default_retries : 0;
+                } else {
+                    allowed_retries = 0;
+                }
+
+                if (allowed_retries <= 0) {
                     // At this point we don't know what has happened and it's better to potentially
                     // take the node down and rely on commitlog to replay.
                     //
@@ -666,21 +678,6 @@ table::seal_active_memtable(compaction_group& cg, flush_permit&& flush_permit) n
                     // may end up in an infinite crash loop.
                     tlogger.error("Memtable flush failed due to: {}. Aborting, at {}", ex, current_backtrace());
                     std::abort();
-                };
-                if (try_catch<std::bad_alloc>(ex)) {
-                    // There is a chance something else will free the memory, so we can try again
-                    if (allowed_retries-- <= 0) {
-                        abort_on_error();
-                    }
-                } else if (auto ep = try_catch<std::system_error>(ex)) {
-                    if (ep->code().value() == ENOSPC) {
-                        // Keep on trying
-                        allowed_retries = default_retries;
-                    } else {
-                        abort_on_error();
-                    }
-                } else {
-                    abort_on_error();
                 }
             }
             if (_async_gate.is_closed()) {
@@ -785,7 +782,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
         auto estimated_partitions = _compaction_strategy.adjust_partition_estimate(metadata, old->partition_count());
 
         if (!_async_gate.is_closed()) {
-            co_await _compaction_manager.maybe_wait_for_sstable_count_reduction(as_table_state());
+            co_await _compaction_manager.maybe_wait_for_sstable_count_reduction(cg.as_table_state());
         }
 
         auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions] (flat_mutation_reader_v2 reader) mutable -> future<> {
@@ -944,7 +941,7 @@ void table::rebuild_statistics() {
     _sstables->for_each_sstable([this] (const sstables::shared_sstable& tab) {
         update_stats_for_new_sstable(tab->bytes_on_disk());
     });
-    for (auto& tab : _sstables_compacted_but_not_deleted) {
+    for (auto& tab : as_table_state().compacted_undeleted_sstables()) {
         update_stats_for_new_sstable(tab->bytes_on_disk());
     }
 }
@@ -1042,7 +1039,7 @@ compaction_group::update_main_sstable_list_on_compaction_completion(sstables::co
     // Precompute before so undo_compacted_but_not_deleted can be sure not to throw
     std::unordered_set<sstables::shared_sstable> s(
            desc.old_sstables.begin(), desc.old_sstables.end());
-    auto& sstables_compacted_but_not_deleted = _t._sstables_compacted_but_not_deleted;
+    auto& sstables_compacted_but_not_deleted = _sstables_compacted_but_not_deleted;
     sstables_compacted_but_not_deleted.insert(sstables_compacted_but_not_deleted.end(), desc.old_sstables.begin(), desc.old_sstables.end());
     // After we are done, unconditionally remove compacted sstables from _sstables_compacted_but_not_deleted,
     // or they could stay forever in the set, resulting in deleted files remaining
@@ -1222,8 +1219,7 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
 }
 
 const sstables::sstable_set& table::get_sstable_set() const {
-    // main sstables is enough for the outside world. sstables in other set like maintenance is not needed even for expiration purposes in compaction
-    return *_compaction_group->main_sstables();
+    return *_sstables;
 }
 
 lw_shared_ptr<const sstable_list> table::get_sstables() const {
@@ -1242,17 +1238,17 @@ std::vector<sstables::shared_sstable> table::select_sstables(const dht::partitio
 // garbage-collect a tombstone that covers data in an sstable that may not be
 // successfully deleted.
 lw_shared_ptr<const sstable_list> table::get_sstables_including_compacted_undeleted() const {
-    if (_sstables_compacted_but_not_deleted.empty()) {
+    if (as_table_state().compacted_undeleted_sstables().empty()) {
         return get_sstables();
     }
     auto ret = make_lw_shared<sstable_list>(*_sstables->all());
-    for (auto&& s : _sstables_compacted_but_not_deleted) {
+    for (auto&& s : as_table_state().compacted_undeleted_sstables()) {
         ret->insert(s);
     }
     return ret;
 }
 
-const std::vector<sstables::shared_sstable>& table::compacted_undeleted_sstables() const {
+const std::vector<sstables::shared_sstable>& compaction_group::compacted_undeleted_sstables() const noexcept {
     return _sstables_compacted_but_not_deleted;
 }
 
@@ -2356,14 +2352,19 @@ table::make_reader_v2_excluding_sstables(schema_ptr s,
 future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable> sstables) {
     auto units = co_await get_units(_sstable_deletion_sem, 1);
     auto dirs_to_sync = std::set<sstring>({dir()});
-    // FIXME: rewrite it for multiple compaction groups.
-    auto main_sstables = _compaction_group->main_sstables()->all();
     for (auto sst : sstables) {
         dirs_to_sync.emplace(sst->get_dir());
         try {
+            // Off-strategy can happen in parallel to view building, so the SSTable may be deleted already if the former
+            // completed first.
+            // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
+            // from stepping on each other's toe.
             co_await sst->move_to_new_dir(dir(), sst->generation(), false);
-            // Maintenance SSTables being moved from staging shouldn't be added to tracker because they're off-strategy
-            if (main_sstables->contains(sst)) {
+            // If view building finished faster, SSTable with repair origin still exists.
+            // It can also happen the SSTable is not going through reshape, so it doesn't have a repair origin.
+            // That being said, we'll only add this SSTable to tracker if its origin is other than repair.
+            // Otherwise, we can count on off-strategy completion to add it when updating lists.
+            if (sst->get_origin() != sstables::repair_origin) {
                 add_sstable_to_backlog_tracker(_compaction_strategy.get_backlog_tracker(), sst);
             }
         } catch (...) {
@@ -2515,7 +2516,7 @@ public:
         return sstables::get_fully_expired_sstables(*this, sstables, query_time);
     }
     const std::vector<sstables::shared_sstable>& compacted_undeleted_sstables() const noexcept override {
-        return _t.compacted_undeleted_sstables();
+        return _cg.compacted_undeleted_sstables();
     }
     sstables::compaction_strategy& get_compaction_strategy() const noexcept override {
         return _t.get_compaction_strategy();
