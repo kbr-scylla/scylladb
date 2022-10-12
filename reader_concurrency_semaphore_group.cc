@@ -62,34 +62,16 @@ void reader_concurrency_semaphore_group::adjust_up(weighted_reader_concurrency_s
 // if they did the behaviour would be undefined.
 future<> reader_concurrency_semaphore_group::adjust() {
     return with_semaphore(_operations_serializer, 1, [this] () {
-        semaphore_priority_type memory_short_semaphores(priority_compare(*this));
-        std::vector<weighted_reader_concurrency_semaphore*> semaphores_with_extra_memory;
-        for (auto&& item : _semaphores) {
-            auto& [sg , sem] = item;
-            // the second part of the condition is to protect against off by one situations
-            // since we are dealing with fractions
-            if (calc_delta(sem) > 0 && sem.memory_share < _total_memory) {
-                memory_short_semaphores.push(&sem);
-            } else if (calc_delta(sem) < 0) {
-                semaphores_with_extra_memory.push_back(&sem);
-            }
+        ssize_t distributed_memory = 0;
+        for (auto& [sg, wsem] : _semaphores) {
+            const ssize_t memory_share = std::floor((double(wsem.weight) / double(_total_weight)) * _total_memory);
+            wsem.sem.set_resources({_max_concurrent_reads, memory_share});
+            distributed_memory += memory_share;
         }
-        // if no one needs more memory - there is no reason to take memory away.
-        // In general it shouldn't happen.
-        if (memory_short_semaphores.empty()) {
-            return make_ready_future();
-        }
-        return do_with(std::move(memory_short_semaphores), std::move(semaphores_with_extra_memory) , [this] (auto&& memory_short_semaphores, auto&& semaphores_with_extra_memory) {
-            if (_spare_memory > 0) {
-                distribute_spare_memory(memory_short_semaphores);
-            }
-            return parallel_for_each(semaphores_with_extra_memory , [&memory_short_semaphores, this] (auto&& sem) {
-                return adjust_down(*sem).then([&memory_short_semaphores, this] () {
-                    distribute_spare_memory(memory_short_semaphores);
-                    return make_ready_future();
-                });
-            });
-        });
+        // Slap the remainder on one of the semaphores.
+        // This will be a few bytes, doesn't matter where we add it.
+        auto& sem = _semaphores.begin()->second.sem;
+        sem.set_resources(sem.initial_resources() + reader_resources{0, _total_memory - distributed_memory});
     });
 }
 

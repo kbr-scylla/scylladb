@@ -1134,12 +1134,20 @@ SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
             // Make sure that the total weight is tracked correctly in the semaphore group
             BOOST_REQUIRE_EQUAL(expected_total_weight, dbt.get_total_user_reader_concurrency_semaphore_weight());
             sl_names[i] = sl_name;
+            size_t total_distributed_memory = 0;
             for (int j = 0 ; j <= i ; j++) {
                 reader_concurrency_semaphore& sem = get_reader_concurrency_semaphore_for_sl(sl_names[j]);
                 // Make sure that all semaphores that has been created until now - have the right amount of available memory
                 // after the operation has ended.
-                BOOST_REQUIRE_EQUAL((index_to_weight(j) * total_memory) / expected_total_weight, sem.available_resources().memory);
+                // We allow for a small delta of up to num_service_levels. This allows an off-by-one for each semaphore,
+                // the remainder being added to one of the semaphores.
+                // We make sure this didn't leak/create memory by checking the total below.
+                const auto delta = std::abs(ssize_t((index_to_weight(j) * total_memory) / expected_total_weight) - sem.available_resources().memory);
+                BOOST_REQUIRE_LE(delta, num_service_levels);
+                total_distributed_memory += sem.available_resources().memory;
             }
+            total_distributed_memory += get_reader_concurrency_semaphore_for_sl(qos::service_level_controller::default_service_level_name).available_resources().memory;
+            BOOST_REQUIRE_EQUAL(total_distributed_memory, total_memory);
         }
 
         size_t total_weight = dbt.get_total_user_reader_concurrency_semaphore_weight();
