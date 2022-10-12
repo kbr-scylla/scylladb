@@ -21,7 +21,6 @@
 class reader_concurrency_semaphore_group {
     size_t _total_memory;
     size_t _total_weight;
-    size_t _spare_memory;
     size_t _max_concurrent_reads;
     size_t _max_queue_length;
     friend class database_test;
@@ -39,32 +38,12 @@ class reader_concurrency_semaphore_group {
     std::unordered_map<scheduling_group, weighted_reader_concurrency_semaphore> _semaphores;
     seastar::semaphore _operations_serializer;
 
-
-    ssize_t calc_delta(weighted_reader_concurrency_semaphore& sem) const;
-    // The priority is given to the semaphore that needs the largest amount of memory
-    struct priority_compare {
-        priority_compare(const reader_concurrency_semaphore_group& sem_group) : _sem_group(sem_group) {}
-        bool operator()(weighted_reader_concurrency_semaphore* lhs, weighted_reader_concurrency_semaphore* rhs) {
-            return _sem_group.calc_delta(*lhs) < _sem_group.calc_delta(*rhs);
-        }
-    private:
-        const reader_concurrency_semaphore_group& _sem_group;
-    };
-    using semaphore_priority_type = std::priority_queue<weighted_reader_concurrency_semaphore*, std::vector<weighted_reader_concurrency_semaphore*>, priority_compare>;
-
-
-    void distribute_spare_memory(semaphore_priority_type& memory_short_semaphores);
-
-    future<> reduce_memory(weighted_reader_concurrency_semaphore& sem, size_t reduction_amount);
-    future<> adjust_down(weighted_reader_concurrency_semaphore& sem);
-    void adjust_up(weighted_reader_concurrency_semaphore& sem);
     future<> change_weight(weighted_reader_concurrency_semaphore& sem, size_t new_weight);
 
 public:
     reader_concurrency_semaphore_group(size_t memory, size_t max_concurrent_reads, size_t max_queue_length)
             : _total_memory(memory)
             , _total_weight(0)
-            , _spare_memory(memory)
             , _max_concurrent_reads(max_concurrent_reads)
             ,  _max_queue_length(max_queue_length)
             , _operations_serializer(1) { }
@@ -75,9 +54,6 @@ public:
     future<> adjust();
     future<> wait_adjust_complete();
 
-    // The call to change_weight is serialized as a consequence of the call to adjust.
-    future<> change_weight(scheduling_group sg, size_t new_weight);
-    future<> set_memory(ssize_t new_memory_amount);
     future<> stop() noexcept;
     reader_concurrency_semaphore& get(scheduling_group sg);
     reader_concurrency_semaphore* get_or_null(scheduling_group sg);
