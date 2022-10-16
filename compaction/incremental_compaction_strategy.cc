@@ -187,7 +187,7 @@ incremental_compaction_strategy::get_sstables_for_compaction(table_state& t, str
     size_t min_threshold = t.min_compaction_threshold();
     size_t max_threshold = t.schema()->max_compaction_threshold();
 
-    auto buckets = get_buckets(t.main_sstable_set().select_sstable_runs(candidates));
+    auto buckets = get_buckets(sstables_to_runs(std::move(candidates)));
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::sstable_run> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
