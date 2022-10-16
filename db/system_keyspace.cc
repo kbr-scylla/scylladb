@@ -941,11 +941,11 @@ schema_ptr system_keyspace::discovery() {
         return schema_builder(NAME, DISCOVERY, id)
             // This is a single-partition table with key 'peers'
             .with_column("key", utf8_type, column_kind::partition_key)
-            // Opaque connection properties. See `raft::server_info`.
-            .with_column("server_info", bytes_type, column_kind::clustering_key)
+            // Peer ip address
+            .with_column("ip_addr", inet_addr_type, column_kind::clustering_key)
             // The ID of the group 0 server on that peer.
             // May be unknown during discovery, then it's set to UUID 0.
-            .with_column("raft_id", uuid_type)
+            .with_column("raft_server_id", uuid_type)
             .set_comment("State of cluster discovery algorithm: the set of discovered peers")
             .with_version(generate_schema_version(id))
             .set_wait_for_sync_to_commitlog(true)
@@ -2876,7 +2876,7 @@ future<> system_keyspace::update_compaction_history(utils::UUID uuid, sstring ks
                     , COMPACTION_HISTORY);
 
     db_clock::time_point tp{db_clock::duration{compacted_at}};
-    return qctx->execute_cql(req, uuid, ksname, cfname, tp, bytes_in, bytes_out,
+    return execute_cql(req, uuid, ksname, cfname, tp, bytes_in, bytes_out,
                        make_map_value(map_type, prepare_rows_merged(rows_merged))).discard_result().handle_exception([] (auto ep) {
         slogger.error("update compaction history failed: {}: ignored", ep);
     });
@@ -3363,6 +3363,8 @@ future<> system_keyspace::start() {
         qctx = std::make_unique<query_context>(_qp);
     }
 
+    _db.local().plug_system_keyspace(*this);
+
     // FIXME
     // This should be coupled with setup_version()'s part committing these values into
     // the system.local table. However, cql_test_env needs cached local_dc_rack strings,
@@ -3371,6 +3373,11 @@ future<> system_keyspace::start() {
     _cache->_local_dc_rack_info.dc = snitch->get_datacenter(utils::fb_utilities::get_broadcast_address());
     _cache->_local_dc_rack_info.rack = snitch->get_rack(utils::fb_utilities::get_broadcast_address());
 
+    co_return;
+}
+
+future<> system_keyspace::shutdown() {
+    _db.local().unplug_system_keyspace();
     co_return;
 }
 

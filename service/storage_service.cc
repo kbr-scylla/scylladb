@@ -947,6 +947,12 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
         } else if (existing && *existing == endpoint) {
             tmptr->del_replacing_endpoint(endpoint);
         } else {
+            auto nodes = _gossiper.get_nodes_with_host_id(host_id);
+            bool left = std::any_of(nodes.begin(), nodes.end(), [this] (const gms::inet_address& node) { return _gossiper.is_left(node); });
+            if (left) {
+                slogger.info("Skip to set host_id={} to be owned by node={}, because the node is removed from the cluster, nodes {} used to own the host_id", host_id, endpoint, nodes);
+                co_return;
+            }
             slogger.info("Set host_id={} to be owned by node={}", host_id, endpoint);
             tmptr->update_host_id(host_id, endpoint);
         }
@@ -1597,7 +1603,7 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
                 for (auto& x : _gossiper.get_endpoint_states()) {
                     auto state = _gossiper.get_gossip_status(x.second);
                     if (state == sstring(versioned_value::STATUS_UNKNOWN)) {
-                        continue;
+                        throw std::runtime_error(format("Node {} has gossip status=UNKNOWN. Try fixing it before adding new node to the cluster.", x.first));
                     }
                     auto addr = x.first;
                     slogger.debug("Checking bootstrapping/leaving/moving nodes: node={}, status={} (check_for_endpoint_collision)", addr, state);
@@ -1989,6 +1995,19 @@ future<> storage_service::decommission() {
             }
             slogger.info("decommission[{}]: Started decommission operation, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
 
+            std::unordered_set<gms::inet_address> gossip_nodes_down;
+            for (auto& node : nodes) {
+                if (!ss._gossiper.is_alive(node)) {
+                    gossip_nodes_down.emplace(node);
+                }
+            }
+            if (!gossip_nodes_down.empty()) {
+                auto msg = format("decommission[{}]: Rejected decommission operation, removing node={}, sync_nodes={}, ignore_nodes={}, nodes_down={}",
+                        uuid, endpoint, nodes, ignore_nodes, gossip_nodes_down);
+                slogger.warn("{}", msg);
+                throw std::runtime_error(msg);
+            }
+
             // Step 2: Prepare to sync data
             std::unordered_set<gms::inet_address> nodes_unknown_verb;
             std::unordered_set<gms::inet_address> nodes_down;
@@ -2360,6 +2379,15 @@ future<> storage_service::removenode(sstring host_id_string, std::list<gms::inet
             }
             slogger.info("removenode[{}]: Started removenode operation, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
 
+            if (ss._gossiper.is_alive(endpoint)) {
+                const std::string message = format(
+                    "removenode[{}]: Rejected removenode operation, removing node={}, sync_nodes={}, ignore_nodes={}; "
+                    "the node being removed is alive, maybe you should use decommission instead?",
+                    uuid, endpoint, nodes, ignore_nodes);
+                slogger.warn(std::string_view(message));
+                throw std::runtime_error(message);
+            }
+
             // Step 2: Prepare to sync data
             std::unordered_set<gms::inet_address> nodes_unknown_verb;
             std::unordered_set<gms::inet_address> nodes_down;
@@ -2718,6 +2746,7 @@ future<> storage_service::do_drain() {
     });
 
     co_await _db.invoke_on_all(&replica::database::drain);
+    co_await _sys_ks.invoke_on_all(&db::system_keyspace::shutdown);
 }
 
 future<> storage_service::rebuild(sstring source_dc) {
