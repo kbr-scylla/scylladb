@@ -447,7 +447,7 @@ scylla_tests = set([
     'test/boost/schema_change_test',
     'test/boost/schema_registry_test',
     'test/boost/secondary_index_test',
-    'test/boost/tracing',
+    'test/boost/tracing_test',
     'test/boost/index_with_paging_test',
     'test/boost/serialization_test',
     'test/boost/serialized_action_test',
@@ -1001,7 +1001,6 @@ scylla_core = (['message/messaging_service.cc',
                 'tracing/tracing.cc',
                 'tracing/trace_keyspace_helper.cc',
                 'tracing/trace_state.cc',
-                'tracing/tracing_backend_registry.cc',
                 'tracing/traced_file.cc',
                 'table_helper.cc',
                 'audit/audit.cc',
@@ -1324,7 +1323,7 @@ deps['test/boost/linearizing_input_stream_test'] = [
     "test/boost/linearizing_input_stream_test.cc",
     "test/lib/log.cc",
 ]
-deps['test/boost/expr_test'] = ['test/boost/expr_test.cc'] + scylla_core
+deps['test/boost/expr_test'] = ['test/boost/expr_test.cc', 'test/lib/expr_test_utils.cc'] + scylla_core
 deps['test/boost/rate_limiter_test'] = ['test/boost/rate_limiter_test.cc', 'db/rate_limiter.cc']
 deps['test/boost/exceptions_optimized_test'] = ['test/boost/exceptions_optimized_test.cc', 'utils/exceptions.cc']
 deps['test/boost/exceptions_fallback_test'] = ['test/boost/exceptions_fallback_test.cc', 'utils/exceptions.cc']

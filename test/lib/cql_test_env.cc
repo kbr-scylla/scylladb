@@ -526,8 +526,15 @@ public:
                 cfg->max_memory_for_unlimited_query_hard_limit.set(uint64_t(query::result_memory_limiter::unlimited_result_size));
             }
 
+            sharded<locator::snitch_ptr> snitch;
+            snitch.start(locator::snitch_config{}).get();
+            auto stop_snitch = defer([&snitch] { snitch.stop().get(); });
+            snitch.invoke_on_all(&locator::snitch_ptr::start).get();
+
             sharded<locator::shared_token_metadata> token_metadata;
-            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
+            locator::token_metadata::config tm_cfg;
+            tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
+            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
             auto stop_token_metadata = defer([&token_metadata] { token_metadata.stop().get(); });
 
             sharded<locator::effective_replication_map_factory> erm_factory;
@@ -605,11 +612,6 @@ public:
                 gossiper.stop().get();
             });
             gossiper.invoke_on_all(&gms::gossiper::start).get();
-
-            sharded<locator::snitch_ptr>& snitch = locator::i_endpoint_snitch::snitch_instance();
-            snitch.start(locator::snitch_config{}, std::ref(gossiper)).get();
-            auto stop_snitch = defer([&snitch] { snitch.stop().get(); });
-            snitch.invoke_on_all(&locator::snitch_ptr::start).get();
 
             distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
             distributed<service::migration_manager> mm;
@@ -733,7 +735,9 @@ public:
             qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), auth_prep_cache_config, std::ref(group0_client)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
-            sys_ks.invoke_on_all(&db::system_keyspace::start).get();
+            sys_ks.invoke_on_all([&snitch] (auto& sys_ks) {
+                return sys_ks.start(snitch.local());
+            }).get();
 
             db::batchlog_manager_config bmcfg;
             bmcfg.replay_rate = 100000000;
@@ -754,6 +758,7 @@ public:
                 std::ref(stream_manager),
                 std::ref(elc_notif),
                 std::ref(bm),
+                std::ref(snitch),
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 

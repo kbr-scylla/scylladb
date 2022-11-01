@@ -26,6 +26,7 @@
 #include "cdc/generation_id.hh"
 #include "locator/host_id.hh"
 #include "service/raft/group0_fwd.hh"
+#include "tasks/task_manager.hh"
 
 namespace service {
 
@@ -55,6 +56,7 @@ namespace gms {
 
 namespace locator {
     class endpoint_dc_rack;
+    class snitch_ptr;
 } // namespace locator
 
 namespace gms {
@@ -106,7 +108,6 @@ class system_keyspace : public seastar::peering_sharded_service<system_keyspace>
     future<> setup_version(sharded<netw::messaging_service>& ms);
     future<> check_health();
     static future<> force_blocking_flush(sstring cfname);
-    future<> build_dc_rack_info();
     future<> build_bootstrap_info();
     future<> cache_truncation_record();
     template <typename Value>
@@ -226,7 +227,7 @@ public:
 
     static table_schema_version generate_schema_version(table_id table_id, uint16_t offset = 0);
 
-    future<> setup(sharded<netw::messaging_service>& ms);
+    future<> setup(sharded<locator::snitch_ptr>& snitch, sharded<netw::messaging_service>& ms);
     future<> update_schema_version(table_schema_version version);
 
     /*
@@ -284,7 +285,7 @@ public:
     /**
      * Return a map of IP addresses containing a map of dc and rack info
      */
-    std::unordered_map<gms::inet_address, locator::endpoint_dc_rack> load_dc_rack_info();
+    future<std::unordered_map<gms::inet_address, locator::endpoint_dc_rack>> load_dc_rack_info();
     locator::endpoint_dc_rack local_dc_rack() const;
 
     enum class bootstrap_state {
@@ -312,7 +313,7 @@ public:
     static future<> get_compaction_history(compaction_history_consumer&& f);
 
     struct repair_history_entry {
-        utils::UUID id;
+        tasks::task_id id;
         table_id table_uuid;
         db_clock::time_point ts;
         sstring ks;
@@ -466,7 +467,7 @@ public:
 
     system_keyspace(sharded<cql3::query_processor>& qp, sharded<replica::database>& db) noexcept;
     ~system_keyspace();
-    future<> start();
+    future<> start(const locator::snitch_ptr&);
     future<> stop();
     future<> shutdown();
 

@@ -102,14 +102,15 @@ class node_ops_meta_data {
     shared_ptr<node_ops_info> _ops;
     seastar::timer<lowres_clock> _watchdog;
     std::chrono::seconds _watchdog_interval{120};
-    bool _aborted = false;
 public:
     explicit node_ops_meta_data(
             utils::UUID ops_uuid,
             gms::inet_address coordinator,
-            shared_ptr<node_ops_info> ops,
+            std::list<gms::inet_address> ignore_nodes,
             std::function<future<> ()> abort_func,
             std::function<void ()> signal_func);
+    future<> start();
+    future<> stop() noexcept;
     shared_ptr<node_ops_info> get_ops_info();
     shared_ptr<abort_source> get_abort_source();
     future<> abort();
@@ -147,6 +148,7 @@ private:
     sharded<service::migration_manager>& _migration_manager;
     sharded<repair_service>& _repair;
     sharded<streaming::stream_manager>& _stream_manager;
+    sharded<locator::snitch_ptr>& _snitch;
     sharded<qos::service_level_controller>& _sl_controller;
 
     // Engaged on shard 0 after `join_cluster`.
@@ -183,6 +185,7 @@ public:
         sharded<streaming::stream_manager>& stream_manager,
         endpoint_lifecycle_notifier& elc_notif,
         sharded<db::batchlog_manager>& bm,
+        sharded<locator::snitch_ptr>& snitch,
         sharded<qos::service_level_controller>&);
 
     // Needed by distributed<>
@@ -304,7 +307,7 @@ private:
     void run_replace_ops(std::unordered_set<token>& bootstrap_tokens);
     void run_bootstrap_ops(std::unordered_set<token>& bootstrap_tokens);
 
-    std::list<gms::inet_address> get_ignore_dead_nodes_for_replace();
+    std::list<gms::inet_address> get_ignore_dead_nodes_for_replace(const locator::token_metadata& tm);
     future<> wait_for_ring_to_settle(std::chrono::milliseconds delay);
 
 public:
@@ -710,7 +713,7 @@ public:
      *
      * @param hostIdString token for the node
      */
-    future<> removenode(sstring host_id_string, std::list<gms::inet_address> ignore_nodes);
+    future<> removenode(locator::host_id host_id, std::list<locator::host_id_or_endpoint> ignore_nodes);
     future<node_ops_cmd_response> node_ops_cmd_handler(gms::inet_address coordinator, node_ops_cmd_request req);
     void node_ops_cmd_check(gms::inet_address coordinator, const node_ops_cmd_request& req);
     future<> node_ops_cmd_heartbeat_updater(node_ops_cmd cmd, utils::UUID uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done);

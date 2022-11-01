@@ -51,7 +51,6 @@
 #include <sys/prctl.h>
 #include "tracing/tracing.hh"
 #include "audit/audit.hh"
-#include "tracing/tracing_backend_registry.hh"
 #include <seastar/core/prometheus.hh>
 #include "message/messaging_service.hh"
 #include "db/sstables-format-selector.hh"
@@ -425,6 +424,7 @@ sharded<replica::database>* the_database;
 sharded<streaming::stream_manager> *the_stream_manager;
 sharded<gms::feature_service> *the_feature_service;
 sharded<gms::gossiper> *the_gossiper;
+sharded<locator::snitch_ptr> *the_snitch;
 }
 
 static int scylla_main(int ac, char** av) {
@@ -531,6 +531,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<streaming::stream_manager> stream_manager;
     sharded<service::forward_service> forward_service;
     sharded<gms::gossiper> gossiper;
+    sharded<locator::snitch_ptr> snitch;
 
     return app.run(ac, av, [&] () -> future<int> {
 
@@ -558,7 +559,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
         tcp_syncookies_sanity();
 
         return seastar::async([&app, cfg, ext, &cm, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
-                &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper,
+                &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper, &snitch,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
                 &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager] {
           try {
@@ -723,8 +724,37 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
             set_abort_on_internal_error(cfg->abort_on_internal_error());
 
+            supervisor::notify("creating snitch");
+            debug::the_snitch = &snitch;
+            snitch_config snitch_cfg;
+            snitch_cfg.name = cfg->endpoint_snitch();
+            snitch_cfg.broadcast_rpc_address_specified_by_user = !cfg->broadcast_rpc_address().empty();
+            snitch_cfg.listen_address = utils::resolve(cfg->listen_address, family).get0();
+            snitch.start(snitch_cfg).get();
+            auto stop_snitch = defer_verbose_shutdown("snitch", [&snitch] {
+                snitch.stop().get();
+            });
+            snitch.invoke_on_all(&locator::snitch_ptr::start).get();
+            // #293 - do not stop anything (unless snitch.on_all(start) fails)
+            stop_snitch->cancel();
+
             supervisor::notify("starting tokens manager");
-            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }).get();
+            locator::token_metadata::config tm_cfg;
+            tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
+            if (snitch.local()->get_name() == "org.apache.cassandra.locator.SimpleSnitch") {
+                //
+                // Simple snitch wants sort_by_proximity() not to reorder nodes anyhow
+                //
+                // "Making all endpoints equal ensures we won't change the original
+                // ordering." - quote from C* code.
+                //
+                // The snitch_base implementation should handle the above case correctly.
+                // I'm leaving the this implementation anyway since it's the C*'s
+                // implementation and some installations may depend on it.
+                //
+                tm_cfg.topo_cfg.disable_proximity_sorting = true;
+            }
+            token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
             // storage_proxy holds a reference on it and is not yet stopped.
             // what's worse is that the calltrace
             //   storage_proxy::do_query 
@@ -755,9 +785,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // });
 
             supervisor::notify("creating tracing");
-            tracing::backend_registry tracing_backend_registry;
-            tracing::register_tracing_keyspace_backend(tracing_backend_registry);
-            tracing::tracing::create_tracing(tracing_backend_registry, "trace_keyspace_helper").get();
+            tracing::tracing::create_tracing("trace_keyspace_helper").get();
             auto destroy_tracing = defer_verbose_shutdown("tracing instance", [] {
                 tracing::tracing::tracing_instance().stop().get();
             });
@@ -904,40 +932,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
             gossiper.invoke_on_all(&gms::gossiper::start).get();
 
-            supervisor::notify("creating snitch");
-            snitch_config snitch_cfg;
-            snitch_cfg.name = cfg->endpoint_snitch();
-            snitch_cfg.broadcast_rpc_address_specified_by_user = !cfg->broadcast_rpc_address().empty();
-            sharded<locator::snitch_ptr>& snitch = i_endpoint_snitch::snitch_instance();
-            snitch.start(snitch_cfg, std::ref(gossiper)).get();
-            auto stop_snitch = defer_verbose_shutdown("snitch", [&snitch] {
-                snitch.stop().get();
-            });
-            snitch.invoke_on_all(&locator::snitch_ptr::start).get();
-            // #293 - do not stop anything (unless snitch.on_all(start) fails)
-            stop_snitch->cancel();
-
-            if (snitch.local()->get_name() == "org.apache.cassandra.locator.SimpleSnitch") {
-                //
-                // Simple snitch wants sort_by_proximity() not to reorder nodes anyhow
-                //
-                // "Making all endpoints equal ensures we won't change the original
-                // ordering." - quote from C* code.
-                //
-                // The snitch_base implementation should handle the above case correctly.
-                // I'm leaving the this implementation anyway since it's the C*'s
-                // implementation and some installations may depend on it.
-                //
-                token_metadata.invoke_on_all([] (shared_token_metadata& tm) mutable {
-                    const auto& topo = tm.get()->get_topology();
-                    // There's no real need in mutate_token_metadata here as it just
-                    // sets a single boolean bit on topology object, this change is
-                    // never ever performed again and by this point no code uses neither
-                    // topology nor the token metadata itself
-                    const_cast<locator::topology&>(topo).disable_proximity_sorting();
-                }).get();
-            }
-
             static direct_fd_clock fd_clock;
             static sharded<direct_failure_detector::failure_detector> fd;
             supervisor::notify("starting direct failure detector service");
@@ -956,7 +950,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 std::ref(db), std::ref(gossiper), std::ref(sys_ks),
                 std::ref(feature_service), std::ref(mm), std::ref(token_metadata), std::ref(erm_factory),
                 std::ref(messaging), std::ref(repair),
-                std::ref(stream_manager), std::ref(lifecycle_notifier), std::ref(bm), std::ref(sl_controller)).get();
+                std::ref(stream_manager), std::ref(lifecycle_notifier), std::ref(bm), std::ref(snitch), std::ref(sl_controller)).get();
 
             auto stop_storage_service = defer_verbose_shutdown("storage_service", [&] {
                 ss.stop().get();
@@ -1153,7 +1147,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             // FIXME -- this sys_ks start should really be up above, where its instance
             // start, but we only have query processor started that late
-            sys_ks.invoke_on_all(&db::system_keyspace::start).get();
+            sys_ks.invoke_on_all([&snitch] (auto& sys_ks) {
+                return sys_ks.start(snitch.local());
+            }).get();
             cfg->host_id = sys_ks.local().load_local_host_id().get0();
 
             group0_client.init().get();
@@ -1190,7 +1186,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // 1. messaging is on the way with its preferred ip cache
             // 2. cql_test_env() doesn't do it
             // 3. need to check if it depends on any of the above steps
-            sys_ks.local().setup(messaging).get();
+            sys_ks.local().setup(snitch, messaging).get();
 
             supervisor::notify("starting schema commit log");
 
@@ -1282,7 +1278,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 }
             }).get();
             api::set_server_gossip(ctx, gossiper).get();
-            api::set_server_snitch(ctx).get();
+            api::set_server_snitch(ctx, snitch).get();
+            auto stop_snitch_api = defer_verbose_shutdown("snitch API", [&ctx] {
+                api::unset_server_snitch(ctx).get();
+            });
             api::set_server_storage_proxy(ctx, ss).get();
             api::set_server_load_sstable(ctx).get();
             static seastar::sharded<memory_threshold_guard> mtg;
@@ -1336,9 +1335,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // ATTN -- sharded repair reference already sits on storage_service and if
             // it calls repair.local() before this place it'll crash (now it doesn't do
             // both)
-            supervisor::notify("starting messaging service");
+            supervisor::notify("starting repair service");
             auto max_memory_repair = memory::stats().total_memory() * 0.1;
-            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(proxy), std::ref(bm), std::ref(sys_dist_ks), std::ref(sys_ks), std::ref(view_update_generator), std::ref(mm), max_memory_repair).get();
+            repair.start(std::ref(gossiper), std::ref(messaging), std::ref(db), std::ref(proxy), std::ref(bm), std::ref(sys_dist_ks), std::ref(sys_ks), std::ref(view_update_generator), std::ref(task_manager), std::ref(mm), max_memory_repair).get();
             auto stop_repair_service = defer_verbose_shutdown("repair service", [&repair] {
                 repair.stop().get();
             });
@@ -1632,7 +1631,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_rpc_controller(ctx).get();
             });
 
-            alternator::controller alternator_ctl(gossiper, proxy, mm, sys_dist_ks, cdc_generation_service, service_memory_limiter, *cfg);
+            alternator::controller alternator_ctl(gossiper, proxy, mm, sys_dist_ks, cdc_generation_service, service_memory_limiter, auth_service, sl_controller, *cfg);
             sharded<alternator::expiration_service> es;
             std::any stop_expiration_service;
 

@@ -172,7 +172,7 @@ public:
     };
 
 private:
-    const resources _initial_resources;
+    resources _initial_resources;
     resources _resources;
 
     expiring_fifo<entry, expiry_handler, db::timeout_clock> _wait_list;
@@ -184,6 +184,7 @@ private:
     stats _stats;
     permit_list_type _permit_list;
     bool _stopped = false;
+    bool _evicting = false;
     gate _close_readers_gate;
     gate _permit_gate;
     std::optional<future<>> _execution_loop_future;
@@ -204,6 +205,15 @@ private:
     future<> enqueue_waiter(reader_permit permit, read_func func);
     void evict_readers_in_background();
     future<> do_wait_admission(reader_permit permit, read_func func = {});
+
+    // Check whether permit can be admitted or not.
+    // Caller can specify whether wait list should be empty or not for admission
+    // to be possible. can_admit::maybe means admission might be possible if some
+    // of the inactive readers are evicted.
+    enum class can_admit { no, maybe, yes };
+    using require_empty_waitlist = bool_class<class require_empty_waitlist_tag>;
+    can_admit can_admit_read(const reader_permit& permit, require_empty_waitlist wait_list_empty) const noexcept;
+
     void maybe_admit_waiters() noexcept;
 
     void on_permit_created(reader_permit::impl&);
@@ -392,6 +402,12 @@ public:
     /// \ref obtain_permit(), then \ref with_ready_permit() is less
     /// optimal then just using \ref with_permit().
     future<> with_ready_permit(reader_permit permit, read_func func);
+
+    /// Set the total resources of the semaphore to \p r.
+    ///
+    /// After this call, \ref initial_resources() will reflect the new value.
+    /// Available resources will be adjusted by the delta.
+    void set_resources(resources r);
 
     const resources initial_resources() const {
         return _initial_resources;

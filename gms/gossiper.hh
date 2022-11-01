@@ -147,8 +147,6 @@ public:
     }
     const std::set<inet_address>& get_seeds() const noexcept;
 
-    netw::messaging_service& get_local_messaging() const noexcept { return _messaging; }
-    sharded<db::system_keyspace>& get_system_keyspace() const noexcept { return _sys_ks; }
 public:
     static clk::time_point inline now() noexcept { return clk::now(); }
 public:
@@ -598,7 +596,7 @@ private:
 public:
     void append_endpoint_state(std::stringstream& ss, const endpoint_state& state);
 public:
-    void check_snitch_name_matches() const;
+    void check_snitch_name_matches(sstring local_snitch_name) const;
     int get_down_endpoint_count() const noexcept;
     int get_up_endpoint_count() const noexcept;
 private:
