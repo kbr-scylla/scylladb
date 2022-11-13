@@ -1149,6 +1149,11 @@ future<bool> table::perform_offstrategy_compaction() {
     return _compaction_manager.perform_offstrategy(as_table_state());
 }
 
+future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_owned_ranges) {
+    co_await flush();
+    co_await get_compaction_manager().perform_cleanup(std::move(sorted_owned_ranges), as_table_state());
+}
+
 void table::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
     tlogger.debug("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), sstables::compaction_strategy::name(strategy));
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
@@ -2359,7 +2364,7 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
             // completed first.
             // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
-            co_await sst->move_to_new_dir(dir(), calculate_generation_for_new_table(), false);
+            co_await sst->move_to_new_dir(dir(), sst->generation(), false);
             // If view building finished faster, SSTable with repair origin still exists.
             // It can also happen the SSTable is not going through reshape, so it doesn't have a repair origin.
             // That being said, we'll only add this SSTable to tracker if its origin is other than repair.
@@ -2375,6 +2380,11 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
     co_await coroutine::parallel_for_each(dirs_to_sync, [] (sstring dir) {
         return sync_directory(dir);
     });
+    // Off-strategy timer will be rearmed, so if there's more incoming data through repair / streaming,
+    // the timer can be updated once again. In practice, it allows off-strategy compaction to kick off
+    // at the end of the node operation on behalf of this table, which brings more efficiency in terms
+    // of write amplification.
+    do_update_off_strategy_trigger();
 }
 
 /**
