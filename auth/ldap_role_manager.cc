@@ -120,7 +120,7 @@ using conn_ptr = lw_shared_ptr<ldap_connection>;
 future<conn_ptr> ldap_role_manager::connect() {
     const auto desc = parse_url(get_url("dummy-user")); // Just need host and port -- any user should do.
     if (!desc) {
-        co_return coroutine::make_exception(std::runtime_error("connect attempted before a successful start"));
+        co_return coroutine::exception(std::make_exception_ptr(std::runtime_error("connect attempted before a successful start")));
     }
     net::inet_address host = co_await net::dns::resolve_name(desc->lud_host);
     const socket_address addr(host, uint16_t(desc->lud_port));
@@ -137,7 +137,7 @@ future<conn_ptr> ldap_role_manager::connect() {
     }
     if (!error.empty()) {
         co_await conn->close();
-        co_return coroutine::make_exception(std::runtime_error(std::move(error)));
+        co_return coroutine::exception(std::make_exception_ptr(std::runtime_error(std::move(error))));
     }
     co_return std::move(conn);
 }
@@ -163,7 +163,7 @@ future<conn_ptr> ldap_role_manager::reconnect() {
     if (conn) {
         co_return std::move(conn);
     }
-    co_return coroutine::make_exception(std::runtime_error("reconnect failed after 5 attempts"));
+    co_return coroutine::exception(std::make_exception_ptr(std::runtime_error("reconnect failed after 5 attempts")));
 }
 
 future<> ldap_role_manager::stop() {
@@ -207,7 +207,7 @@ future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name,
         const auto mtype = ldap_msgtype(res.get());
         if (mtype != LDAP_RES_SEARCH_ENTRY && mtype != LDAP_RES_SEARCH_RESULT && mtype != LDAP_RES_SEARCH_REFERENCE) {
             mylog.error("ldap search yielded result {} of type {}", static_cast<const void*>(res.get()), mtype);
-            co_return coroutine::make_exception(std::runtime_error("ldap_role_manager: search result has wrong type"));
+            co_return coroutine::exception(std::make_exception_ptr(std::runtime_error("ldap_role_manager: search result has wrong type")));
         }
         std::vector<sstring> values = get_attr_values(conn.get_ldap(), res.get(), _target_attr.c_str());
         auth::role_set valid_roles{grantee_name};
