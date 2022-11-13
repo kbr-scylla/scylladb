@@ -103,12 +103,11 @@ future<bool> as_authentication_exception(std::exception_ptr ex) {
 
 future<bool> authenticate_with_saslauthd(sstring saslauthd_socket_path, const saslauthd_credentials& creds) {
     socket_address addr((unix_domain_addr(saslauthd_socket_path)));
-    using std::move;
     // TODO: switch to seastar::connect() when it supports Unix domain sockets.
-    return engine().net().connect(addr).then([creds = move(creds)] (connected_socket s) {
+    return engine().net().connect(addr).then([creds = std::move(creds)] (connected_socket s) {
         return do_with(
                 s.input(), s.output(),
-                [creds = move(creds)] (input_stream<char>& in, output_stream<char>& out) {
+                [creds = std::move(creds)] (input_stream<char>& in, output_stream<char>& out) {
                     return out.write(make_saslauthd_message(creds)).then([&in, &out] () mutable {
                         return out.flush().then([&in] () mutable {
                             return in.read_exactly(2).then([&in] (temporary_buffer<char> len) mutable {

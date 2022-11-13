@@ -197,7 +197,7 @@ future<role_set> ldap_role_manager::query_granted(std::string_view grantee_name,
     if (!desc) {
         return make_exception_future<role_set>(std::runtime_error(format("Error parsing URL {}", url)));
     }
-    return _connection_factory.with_connection([this, desc = move(desc), grantee_name_ = sstring(grantee_name)]
+    return _connection_factory.with_connection([this, desc = std::move(desc), grantee_name_ = sstring(grantee_name)]
                                                (ldap_connection& conn) -> future<role_set> {
         sstring grantee_name = std::move(grantee_name_);
         ldap_msg_ptr res = co_await conn.search(desc->lud_dn, desc->lud_scope, desc->lud_filter, desc->lud_attrs,

@@ -58,17 +58,16 @@ temporary_buffer<char> make_saslauthd_response(sstring_view payload, std::option
 ///
 /// Must be invoked inside a Seastar thread.
 bool authorize_against_this_response(temporary_buffer<char> resp, sstring socket_path) {
-    using std::move;
     auto socket = seastar::listen(socket_address(unix_domain_addr(socket_path)));
     auto [result, closing] = when_all(
             auth::authenticate_with_saslauthd(socket_path, {"jdoe", "pa55w0rd", "", ""}),
-            socket.accept().then([resp = move(resp), socket_path] (accept_result ar) mutable {
+            socket.accept().then([resp = std::move(resp), socket_path] (accept_result ar) mutable {
                 return do_with(
                         ar.connection.input(), ar.connection.output(), socket_path,
-                        [resp = move(resp)] (input_stream<char>& in, output_stream<char>& out, sstring& socket_path) mutable {
+                        [resp = std::move(resp)] (input_stream<char>& in, output_stream<char>& out, sstring& socket_path) mutable {
                             return in.read().then(
-                                    [&in, &out, &socket_path, resp=move(resp)] (temporary_buffer<char>) mutable {
-                                        return out.write(move(resp)).finally([&out] { return out.close(); });
+                                    [&in, &out, &socket_path, resp=std::move(resp)] (temporary_buffer<char>) mutable {
+                                        return out.write(std::move(resp)).finally([&out] { return out.close(); });
                                     }).handle_exception(fail_test).finally([&] {
                                         return in.close().finally([&] { return remove_file(socket_path); });
                                     });

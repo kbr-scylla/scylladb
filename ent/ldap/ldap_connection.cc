@@ -463,8 +463,8 @@ void ldap_reuser::reap(conn_ptr& conn) {
         return;
     }
     if (auto p = conn.release()) { // Safe to close, other fibers are done with it.
-        _reaper = _reaper.then([p = move(p)] () mutable {
-            return p->close().then_wrapped([p = move(p)] (future<> fut) {
+        _reaper = _reaper.then([p = std::move(p)] () mutable {
+            return p->close().then_wrapped([p = std::move(p)] (future<> fut) {
                 if (fut.failed()) {
                     mylog.warn("failure closing dead ldap_connection: {}", fut.get_exception());
                 }
