@@ -27,7 +27,7 @@ class sequential_producer {
     seastar::shared_future<T> _churning; ///< Resolves when the previous _factory call completes.
 
   public:
-    sequential_producer(factory_t&& f) : _factory(move(f))
+    sequential_producer(factory_t&& f) : _factory(std::move(f))
     {
         clear();
     }
