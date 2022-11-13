@@ -556,7 +556,7 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
             }).then([this, cmd, &f, retry](con_ptr cp) mutable {
                 auto host = cp->host();
                 auto res = do_cmd(cmd, std::move(cp), f);
-                kmip_log.trace("{}: request {}", *this, KMIP_CMD_get_request(cmd));
+                kmip_log.trace("{}: request {}", *this, fmt::ptr(KMIP_CMD_get_request(cmd)));
                 return res.then([this, retry, cmd, host = std::move(host)](int res) {
                     if (res == KMIP_ERROR_IO) {
                         kmip_log.debug("{}: request error {}", *this, kmip_errorc.message(res));
@@ -584,7 +584,7 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
         });
     }).then([this, cmd = std::move(cmd_in)](int res) mutable {
         kmip_chk(res, cmd);
-        kmip_log.trace("{}: result {}", *this, KMIP_CMD_get_response(cmd));
+        kmip_log.trace("{}: result {}", *this, fmt::ptr(KMIP_CMD_get_response(cmd)));
         return std::move(cmd);
     });
 }
