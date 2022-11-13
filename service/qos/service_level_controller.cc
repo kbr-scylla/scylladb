@@ -352,7 +352,7 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
                 }
                 sl_it->second.sg.set_shares(new_shares);
                 f = f.then([pc = sl_it->second.pc, shares = new_shares] () {
-                    return engine().update_shares_for_class(pc, shares);
+                    return pc.update_shares(shares);
                 });
             }
 
@@ -646,15 +646,15 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                         _global_controller_db->deleted_priority_classes.pop_front();
                     }
                     return container().invoke_on_all([pc = sl.pc, shares] (service_level_controller& service) {
-                        return engine().update_shares_for_class(pc, shares);
+                        return pc.update_shares(shares);
                     }).then([pc = sl.pc, &sl, &name] () mutable{
                         return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
                             return pc.rename(format(scheduling_group_name_pattern, name));
                         });
                     });
                 } else {
-                    sl. pc = engine().
-                            register_one_priority_class(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares));
+                    sl. pc =
+                            io_priority_class::register_one(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares));
                     return make_ready_future();
                 }
             }).then([this, &sl, &name] () {
