@@ -28,8 +28,8 @@ service_level_controller::service_level_controller(sharded<auth::service>& auth_
         : _sl_data_accessor(nullptr)
         , _auth_service(auth_service)
         , _last_successful_config_update(seastar::lowres_clock::now())
-        , _logged_intervals(0)
-{
+        , _io_priority_classes(seastar::max_scheduling_groups(), default_priority_class())
+        , _logged_intervals(0) {
     // We can't rename the system default scheduling group so we have to reject it.
     assert(default_scheduling_group != get_default_scheduling_group());
     if (this_shard_id() == global_controller) {
@@ -401,7 +401,10 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
 io_priority_class* service_level_controller::get_current_priority_class() {
     unsigned sched_idx = internal::scheduling_group_index(current_scheduling_group());
     if (_sl_lookup[sched_idx].second) {
-        return &(_sl_lookup[sched_idx].second->pc);
+        assert(sched_idx < _io_priority_classes.size());
+        // #2438 - prio class address must survive any group add/deletes. do a defensive copy.
+        _io_priority_classes[sched_idx] = _sl_lookup[sched_idx].second->pc;
+        return &_io_priority_classes[sched_idx];
     } else {
         return nullptr;
     }

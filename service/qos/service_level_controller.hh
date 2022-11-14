@@ -94,6 +94,7 @@ private:
     service_level_distributed_data_accessor_ptr _sl_data_accessor;
     sharded<auth::service>& _auth_service;
     std::chrono::time_point<seastar::lowres_clock> _last_successful_config_update;
+    std::vector<io_priority_class> _io_priority_classes;    
     unsigned _logged_intervals;
     atomic_vector<qos_configuration_change_subscriber*> _subscribers;
 public:
