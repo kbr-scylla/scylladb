@@ -316,7 +316,8 @@ incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> i
         offstrategy_threshold = max_sstables;
     }
 
-    if (input.size() >= offstrategy_threshold && mode == reshape_mode::strict) {
+    auto run_count = boost::copy_range<std::unordered_set<run_id>>(input | boost::adaptors::transformed(std::mem_fn(&sstable::run_identifier))).size();
+    if (run_count >= offstrategy_threshold && mode == reshape_mode::strict) {
         std::sort(input.begin(), input.end(), [&schema] (const shared_sstable& a, const shared_sstable& b) {
             return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
         });

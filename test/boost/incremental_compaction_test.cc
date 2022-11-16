@@ -448,6 +448,21 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
         }
 
         {
+            // create a single run of 256 sstables and expect that reshape will say there's nothing to do.
+
+            run_id sstable_run_id = run_id::create_random_id();
+            std::vector<sstables::shared_sstable> sstables;
+            sstables.reserve(disjoint_sstable_count);
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
+                auto sst = make_sstable_containing(sst_gen, {make_row(i)});
+                sstables::test(sst).set_run_identifier(sstable_run_id);
+                sstables.push_back(std::move(sst));
+            }
+
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == 0);
+        }
+
+        {
             // create set of 256 overlapping ssts and expect that stcs reshape allows only 32 to be compacted at once
 
             std::vector<sstables::shared_sstable> sstables;
