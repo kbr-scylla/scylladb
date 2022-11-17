@@ -347,7 +347,7 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
             });
             if (sl_it->second.slo.shares != slo.shares) {
                 int32_t new_shares = 1000;
-                if (auto new_shares_p = std::get_if<int32_t>(&sl_it->second.slo.shares)) {
+                if (auto new_shares_p = std::get_if<int32_t>(&slo.shares)) {
                     new_shares = *new_shares_p;
                 }
                 sl_it->second.sg.set_shares(new_shares);
