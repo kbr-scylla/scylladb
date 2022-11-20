@@ -128,6 +128,9 @@ const column_definition* view_info::view_column(const column_definition& base_de
 
 void view_info::set_base_info(db::view::base_info_ptr base_info) {
     _base_info = std::move(base_info);
+    // Forget the cached objects which may refer to the base schema.
+    _select_statement = nullptr;
+    _partition_slice = std::nullopt;
 }
 
 // A constructor for a base info that can facilitate reads and writes from the materialized view.
@@ -1391,9 +1394,9 @@ static std::optional<gms::inet_address>
 get_view_natural_endpoint(const sstring& keyspace_name,
         const dht::token& base_token, const dht::token& view_token) {
     auto &db = service::get_local_storage_proxy().local_db();
-    auto& topology = service::get_local_storage_proxy().get_token_metadata_ptr()->get_topology();
     auto& ks = db.find_keyspace(keyspace_name);
     auto erm = ks.get_effective_replication_map();
+    auto& topology = erm->get_token_metadata_ptr()->get_topology();
     auto my_address = utils::fb_utilities::get_broadcast_address();
     auto my_datacenter = topology.get_datacenter();
     bool network_topology = dynamic_cast<const locator::network_topology_strategy*>(&ks.get_replication_strategy());

@@ -58,7 +58,6 @@ using sstable_run_bucket_and_length = std::pair<std::vector<sstables::sstable_ru
 
 class incremental_compaction_strategy : public compaction_strategy_impl {
     incremental_compaction_strategy_options _options;
-    compaction_backlog_tracker _backlog_tracker;
 
     using size_bucket_t = std::vector<sstables::sstable_run>;
 
@@ -108,9 +107,7 @@ public:
         return compaction_strategy_type::incremental;
     }
 
-    virtual compaction_backlog_tracker& get_backlog_tracker() override {
-        return _backlog_tracker;
-    }
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> make_backlog_tracker() override;
 
     virtual compaction_descriptor get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) override;
 

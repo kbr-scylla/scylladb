@@ -48,7 +48,7 @@ using read_id = internal::tagged_uint64<struct read_id_tag>;
 // This value is disseminated between cluster member
 // through regular log replication as part of a configuration
 // log entry. Upon receiving it a server passes it down to
-// RPC module through add_server() call where it is deserialized
+// RPC module through on_configuration_change() call where it is deserialized
 // and used to obtain connection info for the node `id`. After a server
 // is added to the RPC module RPC's send functions can be used to communicate
 // with it using its `id`.
@@ -317,14 +317,6 @@ struct request_aborted : public error {
     request_aborted() : error("Request is aborted by a caller") {}
 };
 
-// True if a failure to execute a Raft operation can be re-tried,
-// perhaps with a different server.
-inline bool is_transient_error(const std::exception& e) {
-    return dynamic_cast<const not_a_leader*>(&e) ||
-           dynamic_cast<const dropped_entry*>(&e) ||
-           dynamic_cast<const conf_change_in_progress*>(&e);
-}
-
 inline bool is_uncertainty(const std::exception& e) {
     return dynamic_cast<const commit_status_unknown*>(&e) ||
            dynamic_cast<const stopped_error*>(&e);
@@ -450,12 +442,41 @@ struct entry_id {
     index_t idx;
 };
 
+// The execute_add_entry/execute_modify_config methods can return this error to signal
+// that the request should be retried.
+// The exception is only used internally for entry/config forwarding and should not be leaked to a user.
+struct transient_error: public error {
+    // for IDL serialization
+    sstring message() const {
+        return what();
+    }
+    // A leader that the client should use for retrying.
+    // Could be empty, if the new leader is not known.
+    // Client should wait for a new leader in this case.
+    server_id leader;
+
+    explicit transient_error(const sstring& message, server_id leader)
+        : error(message)
+        , leader(leader)
+    {
+    }
+
+    explicit transient_error(std::exception_ptr e, server_id leader)
+        : transient_error(format("Transient error: '{}'", e), leader)
+    {
+    }
+
+    friend std::ostream& operator<<(std::ostream& os, const transient_error& e) {
+        return os << "transient_error, message: " << e.what() << ", leader: " << e.leader;
+    }
+};
+
 // Response to add_entry or modify_config RPC.
 // Carries either entry id (the entry is not committed yet),
-// not_a_leader (the entry is not added to Raft log), or, for
+// transient_error (the entry is not added to Raft log), or, for
 // modify_config, commit_status_unknown (commit status is
 // unknown).
-using add_entry_reply = std::variant<entry_id, not_a_leader, commit_status_unknown>;
+using add_entry_reply = std::variant<entry_id, transient_error, commit_status_unknown>;
 
 // std::monostate {} if the leader cannot execute the barrier because
 // it did not commit any entries yet
@@ -599,13 +620,19 @@ public:
         const std::vector<config_member>& add,
         const std::vector<server_id>& del) = 0;
 
-    // When a new server is learn this function is called with the
-    // info about the server.
-    virtual void add_server(server_address) = 0;
-
-    // When a server is removed from local config this call is
-    // executed.
-    virtual void remove_server(server_id id) = 0;
+    // When a configuration is changed this function is called with the
+    // info about the changes. It is also called when a new server
+    // starts and its configuration is loaded from raft storage.
+    //
+    // In fact, today we always call this function first, just
+    // with the added and only then with the removed servers, to
+    // simplify RPC's job of delivering a batch of messages
+    // addressing both  added and removed servers. Passing the
+    // added servers first, then passing a batch, and then passing
+    // the removed servers makes it easier for RPC to deliver all
+    // messages in the batch.
+    virtual void on_configuration_change(server_address_set add,
+            server_address_set del) = 0;
 
     // Stop the RPC instance by aborting the work that can be
     // aborted and waiting for all the rest to complete any

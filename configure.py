@@ -915,6 +915,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/multiprecision_int.cc',
                 'utils/memory.cc',
                 'utils/gz/crc_combine.cc',
+                'utils/gz/crc_combine_table.cc',
                 'gms/version_generator.cc',
                 'gms/versioned_value.cc',
                 'gms/gossiper.cc',
@@ -949,6 +950,7 @@ scylla_core = (['message/messaging_service.cc',
                 'locator/ec2_snitch.cc',
                 'locator/ec2_multi_region_snitch.cc',
                 'locator/gce_snitch.cc',
+                'locator/topology.cc',
                 'service/client_state.cc',
                 'service/storage_service.cc',
                 'service/misc_services.cc',
@@ -1348,8 +1350,6 @@ deps['test/raft/discovery_test'] =  ['test/raft/discovery_test.cc',
                                      'test/lib/log.cc',
                                      'service/raft/discovery.cc'] + scylla_raft_dependencies
 
-deps['utils/gz/gen_crc_combine_table'] = ['utils/gz/gen_crc_combine_table.cc']
-
 
 warnings = [
     '-Wall',
@@ -1629,8 +1629,6 @@ if args.target != '':
     seastar_cflags += ' -march=' + args.target
 seastar_ldflags = args.user_ldflags
 
-libdeflate_cflags = seastar_cflags
-
 # cmake likes to separate things with semicolons
 def semicolon_separated(*flags):
     # original flags may be space separated, so convert to string still
@@ -1758,12 +1756,13 @@ abseil_libs = ['absl/' + lib for lib in [
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
-                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap_r -llber',
+                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  # Must link with static version of libzstd, since
                  # experimental APIs that we use are only present there.
                  maybe_static(True, '-lzstd'),
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc -licui18n'),
                  '-lxxhash',
+                 '-ldeflate',
                 ])
 if has_wasmtime:
     print("Found wasmtime dependency, linking with libwasmtime")
@@ -1997,11 +1996,8 @@ with open(buildfile, 'w') as f:
                 f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
             else:
                 objs.extend(['$builddir/' + mode + '/' + artifact for artifact in [
-                    'libdeflate/libdeflate.a',
-                ] + [
                     'abseil/' + x for x in abseil_libs
                 ]])
-                objs.append('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o')
                 if binary in tests:
                     local_libs = '$seastar_libs_{} $libs'.format(mode)
                     if binary in pure_boost_tests:
@@ -2050,12 +2046,6 @@ with open(buildfile, 'w') as f:
                     rust_libs[staticlib] = src
                 else:
                     raise Exception('No rule for ' + src)
-        compiles['$builddir/' + mode + '/gen/utils/gz/crc_combine_table.o'] = '$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc'
-        compiles['$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'] = 'utils/gz/gen_crc_combine_table.cc'
-        f.write('build {}: run {}\n'.format('$builddir/' + mode + '/gen/utils/gz/crc_combine_table.cc',
-                                            '$builddir/' + mode + '/utils/gz/gen_crc_combine_table'))
-        f.write('build {}: link_build.{} {}\n'.format('$builddir/' + mode + '/utils/gz/gen_crc_combine_table', mode,
-                                                '$builddir/' + mode + '/utils/gz/gen_crc_combine_table.o'))
         f.write('   libs = $seastar_libs_{}\n'.format(mode))
         f.write(
             'build {mode}-objects: phony {objs}\n'.format(
@@ -2197,10 +2187,6 @@ with open(buildfile, 'w') as f:
         f.write(f'  mode = {mode}\n')
         f.write(f'build $builddir/{mode}/dist/tar/{scylla_product}-unified-package-{scylla_version}-{scylla_release}.tar.gz: copy $builddir/{mode}/dist/tar/{scylla_product}-unified-{scylla_version}-{scylla_release}.{arch}.tar.gz\n')
         f.write(f'build $builddir/{mode}/dist/tar/{scylla_product}-unified-{arch}-package-{scylla_version}-{scylla_release}.tar.gz: copy $builddir/{mode}/dist/tar/{scylla_product}-unified-{scylla_version}-{scylla_release}.{arch}.tar.gz\n')
-        f.write('rule libdeflate.{mode}\n'.format(**locals()))
-        f.write('  command = make -C libdeflate BUILD_DIR=../$builddir/{mode}/libdeflate/ CFLAGS="{libdeflate_cflags}" CC={args.cc} ../$builddir/{mode}/libdeflate//libdeflate.a\n'.format(**locals()))
-        f.write('build $builddir/{mode}/libdeflate/libdeflate.a: libdeflate.{mode}\n'.format(**locals()))
-        f.write('  pool = submodule_pool\n')
 
         for lib in abseil_libs:
             f.write('build $builddir/{mode}/abseil/{lib}: ninja $builddir/{mode}/abseil/build.ninja\n'.format(**locals()))

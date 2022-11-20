@@ -533,6 +533,7 @@ class Test:
         self.id = test_no
         self.path = ""
         self.args: List[str] = []
+        self.valid_exit_codes = [0]
         # Name with test suite name
         self.name = os.path.join(suite.name, shortname.split('.')[0])
         # Name within the suite
@@ -734,8 +735,7 @@ class LdapTest(BoostTest):
         instances_root = os.path.join(options.tmpdir, self.mode, 'ldap_instances');
         instance_path = os.path.join(os.path.abspath(instances_root), str(port))
         slapd_pid_file = os.path.join(instance_path, 'slapd.pid')
-        data_path = os.path.join(instance_path, 'data')
-        os.makedirs(data_path)
+        os.makedirs(instance_path, exist_ok=True)
         # This will always fail because it lacks the permissions to read the default slapd data
         # folder but it does create the instance folder so we don't want to fail here.
         try:
@@ -754,7 +754,7 @@ class LdapTest(BoostTest):
                                  '-a', 'bytes={}'.format(byte_limit)])
         # Change the data folder in the default config.
         replace_expression = 's/olcDbDirectory:.*/olcDbDirectory: {}/g'.format(
-            os.path.abspath(data_path).replace('/','\/'))
+            os.path.abspath(instance_path).replace('/','\/'))
         subprocess.check_output(
             ['find', instance_path, '-type', 'f', '-exec', 'sed', '-i', replace_expression, '{}', ';'])
         # Change the pid file to be kept with the instance.
@@ -961,19 +961,27 @@ class PythonTest(Test):
         self.server_log_filename: Optional[pathlib.Path] = None
         PythonTest._reset(self)
 
+    def _prepare_pytest_params(self, options: argparse.Namespace):
+        self.args = [
+            "-s",  # don't capture print() output inside pytest
+            "--log-level=DEBUG",   # Capture logs
+            "-o",
+            "junit_family=xunit2",
+            "--junit-xml={}".format(self.xmlout)]
+        if options.markers:
+            self.args.append(f"-m={options.markers}")
+
+            # https://docs.pytest.org/en/7.1.x/reference/exit-codes.html
+            no_tests_selected_exit_code = 5
+            self.valid_exit_codes = [0, no_tests_selected_exit_code]
+        self.args.append(str(self.suite.suite_path / (self.shortname + ".py")))
+
     def _reset(self) -> None:
         """Reset the test before a retry, if it is retried as flaky"""
         self.server_log = None
         self.server_log_filename = None
         self.is_before_test_ok = False
         self.is_after_test_ok = False
-        self.args = [
-            "-s",  # don't capture print() output inside pytest
-            "--log-level=DEBUG",   # Capture logs
-            "-o",
-            "junit_family=xunit2",
-            "--junit-xml={}".format(self.xmlout),
-            str(self.suite.suite_path / (self.shortname + ".py"))]
 
     def print_summary(self) -> None:
         print("Output of {} {}:".format(self.path, " ".join(self.args)))
@@ -983,6 +991,8 @@ class PythonTest(Test):
             print(self.server_log)
 
     async def run(self, options: argparse.Namespace) -> Test:
+
+        self._prepare_pytest_params(options)
 
         async with self.suite.clusters.instance() as cluster:
             try:
@@ -1021,6 +1031,8 @@ class TopologyTest(PythonTest):
         super().__init__(test_no, shortname, suite)
 
     async def run(self, options: argparse.Namespace) -> Test:
+
+        self._prepare_pytest_params(options)
 
         test_path = os.path.join(self.suite.options.tmpdir, self.mode)
         async with get_cluster_manager(self.uname, self.suite.clusters, test_path) as manager:
@@ -1129,7 +1141,13 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
             "disable_coredump=0",
             "abort_on_error=1",
             "detect_stack_use_after_return=1",
+            # See #2504
+            "detect_leaks=0",
             os.getenv("ASAN_OPTIONS"),
+        ]
+        LSAN_OPTIONS = [
+            f"suppressions={os.getcwd()}/lsan-suppressions.supp",
+            os.getenv("LSAN_OPTIONS"),
         ]
         ldap_instance_path = os.path.join(
             os.path.abspath(os.path.join(options.tmpdir, test.mode, 'ldap_instances')),
@@ -1149,6 +1167,8 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
                 ":".join(filter(None, UBSAN_OPTIONS))).encode(encoding="UTF-8"))
             log.write("export ASAN_OPTIONS='{}'\n".format(
                 ":".join(filter(None, ASAN_OPTIONS))).encode(encoding="UTF-8"))
+            log.write("export LSAN_OPTIONS='{}'\n".format(
+                ":".join(filter(None, LSAN_OPTIONS))).encode(encoding="UTF-8"))
             log.write("{} {}\n".format(test.path, " ".join(test.args)).encode(encoding="UTF-8"))
             log.write("=== TEST.PY TEST {} OUTPUT ===\n".format(test.uname).encode(encoding="UTF-8"))
             log.flush()
@@ -1169,6 +1189,7 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
                          SASLAUTHD_MUX_PATH=saslauthd_mux_path,
                          UBSAN_OPTIONS=":".join(filter(None, UBSAN_OPTIONS)),
                          ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
+                         LSAN_OPTIONS=":".join(filter(None, LSAN_OPTIONS)),
                          # TMPDIR env variable is used by any seastar/scylla
                          # test for directory to store test temporary data.
                          TMPDIR=os.path.join(options.tmpdir, test.mode),
@@ -1178,7 +1199,7 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
             )
             stdout, _ = await asyncio.wait_for(process.communicate(), options.timeout)
             test.time_end = time.time()
-            if process.returncode != 0:
+            if process.returncode not in test.valid_exit_codes:
                 report_error('Test exited with code {code}\n'.format(code=process.returncode))
                 return False
             try:
@@ -1276,6 +1297,12 @@ def parse_cmd_line() -> argparse.Namespace:
                         choices=["CRITICAL", "ERROR", "WARNING", "INFO",
                                  "DEBUG"],
                         dest="log_level")
+    parser.add_argument('--markers', action='store', metavar='MARKEXPR',
+                        help="Only run tests that match the given mark expression. The syntax is the same "
+                             "as in pytest, for example: --markers 'mark1 and not mark2'. The parameter "
+                             "is only supported by python tests for now, other tests ignore it. "
+                             "By default, the marker filter is not applied and all tests will be run without exception."
+                             "To exclude e.g. slow tests you can write --markers 'not slow'.")
     parser.add_argument('--manual-execution', action='store_true', default=False,
                         help='Let me manually run the test executable at the moment this script would run it')
     parser.add_argument('--byte-limit', action="store", default=None, type=int,
@@ -1535,11 +1562,13 @@ async def main() -> int:
             if not try_something_backoff(can_connect_to_toxiproxy):
                 raise Exception('Could not connect to toxiproxy')
 
-            try:
-                await run_all_tests(signaled, options)
-            except Exception as e:
-                print(palette.fail(e))
-                raise
+        try:
+            logging.info('running all tests')
+            await run_all_tests(signaled, options)
+            logging.info('after running all tests')
+        except Exception as e:
+            print(palette.fail(e))
+            raise
     finally:
         if tp_server is not None:
             tp_server.terminate()

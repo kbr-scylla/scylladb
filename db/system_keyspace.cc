@@ -355,6 +355,7 @@ schema_ptr system_keyspace::built_indexes() {
 }
 
 /*static*/ schema_ptr system_keyspace::peers() {
+    constexpr uint16_t schema_version_offset = 1; // raft_server_id
     static thread_local auto peers = [] {
         schema_builder builder(generate_legacy_id(NAME, PEERS), NAME, PEERS,
         // partition key
@@ -372,6 +373,7 @@ schema_ptr system_keyspace::built_indexes() {
                 {"schema_version", uuid_type},
                 {"tokens", set_type_impl::get_instance(utf8_type, true)},
                 {"supported_features", utf8_type},
+                {"raft_server_id", uuid_type},
         },
         // static columns
         {},
@@ -381,7 +383,7 @@ schema_ptr system_keyspace::built_indexes() {
         "information about known peers in the cluster"
        );
        builder.set_gc_grace_seconds(0);
-       builder.with_version(generate_schema_version(builder.uuid()));
+       builder.with_version(generate_schema_version(builder.uuid(), schema_version_offset));
        return builder.build(schema_builder::compact_storage::no);
     }();
     return peers;
@@ -1502,6 +1504,7 @@ future<> system_keyspace::update_tokens(gms::inet_address ep, const std::unorder
     }
 
     sstring req = format("INSERT INTO system.{} (peer, tokens) VALUES (?, ?)", PEERS);
+    slogger.debug("INSERT INTO system.{} (peer, tokens) VALUES ({}, {})", PEERS, ep, tokens);
     auto set_type = set_type_impl::get_instance(utf8_type, true);
     co_await execute_cql(req, ep.addr(), make_set_value(set_type, prepare_tokens(tokens))).discard_result();
     co_await force_blocking_flush(PEERS);
@@ -1541,11 +1544,18 @@ future<std::unordered_map<gms::inet_address, locator::host_id>> system_keyspace:
 }
 
 future<std::vector<gms::inet_address>> system_keyspace::load_peers() {
-    auto res = co_await execute_cql(format("SELECT peer FROM system.{}", PEERS));
+    auto res = co_await execute_cql(format("SELECT peer, tokens FROM system.{}", PEERS));
     assert(res);
 
     std::vector<gms::inet_address> ret;
     for (auto& row: *res) {
+        if (!row.has("tokens")) {
+            // Ignore rows that don't have tokens. Such rows may
+            // be introduced by code that persists parts of peer
+            // information (such as RAFT_ID) which may potentially
+            // race with deleting a peer (during node removal).
+            continue;
+        }
         ret.emplace_back(row.get_as<net::inet_address>("peer"));
     }
     co_return ret;
@@ -1594,6 +1604,7 @@ future<> system_keyspace::update_peer_info(gms::inet_address ep, sstring column_
 
     co_await update_cached_values(ep, column_name, value);
     sstring req = format("INSERT INTO system.{} (peer, {}) VALUES (?, ?)", PEERS, column_name);
+    slogger.debug("INSERT INTO system.{} (peer, {}) VALUES ({}, {})", PEERS, column_name, ep, value);
     co_await execute_cql(req, ep.addr(), value).discard_result();
 }
 // sets are not needed, since tokens are updated by another method
@@ -1645,6 +1656,7 @@ future<> system_keyspace::update_schema_version(table_schema_version version) {
  */
 future<> system_keyspace::remove_endpoint(gms::inet_address ep) {
     sstring req = format("DELETE FROM system.{} WHERE peer = ?", PEERS);
+    slogger.debug("DELETE FROM system.{} WHERE peer = {}", PEERS, ep);
     co_await execute_cql(req, ep.addr()).discard_result();
     co_await force_blocking_flush(PEERS);
 }
@@ -1869,7 +1881,7 @@ public:
                     set_cell(cr, "host_id", hostid->uuid());
                 }
 
-                if (tm.is_member(endpoint)) {
+                if (tm.is_normal_token_owner(endpoint)) {
                     sstring dc = tm.get_topology().get_location(endpoint).dc;
                     set_cell(cr, "dc", dc);
                 }

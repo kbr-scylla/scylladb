@@ -39,7 +39,6 @@ public:
 
 class in_memory_compaction_strategy : public compaction_strategy_impl {
     in_memory_compaction_strategy_options _options;
-    compaction_backlog_tracker _backlog_tracker;
 
 public:
     in_memory_compaction_strategy() = default;
@@ -47,12 +46,10 @@ public:
     in_memory_compaction_strategy(const std::map<sstring, sstring>& options)
         : compaction_strategy_impl(options)
         , _options(options)
-        , _backlog_tracker(std::make_unique<in_memory_backlog_tracker>())
     {}
 
     explicit in_memory_compaction_strategy(const in_memory_compaction_strategy_options& options)
     : _options(options)
-    , _backlog_tracker(std::make_unique<in_memory_backlog_tracker>())
     {}
 
     compaction_descriptor get_sstables_for_compaction(table_state& cfs, strategy_control& control, std::vector<sstables::shared_sstable> candidates) override;
@@ -63,8 +60,8 @@ public:
         return compaction_strategy_type::in_memory;
     }
 
-    compaction_backlog_tracker& get_backlog_tracker() override {
-        return _backlog_tracker;
+    virtual std::unique_ptr<compaction_backlog_tracker::impl> make_backlog_tracker() override {
+        return std::make_unique<in_memory_backlog_tracker>();
     }
 };
 

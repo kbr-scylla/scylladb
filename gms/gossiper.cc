@@ -726,7 +726,7 @@ future<> gossiper::do_status_check() {
         // check for dead state removal
         auto expire_time = get_expire_time_for_endpoint(endpoint);
         if (!is_alive && (now > expire_time)
-             && (!get_token_metadata_ptr()->is_member(endpoint))) {
+             && (!get_token_metadata_ptr()->is_normal_token_owner(endpoint))) {
             logger.debug("time is expiring for endpoint : {} ({})", endpoint, expire_time.time_since_epoch().count());
             co_await evict_from_membership(endpoint);
         }
@@ -1020,10 +1020,10 @@ std::set<inet_address> gossiper::get_live_members() const {
 
 std::set<inet_address> gossiper::get_live_token_owners() const {
     std::set<inet_address> token_owners;
-    for (auto& member : get_live_members()) {
-        auto es = get_endpoint_state_for_endpoint_ptr(member);
-        if (es && !is_dead_state(*es) && get_token_metadata_ptr()->is_member(member)) {
-            token_owners.insert(member);
+    auto normal_token_owners = get_token_metadata_ptr()->get_all_endpoints();
+    for (auto& node: normal_token_owners) {
+        if (is_alive(node)) {
+            token_owners.insert(node);
         }
     }
     return token_owners;
@@ -1031,10 +1031,10 @@ std::set<inet_address> gossiper::get_live_token_owners() const {
 
 std::set<inet_address> gossiper::get_unreachable_token_owners() const {
     std::set<inet_address> token_owners;
-    for (auto&& x : _unreachable_endpoints) {
-        auto& endpoint = x.first;
-        if (get_token_metadata_ptr()->is_member(endpoint)) {
-            token_owners.insert(endpoint);
+    auto normal_token_owners = get_token_metadata_ptr()->get_all_endpoints();
+    for (auto& node: normal_token_owners) {
+        if (!is_alive(node)) {
+            token_owners.insert(node);
         }
     }
     return token_owners;
@@ -1300,7 +1300,7 @@ bool gossiper::is_gossip_only_member(inet_address endpoint) {
     if (!es) {
         return false;
     }
-    return !is_dead_state(*es) && !get_token_metadata_ptr()->is_member(endpoint);
+    return !is_dead_state(*es) && !get_token_metadata_ptr()->is_normal_token_owner(endpoint);
 }
 
 clk::time_point gossiper::get_expire_time_for_endpoint(inet_address endpoint) const noexcept {
