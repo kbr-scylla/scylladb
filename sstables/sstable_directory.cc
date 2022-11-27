@@ -7,9 +7,12 @@
  */
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/util/file.hh>
 #include <boost/range/adaptor/map.hpp>
+#include <boost/algorithm/string.hpp>
 #include "sstables/sstable_directory.hh"
 #include "sstables/sstables.hh"
+#include "mirror-file-impl.hh"
 #include "compaction/compaction_manager.hh"
 #include "log.hh"
 #include "sstable_directory.hh"
@@ -33,19 +36,11 @@ sstable_directory::sstable_directory(fs::path sstable_dir,
         ::io_priority_class io_prio,
         unsigned load_parallelism,
         semaphore& load_semaphore,
-        need_mutate_level need_mutate_level,
-        lack_of_toc_fatal throw_on_missing_toc,
-        enable_dangerous_direct_import_of_cassandra_counters eddiocc,
-        allow_loading_materialized_view allow_mv,
         sstable_object_from_existing_fn sstable_from_existing)
     : _sstable_dir(std::move(sstable_dir))
     , _io_priority(std::move(io_prio))
     , _load_parallelism(load_parallelism)
     , _load_semaphore(load_semaphore)
-    , _need_mutate_level(need_mutate_level)
-    , _throw_on_missing_toc(throw_on_missing_toc)
-    , _enable_dangerous_direct_import_of_cassandra_counters(eddiocc)
-    , _allow_loading_materialized_view(allow_mv)
     , _sstable_object_from_existing_sstable(std::move(sstable_from_existing))
     , _unshared_remote_sstables(smp::count)
 {}
@@ -79,18 +74,18 @@ sstable_directory::handle_component(scan_state& state, sstables::entry_descripto
     }
 }
 
-void sstable_directory::validate(sstables::shared_sstable sst) const {
+void sstable_directory::validate(sstables::shared_sstable sst, process_flags flags) const {
     schema_ptr s = sst->get_schema();
     if (s->is_counter() && !sst->has_scylla_component()) {
         sstring error = "Direct loading non-Scylla SSTables containing counters is not supported.";
-        if (_enable_dangerous_direct_import_of_cassandra_counters) {
+        if (flags.enable_dangerous_direct_import_of_cassandra_counters) {
             dirlog.info("{} But trying to continue on user's request.", error);
         } else {
             dirlog.error("{} Use sstableloader instead.", error);
             throw std::runtime_error(fmt::format("{} Use sstableloader instead.", error));
         }
     }
-    if (s->is_view() && !_allow_loading_materialized_view) {
+    if (s->is_view() && !flags.allow_loading_materialized_view) {
         throw std::runtime_error("Loading Materialized View SSTables is not supported. Re-create the view instead.");
     }
     if (!sst->is_uploaded()) {
@@ -99,22 +94,22 @@ void sstable_directory::validate(sstables::shared_sstable sst) const {
 }
 
 future<>
-sstable_directory::process_descriptor(sstables::entry_descriptor desc, bool sort_sstables_according_to_owner) {
+sstable_directory::process_descriptor(sstables::entry_descriptor desc, process_flags flags) {
     if (desc.version > _max_version_seen) {
         _max_version_seen = desc.version;
     }
 
     auto sst = _sstable_object_from_existing_sstable(_sstable_dir, desc.generation, desc.version, desc.format);
-    return sst->load(_io_priority).then([this, sst] {
-        validate(sst);
-        if (_need_mutate_level) {
+    return sst->load(_io_priority).then([this, sst, flags] {
+        validate(sst, flags);
+        if (flags.need_mutate_level) {
             dirlog.trace("Mutating {} to level 0\n", sst->get_filename());
             return sst->mutate_sstable_level(0);
         } else {
             return make_ready_future<>();
         }
-    }).then([sst, sort_sstables_according_to_owner, this] {
-        if (sort_sstables_according_to_owner) {
+    }).then([sst, flags, this] {
+        if (flags.sort_sstables_according_to_owner) {
             return sort_sstable(sst);
         } else {
             dirlog.debug("Added {} to unsorted sstables list", sst->get_filename());
@@ -155,7 +150,7 @@ sstable_directory::highest_version_seen() const {
 }
 
 future<>
-sstable_directory::process_sstable_dir(bool sort_sstables_according_to_owner) {
+sstable_directory::process_sstable_dir(process_flags flags) {
     dirlog.debug("Start processing directory {} for SSTables", _sstable_dir);
 
     // It seems wasteful that each shard is repeating this scan, and to some extent it is.
@@ -213,11 +208,11 @@ sstable_directory::process_sstable_dir(bool sort_sstables_according_to_owner) {
 
     // _descriptors is everything with a TOC. So after we remove this, what's left is
     // SSTables for which a TOC was not found.
-    co_await parallel_for_each_restricted(state.descriptors, [this, sort_sstables_according_to_owner, &state] (std::tuple<generation_type, sstables::entry_descriptor>&& t) {
+    co_await parallel_for_each_restricted(state.descriptors, [this, flags, &state] (std::tuple<generation_type, sstables::entry_descriptor>&& t) {
         auto& desc = std::get<1>(t);
         state.generations_found.erase(desc.generation);
         // This will try to pre-load this file and throw an exception if it is invalid
-        return process_descriptor(std::move(desc), sort_sstables_according_to_owner);
+        return process_descriptor(std::move(desc), flags);
     });
 
     // For files missing TOC, it depends on where this is coming from.
@@ -225,7 +220,7 @@ sstable_directory::process_sstable_dir(bool sort_sstables_according_to_owner) {
     // we refuse to proceed. If this coming from, say, an import, then we just delete,
     // log and proceed.
     for (auto& path : state.generations_found | boost::adaptors::map_values) {
-        if (_throw_on_missing_toc) {
+        if (flags.throw_on_missing_toc) {
             throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable {}!. Refusing to boot", _sstable_dir.native(), path.native()));
         } else {
             dirlog.info("Found incomplete SSTable {} at directory {}. Removing", path.native(), _sstable_dir.native());
@@ -461,6 +456,100 @@ sstable_directory::store_phaser(utils::phased_barrier::operation op) {
 sstable_directory::sstable_info_vector
 sstable_directory::retrieve_shared_sstables() {
     return std::exchange(_shared_sstable_info, {});
+}
+
+future<> sstable_directory::delete_atomically(std::vector<shared_sstable> ssts) {
+    if (ssts.empty()) {
+        return make_ready_future<>();
+    }
+    return seastar::async([ssts = std::move(ssts)] {
+        sstring sstdir;
+        min_max_tracker<generation_type> gen_tracker;
+
+        for (const auto& sst : ssts) {
+            gen_tracker.update(sst->generation());
+
+            if (sstdir.empty()) {
+                sstdir = sst->get_dir();
+            } else {
+                // All sstables are assumed to be in the same column_family, hence
+                // sharing their base directory.
+                assert (sstdir == sst->get_dir());
+            }
+        }
+
+        sstring pending_delete_dir = sstdir + "/" + sstable::pending_delete_dir_basename();
+        sstring pending_delete_log = format("{}/sstables-{}-{}.log", pending_delete_dir, gen_tracker.min(), gen_tracker.max());
+        sstring tmp_pending_delete_log = pending_delete_log + ".tmp";
+        sstlog.trace("Writing {}", tmp_pending_delete_log);
+        try {
+            touch_directory(pending_delete_dir).get();
+            auto oflags = open_flags::wo | open_flags::create | open_flags::exclusive;
+            // Create temporary pending_delete log file.
+            auto f = open_file_dma(tmp_pending_delete_log, oflags).get0();
+            // Write all toc names into the log file.
+            auto out = make_file_output_stream(std::move(f), 4096).get0();
+            auto close_out = deferred_close(out);
+
+            for (const auto& sst : ssts) {
+                auto toc = sst->component_basename(component_type::TOC);
+                out.write(toc).get();
+                out.write("\n").get();
+            }
+
+            out.flush().get();
+            close_out.close_now();
+
+            auto dir_f = open_directory(pending_delete_dir).get0();
+            // Once flushed and closed, the temporary log file can be renamed.
+            rename_mirrored_file(tmp_pending_delete_log, pending_delete_log).get();
+
+            // Guarantee that the changes above reached the disk.
+            dir_f.flush().get();
+            dir_f.close().get();
+            sstlog.debug("{} written successfully.", pending_delete_log);
+        } catch (...) {
+            sstlog.warn("Error while writing {}: {}. Ignoring.", pending_delete_log, std::current_exception());
+        }
+
+        parallel_for_each(ssts, [] (shared_sstable sst) {
+            return sst->unlink();
+        }).get();
+
+        // Once all sstables are deleted, the log file can be removed.
+        // Note: the log file will be removed also if unlink failed to remove
+        // any sstable and ignored the error.
+        try {
+            remove_file(pending_delete_log).get();
+            sstlog.debug("{} removed.", pending_delete_log);
+        } catch (...) {
+            sstlog.warn("Error removing {}: {}. Ignoring.", pending_delete_log, std::current_exception());
+        }
+    });
+}
+
+// FIXME: Go through maybe_delete_large_partitions_entry on recovery
+// since this is an indication we crashed in the middle of delete_atomically
+future<> sstable_directory::replay_pending_delete_log(fs::path pending_delete_log) {
+    sstlog.debug("Reading pending_deletes log file {}", pending_delete_log);
+    fs::path pending_delete_dir = pending_delete_log.parent_path();
+    assert(sstable::is_pending_delete_dir(pending_delete_dir));
+    try {
+        sstring sstdir = pending_delete_dir.parent_path().native();
+        auto text = co_await seastar::util::read_entire_file_contiguous(pending_delete_log);
+
+        sstring all(text.begin(), text.end());
+        std::vector<sstring> basenames;
+        boost::split(basenames, all, boost::is_any_of("\n"), boost::token_compress_on);
+        auto tocs = boost::copy_range<std::vector<sstring>>(basenames | boost::adaptors::filtered([] (auto&& basename) { return !basename.empty(); }));
+        co_await parallel_for_each(tocs, [&sstdir] (const sstring& name) {
+            return remove_by_toc_name(sstdir + "/" + name);
+        });
+        sstlog.debug("Replayed {}, removing", pending_delete_log);
+        co_await remove_file(pending_delete_log.native());
+    } catch (...) {
+        sstlog.warn("Error replaying {}: {}. Ignoring.", pending_delete_log, std::current_exception());
+    }
 }
 
 }

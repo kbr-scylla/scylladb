@@ -118,7 +118,7 @@ bool mutation_fragment_stream_validator::validate(mutation_fragment_v2::kind kin
     } else {
         switch (kind) {
             case mutation_fragment_v2::kind::partition_start:
-                _prev_pos = position_in_partition(position_in_partition::partition_start_tag_t{});
+                _prev_pos = position_in_partition::for_partition_start();
                 break;
             case mutation_fragment_v2::kind::static_row:
                 _prev_pos = position_in_partition(position_in_partition::static_row_tag_t{});
@@ -210,25 +210,38 @@ bool mutation_fragment_stream_validating_filter::operator()(const dht::decorated
             return true;
         }
         on_validation_error(mrlog, format("[validator {} for {}] Unexpected token: previous {}, current {}",
-                static_cast<void*>(this), _name, _validator.previous_token(), dk.token()));
+                static_cast<void*>(this), full_name(), _validator.previous_token(), dk.token()));
     } else {
         if (_validator(dk)) {
             return true;
         }
         on_validation_error(mrlog, format("[validator {} for {}] Unexpected partition key: previous {}, current {}",
-                static_cast<void*>(this), _name, _validator.previous_partition_key(), dk));
+                static_cast<void*>(this), full_name(), _validator.previous_partition_key(), dk));
     }
 }
 
-mutation_fragment_stream_validating_filter::mutation_fragment_stream_validating_filter(sstring_view name, const schema& s,
+sstring mutation_fragment_stream_validating_filter::full_name() const {
+    const auto& s = _validator.schema();
+    return format("{} ({}.{} {})", _name_view, s.ks_name(), s.cf_name(), s.id());
+}
+
+mutation_fragment_stream_validating_filter::mutation_fragment_stream_validating_filter(const char* name_literal, sstring name_value, const schema& s,
         mutation_fragment_stream_validation_level level)
     : _validator(s)
-    , _name(format("{} ({}.{} {})", name, s.ks_name(), s.cf_name(), s.id()))
+    , _name_storage(std::move(name_value))
     , _validation_level(level)
 {
+    if (name_literal) {
+        _name_view = name_literal;
+    } else {
+        _name_view = _name_storage;
+    }
     if (mrlog.is_enabled(log_level::debug)) {
         std::string_view what;
         switch (_validation_level) {
+            case mutation_fragment_stream_validation_level::none:
+                what = "no";
+                break;
             case mutation_fragment_stream_validation_level::partition_region:
                 what = "partition region";
                 break;
@@ -242,12 +255,26 @@ mutation_fragment_stream_validating_filter::mutation_fragment_stream_validating_
                 what = "partition region, partition key and clustering key";
                 break;
         }
-        mrlog.debug("[validator {} for {}] Will validate {} monotonicity.", static_cast<void*>(this), _name, what);
+        mrlog.debug("[validator {} for {}] Will validate {} monotonicity.", static_cast<void*>(this), full_name(), what);
     }
 }
 
+mutation_fragment_stream_validating_filter::mutation_fragment_stream_validating_filter(sstring name, const schema& s,
+        mutation_fragment_stream_validation_level level)
+    : mutation_fragment_stream_validating_filter(nullptr, std::move(name), s, level)
+{ }
+
+mutation_fragment_stream_validating_filter::mutation_fragment_stream_validating_filter(const char* name, const schema& s,
+        mutation_fragment_stream_validation_level level)
+    : mutation_fragment_stream_validating_filter(name, {}, s, level)
+{ }
+
 bool mutation_fragment_stream_validating_filter::operator()(mutation_fragment_v2::kind kind, position_in_partition_view pos,
         std::optional<tombstone> new_current_tombstone) {
+    if (_validation_level < mutation_fragment_stream_validation_level::partition_region) {
+        return true;
+    }
+
     bool valid = false;
 
     mrlog.debug("[validator {}] {}:{} new_current_tombstone: {}", static_cast<void*>(this), kind, pos, new_current_tombstone);
@@ -261,16 +288,16 @@ bool mutation_fragment_stream_validating_filter::operator()(mutation_fragment_v2
     if (__builtin_expect(!valid, false)) {
         if (_validation_level >= mutation_fragment_stream_validation_level::clustering_key) {
             on_validation_error(mrlog, format("[validator {} for {}] Unexpected mutation fragment: partition key {}: previous {}:{}, current {}:{}",
-                    static_cast<void*>(this), _name, _validator.previous_partition_key(), _validator.previous_mutation_fragment_kind(), _validator.previous_position(), kind, pos));
+                    static_cast<void*>(this), full_name(), _validator.previous_partition_key(), _validator.previous_mutation_fragment_kind(), _validator.previous_position(), kind, pos));
         } else if (_validation_level >= mutation_fragment_stream_validation_level::partition_key) {
             on_validation_error(mrlog, format("[validator {} for {}] Unexpected mutation fragment: partition key {}: previous {}, current {}",
-                    static_cast<void*>(this), _name, _validator.previous_partition_key(), _validator.previous_mutation_fragment_kind(), kind));
+                    static_cast<void*>(this), full_name(), _validator.previous_partition_key(), _validator.previous_mutation_fragment_kind(), kind));
         } else if (kind == mutation_fragment_v2::kind::partition_end && _validator.current_tombstone()) {
             on_validation_error(mrlog, format("[validator {} for {}] Partition ended with active tombstone: {}",
-                    static_cast<void*>(this), _name, _validator.current_tombstone()));
+                    static_cast<void*>(this), full_name(), _validator.current_tombstone()));
         } else {
             on_validation_error(mrlog, format("[validator {} for {}] Unexpected mutation fragment: previous {}, current {}",
-                    static_cast<void*>(this), _name, _validator.previous_mutation_fragment_kind(), kind));
+                    static_cast<void*>(this), full_name(), _validator.previous_mutation_fragment_kind(), kind));
         }
     }
 
@@ -314,9 +341,12 @@ bool mutation_fragment_stream_validating_filter::on_end_of_partition() {
 }
 
 void mutation_fragment_stream_validating_filter::on_end_of_stream() {
+    if (_validation_level < mutation_fragment_stream_validation_level::partition_region) {
+        return;
+    }
     mrlog.debug("[validator {}] EOS", static_cast<const void*>(this));
     if (!_validator.on_end_of_stream()) {
-        on_validation_error(mrlog, format("[validator {} for {}] Stream ended with unclosed partition: {}", static_cast<const void*>(this), _name,
+        on_validation_error(mrlog, format("[validator {} for {}] Stream ended with unclosed partition: {}", static_cast<const void*>(this), full_name(),
                 _validator.previous_mutation_fragment_kind()));
     }
 }

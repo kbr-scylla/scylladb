@@ -34,6 +34,7 @@
 #include "expressions.hh"
 #include "conditions.hh"
 #include "cql3/constants.hh"
+#include "cql3/util.hh"
 #include <optional>
 #include "utils/overloaded_functor.hh"
 #include <seastar/json/json_elements.hh>
@@ -927,9 +928,10 @@ static future<executor::request_return_type> create_table_on_shard0(tracing::tra
             if  (!range_key.empty() && range_key != view_hash_key && range_key != view_range_key) {
                 add_column(view_builder, range_key, attribute_definitions, column_kind::clustering_key);
             }
-            sstring where_clause = "\"" + view_hash_key + "\" IS NOT NULL";
+            sstring where_clause = format("{} IS NOT NULL", cql3::util::maybe_quote(view_hash_key));
             if (!view_range_key.empty()) {
-                where_clause = where_clause + " AND \"" + view_hash_key + "\" IS NOT NULL";
+                where_clause = format("{} AND {} IS NOT NULL", where_clause,
+                    cql3::util::maybe_quote(view_range_key));
             }
             where_clauses.push_back(std::move(where_clause));
             view_builders.emplace_back(std::move(view_builder));
@@ -984,9 +986,10 @@ static future<executor::request_return_type> create_table_on_shard0(tracing::tra
             // Note above we don't need to add virtual columns, as all
             // base columns were copied to view. TODO: reconsider the need
             // for virtual columns when we support Projection.
-            sstring where_clause = "\"" + view_hash_key + "\" IS NOT NULL";
+            sstring where_clause = format("{} IS NOT NULL", cql3::util::maybe_quote(view_hash_key));
             if (!view_range_key.empty()) {
-                where_clause = where_clause + " AND \"" + view_range_key + "\" IS NOT NULL";
+                where_clause = format("{} AND {} IS NOT NULL", where_clause,
+                    cql3::util::maybe_quote(view_range_key));
             }
             where_clauses.push_back(std::move(where_clause));
             view_builders.emplace_back(std::move(view_builder));
@@ -3642,7 +3645,7 @@ static future<executor::request_return_type> do_query(service::storage_proxy& pr
 
     if (exclusive_start_key) {
         partition_key pk = pk_from_json(*exclusive_start_key, schema);
-        auto pos = position_in_partition(position_in_partition::partition_start_tag_t());
+        auto pos = position_in_partition::for_partition_start();
         if (schema->clustering_key_size() > 0) {
             pos = pos_from_json(*exclusive_start_key, schema);
         }
