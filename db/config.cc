@@ -912,7 +912,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , force_schema_commit_log(this, "force_schema_commit_log", value_status::Used, false,
         "Use separate schema commit log unconditionally rater than after restart following discovery of cluster-wide support for it.")
     , task_ttl_seconds(this, "task_ttl_in_seconds", liveness::LiveUpdate, value_status::Used, 10, "Time for which information about finished task stays in memory.")
-    , cache_index_pages(this, "cache_index_pages", liveness::LiveUpdate, value_status::Used, true,
+    , cache_index_pages(this, "cache_index_pages", liveness::LiveUpdate, value_status::Used, false,
         "Keep SSTable index pages in the global cache after a SSTable read. Expected to improve performance for workloads with big partitions, but may degrade performance for workloads with small partitions.")
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
@@ -1085,7 +1085,7 @@ std::map<sstring, db::experimental_features_t::feature> db::experimental_feature
         {"udf", feature::UDF},
         {"cdc", feature::UNUSED},
         {"alternator-streams", feature::ALTERNATOR_STREAMS},
-        {"alternator-ttl", feature::ALTERNATOR_TTL},
+        {"alternator-ttl", feature::UNUSED },
         {"raft", feature::RAFT},
         {"broadcast-tables", feature::BROADCAST_TABLES},
         {"keyspace-storage-options", feature::KEYSPACE_STORAGE_OPTIONS},
