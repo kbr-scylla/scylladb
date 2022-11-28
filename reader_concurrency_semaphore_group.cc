@@ -8,94 +8,21 @@
 
 #include "reader_concurrency_semaphore_group.hh"
 
-ssize_t reader_concurrency_semaphore_group::calc_delta(weighted_reader_concurrency_semaphore& sem) const {
-    auto new_memory_share = _total_weight ? (_total_memory * sem.weight) / _total_weight : 0;
-    return new_memory_share - sem.memory_share;
-}
-
-void reader_concurrency_semaphore_group::distribute_spare_memory(semaphore_priority_type& memory_short_semaphores) {
-    while (!memory_short_semaphores.empty() && _spare_memory > 0) {
-        auto&& memory_short_sem = *(memory_short_semaphores.top());
-        memory_short_semaphores.pop();
-        adjust_up(memory_short_sem);
-        if (calc_delta(memory_short_sem) > 0 ) {
-            memory_short_semaphores.push(&memory_short_sem);
-        }
-    }
-}
-
-future<> reader_concurrency_semaphore_group::reduce_memory(weighted_reader_concurrency_semaphore& sem, size_t reduction_amount) {
-    return sem.sem.with_permit(nullptr, "adjust memory down", reduction_amount, db::timeout_clock::time_point::max(), [this, reduction_amount, &sem] (reader_permit permit) noexcept {
-            sem.sem.consume({0, reduction_amount});
-            sem.memory_share -= reduction_amount;
-            return make_ready_future();
-    });
-}
-
-// for decreasing operation we first need to make sure we have a memory to decrease.
-// the easiest way (or at least most standard way) is to first consume it.
-future<> reader_concurrency_semaphore_group::adjust_down(weighted_reader_concurrency_semaphore& sem) {
-    ssize_t delta = calc_delta(sem);
-    if ( delta < 0 ) {
-        return reduce_memory(sem, std::abs(delta)).then([this, &sem, reduction_amount = std::abs(delta)] () {
-            _spare_memory += reduction_amount;
-        });
-    }
-    return make_ready_future();
-}
-
-
-void reader_concurrency_semaphore_group::adjust_up(weighted_reader_concurrency_semaphore& sem) {
-    ssize_t delta = calc_delta(sem);
-    // if we are increasing memory - delta will be positive.
-    if (( delta > 0 ) && (_spare_memory > 0)) {
-        auto mem_amount = std::min<size_t>(_spare_memory, std::abs(delta));
-        sem.sem.signal({0, mem_amount});
-        auto old_memory_share = sem.memory_share;
-        auto old_spare_memory = _spare_memory;
-        sem.memory_share += mem_amount;
-        _spare_memory -= mem_amount;
-    }
-}
-
 // Calling adjust is serialized since 2 adjustments can't happen simultaneosly,
 // if they did the behaviour would be undefined.
 future<> reader_concurrency_semaphore_group::adjust() {
     return with_semaphore(_operations_serializer, 1, [this] () {
-        semaphore_priority_type memory_short_semaphores(priority_compare(*this));
-        std::vector<weighted_reader_concurrency_semaphore*> semaphores_with_extra_memory;
-        for (auto&& item : _semaphores) {
-            auto& [sg , sem] = item;
-            // the second part of the condition is to protect against off by one situations
-            // since we are dealing with fractions
-            if (calc_delta(sem) > 0 && sem.memory_share < _total_memory) {
-                memory_short_semaphores.push(&sem);
-            } else if (calc_delta(sem) < 0) {
-                semaphores_with_extra_memory.push_back(&sem);
-            }
+        ssize_t distributed_memory = 0;
+        for (auto& [sg, wsem] : _semaphores) {
+            const ssize_t memory_share = std::floor((double(wsem.weight) / double(_total_weight)) * _total_memory);
+            wsem.sem.set_resources({_max_concurrent_reads, memory_share});
+            distributed_memory += memory_share;
         }
-        // if no one needs more memory - there is no reason to take memory away.
-        // In general it shouldn't happen.
-        if (memory_short_semaphores.empty()) {
-            return make_ready_future();
-        }
-        return do_with(std::move(memory_short_semaphores), std::move(semaphores_with_extra_memory) , [this] (auto&& memory_short_semaphores, auto&& semaphores_with_extra_memory) {
-            if (_spare_memory > 0) {
-                distribute_spare_memory(memory_short_semaphores);
-            }
-            return parallel_for_each(semaphores_with_extra_memory , [&memory_short_semaphores, this] (auto&& sem) {
-                return adjust_down(*sem).then([&memory_short_semaphores, this] () {
-                    distribute_spare_memory(memory_short_semaphores);
-                    return make_ready_future();
-                });
-            });
-        });
+        // Slap the remainder on one of the semaphores.
+        // This will be a few bytes, doesn't matter where we add it.
+        auto& sem = _semaphores.begin()->second.sem;
+        sem.set_resources(sem.initial_resources() + reader_resources{0, _total_memory - distributed_memory});
     });
-}
-
-// The call to change_weight is serialized as a consequence of the call to adjust.
-future<> reader_concurrency_semaphore_group::change_weight(scheduling_group sg, size_t new_weight) {
-   return change_weight(_semaphores.at(sg), new_weight);
 }
 
 // The call to change_weight is serialized as a consequence of the call to adjust.
@@ -108,40 +35,6 @@ future<> reader_concurrency_semaphore_group::change_weight(weighted_reader_concu
         return adjust();
     }
     return make_ready_future<>();
-}
-
-future<> reader_concurrency_semaphore_group::set_memory(ssize_t new_memory_amount) {
-    if (_total_memory == new_memory_amount) {
-        return make_ready_future<>();
-    }
-
-    return with_semaphore(_operations_serializer, 1, [this, new_memory_amount] {
-        ssize_t memory_delta = new_memory_amount - _total_memory;
-        _total_memory = new_memory_amount;
-        if (memory_delta > 0) {
-            _spare_memory += memory_delta;
-        }
-
-        if (_spare_memory) {
-            semaphore_priority_type memory_short_semaphores(priority_compare(*this));
-            for (auto&& item : _semaphores) {
-                auto& [sg, sem] = item;
-                memory_short_semaphores.push(&sem);
-            }
-            distribute_spare_memory(memory_short_semaphores);
-        }
-        if (memory_delta > 0) {
-            return make_ready_future<>();
-        }
-        return parallel_for_each(_semaphores, [this] (auto&& item) {
-            auto& [sg, sem] = item;
-            ssize_t delta = calc_delta(sem);
-            if (delta < 0) {
-                return reduce_memory(sem, std::abs(delta));
-            }
-            return make_ready_future<>();
-        });
-    });
 }
 
 future<> reader_concurrency_semaphore_group::wait_adjust_complete() {
