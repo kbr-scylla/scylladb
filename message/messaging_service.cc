@@ -42,7 +42,6 @@
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "cache_temperature.hh"
 #include "raft/raft.hh"
-#include "service/raft/messaging.hh"
 #include "service/raft/group0_fwd.hh"
 #include "replica/exceptions.hh"
 #include "serializer.hh"
@@ -568,6 +567,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::RAFT_EXECUTE_READ_BARRIER_ON_LEADER:
     case messaging_verb::RAFT_ADD_ENTRY:
     case messaging_verb::RAFT_MODIFY_CONFIG:
+    case messaging_verb::DIRECT_FD_PING:
         return 2;
     case messaging_verb::MUTATION_DONE:
     case messaging_verb::MUTATION_FAILED:

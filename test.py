@@ -8,6 +8,7 @@
 #
 import argparse
 import asyncio
+import collections
 import colorama
 import difflib
 import filecmp
@@ -150,7 +151,7 @@ class TestSuite(ABC):
     artifacts = ArtifactRegistry()
     hosts = HostRegistry()
     FLAKY_RETRIES = 5
-    _next_id = 0
+    _next_id = collections.defaultdict(int) # (test_key -> id)
 
     def __init__(self, path: str, cfg: dict, options: argparse.Namespace, mode: str) -> None:
         self.suite_path = pathlib.Path(path)
@@ -188,14 +189,22 @@ class TestSuite(ABC):
             skip_in_m = set(self.cfg.get("run_in_" + a, []))
             self.disabled_tests.update(skip_in_m - run_in_m)
 
-    @property
-    def next_id(self) -> int:
-        TestSuite._next_id += 1
-        return TestSuite._next_id
+    # Generate a unique ID for `--repeat`ed tests
+    # We want these tests to have different XML IDs so test result
+    # processors (Jenkins) don't merge results for different iterations of
+    # the same test. We also don't want the ids to be too random, because then
+    # there is no correlation between test identifiers across multiple
+    # runs of test.py, and so it's hard to understand failure trends. The
+    # compromise is for next_id() results to be unique only within a particular
+    # test case. That is, we'll have a.1, a.2, a.3, b.1, b.2, b.3 rather than
+    # a.1 a.2 a.3 b.4 b.5 b.6.
+    def next_id(self, test_key) -> int:
+        TestSuite._next_id[test_key] += 1
+        return TestSuite._next_id[test_key]
 
     @staticmethod
     def test_count() -> int:
-        return TestSuite._next_id
+        return sum(TestSuite._next_id.values())
 
     @staticmethod
     def load_cfg(path: str) -> dict:
@@ -319,7 +328,7 @@ class UnitTestSuite(TestSuite):
         self.custom_args = cfg.get("custom_args", {})
 
     async def create_test(self, shortname, suite, args):
-        test = UnitTest(self.next_id, shortname, suite, args)
+        test = UnitTest(self.next_id((shortname, self.suite_key)), shortname, suite, args)
         self.tests.append(test)
 
     async def add_test(self, shortname) -> None:
@@ -371,14 +380,14 @@ class BoostTestSuite(UnitTestSuite):
 
             case_list = self._case_cache[fqname]
             if len(case_list) == 1:
-                test = BoostTest(self.next_id, shortname, suite, args, None)
+                test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None)
                 self.tests.append(test)
             else:
                 for case in case_list:
-                    test = BoostTest(self.next_id, shortname, suite, args, case)
+                    test = BoostTest(self.next_id((shortname, self.suite_key, case)), shortname, suite, args, case)
                     self.tests.append(test)
         else:
-            test = BoostTest(self.next_id, shortname, suite, args, None)
+            test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None)
             self.tests.append(test)
 
     def junit_tests(self) -> Iterable['Test']:
@@ -389,7 +398,7 @@ class LdapTestSuite(UnitTestSuite):
     """TestSuite for ldap unit tests"""
 
     async def create_test(self, shortname, args, suite):
-        test = LdapTest(self.next_id, shortname, args, suite)
+        test = LdapTest(self.next_id((shortname, self.suite_key)), shortname, args, suite)
         self.tests.append(test)
 
     def junit_tests(self):
@@ -416,36 +425,51 @@ class PythonTestSuite(TestSuite):
         self.clusters = Pool(pool_size, self.create_cluster)
 
     def get_cluster_factory(self, cluster_size: int) -> Callable[[], Awaitable]:
-        def create_server(cluster_name: str, seeds: List[str]):
+        def create_server(create_cfg: ScyllaCluster.CreateServerParams):
             cmdline_options = self.cfg.get("extra_scylla_cmdline_options", [])
             if type(cmdline_options) == str:
                 cmdline_options = [cmdline_options]
 
+            # There are multiple sources of config options, with increasing priority
+            # (if two sources provide the same config option, the higher priority one wins):
+            # 1. the defaults
+            # 2. suite-specific config options (in "extra_scylla_config_options")
+            # 3. config options from tests (when servers are added during a test)
             default_config_options = \
                     {"authenticator": "PasswordAuthenticator",
                      "authorizer": "CassandraAuthorizer"}
-            config_options = default_config_options | self.cfg.get("extra_scylla_config_options", {})
+            config_options = default_config_options | \
+                             self.cfg.get("extra_scylla_config_options", {}) | \
+                             create_cfg.config_from_test
 
             server = ScyllaServer(
                 exe=self.scylla_exe,
                 vardir=os.path.join(self.options.tmpdir, self.mode),
-                host_registry=self.hosts,
-                cluster_name=cluster_name,
-                seeds=seeds,
+                cluster_name=create_cfg.cluster_name,
+                ip_addr=create_cfg.ip_addr,
+                seeds=create_cfg.seeds,
                 cmdline_options=cmdline_options,
                 config_options=config_options)
 
-            # Suite artifacts are removed when
-            # the entire suite ends successfully.
-            self.artifacts.add_suite_artifact(self, server.stop_artifact)
-            if not self.options.save_log_on_success:
-                # If a test fails, we might want to keep the data dir.
-                self.artifacts.add_suite_artifact(self, server.uninstall_artifact)
-            self.artifacts.add_exit_artifact(self, server.stop_artifact)
             return server
 
         async def create_cluster() -> ScyllaCluster:
-            cluster = ScyllaCluster(cluster_size, create_server)
+            cluster = ScyllaCluster(self.hosts, cluster_size, create_server)
+
+            async def stop() -> None:
+                await cluster.stop()
+
+            # Suite artifacts are removed when
+            # the entire suite ends successfully.
+            self.artifacts.add_suite_artifact(self, stop)
+            if not self.options.save_log_on_success:
+                # If a test fails, we might want to keep the data dirs.
+                async def uninstall() -> None:
+                    await cluster.uninstall()
+
+                self.artifacts.add_suite_artifact(self, uninstall)
+            self.artifacts.add_exit_artifact(self, stop)
+
             await cluster.install_and_start()
             return cluster
 
@@ -462,7 +486,7 @@ class PythonTestSuite(TestSuite):
         assert False
 
     async def add_test(self, shortname) -> None:
-        test = PythonTest(self.next_id, shortname, self)
+        test = PythonTest(self.next_id((shortname, self.suite_key)), shortname, self)
         self.tests.append(test)
 
 
@@ -476,7 +500,7 @@ class CQLApprovalTestSuite(PythonTestSuite):
         return TestSuite.build_test_list(self)
 
     async def add_test(self, shortname: str) -> None:
-        test = CQLApprovalTest(self.next_id, shortname, self)
+        test = CQLApprovalTest(self.next_id((shortname, self.suite_key)), shortname, self)
         self.tests.append(test)
 
     @property
@@ -497,7 +521,7 @@ class TopologyTestSuite(PythonTestSuite):
 
     async def add_test(self, shortname: str) -> None:
         """Add test to suite"""
-        test = TopologyTest(self.next_id, shortname, self)
+        test = TopologyTest(self.next_id((shortname, 'topology', self.mode)), shortname, self)
         self.tests.append(test)
 
     @property
@@ -519,7 +543,7 @@ class RunTestSuite(TestSuite):
         self.scylla_env['SCYLLA'] = self.scylla_exe
 
     async def add_test(self, shortname) -> None:
-        test = RunTest(self.next_id, shortname, self)
+        test = RunTest(self.next_id((shortname, self.suite_key)), shortname, self)
         self.tests.append(test)
 
     @property
@@ -1107,12 +1131,16 @@ class TabularConsoleOutput:
             msg += " {:.2f}s".format(test.time_end - test.time_start)
             print(msg)
 
+toxiproxy_id_gen = 0
 
 async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, env=dict()) -> bool:
     """Run test program, return True if success else False"""
 
     with test.log_filename.open("wb") as log:
-        ldap_port = 5000 + test.id * 3
+        global toxiproxy_id_gen
+        toxiproxy_id = toxiproxy_id_gen
+        toxiproxy_id_gen += 1
+        ldap_port = 5000 + toxiproxy_id * 3
         cleanup_fn = None
         finject_desc = None
         def report_error(error, failure_injection_desc = None):

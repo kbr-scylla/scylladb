@@ -14,19 +14,22 @@
 #include "message/messaging_service_fwd.hh"
 #include "raft/raft.hh"
 #include "raft/server.hh"
-#include "service/raft/raft_address_map.hh"
-#include "gms/feature.hh"
 #include "direct_failure_detector/failure_detector.hh"
+#include "service/raft/group0_fwd.hh"
 
 namespace gms {
 class gossiper;
-class echo_pinger;
+}
+
+namespace db {
+class system_keyspace;
 }
 
 namespace service {
 
 class raft_rpc;
 class raft_sys_table_storage;
+using raft_ticker_type = seastar::timer<lowres_clock>;
 
 struct raft_group_not_found: public raft::error {
     raft::group_id gid;
@@ -46,6 +49,10 @@ struct raft_server_for_group {
 };
 
 class direct_fd_pinger;
+class direct_fd_proxy;
+class gossiper_state_change_subscriber_proxy;
+
+future<raft::server_id> load_or_create_my_raft_id(db::system_keyspace&);
 
 // This class is responsible for creating, storing and accessing raft servers.
 // It also manages the raft rpc verbs initialization.
@@ -58,16 +65,19 @@ private:
     bool _is_enabled;
 
     netw::messaging_service& _ms;
+    gms::gossiper& _gossiper;
+    // A proxy class representing subscription to on_change
+    // events, and updating the address map on this events.
+    shared_ptr<gossiper_state_change_subscriber_proxy> _gossiper_proxy;
     // Raft servers along with the corresponding timers to tick each instance.
     // Currently ticking every 100ms.
     std::unordered_map<raft::group_id, raft_server_for_group> _servers;
     // inet_address:es for remote raft servers known to us
-    raft_address_map<>& _srv_address_mappings;
+    raft_address_map& _address_map;
 
     direct_failure_detector::failure_detector& _direct_fd;
     // Listens to notifications from direct failure detector.
     // Implements the `raft::failure_detector` interface. Used by all raft groups to check server liveness.
-    class direct_fd_proxy;
     seastar::shared_ptr<direct_fd_proxy> _direct_fd_proxy;
     // Direct failure detector listener subscription for `_direct_fd_proxy`.
     std::optional<direct_failure_detector::subscription> _direct_fd_subscription;
@@ -81,16 +91,29 @@ private:
     // Group 0 id, valid only on shard 0 after boot/upgrade is over
     std::optional<raft::group_id> _group0_id;
 
+    // My Raft ID. Shared between different Raft groups.
+    // Once set, must not be changed.
+    //
+    // FIXME: ideally we'd like this to be passed to the constructor.
+    // However storage_proxy/query_processor/system_keyspace are unavailable
+    // when we start raft_group_registry so we have to set it later,
+    // after system_keyspace is initialized.
+    std::optional<raft::server_id> _my_id;
+
 public:
     // `is_enabled` must be `true` iff the local RAFT feature is enabled.
-    raft_group_registry(bool is_enabled, raft_address_map<>&,
+    raft_group_registry(bool is_enabled, raft_address_map&,
             netw::messaging_service& ms, gms::gossiper& gs, direct_failure_detector::failure_detector& fd);
     ~raft_group_registry();
 
-    // Called manually at start
-    seastar::future<> start();
+    // If is_enabled(),
+    // Called manually at start on every shard, after system_keyspace is initialized.
+    seastar::future<> start(raft::server_id my_id);
     // Called by sharded<>::stop()
     seastar::future<> stop();
+
+    // Must not be called before `start`.
+    const raft::server_id& get_my_raft_id();
 
     // Called by before stopping the database.
     // May be called multiple times.
@@ -112,7 +135,7 @@ public:
     void abort_server(raft::group_id gid, sstring reason = "");
     unsigned shard_for_group(const raft::group_id& gid) const;
     shared_ptr<raft::failure_detector> failure_detector();
-    raft_address_map<>& address_map() { return _srv_address_mappings; }
+    raft_address_map& address_map() { return _address_map; }
     direct_failure_detector::failure_detector& direct_fd() { return _direct_fd; }
 
     // Is the RAFT local feature enabled?
@@ -120,16 +143,15 @@ public:
     bool is_enabled() const { return _is_enabled; }
 };
 
-// Implementation of `direct_failure_detector::pinger` which uses gossip echo messages for pinging.
+// Implementation of `direct_failure_detector::pinger` which uses DIRECT_FD_PING verb for pinging.
 // Translates `raft::server_id`s to `gms::inet_address`es before pinging.
-// The actual pinging is performed by `echo_pinger`.
 class direct_fd_pinger : public seastar::peering_sharded_service<direct_fd_pinger>, public direct_failure_detector::pinger {
-    gms::echo_pinger& _echo_pinger;
-    raft_address_map<>& _address_map;
+    netw::messaging_service& _ms;
+    raft_address_map& _address_map;
 
 public:
-    direct_fd_pinger(gms::echo_pinger& pinger, raft_address_map<>& address_map)
-            : _echo_pinger(pinger), _address_map(address_map) {}
+    direct_fd_pinger(netw::messaging_service& ms, raft_address_map& address_map)
+            : _ms(ms), _address_map(address_map) {}
 
     direct_fd_pinger(const direct_fd_pinger&) = delete;
     direct_fd_pinger(direct_fd_pinger&&) = delete;

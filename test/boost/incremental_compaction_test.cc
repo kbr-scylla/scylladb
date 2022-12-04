@@ -399,7 +399,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
         builder.set_compaction_strategy_options(std::move(opts));
         auto s = builder.build();
 
-        auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), test_db_config.murmur3_partitioner_ignore_msb_bits(), smp::count);
+        auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), db::default_murmur3_partitioner_ignore_msb_bits, smp::count);
 
         auto make_row = [&](unsigned token_idx) {
             auto key_str = tokens[token_idx].first;

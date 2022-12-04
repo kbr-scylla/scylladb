@@ -9,7 +9,7 @@
 
 #include <list>
 #include <random>
-#include <experimental/source_location>
+#include <source_location>
 
 #include <seastar/core/sleep.hh>
 #include <seastar/core/do_with.hh>
@@ -248,7 +248,7 @@ SEASTAR_THREAD_TEST_CASE(test_combined_reader_range_tombstone_change_merging) {
     struct output {
         std::vector<range_tombstone_change> rtcs;
     };
-    auto check = [&] (const char* desc, std::vector<input> in, output out, std::experimental::source_location sl = std::experimental::source_location::current()) {
+    auto check = [&] (const char* desc, std::vector<input> in, output out, std::source_location sl = std::source_location::current()) {
         testlog.info("check() {} @ {}:{}", desc, sl.file_name(), sl.line());
         std::vector<flat_mutation_reader_v2> readers;
         for (auto& i : in) {
@@ -997,28 +997,6 @@ SEASTAR_TEST_CASE(reader_selector_fast_forwarding_test) {
     });
 }
 
-sstables::shared_sstable create_sstable(sstables::test_env& env, simple_schema& sschema, const sstring& path) {
-    std::vector<mutation> mutations;
-    mutations.reserve(1 << 14);
-
-    for (std::size_t p = 0; p < (1 << 10); ++p) {
-        mutation m(sschema.schema(), sschema.make_pkey(p));
-        sschema.add_static_row(m, format("{:d}_static_val", p));
-
-        for (std::size_t c = 0; c < (1 << 4); ++c) {
-            sschema.add_row(m, sschema.make_ckey(c), format("val_{:d}", c));
-        }
-
-        mutations.emplace_back(std::move(m));
-        thread::yield();
-    }
-
-    return make_sstable_containing([&] {
-            return env.make_sstable(sschema.schema(), path, 0);
-        }
-        , mutations);
-}
-
 static
 sstables::shared_sstable create_sstable(sstables::test_env& env, schema_ptr s, std::vector<mutation> mutations) {
     static thread_local auto tmp = tmpdir();
@@ -1376,7 +1354,7 @@ SEASTAR_TEST_CASE(test_trim_clustering_row_ranges_to) {
             .build();
 
     const auto check = [&schema] (std::vector<range> ranges, key key, std::vector<range> output_ranges, bool reversed = false,
-            std::experimental::source_location sl = std::experimental::source_location::current()) {
+            std::source_location sl = std::source_location::current()) {
         auto actual_ranges = ranges::to<query::clustering_row_ranges>(ranges | boost::adaptors::transformed(
                     [&] (const range& r) { return r.to_clustering_range(*schema); }));
 
@@ -1393,7 +1371,7 @@ SEASTAR_TEST_CASE(test_trim_clustering_row_ranges_to) {
         }
     };
     const auto check_reversed = [&schema, &check] (std::vector<range> ranges, key key, std::vector<range> output_ranges, bool reversed = false,
-            std::experimental::source_location sl = std::experimental::source_location::current()) {
+            std::source_location sl = std::source_location::current()) {
         return check(std::move(ranges), std::move(key), std::move(output_ranges), true, sl);
     };
 

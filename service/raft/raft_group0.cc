@@ -5,13 +5,14 @@
 /*
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
-#include <experimental/source_location>
+#include <source_location>
 
 #include "service/raft/raft_group0.hh"
 #include "service/raft/raft_rpc.hh"
 #include "service/raft/raft_sys_table_storage.hh"
 #include "service/raft/group0_state_machine.hh"
 #include "service/raft/raft_group0_client.hh"
+#include "service/raft/raft_address_map.hh"
 
 #include "message/messaging_service.hh"
 #include "cql3/query_processor.hh"
@@ -86,6 +87,40 @@ namespace service {
 static logging::logger group0_log("raft_group0");
 static logging::logger upgrade_log("raft_group0_upgrade");
 
+// {{{ group0_rpc Maintain failure detector subscription whenever
+// group 0 configuration changes.
+
+class group0_rpc: public service::raft_rpc {
+    direct_failure_detector::failure_detector& _direct_fd;
+public:
+    explicit group0_rpc(direct_failure_detector::failure_detector& direct_fd,
+            raft_state_machine& sm, netw::messaging_service& ms,
+            raft_address_map& address_map, raft::group_id gid, raft::server_id srv_id)
+        : raft_rpc(sm, ms, address_map, gid, srv_id)
+        , _direct_fd(direct_fd)
+    {}
+
+    virtual void on_configuration_change(raft::server_address_set add, raft::server_address_set del) override {
+        for (const auto& addr: add) {
+            // Entries explicitly managed via `rpc::on_configuration_change() should NOT be
+            // expirable.
+            _address_map.set_nonexpiring(addr.id);
+            // Notify the direct failure detector that it should track
+            // (or liveness of a specific raft server id.
+            _direct_fd.add_endpoint(addr.id.id);
+        }
+        for (const auto& addr: del) {
+            // RPC 'send' may yield before resolving IP address,
+            // e.g. on _shutdown_gate, so keep the deleted
+            // entries in the map for a bit.
+            _address_map.set_expiring(addr.id);
+            _direct_fd.remove_endpoint(addr.id.id);
+        }
+    }
+};
+
+// }}} group0_rpc
+
 raft_group0::raft_group0(seastar::abort_source& abort_source,
         raft_group_registry& raft_gr,
         netw::messaging_service& ms,
@@ -137,42 +172,13 @@ static future<group0_upgrade_state> send_get_group0_upgrade_state(netw::messagin
     co_return state;
 }
 
-future<raft::server_id> raft_group0::load_my_id() {
-    assert(this_shard_id() == 0);
-
-    auto id = raft::server_id{co_await db::system_keyspace::get_raft_server_id()};
-    if (!id) {
-        on_internal_error(group0_log, "load_my_id(): server ID for group 0 missing");
-    }
-
-    co_return id;
-}
-
-seastar::future<raft::server_id> raft_group0::load_or_create_my_id() {
-    assert(this_shard_id() == 0);
-    auto id = raft::server_id{co_await db::system_keyspace::get_raft_server_id()};
-    if (id == raft::server_id{}) {
-        id = raft::server_id::create_random_id();
-        co_await db::system_keyspace::set_raft_server_id(id.id);
-    }
-    co_return id;
+const raft::server_id& raft_group0::load_my_id() {
+    return _raft_gr.get_my_raft_id();
 }
 
 raft_server_for_group raft_group0::create_server_for_group0(raft::group_id gid, raft::server_id my_id) {
-    raft::server_address my_addr{my_id, inet_addr_to_raft_addr(_gossiper.get_broadcast_address())};
-    _raft_gr.address_map().set(my_addr);
     auto state_machine = std::make_unique<group0_state_machine>(_client, _mm, _qp.proxy());
-    auto rpc = std::make_unique<raft_rpc>(*state_machine, _ms, _raft_gr.address_map(), gid, my_id,
-            [this] (raft::server_id raft_id, bool added) {
-                auto fd_id = raft_id.uuid();
-                if (added) {
-                    group0_log.info("Added Raft server {} to failure detector", raft_id);
-                    _raft_gr.direct_fd().add_endpoint(fd_id);
-                } else {
-                    group0_log.info("Removed Raft server {} from failure detector", raft_id);
-                    _raft_gr.direct_fd().remove_endpoint(fd_id);
-                }
-            });
+    auto rpc = std::make_unique<group0_rpc>(_raft_gr.direct_fd(), *state_machine, _ms, _raft_gr.address_map(), gid, my_id);
     // Keep a reference to a specific RPC class.
     auto& rpc_ref = *rpc;
     auto storage = std::make_unique<raft_sys_table_storage>(_qp, gid, my_id);
@@ -346,9 +352,15 @@ future<> raft_group0::abort() {
 
 future<> raft_group0::start_server_for_group0(raft::group_id group0_id) {
     assert(group0_id != raft::group_id{});
-
-    auto my_id = co_await load_my_id();
-
+    // The address map may miss our own id in case we connect
+    // to an existing Raft Group 0 leader.
+    auto my_id = load_my_id();
+    _raft_gr.address_map().add_or_update_entry(my_id, _gossiper.get_broadcast_address());
+    // At this time the group registry is already up and running,
+    // so the address map is getting all the notifications from
+    // the gossiper. By reading the application state *after* subscribing to new gossip events,
+    // we ensure we haven't missed any IP update in the map.
+    load_initial_raft_address_map();
     group0_log.info("Server {} is starting group 0 with id {}", my_id, group0_id);
     co_await _raft_gr.start_server_for_group(create_server_for_group0(group0_id, my_id));
     _group0.emplace<raft::group_id>(group0_id);
@@ -365,7 +377,7 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, bool as_
     }
 
     raft::server* server = nullptr;
-    auto my_id = co_await load_or_create_my_id();
+    auto my_id = load_my_id();
     group0_log.info("server {} found no local group 0. Discovering...", my_id);
     while (true) {
         auto g0_info = co_await discover_group0(my_id, seeds);
@@ -383,7 +395,7 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, bool as_
             // TODO: link to the manual recovery docs
         }
         group0_id = g0_info.group0_id;
-        raft::server_address my_addr{my_id, inet_addr_to_raft_addr(_gossiper.get_broadcast_address())};
+        raft::server_address my_addr{my_id, {}};
 
         if (server == nullptr) {
             // This is the first time discovery is run. Create and start a Raft server for group 0 on this node.
@@ -436,11 +448,11 @@ future<> raft_group0::join_group0(std::vector<gms::inet_address> seeds, bool as_
 
 struct group0_members {
     const raft::server& _group0_server;
-    const raft_address_map<>& _address_map;
+    const raft_address_map& _address_map;
 
 
-    std::vector<gms::inet_address> get_inet_addrs(std::experimental::source_location l =
-            std::experimental::source_location::current()) const {
+    std::vector<gms::inet_address> get_inet_addrs(std::source_location l =
+            std::source_location::current()) const {
         const raft::config_member_set& members = _group0_server.get_configuration().current;
         std::vector<gms::inet_address> ret;
         std::vector<raft::server_id> missing;
@@ -605,15 +617,34 @@ future<> raft_group0::persist_initial_raft_address_map() {
     });
 }
 
+void raft_group0::load_initial_raft_address_map() {
+    for (auto& [ip_addr, state] : _gossiper.get_endpoint_states()) {
+        auto* value = state.get_application_state_ptr(gms::application_state::RAFT_SERVER_ID);
+        if (value == nullptr) {
+            continue;
+        }
+        auto server_id = utils::UUID(value->value);
+        if (server_id == utils::UUID{}) {
+            upgrade_log.error("empty raft server id for host {} ", ip_addr);
+            continue;
+        }
+        // The failure detector needs the IPs on all shards. We
+        // can safely overwrite existing entries since are loading
+        // them directly from gossiper app state - which is most
+        // recent.
+        _raft_gr.address_map().add_or_update_entry(raft::server_id{server_id}, ip_addr);
+    }
+}
+
 future<> raft_group0::finish_setup_after_join() {
     if (joined_group0()) {
         group0_log.info("finish_setup_after_join: group 0 ID present, loading server info.");
-        auto my_id = co_await load_my_id();
+        auto my_id = load_my_id();
         if (!_raft_gr.group0().get_configuration().can_vote(my_id)) {
             group0_log.info("finish_setup_after_join: becoming a voter in the group 0 configuration...");
             // Just bootstrapped and joined as non-voter. Become a voter.
             auto pause_shutdown = _shutdown_gate.hold();
-            raft::server_address my_addr{my_id, inet_addr_to_raft_addr(_gossiper.get_broadcast_address())};
+            raft::server_address my_addr{my_id, {}};
             co_await _raft_gr.group0().modify_config({{my_addr, true}}, {}, &_abort_source);
             group0_log.info("finish_setup_after_join: became a group 0 voter.");
 
@@ -715,12 +746,7 @@ future<> raft_group0::leave_group0() {
             "leave_group0: we're fully upgraded to use Raft but didn't join group 0. Please report a bug.");
     }
 
-    auto my_id = raft::server_id{co_await db::system_keyspace::get_raft_server_id()};
-    if (!my_id) {
-        on_internal_error(group0_log,
-            "leave_group0: we're fully upgraded to use Raft and group 0 ID is present but Raft server ID is not."
-            " Please report a bug.");
-    }
+    auto my_id = load_my_id();
 
     // Note: if this gets stuck due to a failure, the DB admin can abort.
     // FIXME: this gets stuck without failures if we're the leader (#10833)
@@ -775,12 +801,7 @@ future<> raft_group0::remove_from_group0(gms::inet_address node) {
             " Please report a bug.", node));
     }
 
-    auto my_id = raft::server_id{co_await db::system_keyspace::get_raft_server_id()};
-    if (!my_id) {
-        on_internal_error(group0_log, format(
-            "remove_from_group0({}): we're fully upgraded to use Raft and group 0 ID is present but Raft server ID is not."
-            " Please report a bug.", node));
-    }
+    auto my_id = load_my_id();
 
     // Find their group 0 server's Raft ID.
     // Note: even if the removed node had the same inet_address as us, `find_replace_id` should correctly find them
@@ -857,8 +878,11 @@ future<group0_peer_exchange> raft_group0::peer_exchange(discovery::peer_list pee
             // incoming RPC will then be bounced to the leader.
             co_return group0_peer_exchange{group0_info{
                 .group0_id = std::get<raft::group_id>(_group0),
+                // Use self as leader - modify_config() is
+                // a forwarding API so we'll be able to forward
+                // the request when it arrives.
                 .id = _raft_gr.group0().id(),
-                .ip_addr = _raft_gr.address_map().get_inet_address(_raft_gr.group0().id())
+                .ip_addr = _gossiper.get_broadcast_address(),
             }};
         }
     }, _group0);
@@ -1027,9 +1051,11 @@ with_timeout(abort_source& as, db::timeout_clock::duration d, F&& fun) {
 struct sleep_with_exponential_backoff {
     std::chrono::seconds _retry_period{1};
     static constexpr std::chrono::seconds _max_retry_period{16};
-    future<> operator()(abort_source& as) {
+    future<> operator()(abort_source& as,
+                        std::source_location loc = std::source_location::current()) {
+        upgrade_log.info("{}: sleeping for {} seconds before retrying...", loc.function_name(), _retry_period);
         co_await sleep_abortable(_retry_period, as);
-        _retry_period = std::max(_retry_period * 2, _max_retry_period);
+        _retry_period = std::min(_retry_period * 2, _max_retry_period);
     }
 };
 
@@ -1060,13 +1086,13 @@ static future<> wait_until_every_peer_joined_group0(db::system_keyspace& sys_ks,
                 co_return;
             }
 
-            upgrade_log.info("group 0 configuration is joint: {}. Sleeping for a while before retrying...", current_config);
+            upgrade_log.info("group 0 configuration is joint: {}.", current_config);
             continue;
         }
 
         upgrade_log.info(
             "group 0 configuration does not contain all peers yet."
-            " Missing peers: {}. Current group 0 config: {}. Sleeping for a while before retrying...",
+            " Missing peers: {}. Current group 0 config: {}.",
             missing_peers, current_config);
     }
 }
@@ -1134,8 +1160,6 @@ static future<> check_remote_group0_upgrade_state_dry_run(
         if (!retry) {
             co_return;
         }
-
-        upgrade_log.warn("check_remote_group0_upgrade_state_dry_run: retrying in a while...");
     }
 }
 
@@ -1227,8 +1251,6 @@ static future<bool> wait_for_peers_to_enter_synchronize_state(
         if (!*retry) {
             co_return true;
         }
-
-        upgrade_log.warn("wait_for_peers_to_enter_synchronize_state: retrying in a while...");
     }
 }
 
@@ -1287,9 +1309,7 @@ collect_schema_versions_from_group0_members(
             co_return std::nullopt;
         }
 
-        upgrade_log.info(
-                "synchronize_schema: could not finish early."
-                " Sleeping for a while before retrying remote schema version collection...");
+        upgrade_log.info("synchronize_schema: could not finish early.");
     }
 }
 
@@ -1388,8 +1408,6 @@ static future<bool> synchronize_schema(
             upgrade_log.info("synchronize_schema: finishing early.");
             co_return false;
         }
-
-        upgrade_log.info("synchronize_schema: sleeping for a while before collecting schema versions again...");
     }
 }
 

@@ -14,6 +14,9 @@
 
 namespace service {
 
+template <typename C> class raft_address_map_t;
+using raft_address_map = raft_address_map_t<seastar::lowres_clock>;
+
 // Address of a discovery peer
 struct discovery_peer {
     raft::server_id id;
@@ -67,5 +70,13 @@ enum class group0_upgrade_state : uint8_t {
 inline constexpr uint8_t group0_upgrade_state_last = 3;
 
 std::ostream& operator<<(std::ostream&, group0_upgrade_state);
+
+struct wrong_destination {
+    raft::server_id reached_id;
+};
+
+struct direct_fd_ping_reply {
+    std::variant<std::monostate, wrong_destination> result;
+};
 
 } // namespace service
