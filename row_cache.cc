@@ -17,7 +17,7 @@
 #include <boost/version.hpp>
 #include <sys/sdt.h>
 #include "read_context.hh"
-#include "dirty_memory_manager.hh"
+#include "replica/dirty_memory_manager.hh"
 #include "real_dirty_memory_accounter.hh"
 #include "readers/delegating_v2.hh"
 #include "readers/forwardable_v2.hh"
@@ -952,6 +952,11 @@ future<> row_cache::do_update(external_updater eu, replica::memtable& m, Updater
             _prev_snapshot = {};
         });
         utils::coroutine update; // Destroy before cleanup to release snapshots before invalidating.
+        auto destroy_update = defer([&] {
+            with_allocator(_tracker.allocator(), [&] {
+                update = {};
+            });
+        });
         partition_presence_checker is_present = _prev_snapshot->make_partition_presence_checker();
         while (!m.partitions.empty()) {
             with_allocator(_tracker.allocator(), [&] () {

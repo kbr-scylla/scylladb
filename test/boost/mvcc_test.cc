@@ -24,6 +24,7 @@
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/mutation_source_test.hh"
+#include "test/lib/reader_concurrency_semaphore.hh"
 #include "test/lib/failure_injecting_allocation_strategy.hh"
 #include "test/lib/log.hh"
 #include "test/boost/range_tombstone_list_assertions.hh"
@@ -257,7 +258,7 @@ class mvcc_container {
     std::optional<logalloc::region> _region_holder;
     std::optional<mutation_cleaner> _cleaner_holder;
     partition_snapshot::phase_type _phase = partition_snapshot::min_phase;
-    dirty_memory_manager _mgr;
+    replica::dirty_memory_manager _mgr;
     std::optional<real_dirty_memory_accounter> _acc;
     logalloc::region* _region;
     mutation_cleaner* _cleaner;

@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "sstables/sstables.hh"
 #include "size_tiered_compaction_strategy.hh"
 
 #include <boost/range/adaptor/transformed.hpp>

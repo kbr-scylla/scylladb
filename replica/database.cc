@@ -78,11 +78,11 @@ using namespace db;
 
 logging::logger dblog("database");
 
+namespace replica {
+
 // Used for tests where the CF exists without a database object. We need to pass a valid
 // dirty_memory manager in that case.
 thread_local dirty_memory_manager default_dirty_memory_manager;
-
-namespace replica {
 
 inline
 flush_controller
@@ -332,7 +332,7 @@ database::read_concurrency_sem() {
 }
 
 database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-        compaction_manager& cm, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
+        compaction_manager& cm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
     : _stats(make_lw_shared<db_stats>())
     , _user_types(std::make_shared<db_user_types_storage>(*this))
     , _cl_stats(std::make_unique<cell_locker_stats>())
@@ -376,8 +376,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
               _cfg.compaction_rows_count_warning_threshold,
               _cfg.compaction_collection_elements_count_warning_threshold))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
-    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
-    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory))
+    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local()))
+    , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local()))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
     , _mnotifier(mn)
@@ -470,32 +470,6 @@ void backlog_controller::update_controller(float shares) {
     _inflight_update = _scheduling_group.io.update_shares(uint32_t(shares));
 }
 
-
-dirty_memory_manager::dirty_memory_manager(replica::database& db, size_t threshold, double soft_limit, scheduling_group deferred_work_sg)
-    : _db(&db)
-    , _region_group("memtable (unspooled)", dirty_memory_manager_logalloc::reclaim_config{
-            .unspooled_hard_limit = threshold / 2,
-            .unspooled_soft_limit = threshold * soft_limit / 2,
-            .real_hard_limit = threshold,
-            .start_reclaiming = std::bind_front(&dirty_memory_manager::start_reclaiming, this)
-      }, deferred_work_sg)
-    , _flush_serializer(1)
-    , _waiting_flush(flush_when_needed()) {}
-
-void
-dirty_memory_manager::setup_collectd(sstring namestr) {
-    namespace sm = seastar::metrics;
-
-    _metrics.add_group("memory", {
-        sm::make_gauge(namestr + "_dirty_bytes", [this] { return real_dirty_memory(); },
-                       sm::description("Holds the current size of a all non-free memory in bytes: used memory + released memory that hasn't been returned to a free memory pool yet. "
-                                       "Total memory size minus this value represents the amount of available memory. "
-                                       "If this value minus unspooled_dirty_bytes is too high then this means that the dirty memory eviction lags behind.")),
-
-        sm::make_gauge(namestr +"_unspooled_dirty_bytes", [this] { return unspooled_dirty_memory(); },
-                       sm::description("Holds the size of used memory in bytes. Compare it to \"dirty_bytes\" to see how many memory is wasted (neither used nor available).")),
-    });
-}
 
 namespace replica {
 
@@ -1764,18 +1738,6 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
     });
 }
 
-} // namespace replica
-
-future<> dirty_memory_manager::shutdown() {
-    _db_shutdown_requested = true;
-    _should_flush.signal();
-    return std::move(_waiting_flush).then([this] {
-        return _region_group.shutdown();
-    });
-}
-
-namespace replica {
-
 future<> memtable_list::flush() {
     if (!may_flush()) {
         return make_ready_future<>();
@@ -1807,81 +1769,6 @@ std::vector<replica::shared_memtable> memtable_list::clear_and_add() {
     new_memtables.emplace_back(new_memtable());
     return std::exchange(_memtables, std::move(new_memtables));
 }
-
-} // namespace replica
-
-future<flush_permit> flush_permit::reacquire_sstable_write_permit() && {
-    return _manager->get_flush_permit(std::move(_background_permit));
-}
-
-future<> dirty_memory_manager::flush_one(replica::memtable_list& mtlist, flush_permit&& permit) noexcept {
-    return mtlist.seal_active_memtable(std::move(permit)).handle_exception([this, schema = mtlist.back()->schema()] (std::exception_ptr ep) {
-        dblog.error("Failed to flush memtable, {}:{} - {}", schema->ks_name(), schema->cf_name(), ep);
-        return make_exception_future<>(ep);
-    });
-}
-
-future<> dirty_memory_manager::flush_when_needed() {
-    using namespace replica;
-    if (!_db) {
-        return make_ready_future<>();
-    }
-    // If there are explicit flushes requested, we must wait for them to finish before we stop.
-    return do_until([this] { return _db_shutdown_requested; }, [this] {
-        auto has_work = [this] { return has_pressure() || _db_shutdown_requested; };
-        return _should_flush.wait(std::move(has_work)).then([this] {
-            return get_flush_permit().then([this] (auto permit) {
-                // We give priority to explicit flushes. They are mainly user-initiated flushes,
-                // flushes coming from a DROP statement, or commitlog flushes.
-                if (_flush_serializer.waiters()) {
-                    return make_ready_future<>();
-                }
-                // condition abated while we waited for the semaphore
-                if (!this->has_pressure() || _db_shutdown_requested) {
-                    return make_ready_future<>();
-                }
-                // There are many criteria that can be used to select what is the best memtable to
-                // flush. Most of the time we want some coordination with the commitlog to allow us to
-                // release commitlog segments as early as we can.
-                //
-                // But during pressure condition, we'll just pick the CF that holds the largest
-                // memtable. The advantage of doing this is that this is objectively the one that will
-                // release the biggest amount of memory and is less likely to be generating tiny
-                // SSTables.
-                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
-                memtable_list& mtlist = *(candidate_memtable.get_memtable_list());
-
-                if (!candidate_memtable.region().evictable_occupancy()) {
-                    // Soft pressure, but nothing to flush. It could be due to fsync, memtable_to_cache lagging,
-                    // or candidate_memtable failed to flush.
-                    // Back off to avoid OOMing with flush continuations.
-                    return sleep(1ms);
-                }
-
-                // Do not wait. The semaphore will protect us against a concurrent flush. But we
-                // want to start a new one as soon as the permits are destroyed and the semaphore is
-                // made ready again, not when we are done with the current one.
-                (void)this->flush_one(mtlist, std::move(permit)).handle_exception([this] (std::exception_ptr ex) {
-                    dblog.error("Flushing memtable returned unexpected error: {}", ex);
-                });
-                return make_ready_future<>();
-            });
-        });
-    }).finally([this] {
-        // We'll try to acquire the permit here to make sure we only really stop when there are no
-        // in-flight flushes. Our stop condition checks for the presence of waiters, but it could be
-        // that we have no waiters, but a flush still in flight. We wait for all background work to
-        // stop. When that stops, we know that the foreground work in the _flush_serializer has
-        // stopped as well.
-        return get_units(_background_work_flush_serializer, _max_background_work).discard_result();
-    });
-}
-
-void dirty_memory_manager::start_reclaiming() noexcept {
-    _should_flush.signal();
-}
-
-namespace replica {
 
 future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
     auto& cf = find_column_family(m.column_family_id());
@@ -2039,6 +1926,10 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
 }
 
 future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
+    ++_stats->total_writes;
+    // assume failure until proven otherwise
+    auto update_writes_failed = defer([&] { ++_stats->total_writes_failed; });
+
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
@@ -2050,6 +1941,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
         auto& write_label = cf.get_rate_limiter_label_for_writes();
         auto token = dht::token::to_int64(dht::get_token(*s, m.key()));
         if (_rate_limiter.account_operation(write_label, token, table_limit, rate_limit_info) == db::rate_limiter::can_proceed::no) {
+            ++_stats->total_writes_rate_limited;
             co_await coroutine::return_exception(replica::rate_limit_exception());
         }
     }
@@ -2062,7 +1954,15 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
 
     row_locker::lock_holder lock;
     if (!cf.views().empty()) {
-        lock = co_await cf.push_view_replica_updates(s, m, timeout, std::move(tr_state), get_reader_concurrency_semaphore());
+        auto lock_f = co_await coroutine::as_future(cf.push_view_replica_updates(s, m, timeout, std::move(tr_state), get_reader_concurrency_semaphore()));
+        if (lock_f.failed()) {
+            auto ex = lock_f.get_exception();
+            if (is_timeout_exception(ex)) {
+                ++_stats->total_writes_timedout;
+            }
+            co_await coroutine::return_exception_ptr(std::move(ex));
+        }
+        lock = lock_f.get();
     }
 
     // purposefully manually "inlined" apply_with_commitlog call here to reduce # coroutine
@@ -2083,7 +1983,8 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             ex = std::current_exception();
         }
         if (ex) {
-            if (try_catch<timed_out_error>(ex)) {
+            if (is_timeout_exception(ex)) {
+                ++_stats->total_writes_timedout;
                 ex = wrap_commitlog_add_error<wrapped_timed_out_error>(cf.schema(), m, std::move(ex));
             } else {
                 ex = wrap_commitlog_add_error<>(s, m, std::move(ex));
@@ -2091,12 +1992,20 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::exception(std::move(ex));
         }
     }
-    try {
-        co_await this->apply_in_memory(m, s, std::move(h), timeout);
-    } catch (mutation_reordered_with_truncate_exception&) {
+    auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
+    if (f.failed()) {
+      auto ex = f.get_exception();
+      if (try_catch<mutation_reordered_with_truncate_exception>(ex)) {
         // This mutation raced with a truncate, so we can just drop it.
         dblog.debug("replay_position reordering detected");
+        co_return;
+      } else if (is_timeout_exception(ex)) {
+        ++_stats->total_writes_timedout;
+      }
+      co_await coroutine::return_exception_ptr(std::move(ex));
     }
+    // Success, prevent incrementing failure counter
+    update_writes_failed.cancel();
 }
 
 template<typename Future>
@@ -2134,7 +2043,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
     if (!s->is_synced()) {
         on_internal_error(dblog, format("attempted to apply mutation using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
     }
-    return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync, rate_limit_info));
+    return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, sync, rate_limit_info);
 }
 
 future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
@@ -2145,7 +2054,7 @@ future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::t
         on_internal_error(dblog, format("attempted to apply hint using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
     }
     return with_scheduling_group(_dbcfg.streaming_scheduling_group, [this, s = std::move(s), &m, tr_state = std::move(tr_state), timeout] () mutable {
-        return update_write_metrics(_apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no, std::monostate{}));
+        return _apply_stage(this, std::move(s), seastar::cref(m), std::move(tr_state), timeout, db::commitlog::force_sync::no, std::monostate{});
     });
 }
 

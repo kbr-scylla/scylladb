@@ -6,7 +6,6 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 #include "mutation.hh"
-#include "sstables.hh"
 #include "types.hh"
 #include <seastar/core/future-util.hh>
 #include <seastar/core/coroutine.hh>

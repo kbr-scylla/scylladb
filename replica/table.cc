@@ -1494,25 +1494,18 @@ future<table::snapshot_file_set> table::take_snapshot(database& db, sstring json
     std::exception_ptr ex;
 
     auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables->all());
+    auto table_names = std::make_unique<std::unordered_set<sstring>>();
+
     co_await io_check([&jsondir] { return recursive_touch_directory(jsondir); });
-    co_await max_concurrent_for_each(tables, db.get_config().initial_sstable_loading_concurrency(), [&db, &jsondir] (sstables::shared_sstable sstable) {
-        return with_semaphore(db.get_sharded_sst_dir_semaphore().local(), 1, [&jsondir, sstable] {
+    co_await max_concurrent_for_each(tables, db.get_sharded_sst_dir_semaphore().local()._concurrency, [&db, &jsondir, &table_names] (sstables::shared_sstable sstable) {
+        table_names->insert(sstable->component_basename(sstables::component_type::Data));
+        return with_semaphore(db.get_sharded_sst_dir_semaphore().local()._sem, 1, [&jsondir, sstable] {
             return io_check([sstable, &dir = jsondir] {
                 return sstable->create_links(dir);
             });
         });
     });
     co_await io_check(sync_directory, jsondir);
-
-    auto table_names = std::make_unique<std::unordered_set<sstring>>();
-    table_names->reserve(tables.size());
-    for (auto& sst : tables) {
-        auto f = sst->get_filename();
-        auto rf = f.substr(sst->get_dir().size() + 1);
-        table_names->insert(std::move(rf));
-        co_await coroutine::maybe_yield();
-    }
-
     co_return make_foreign(std::move(table_names));
 }
 
@@ -1612,12 +1605,12 @@ lw_shared_ptr<memtable_list>& compaction_group::memtables() noexcept {
 
 future<> table::flush(std::optional<db::replay_position> pos) {
     if (pos && *pos < _flush_rp) {
-        return make_ready_future<>();
+        co_return;
     }
     auto op = _pending_flushes_phaser.start();
-    return _compaction_group->flush().then([this, op = std::move(op), fp = _highest_rp] {
-        _flush_rp = std::max(_flush_rp, fp);
-    });
+    auto fp = _highest_rp;
+    co_await _compaction_group->flush();
+    _flush_rp = std::max(_flush_rp, fp);
 }
 
 bool table::can_flush() const {
@@ -1689,21 +1682,18 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         }
     };
     auto p = make_lw_shared<pruner>(*this, *_compaction_group);
-    return _cache.invalidate(row_cache::external_updater([p, truncated_at] {
+    co_await _cache.invalidate(row_cache::external_updater([p, truncated_at] {
         p->prune(truncated_at);
         tlogger.debug("cleaning out row cache");
-    })).then([this, p]() mutable {
-        rebuild_statistics();
-
-        return parallel_for_each(p->remove, [this, p] (pruner::removed_sstable& r) {
-            if (r.enable_backlog_tracker) {
-                remove_sstable_from_backlog_tracker(p->cg.get_backlog_tracker(), r.sst);
-            }
-            return sstables::sstable_directory::delete_atomically({r.sst});
-        }).then([p] {
-            return make_ready_future<db::replay_position>(p->rp);
-        });
+    }));
+    rebuild_statistics();
+    co_await coroutine::parallel_for_each(p->remove, [this, p] (pruner::removed_sstable& r) {
+        if (r.enable_backlog_tracker) {
+            remove_sstable_from_backlog_tracker(p->cg.get_backlog_tracker(), r.sst);
+        }
+        return sstables::sstable_directory::delete_atomically({r.sst});
     });
+    co_return p->rp;
 }
 
 void table::set_schema(schema_ptr s) {
@@ -2372,15 +2362,14 @@ table::make_reader_v2_excluding_sstables(schema_ptr s,
 
 future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable> sstables) {
     auto units = co_await get_units(_sstable_deletion_sem, 1);
-    auto dirs_to_sync = std::set<sstring>({dir()});
+    sstables::sstable::delayed_commit_changes delay_commit;
     for (auto sst : sstables) {
-        dirs_to_sync.emplace(sst->get_dir());
         try {
             // Off-strategy can happen in parallel to view building, so the SSTable may be deleted already if the former
             // completed first.
             // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
-            co_await sst->move_to_new_dir(dir(), sst->generation(), false);
+            co_await sst->move_to_new_dir(dir(), sst->generation(), &delay_commit);
             // If view building finished faster, SSTable with repair origin still exists.
             // It can also happen the SSTable is not going through reshape, so it doesn't have a repair origin.
             // That being said, we'll only add this SSTable to tracker if its origin is other than repair.
@@ -2393,9 +2382,9 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
             throw;
         }
     }
-    co_await coroutine::parallel_for_each(dirs_to_sync, [] (sstring dir) {
-        return sync_directory(dir);
-    });
+
+    co_await delay_commit.commit();
+
     // Off-strategy timer will be rearmed, so if there's more incoming data through repair / streaming,
     // the timer can be updated once again. In practice, it allows off-strategy compaction to kick off
     // at the end of the node operation on behalf of this table, which brings more efficiency in terms
@@ -2436,26 +2425,36 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(schema_ptr s
         co_return row_locker::lock_holder();
     }
     auto cr_ranges = co_await db::view::calculate_affected_clustering_ranges(*base, m.decorated_key(), m.partition(), views);
-    if (cr_ranges.empty()) {
+    const bool need_regular = !cr_ranges.empty();
+    const bool need_static = db::view::needs_static_row(m.partition(), views);
+    if (!need_regular && !need_static) {
         tracing::trace(tr_state, "View updates do not require read-before-write");
         co_await generate_and_propagate_view_updates(base, sem.make_tracking_only_permit(s.get(), "push-view-updates-1", timeout), std::move(views), std::move(m), { }, std::move(tr_state), now);
         // In this case we are not doing a read-before-write, just a
         // write, so no lock is needed.
         co_return row_locker::lock_holder();
     }
-    // We read the whole set of regular columns in case the update now causes a base row to pass
+    // We read whole sets of regular and/or static columns in case the update now causes a base row to pass
     // a view's filters, and a view happens to include columns that have no value in this update.
     // Also, one of those columns can determine the lifetime of the base row, if it has a TTL.
-    auto columns = boost::copy_range<query::column_id_vector>(
-            base->regular_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)));
+    query::column_id_vector static_columns;
+    query::column_id_vector regular_columns;
+    if (need_regular) {
+        boost::copy(base->regular_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)), std::back_inserter(regular_columns));
+    }
+    if (need_static) {
+        boost::copy(base->static_columns() | boost::adaptors::transformed(std::mem_fn(&column_definition::id)), std::back_inserter(static_columns));
+    }
     query::partition_slice::option_set opts;
     opts.set(query::partition_slice::option::send_partition_key);
-    opts.set(query::partition_slice::option::send_clustering_key);
+    opts.set_if<query::partition_slice::option::send_clustering_key>(need_regular);
+    opts.set_if<query::partition_slice::option::distinct>(need_static && !need_regular);
+    opts.set_if<query::partition_slice::option::always_return_static_content>(need_static);
     opts.set(query::partition_slice::option::send_timestamp);
     opts.set(query::partition_slice::option::send_ttl);
     opts.add(custom_opts);
     auto slice = query::partition_slice(
-            std::move(cr_ranges), { }, std::move(columns), std::move(opts), { }, cql_serialization_format::internal(), query::max_rows);
+            std::move(cr_ranges), std::move(static_columns), std::move(regular_columns), std::move(opts), { }, cql_serialization_format::internal(), query::max_rows);
     // Take the shard-local lock on the base-table row or partition as needed.
     // We'll return this lock to the caller, which will release it after
     // writing the base-table update.

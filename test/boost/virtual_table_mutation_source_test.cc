@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include <seastar/util/closeable.hh>
 #include "db/virtual_table.hh"
 #include "db/system_keyspace.hh"
 #include "schema.hh"

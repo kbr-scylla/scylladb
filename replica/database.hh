@@ -65,6 +65,7 @@
 #include "utils/serialized_action.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
 #include "compaction/compaction_manager.hh"
+#include "utils/disk-error-handler.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -92,6 +93,7 @@ class compaction_completion_desc;
 class sstables_manager;
 class compaction_data;
 class sstable_set;
+class directory_semaphore;
 
 }
 
@@ -164,7 +166,7 @@ private:
     std::vector<shared_memtable> _memtables;
     seal_immediate_fn_type _seal_immediate_fn;
     std::function<schema_ptr()> _current_schema;
-    dirty_memory_manager* _dirty_memory_manager;
+    replica::dirty_memory_manager* _dirty_memory_manager;
     std::optional<shared_future<>> _flush_coalescing;
     seastar::scheduling_group _compaction_scheduling_group;
     replica::table_stats& _table_stats;
@@ -363,7 +365,7 @@ public:
         bool enable_incremental_backups = false;
         utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
-        ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
+        replica::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
         replica::cf_stats* cf_stats = nullptr;
@@ -1118,7 +1120,7 @@ public:
         bool enable_incremental_backups = false;
         utils::updateable_value<bool> compaction_enforce_min_threshold{false};
         bool enable_dangerous_direct_import_of_cassandra_counters = false;
-        ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
+        replica::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         reader_concurrency_semaphore* streaming_read_concurrency_semaphore;
         reader_concurrency_semaphore* compaction_concurrency_semaphore;
         replica::cf_stats* cf_stats = nullptr;
@@ -1350,7 +1352,7 @@ private:
     std::vector<std::any> _listeners;
     const locator::shared_token_metadata& _shared_token_metadata;
 
-    sharded<semaphore>& _sst_dir_semaphore;
+    sharded<sstables::directory_semaphore>& _sst_dir_semaphore;
     reader_concurrency_semaphore_group _reader_concurrency_semaphores_group;
     scheduling_group _default_read_concurrency_group;
     noncopyable_function<future<>()> _unsubscribe_qos_configuration_change;
@@ -1440,7 +1442,7 @@ public:
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, sharded<db::system_keyspace>&);
     database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-            compaction_manager& cm, sharded<semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
+            compaction_manager& cm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
     database(database&&) = delete;
     ~database();
 
@@ -1713,7 +1715,7 @@ public:
 
     bool is_internal_query() const;
 
-    sharded<semaphore>& get_sharded_sst_dir_semaphore() {
+    sharded<sstables::directory_semaphore>& get_sharded_sst_dir_semaphore() {
         return _sst_dir_semaphore;
     }
 

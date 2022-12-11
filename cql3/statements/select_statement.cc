@@ -567,6 +567,11 @@ indexed_table_select_statement::do_execute_base_query(
         base_query_state(const base_query_state&) = delete;
     };
 
+    const column_definition* target_cdef = _schema->get_column_definition(to_bytes(_index.target_column()));
+    if (!target_cdef) {
+        throw exceptions::invalid_request_exception("Indexed column not found in schema");
+    }
+
     const bool is_paged = bool(paging_state);
     base_query_state query_state{cmd->get_row_limit() * queried_ranges_count, std::move(ranges_to_vnodes)};
     {
@@ -586,7 +591,7 @@ indexed_table_select_statement::do_execute_base_query(
                 auto base_pk = generate_base_key_from_index_pk<partition_key>(old_paging_state->get_partition_key(),
                         old_paging_state->get_clustering_key(), *_schema, *_view_schema);
                 auto row_ranges = command->slice.default_row_ranges();
-                if (old_paging_state->get_clustering_key() && _schema->clustering_key_size() > 0) {
+                if (old_paging_state->get_clustering_key() && _schema->clustering_key_size() > 0 && !target_cdef->is_static()) {
                     auto base_ck = generate_base_key_from_index_pk<clustering_key>(old_paging_state->get_partition_key(),
                             old_paging_state->get_clustering_key(), *_schema, *_view_schema);
 
@@ -804,35 +809,40 @@ select_statement::process_results(foreign_ptr<lw_shared_ptr<query::result>> resu
             ::make_shared<metadata>(*_selection->get_result_metadata()))
         ));
     }
+    return process_results_complex(std::move(results), std::move(cmd), options, now);
+}
 
+future<shared_ptr<cql_transport::messages::result_message>>
+select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::result>> results,
+                                  lw_shared_ptr<query::read_command> cmd,
+                                  const query_options& options,
+                                  gc_clock::time_point now) const {
     cql3::selection::result_set_builder builder(*_selection, now,
             options.get_cql_serialization_format());
-    return do_with(std::move(builder), [this, cmd, results = std::move(results), options] (cql3::selection::result_set_builder& builder) mutable {
-        return builder.with_thread_if_needed([this, &builder, cmd, results = std::move(results), options] {
-            if (_restrictions_need_filtering) {
-                results->ensure_counts();
-                _stats.filtered_rows_read_total += *results->row_count();
-                query::result_view::consume(*results, cmd->slice,
-                        cql3::selection::result_set_builder::visitor(builder, *_schema,
-                                *_selection, cql3::selection::result_set_builder::restrictions_filter(_restrictions, options, cmd->get_row_limit(), _schema, cmd->slice.partition_row_limit())));
-            } else {
-                query::result_view::consume(*results, cmd->slice,
-                        cql3::selection::result_set_builder::visitor(builder, *_schema,
-                                *_selection));
-            }
-            auto rs = builder.build();
+    co_return co_await builder.with_thread_if_needed([&] {
+        if (_restrictions_need_filtering) {
+            results->ensure_counts();
+            _stats.filtered_rows_read_total += *results->row_count();
+            query::result_view::consume(*results, cmd->slice,
+                    cql3::selection::result_set_builder::visitor(builder, *_schema,
+                            *_selection, cql3::selection::result_set_builder::restrictions_filter(_restrictions, options, cmd->get_row_limit(), _schema, cmd->slice.partition_row_limit())));
+        } else {
+            query::result_view::consume(*results, cmd->slice,
+                    cql3::selection::result_set_builder::visitor(builder, *_schema,
+                            *_selection));
+        }
+        auto rs = builder.build();
 
-            if (needs_post_query_ordering()) {
-                rs->sort(_ordering_comparator);
-                if (_is_reversed) {
-                    rs->reverse();
-                }
-                rs->trim(cmd->get_row_limit());
+        if (needs_post_query_ordering()) {
+            rs->sort(_ordering_comparator);
+            if (_is_reversed) {
+                rs->reverse();
             }
-            update_stats_rows_read(rs->size());
-            _stats.filtered_rows_matched_total += _restrictions_need_filtering ? rs->size() : 0;
-            return shared_ptr<cql_transport::messages::result_message>(::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs))));
-        });
+            rs->trim(cmd->get_row_limit());
+        }
+        update_stats_rows_read(rs->size());
+        _stats.filtered_rows_matched_total += _restrictions_need_filtering ? rs->size() : 0;
+        return shared_ptr<cql_transport::messages::result_message>(::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs))));
     });
 }
 
@@ -1008,7 +1018,7 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
         exploded_index_ck.push_back(bytes_view(token_bytes));
         append_base_key_to_index_ck<partition_key>(exploded_index_ck, last_base_pk, *cdef);
     }
-    if (last_base_ck) {
+    if (last_base_ck && !cdef->is_static()) {
         append_base_key_to_index_ck<clustering_key>(exploded_index_ck, *last_base_ck, *cdef);
     }
 
@@ -1062,6 +1072,10 @@ indexed_table_select_statement::do_execute(query_processor& qp,
     if (_schema->clustering_key_size() == 0) {
         // Obviously, if there are no clustering columns, then we can work at
         // the granularity of whole partitions.
+        whole_partitions = true;
+    } else if (_schema->get_column_definition(to_bytes(_index.target_column()))->is_static()) {
+        // Index table for a static index does not have the original tables'
+        // clustering key columns, so we must not fetch them.
         whole_partitions = true;
     } else {
         if (_index.depends_on(*(_schema->clustering_key_columns().begin()))) {
