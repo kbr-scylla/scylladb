@@ -52,8 +52,6 @@ class direct_fd_pinger;
 class direct_fd_proxy;
 class gossiper_state_change_subscriber_proxy;
 
-future<raft::server_id> load_or_create_my_raft_id(db::system_keyspace&);
-
 // This class is responsible for creating, storing and accessing raft servers.
 // It also manages the raft rpc verbs initialization.
 //
@@ -148,6 +146,9 @@ public:
 class direct_fd_pinger : public seastar::peering_sharded_service<direct_fd_pinger>, public direct_failure_detector::pinger {
     netw::messaging_service& _ms;
     raft_address_map& _address_map;
+
+    using rate_limits = std::unordered_map<direct_failure_detector::pinger::endpoint_id, logger::rate_limit>;
+    rate_limits _rate_limits;
 
 public:
     direct_fd_pinger(netw::messaging_service& ms, raft_address_map& address_map)

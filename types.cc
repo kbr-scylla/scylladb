@@ -2298,9 +2298,11 @@ struct compare_visitor {
     std::strong_ordering operator()(const listlike_collection_type_impl& l) {
         using llpdi = listlike_partial_deserializing_iterator;
         auto sf = cql_serialization_format::internal();
-        return lexicographical_tri_compare(llpdi::begin(v1, sf), llpdi::end(v1, sf), llpdi::begin(v2, sf),
-                llpdi::end(v2, sf),
-                [&] (const managed_bytes_view& o1, const managed_bytes_view& o2) { return l.get_elements_type()->compare(o1, o2); });
+        return with_empty_checks([&] {
+            return lexicographical_tri_compare(llpdi::begin(v1, sf), llpdi::end(v1, sf), llpdi::begin(v2, sf),
+                    llpdi::end(v2, sf),
+                    [&] (const managed_bytes_view& o1, const managed_bytes_view& o2) { return l.get_elements_type()->compare(o1, o2); });
+        });
     }
     std::strong_ordering operator()(const map_type_impl& m) {
         return map_type_impl::compare_maps(m.get_keys_type(), m.get_values_type(), v1, v2);
@@ -3121,6 +3123,20 @@ user_type_impl::get_name_as_string() const {
 
 sstring user_type_impl::get_name_as_cql_string() const {
     return cql3::util::maybe_quote(get_name_as_string());
+}
+
+std::ostream& user_type_impl::describe(std::ostream& os) const {
+    os << "CREATE TYPE " << cql3::util::maybe_quote(_keyspace) << "." << get_name_as_cql_string() << " (\n";
+    for (size_t i = 0; i < _string_field_names.size(); i++) {
+        os << "    " << cql3::util::maybe_quote(_string_field_names[i]) << " " << _types[i]->cql3_type_name();
+        if (i < _string_field_names.size() - 1) {
+            os << ",";
+        }
+        os << "\n";
+    }
+    os << ");";
+
+    return os;
 }
 
 data_type

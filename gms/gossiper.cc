@@ -1443,6 +1443,16 @@ int gossiper::compare_endpoint_startup(inet_address addr1, inet_address addr2) {
     return ep1->get_heart_beat_state().get_generation() - ep2->get_heart_beat_state().get_generation();
 }
 
+sstring gossiper::get_rpc_address(const inet_address& endpoint) const {
+    if (endpoint != get_broadcast_address()) {
+        auto* v = get_application_state_ptr(endpoint, gms::application_state::RPC_ADDRESS);
+        if (v) {
+            return v->value;
+        }
+    }
+    return boost::lexical_cast<std::string>(endpoint);
+}
+
 void gossiper::update_timestamp_for_nodes(const std::map<inet_address, endpoint_state>& map) {
     for (const auto& x : map) {
         const gms::inet_address& endpoint = x.first;
@@ -1885,8 +1895,7 @@ future<> gossiper::do_shadow_round(std::unordered_set<gms::inet_address> nodes) 
             gms::application_state::DC,
             gms::application_state::RACK,
             gms::application_state::SUPPORTED_FEATURES,
-            gms::application_state::SNITCH_NAME,
-            gms::application_state::RAFT_SERVER_ID}};
+            gms::application_state::SNITCH_NAME}};
         logger.info("Gossip shadow round started with nodes={}", nodes);
         std::unordered_set<gms::inet_address> nodes_talked;
         size_t nodes_down = 0;
@@ -1993,10 +2002,6 @@ future<> gossiper::add_saved_endpoint(inet_address ep) {
     auto host_id = tmptr->get_host_id_if_known(ep);
     if (host_id) {
         ep_state.add_application_state(gms::application_state::HOST_ID, versioned_value::host_id(host_id.value()));
-    }
-    auto raft_id = co_await _sys_ks.local().get_peer_raft_id_if_known(ep);
-    if (raft_id) {
-        ep_state.add_application_state(gms::application_state::RAFT_SERVER_ID, versioned_value::raft_server_id(raft_id.value()));
     }
     ep_state.mark_dead();
     _endpoint_state_map[ep] = ep_state;

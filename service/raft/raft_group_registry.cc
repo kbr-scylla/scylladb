@@ -75,7 +75,7 @@ class gossiper_state_change_subscriber_proxy: public gms::i_endpoint_state_chang
 
     future<>
     on_endpoint_change(gms::inet_address endpoint, gms::endpoint_state ep_state) {
-        auto app_state_ptr = ep_state.get_application_state_ptr(gms::application_state::RAFT_SERVER_ID);
+        auto app_state_ptr = ep_state.get_application_state_ptr(gms::application_state::HOST_ID);
         if (app_state_ptr) {
             raft::server_id id(utils::UUID(app_state_ptr->value));
             rslog.debug("gossiper_state_change_subscriber_proxy::on_endpoint_change() {} {}", endpoint, id);
@@ -134,16 +134,6 @@ public:
 };
 
 // }}} gossiper_state_change_subscriber_proxy
-
-future<raft::server_id> load_or_create_my_raft_id(db::system_keyspace& sys_ks) {
-    assert(this_shard_id() == 0);
-    auto id = raft::server_id{co_await sys_ks.get_raft_server_id()};
-    if (id == raft::server_id{}) {
-        id = raft::server_id::create_random_id();
-        co_await sys_ks.set_raft_server_id(id.id);
-    }
-    co_return id;
-}
 
 raft_group_registry::raft_group_registry(bool is_enabled, raft_address_map& address_map,
         netw::messaging_service& ms, gms::gossiper& gossiper, direct_failure_detector::failure_detector& fd)
@@ -445,6 +435,10 @@ future<bool> direct_fd_pinger::ping(direct_failure_detector::pinger::endpoint_id
     auto dst_id = raft::server_id{std::move(id)};
     auto addr = _address_map.find(dst_id);
     if (!addr) {
+        auto [it, _] = _rate_limits.try_emplace(id, std::chrono::minutes(5));
+        auto& rate_limit = it->second;
+
+        rslog.log(log_level::warn, rate_limit, "Raft server id {} cannot be translated to an IP address.", id);
         co_return false;
     }
 

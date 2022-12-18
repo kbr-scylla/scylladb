@@ -65,6 +65,7 @@
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "utils/stall_free.hh"
 #include "utils/error_injection.hh"
+#include "locator/util.hh"
 #include "audit/audit.hh"
 #include "service/qos/service_level_controller.hh"
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
@@ -318,6 +319,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 
     bool replacing_a_node_with_same_ip = false;
     bool replacing_a_node_with_diff_ip = false;
+    std::optional<locator::host_id> replaced_host_id;
     std::optional<raft_group0::replace_info> raft_replace_info;
     auto tmlock = std::make_unique<token_metadata_lock>(co_await get_token_metadata_lock());
     auto tmptr = co_await get_mutable_token_metadata_ptr();
@@ -336,9 +338,10 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
             get_broadcast_address(), *replace_address);
         tmptr->update_topology(*replace_address, std::move(ri.dc_rack));
         co_await tmptr->update_normal_tokens(bootstrap_tokens, *replace_address);
+        replaced_host_id = ri.host_id;
         raft_replace_info = raft_group0::replace_info {
             .ip_addr = *replace_address,
-            .raft_id = std::move(ri.raft_id)
+            .raft_id = raft::server_id{ri.host_id.uuid()},
         };
     } else if (should_bootstrap()) {
         co_await check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features);
@@ -396,9 +399,12 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     // Seed the host ID-to-endpoint map with our own ID.
     auto local_host_id = _db.local().get_config().host_id;
     if (!replacing_a_node_with_diff_ip) {
-        // Replacing node with a different ip should own the host_id only after
-        // the replacing node becomes NORMAL status. It is updated in
-        // handle_state_normal().
+        auto endpoint = get_broadcast_address();
+        auto eps = _gossiper.get_endpoint_state_for_endpoint_ptr(endpoint);
+        if (eps) {
+            auto replace_host_id = _gossiper.get_host_id(get_broadcast_address());
+            slogger.info("Host {}/{} is replacing {}/{} using the same address", local_host_id, endpoint, replace_host_id, endpoint);
+        }
         tmptr->update_host_id(local_host_id, get_broadcast_address());
     }
 
@@ -415,10 +421,6 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     app_states.emplace(gms::application_state::NET_VERSION, versioned_value::network_version());
     app_states.emplace(gms::application_state::HOST_ID, versioned_value::host_id(local_host_id));
     app_states.emplace(gms::application_state::RPC_ADDRESS, versioned_value::rpcaddress(broadcast_rpc_address));
-    if (_group0->is_raft_enabled()) {
-        auto my_id = _group0->load_my_id();
-        app_states.emplace(gms::application_state::RAFT_SERVER_ID, versioned_value::raft_server_id(my_id.id));
-    }
     app_states.emplace(gms::application_state::RELEASE_VERSION, versioned_value::release_version());
     app_states.emplace(gms::application_state::SUPPORTED_FEATURES, versioned_value::supported_features(features));
     app_states.emplace(gms::application_state::CACHE_HITRATES, versioned_value::cache_hitrates(""));
@@ -532,7 +534,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         co_await sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start);
         co_await mark_existing_views_as_built(sys_dist_ks);
         co_await _sys_ks.local().update_tokens(bootstrap_tokens);
-        co_await bootstrap(cdc_gen_service, bootstrap_tokens, cdc_gen_id);
+        co_await bootstrap(cdc_gen_service, bootstrap_tokens, cdc_gen_id, replaced_host_id);
     } else {
         supervisor::notify("starting system distributed keyspace");
         co_await sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start);
@@ -678,8 +680,8 @@ std::list<gms::inet_address> storage_service::get_ignore_dead_nodes_for_replace(
 }
 
 // Runs inside seastar::async context
-future<> storage_service::bootstrap(cdc::generation_service& cdc_gen_service, std::unordered_set<token>& bootstrap_tokens, std::optional<cdc::generation_id>& cdc_gen_id) {
-    return seastar::async([this, &bootstrap_tokens, &cdc_gen_id, &cdc_gen_service] {
+future<> storage_service::bootstrap(cdc::generation_service& cdc_gen_service, std::unordered_set<token>& bootstrap_tokens, std::optional<cdc::generation_id>& cdc_gen_id, const std::optional<locator::host_id>& replaced_host_id) {
+    return seastar::async([this, &bootstrap_tokens, &cdc_gen_id, &cdc_gen_service, &replaced_host_id] {
         auto bootstrap_rbno = is_repair_based_node_ops_enabled(streaming::stream_reason::bootstrap);
 
         set_mode(mode::BOOTSTRAP);
@@ -725,7 +727,7 @@ future<> storage_service::bootstrap(cdc::generation_service& cdc_gen_service, st
                 slogger.debug("bootstrap: update pending ranges: endpoint={} bootstrap_tokens={}", get_broadcast_address(), bootstrap_tokens);
                 mutate_token_metadata([this, &bootstrap_tokens] (mutable_token_metadata_ptr tmptr) {
                     auto endpoint = get_broadcast_address();
-                    tmptr->update_topology(endpoint, _sys_ks.local().local_dc_rack(), locator::topology::pending::yes);
+                    tmptr->update_topology(endpoint, _sys_ks.local().local_dc_rack());
                     tmptr->add_bootstrap_tokens(bootstrap_tokens, endpoint);
                     return update_pending_ranges(std::move(tmptr), format("bootstrapping node {}", endpoint));
                 }).get();
@@ -766,9 +768,11 @@ future<> storage_service::bootstrap(cdc::generation_service& cdc_gen_service, st
             slogger.debug("Removing replaced endpoint {} from system.peers", *replace_addr);
             _sys_ks.local().remove_endpoint(*replace_addr).get();
 
-            slogger.info("Replace: removing {} from group 0...", *replace_addr);
+            assert(replaced_host_id);
+            auto raft_id = raft::server_id{replaced_host_id->uuid()};
+            slogger.info("Replace: removing {}/{} from group 0...", *replace_addr, raft_id);
             assert(_group0);
-            _group0->remove_from_group0(*replace_addr).get();
+            _group0->remove_from_group0(raft_id).get();
 
             slogger.info("Starting to bootstrap...");
             run_replace_ops(bootstrap_tokens);
@@ -803,38 +807,6 @@ storage_service::get_range_to_address_map(const sstring& keyspace) const {
 future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>>
 storage_service::get_range_to_address_map(locator::effective_replication_map_ptr erm) const {
     return get_range_to_address_map(erm, erm->get_token_metadata_ptr()->sorted_tokens());
-}
-
-future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>>
-storage_service::get_range_to_address_map_in_local_dc(
-        locator::effective_replication_map_ptr erm) const {
-    auto tmptr = erm->get_token_metadata_ptr();
-    auto orig_map = co_await get_range_to_address_map(erm, co_await get_tokens_in_local_dc(*tmptr));
-    std::unordered_map<dht::token_range, inet_address_vector_replica_set> filtered_map;
-    filtered_map.reserve(orig_map.size());
-    auto local_dc_filter = tmptr->get_topology().get_local_dc_filter();
-    for (auto entry : orig_map) {
-        auto& addresses = filtered_map[entry.first];
-        addresses.reserve(entry.second.size());
-        std::copy_if(entry.second.begin(), entry.second.end(), std::back_inserter(addresses), std::cref(local_dc_filter));
-        co_await coroutine::maybe_yield();
-    }
-
-    co_return filtered_map;
-}
-
-// Caller is responsible to hold token_metadata valid until the returned future is resolved
-future<std::vector<token>>
-storage_service::get_tokens_in_local_dc(const locator::token_metadata& tm) const {
-    std::vector<token> filtered_tokens;
-    auto local_dc_filter = tm.get_topology().get_local_dc_filter();
-    for (auto token : tm.sorted_tokens()) {
-        auto endpoint = tm.get_endpoint(token);
-        if (local_dc_filter(*endpoint))
-            filtered_tokens.push_back(token);
-        co_await coroutine::maybe_yield();
-    }
-    co_return filtered_tokens;
 }
 
 // Caller is responsible to hold token_metadata valid until the returned future is resolved
@@ -911,7 +883,7 @@ future<> storage_service::handle_state_bootstrap(inet_address endpoint) {
         tmptr->remove_endpoint(endpoint);
     }
 
-    tmptr->update_topology(endpoint, get_dc_rack_for(endpoint), locator::topology::pending::yes);
+    tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
     tmptr->add_bootstrap_tokens(tokens, endpoint);
     if (_gossiper.uses_host_id(endpoint)) {
         tmptr->update_host_id(_gossiper.get_host_id(endpoint), endpoint);
@@ -1042,15 +1014,11 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
             on_internal_error_noexcept(slogger, format("endpoint={} is not marked for removal but owns no tokens", endpoint));
         }
 
-        // Update pending ranges after update of normal tokens immediately to avoid
-        // a race where natural endpoint was updated to contain node A, but A was
-        // not yet removed from pending endpoints
         if (!is_normal_token_owner) {
-            auto dc_rack = get_dc_rack_for(endpoint);
-            slogger.debug("handle_state_normal: update_topology: endpoint={} dc={} rack={}", endpoint, dc_rack.dc, dc_rack.rack);
-            tmptr->update_topology(endpoint, std::move(dc_rack));
             do_notify_joined = true;
         }
+
+        tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
         co_await tmptr->update_normal_tokens(owned_tokens, endpoint);
     }
 
@@ -1246,7 +1214,7 @@ future<> storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_sta
             co_await handle_state_replacing_update_pending_ranges(tmptr, endpoint);
         }
         if (!is_normal_token_owner) {
-            tmptr->update_topology(endpoint, get_dc_rack_for(endpoint), locator::topology::pending::yes);
+            tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
         }
         co_await replicate_to_all_cores(std::move(tmptr));
     }
@@ -1384,13 +1352,6 @@ future<> storage_service::do_update_system_peers_table(gms::inet_address endpoin
         co_await update_table(endpoint, "schema_version", utils::UUID(value.value));
     } else if (state == application_state::HOST_ID) {
         co_await update_table(endpoint, "host_id", utils::UUID(value.value));
-    } else if (state == application_state::RAFT_SERVER_ID && _feature_service.supports_raft_cluster_mgmt) {
-        auto server_id = utils::UUID(value.value);
-        if (server_id == utils::UUID{}) {
-            slogger.error("empty raft server id in application state for host {} ", endpoint);
-        } else {
-            co_await update_table(endpoint, "raft_server_id", server_id);
-        }
     } else if (state == application_state::SUPPORTED_FEATURES) {
         co_await update_table(endpoint, "supported_features", value.value);
     }
@@ -1707,19 +1668,6 @@ future<> storage_service::remove_endpoint(inet_address endpoint) {
     }
 }
 
-// If the Raft ID is present in gossiper and non-empty, return it.
-// Otherwise return nullopt.
-static std::optional<raft::server_id> get_raft_id_for(gms::gossiper& g, gms::inet_address ep) {
-    auto app_state = g.get_application_state_ptr(ep, gms::application_state::RAFT_SERVER_ID);
-    if (app_state) {
-        auto value = utils::UUID{app_state->value};
-        if (value) {
-            return raft::server_id{value};
-        }
-    }
-    return std::nullopt;
-}
-
 future<storage_service::replacement_info>
 storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<gms::inet_address, sstring>& loaded_peer_features) {
     if (!get_replace_address()) {
@@ -1759,18 +1707,15 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
     }
 
     auto dc_rack = get_dc_rack_for(replace_address);
-    auto raft_id = get_raft_id_for(_gossiper, replace_address);
 
-    // use the replacee's host Id as our own so we receive hints, etc
-    auto host_id = _gossiper.get_host_id(replace_address);
-    co_await _sys_ks.local().set_local_host_id(host_id).discard_result();
-    const_cast<db::config&>(_db.local().get_config()).host_id = host_id; // FIXME -- carry non-cost config on storage service itself
+    auto replace_host_id = _gossiper.get_host_id(replace_address);
+    slogger.info("Host {}/{} is replacing {}/{}", _db.local().get_config().host_id, get_broadcast_address(), replace_host_id, replace_address);
     co_await _gossiper.reset_endpoint_state_map();
 
     co_return replacement_info {
         .tokens = std::move(tokens),
         .dc_rack = std::move(dc_rack),
-        .raft_id = std::move(raft_id),
+        .host_id = std::move(replace_host_id),
     };
 }
 
@@ -2534,9 +2479,10 @@ future<> storage_service::removenode(locator::host_id host_id, std::list<locator
                     });
                 }).get();
 
-                slogger.info("removenode[{}]: removing node {} from group 0", uuid, endpoint);
+                auto raft_id = raft::server_id{host_id.uuid()};
+                slogger.info("removenode[{}]: removing node {}/{} from group 0", uuid, endpoint, raft_id);
                 assert(ss._group0);
-                ss._group0->remove_from_group0(endpoint).get();
+                ss._group0->remove_from_group0(raft_id).get();
 
                 slogger.info("removenode[{}]: Finished removenode operation, removing node={}, sync_nodes={}, ignore_nodes={}", uuid, endpoint, nodes, ignore_nodes);
             } catch (...) {
@@ -2718,7 +2664,7 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
                     auto existing_node = x.first;
                     auto replacing_node = x.second;
                     slogger.info("replace[{}]: Added replacing_node={} to replace existing_node={}, coordinator={}", req.ops_uuid, replacing_node, existing_node, coordinator);
-                    tmptr->update_topology(replacing_node, get_dc_rack_for(replacing_node), locator::topology::pending::yes);
+                    tmptr->update_topology(replacing_node, get_dc_rack_for(replacing_node));
                     tmptr->add_replacing_endpoint(existing_node, replacing_node);
                 }
                 return make_ready_future<>();
@@ -2773,7 +2719,7 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
                     auto& endpoint = x.first;
                     auto tokens = std::unordered_set<dht::token>(x.second.begin(), x.second.end());
                     slogger.info("bootstrap[{}]: Added node={} as bootstrap, coordinator={}", req.ops_uuid, endpoint, coordinator);
-                    tmptr->update_topology(endpoint, get_dc_rack_for(endpoint), locator::topology::pending::yes);
+                    tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
                     tmptr->add_bootstrap_tokens(tokens, endpoint);
                 }
                 return update_pending_ranges(tmptr, format("bootstrap {}", req.bootstrap_nodes));
@@ -3269,56 +3215,7 @@ future<> storage_service::move(token new_token) {
 
 future<std::vector<storage_service::token_range_endpoints>>
 storage_service::describe_ring(const sstring& keyspace, bool include_only_local_dc) const {
-    std::vector<token_range_endpoints> ranges;
-    //Token.TokenFactory tf = getPartitioner().getTokenFactory();
-
-    auto erm = _db.local().find_keyspace(keyspace).get_effective_replication_map();
-    std::unordered_map<dht::token_range, inet_address_vector_replica_set> range_to_address_map = co_await (
-            include_only_local_dc
-                    ? get_range_to_address_map_in_local_dc(erm)
-                    : get_range_to_address_map(erm)
-    );
-    auto tmptr = erm->get_token_metadata_ptr();
-    for (auto entry : range_to_address_map) {
-        const auto& topology = tmptr->get_topology();
-        auto range = entry.first;
-        auto addresses = entry.second;
-        token_range_endpoints tr;
-        if (range.start()) {
-            tr._start_token = range.start()->value().to_sstring();
-        }
-        if (range.end()) {
-            tr._end_token = range.end()->value().to_sstring();
-        }
-        for (auto endpoint : addresses) {
-            endpoint_details details;
-            details._host = endpoint;
-            details._datacenter = topology.get_datacenter(endpoint);
-            details._rack = topology.get_rack(endpoint);
-            tr._rpc_endpoints.push_back(get_rpc_address(endpoint));
-            tr._endpoints.push_back(boost::lexical_cast<std::string>(details._host));
-            tr._endpoint_details.push_back(details);
-        }
-        ranges.push_back(tr);
-        co_await coroutine::maybe_yield();
-    }
-    // Convert to wrapping ranges
-    auto left_inf = boost::find_if(ranges, [] (const token_range_endpoints& tr) {
-        return tr._start_token.empty();
-    });
-    auto right_inf = boost::find_if(ranges, [] (const token_range_endpoints& tr) {
-        return tr._end_token.empty();
-    });
-    using set = std::unordered_set<sstring>;
-    if (left_inf != right_inf
-            && left_inf != ranges.end()
-            && right_inf != ranges.end()
-            && (boost::copy_range<set>(left_inf->_endpoints)
-                 == boost::copy_range<set>(right_inf->_endpoints))) {
-        left_inf->_start_token = std::move(right_inf->_start_token);
-        ranges.erase(right_inf);
-    }
-    co_return ranges;
+    return locator::describe_ring(_db.local(), _gossiper, keyspace, include_only_local_dc);
 }
 
 future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>>
@@ -3506,7 +3403,7 @@ future<> storage_service::force_remove_completion() {
 
                     slogger.info("force_remove_completion: removing endpoint {} from group 0", endpoint);
                     assert(ss._group0);
-                    co_await ss._group0->remove_from_group0(endpoint);
+                    co_await ss._group0->remove_from_group0(raft::server_id{host_id.uuid()});
                 }
             } else {
                 slogger.warn("No tokens to force removal on, call 'removenode' first");

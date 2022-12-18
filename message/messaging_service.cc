@@ -260,7 +260,7 @@ bool messaging_service::topology_known_for(inet_address addr) const {
     // The token metadata pointer is nullptr before
     // the service is start_listen()-ed and after it's being shutdown()-ed.
     return _token_metadata
-        && _token_metadata->get()->get_topology().has_endpoint(addr, locator::topology::pending::yes);
+        && _token_metadata->get()->get_topology().has_endpoint(addr);
 }
 
 // Precondition: `topology_known_for(addr)`.
@@ -449,6 +449,11 @@ future<> messaging_service::shutdown() {
 }
 
 future<> messaging_service::stop() {
+    if (!_shutting_down) {
+        return shutdown().then([this] {
+            return stop();
+        });
+    }
     return unregister_handler(messaging_verb::CLIENT_ID).then([this] {
         if (_rpc->has_handlers()) {
             mlogger.error("RPC server still has handlers registered");

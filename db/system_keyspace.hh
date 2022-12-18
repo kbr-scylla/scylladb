@@ -347,10 +347,6 @@ public:
      */
     future<std::unordered_map<gms::inet_address, locator::host_id>> load_host_ids();
 
-    // Load the list of raft server ids and their ips known to
-    // gossip.
-    future<std::optional<utils::UUID>> get_peer_raft_id_if_known(gms::inet_address ip_addr);
-
     future<std::vector<gms::inet_address>> load_peers();
 
     /*
@@ -380,12 +376,12 @@ public:
      * none exists.
      */
     future<locator::host_id> load_local_host_id();
-
+private:
     /**
-     * Sets the local host ID explicitly.  Should only be called outside of SystemTable when replacing a node.
+     * Sets the local host ID explicitly.  Used only internally when intializing the host_id
      */
-    future<locator::host_id> set_local_host_id(locator::host_id host_id);
-
+    future<locator::host_id> set_local_random_host_id();
+public:
     static api::timestamp_type schema_creation_timestamp();
 
     /**
@@ -431,15 +427,8 @@ public:
     // Load Raft Group 0 id from scylla.local
     static future<utils::UUID> get_raft_group0_id();
 
-    // Load this server id from scylla.local
-    future<utils::UUID> get_raft_server_id();
-
     // Persist Raft Group 0 id. Should be a TIMEUUID.
     static future<> set_raft_group0_id(utils::UUID id);
-
-    // Called once at fresh server startup to make sure every server
-    // has a Raft ID
-    future<> set_raft_server_id(utils::UUID id);
 
     // Save advertised gossip feature set to system.local
     static future<> save_local_supported_features(const std::set<std::string_view>& feats);
