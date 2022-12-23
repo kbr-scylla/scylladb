@@ -1141,7 +1141,7 @@ async def run_test(test: Test, options: argparse.Namespace, gentle_kill=False, e
         global toxiproxy_id_gen
         toxiproxy_id = toxiproxy_id_gen
         toxiproxy_id_gen += 1
-        ldap_port = 5000 + toxiproxy_id * 3
+        ldap_port = 5000 + (toxiproxy_id * 3) % 55000
         cleanup_fn = None
         finject_desc = None
         def report_error(error, failure_injection_desc = None):
