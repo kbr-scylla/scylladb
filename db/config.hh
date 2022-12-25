@@ -389,6 +389,8 @@ public:
 
     named_value<bool> cache_index_pages;
 
+    named_value<unsigned> x_log2_compaction_groups;
+
     named_value<sstring> audit;
     named_value<sstring> audit_categories;
     named_value<sstring> audit_tables;

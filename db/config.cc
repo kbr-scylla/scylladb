@@ -914,6 +914,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , task_ttl_seconds(this, "task_ttl_in_seconds", liveness::LiveUpdate, value_status::Used, 10, "Time for which information about finished task stays in memory.")
     , cache_index_pages(this, "cache_index_pages", liveness::LiveUpdate, value_status::Used, false,
         "Keep SSTable index pages in the global cache after a SSTable read. Expected to improve performance for workloads with big partitions, but may degrade performance for workloads with small partitions.")
+    , x_log2_compaction_groups(this, "x_log2_compaction_groups", value_status::Used, 0, "Controls static number of compaction groups per table per shard. For X groups, set the option to log (base 2) of X. Example: Value of 3 implies 8 groups.")
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
         "\n"

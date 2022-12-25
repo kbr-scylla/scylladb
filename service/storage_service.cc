@@ -1941,7 +1941,7 @@ future<> storage_service::do_stop_ms() {
     });
 }
 
-future<> storage_service::node_ops_cmd_heartbeat_updater(node_ops_cmd cmd, utils::UUID uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done) {
+future<> storage_service::node_ops_cmd_heartbeat_updater(node_ops_cmd cmd, node_ops_id uuid, std::list<gms::inet_address> nodes, lw_shared_ptr<bool> heartbeat_updater_done) {
     std::string ops;
     if (cmd == node_ops_cmd::decommission_heartbeat) {
         ops = "decommission";
@@ -1979,7 +1979,7 @@ future<> storage_service::node_ops_cmd_heartbeat_updater(node_ops_cmd cmd, utils
 future<> storage_service::decommission() {
     return run_with_api_lock(sstring("decommission"), [] (storage_service& ss) {
         return seastar::async([&ss] {
-            auto uuid = utils::make_random_uuid();
+            auto uuid = node_ops_id::create_random_id();
             auto tmptr = ss.get_token_metadata_ptr();
             auto& db = ss._db.local();
             auto endpoint = ss.get_broadcast_address();
@@ -2127,7 +2127,7 @@ future<> storage_service::decommission() {
 
 // Runs inside seastar::async context
 void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tokens) {
-    auto uuid = utils::make_random_uuid();
+    auto uuid = node_ops_id::create_random_id();
     // TODO: Specify ignore_nodes
     std::list<gms::inet_address> ignore_nodes;
     std::list<gms::inet_address> sync_nodes;
@@ -2149,7 +2149,7 @@ void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tok
         sync_nodes.push_front(get_broadcast_address());
 
         // Step 2: Wait until no pending node operations
-        std::unordered_map<gms::inet_address, std::list<utils::UUID>> pending_ops;
+        std::unordered_map<gms::inet_address, std::list<node_ops_id>> pending_ops;
         auto req = node_ops_cmd_request(node_ops_cmd::query_pending_ops, uuid);
         parallel_for_each(sync_nodes, [this, req, uuid, &pending_ops] (const gms::inet_address& node) {
             return _messaging.local().send_node_ops_cmd(netw::msg_addr(node), req).then([uuid, node, &pending_ops] (node_ops_cmd_response resp) {
@@ -2249,7 +2249,7 @@ void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tok
 // Runs inside seastar::async context
 void storage_service::run_replace_ops(std::unordered_set<token>& bootstrap_tokens) {
     auto replace_address = get_replace_address().value();
-    auto uuid = utils::make_random_uuid();
+    auto uuid = node_ops_id::create_random_id();
     auto tmptr = get_token_metadata_ptr();
     std::list<gms::inet_address> ignore_nodes = get_ignore_dead_nodes_for_replace(*tmptr);
     // Step 1: Decide who needs to sync data for replace operation
@@ -2378,7 +2378,7 @@ void storage_service::run_replace_ops(std::unordered_set<token>& bootstrap_token
 future<> storage_service::removenode(locator::host_id host_id, std::list<locator::host_id_or_endpoint> ignore_nodes_params) {
     return run_with_api_lock(sstring("removenode"), [host_id, ignore_nodes_params = std::move(ignore_nodes_params)] (storage_service& ss) mutable {
         return seastar::async([&ss, host_id, ignore_nodes_params = std::move(ignore_nodes_params)] () mutable {
-            auto uuid = utils::make_random_uuid();
+            auto uuid = node_ops_id::create_random_id();
             auto tmptr = ss.get_token_metadata_ptr();
             auto endpoint_opt = tmptr->get_endpoint_for_host_id(host_id);
             if (!endpoint_opt) {
@@ -2507,7 +2507,7 @@ future<> storage_service::removenode(locator::host_id host_id, std::list<locator
 }
 
 void storage_service::node_ops_cmd_check(gms::inet_address coordinator, const node_ops_cmd_request& req) {
-    auto ops_uuids = boost::copy_range<std::vector<utils::UUID>>(_node_ops| boost::adaptors::map_keys);
+    auto ops_uuids = boost::copy_range<std::vector<node_ops_id>>(_node_ops| boost::adaptors::map_keys);
     std::string msg;
     if (req.cmd == node_ops_cmd::removenode_prepare || req.cmd == node_ops_cmd::replace_prepare ||
             req.cmd == node_ops_cmd::decommission_prepare || req.cmd == node_ops_cmd::bootstrap_prepare) {
@@ -2542,7 +2542,7 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
 
         if (req.cmd == node_ops_cmd::query_pending_ops) {
             bool ok = true;
-            auto ops_uuids = boost::copy_range<std::list<utils::UUID>>(_node_ops| boost::adaptors::map_keys);
+            auto ops_uuids = boost::copy_range<std::list<node_ops_id>>(_node_ops| boost::adaptors::map_keys);
             node_ops_cmd_response resp(ok, ops_uuids);
             slogger.debug("node_ops_cmd_handler: Got query_pending_ops request from {}, pending_ops={}", coordinator, ops_uuids);
             return resp;
@@ -2550,10 +2550,16 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
             slogger.debug("repair[{}]: Got repair_updater request from {}", ops_uuid, coordinator);
             _db.invoke_on_all([coordinator, ops_uuid, tables = req.repair_tables] (replica::database &db) {
                 for (const auto& table_id : tables) {
-                    auto& table = db.find_column_family(table_id);
-                    table.update_off_strategy_trigger();
-                    slogger.debug("repair[{}]: Updated off_strategy_trigger for table {}.{} by node {}",
-                            ops_uuid, table.schema()->ks_name(), table.schema()->cf_name(), coordinator);
+                    try {
+                        auto& table = db.find_column_family(table_id);
+                        table.update_off_strategy_trigger();
+                        slogger.debug("repair[{}]: Updated off_strategy_trigger for table {}.{} by node {}",
+                                ops_uuid, table.schema()->ks_name(), table.schema()->cf_name(), coordinator);
+                    } catch (replica::no_such_column_family&) {
+                        // The table could be dropped by user, ignore it.
+                    } catch (...) {
+                        throw;
+                    }
                 }
             }).get();
             bool ok = true;
@@ -2916,7 +2922,7 @@ future<> storage_service::unbootstrap() {
 
         set_mode(mode::LEAVING);
 
-        auto stream_success = stream_ranges(ranges_to_stream);
+        auto stream_success = stream_ranges(std::move(ranges_to_stream));
 
         // wait for the transfer runnables to signal the latch.
         slogger.debug("waiting for stream acks.");
@@ -2981,7 +2987,7 @@ future<> storage_service::removenode_with_stream(gms::inet_address leaving_node,
 
 future<> storage_service::restore_replica_count(inet_address endpoint, inet_address notify_endpoint) {
     if (is_repair_based_node_ops_enabled(streaming::stream_reason::removenode)) {
-        auto ops_uuid = utils::make_random_uuid();
+        auto ops_uuid = node_ops_id::create_random_id();
         auto ops = seastar::make_shared<node_ops_info>(ops_uuid, nullptr, std::list<gms::inet_address>());
         return _repair.local().removenode_with_repair(get_token_metadata_ptr(), endpoint, ops).finally([this, notify_endpoint] () {
             return send_replication_notification(notify_endpoint);
@@ -3115,7 +3121,7 @@ future<> storage_service::leave_ring() {
 
 future<>
 storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, inet_address>> ranges_to_stream_by_keyspace) {
-    auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), _sys_ks.local().local_dc_rack(), "Unbootstrap", streaming::stream_reason::decommission);
+    auto streamer = dht::range_streamer(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), _sys_ks.local().local_dc_rack(), "Unbootstrap", streaming::stream_reason::decommission);
     for (auto& entry : ranges_to_stream_by_keyspace) {
         const auto& keyspace = entry.first;
         auto& ranges_with_endpoints = entry.second;
@@ -3129,15 +3135,18 @@ storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multim
             dht::token_range r = end_point_entry.first;
             inet_address endpoint = end_point_entry.second;
             ranges_per_endpoint[endpoint].emplace_back(r);
+            co_await coroutine::maybe_yield();
         }
-        streamer->add_tx_ranges(keyspace, std::move(ranges_per_endpoint));
+        streamer.add_tx_ranges(keyspace, std::move(ranges_per_endpoint));
     }
-    return streamer->stream_async().then([streamer] {
+    try {
+        co_await streamer.stream_async();
         slogger.info("stream_ranges successful");
-    }).handle_exception([] (auto ep) {
+    } catch (...) {
+        auto ep = std::current_exception();
         slogger.warn("stream_ranges failed: {}", ep);
-        return make_exception_future<>(std::move(ep));
-    });
+        std::rethrow_exception(std::move(ep));
+    }
 }
 
 future<> storage_service::start_leaving() {
@@ -3659,7 +3668,7 @@ bool storage_service::is_repair_based_node_ops_enabled(streaming::stream_reason 
 }
 
 node_ops_meta_data::node_ops_meta_data(
-        utils::UUID ops_uuid,
+        node_ops_id ops_uuid,
         gms::inet_address coordinator,
         std::list<gms::inet_address> ignore_nodes,
         std::function<future<> ()> abort_func,
@@ -3710,7 +3719,7 @@ shared_ptr<abort_source> node_ops_meta_data::get_abort_source() {
     return _abort_source;
 }
 
-future<> storage_service::node_ops_update_heartbeat(utils::UUID ops_uuid) {
+future<> storage_service::node_ops_update_heartbeat(node_ops_id ops_uuid) {
     slogger.debug("node_ops_update_heartbeat: ops_uuid={}", ops_uuid);
     auto permit = co_await seastar::get_units(_node_ops_abort_sem, 1);
     auto it = _node_ops.find(ops_uuid);
@@ -3720,7 +3729,7 @@ future<> storage_service::node_ops_update_heartbeat(utils::UUID ops_uuid) {
     }
 }
 
-future<> storage_service::node_ops_done(utils::UUID ops_uuid) {
+future<> storage_service::node_ops_done(node_ops_id ops_uuid) {
     slogger.debug("node_ops_done: ops_uuid={}", ops_uuid);
     auto permit = co_await seastar::get_units(_node_ops_abort_sem, 1);
     auto it = _node_ops.find(ops_uuid);
@@ -3732,7 +3741,7 @@ future<> storage_service::node_ops_done(utils::UUID ops_uuid) {
     }
 }
 
-future<> storage_service::node_ops_abort(utils::UUID ops_uuid) {
+future<> storage_service::node_ops_abort(node_ops_id ops_uuid) {
     slogger.debug("node_ops_abort: ops_uuid={}", ops_uuid);
     auto permit = co_await seastar::get_units(_node_ops_abort_sem, 1);
 
@@ -3766,7 +3775,7 @@ future<> storage_service::node_ops_abort(utils::UUID ops_uuid) {
     }
 }
 
-void storage_service::node_ops_singal_abort(std::optional<utils::UUID> ops_uuid) {
+void storage_service::node_ops_singal_abort(std::optional<node_ops_id> ops_uuid) {
     slogger.debug("node_ops_singal_abort: ops_uuid={}", ops_uuid);
     _node_ops_abort_queue.push_back(ops_uuid);
     _node_ops_abort_cond.signal();
@@ -3781,7 +3790,7 @@ future<> storage_service::node_ops_abort_thread() {
             auto uuid_opt = _node_ops_abort_queue.front();
             _node_ops_abort_queue.pop_front();
             try {
-                co_await node_ops_abort(uuid_opt.value_or(utils::null_uuid()));
+                co_await node_ops_abort(uuid_opt.value_or(node_ops_id::create_null_id()));
             } catch (...) {
                 slogger.warn("Failed to abort node operation ops_uuid={}: {}", *uuid_opt, std::current_exception());
             }
