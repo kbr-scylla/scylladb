@@ -43,6 +43,7 @@ from cassandra.policies import WhiteListRoundRobinPolicy  # type: ignore
 class ReplaceConfig(NamedTuple):
     replaced_id: ServerNum
     reuse_ip_addr: bool
+    use_host_id: bool
 
 
 def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str], cluster_name: str) -> dict[str, object]:
@@ -580,7 +581,10 @@ class ScyllaCluster:
                 f"add_server: replaced id {replaced_id} not found in existing servers"
 
             replaced_srv = self.servers[replaced_id]
-            extra_config['replace_address_first_boot'] = replaced_srv.ip_addr
+            if replace_cfg.use_host_id:
+                extra_config['replace_node_first_boot'] = replaced_srv.host_id
+            else:
+                extra_config['replace_address_first_boot'] = replaced_srv.ip_addr
 
             assert replaced_id not in self.removed, \
                 f"add_server: cannot replace removed server {replaced_srv}"
@@ -618,7 +622,7 @@ class ScyllaCluster:
             raise
         self.running[server.server_id] = server
         logging.info("Cluster %s added %s", self, server)
-        return ServerInfo(server.server_id, server.ip_addr)
+        return ServerInfo(server.server_id, server.ip_addr, server.host_id)
 
     def endpoint(self) -> str:
         """Get a server id (IP) from running servers"""
@@ -650,9 +654,9 @@ class ScyllaCluster:
         stopped = ", ".join(str(server) for server in self.stopped.values())
         return f"ScyllaCluster(name: {self.name}, running: {running}, stopped: {stopped})"
 
-    def running_servers(self) -> List[Tuple[ServerNum, IPAddress]]:
+    def running_servers(self) -> List[Tuple[ServerNum, IPAddress, HostID]]:
         """Get a list of tuples of server id and IP address of running servers (and not removed)"""
-        return [(server.server_id, server.ip_addr) for server in self.running.values()
+        return [(server.server_id, server.ip_addr, server.host_id) for server in self.running.values()
                 if server.server_id not in self.removed]
 
     def _get_keyspace_count(self) -> int:
@@ -944,7 +948,8 @@ class ScyllaClusterManager:
         replace_cfg = ReplaceConfig(**data["replace_cfg"]) if "replace_cfg" in data else None
         s_info = await self.cluster.add_server(replace_cfg, data.get('cmdline'))
         return aiohttp.web.json_response({"server_id" : s_info.server_id,
-                                          "ip_addr": s_info.ip_addr})
+                                          "ip_addr": s_info.ip_addr,
+                                          "host_id": s_info.host_id})
 
     async def _cluster_remove_node(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
         """Run remove node on Scylla REST API for a specified server"""
