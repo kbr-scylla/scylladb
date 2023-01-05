@@ -829,36 +829,6 @@ future<> storage_service::handle_state_replacing_update_pending_ranges(mutable_t
     co_await update_pending_ranges(tmptr, format("handle_state_replacing {}", replacing_node));
 }
 
-future<> storage_service::handle_state_replacing(inet_address replacing_node) {
-    slogger.debug("endpoint={} handle_state_replacing", replacing_node);
-    auto host_id = _gossiper.get_host_id(replacing_node);
-    auto tmlock = co_await get_token_metadata_lock();
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
-    auto existing_node_opt = tmptr->get_endpoint_for_host_id(host_id);
-    auto replace_addr = get_replace_address();
-    if (replacing_node == get_broadcast_address() && replace_addr && *replace_addr == get_broadcast_address()) {
-        existing_node_opt = replacing_node;
-    }
-    if (!existing_node_opt) {
-        slogger.warn("Can not find the existing node for the replacing node {}", replacing_node);
-        co_return;
-    }
-    auto existing_node = *existing_node_opt;
-    auto existing_tokens = get_tokens_for(existing_node);
-    auto replacing_tokens = get_tokens_for(replacing_node);
-    slogger.info("Node {} is replacing existing node {} with host_id={}, existing_tokens={}, replacing_tokens={}",
-            replacing_node, existing_node, host_id, existing_tokens, replacing_tokens);
-    tmptr->add_replacing_endpoint(existing_node, replacing_node);
-    if (_gossiper.is_alive(replacing_node)) {
-        slogger.info("handle_state_replacing: Replacing node {} is already alive, update pending ranges", replacing_node);
-        co_await handle_state_replacing_update_pending_ranges(tmptr, replacing_node);
-    } else {
-        slogger.info("handle_state_replacing: Replacing node {} is not alive yet, delay update pending ranges", replacing_node);
-        _replacing_nodes_pending_ranges_updater.insert(replacing_node);
-    }
-    co_await replicate_to_all_cores(std::move(tmptr));
-}
-
 future<> storage_service::handle_state_bootstrap(inet_address endpoint) {
     slogger.debug("endpoint={} handle_state_bootstrap", endpoint);
     // explicitly check for TOKENS, because a bootstrapping node might be bootstrapping in legacy mode; that is, not using vnodes and no token specified
@@ -1250,7 +1220,7 @@ future<> storage_service::on_change(inet_address endpoint, application_state sta
         } else if (move_name == sstring(versioned_value::STATUS_MOVING)) {
             handle_state_moving(endpoint, pieces);
         } else if (move_name == sstring(versioned_value::HIBERNATE)) {
-            co_await handle_state_replacing(endpoint);
+            slogger.warn("endpoint={} went into HIBERNATE state, this is no longer supported.  Use a new version to perform the replace operation.", endpoint);
         } else {
             co_return; // did nothing.
         }
@@ -2073,6 +2043,7 @@ future<> storage_service::decommission() {
                 // Step 5: Start to sync data
                 slogger.info("DECOMMISSIONING: unbootstrap starts");
                 ss.unbootstrap().get();
+                ss.leave_ring().get();
                 slogger.info("DECOMMISSIONING: unbootstrap done");
 
                 // Step 6: Finish
@@ -2934,7 +2905,6 @@ future<> storage_service::unbootstrap() {
         }
         slogger.debug("stream acks all received.");
     }
-    co_await leave_ring();
 }
 
 future<> storage_service::removenode_add_ranges(lw_shared_ptr<dht::range_streamer> streamer, gms::inet_address leaving_node) {
@@ -3149,15 +3119,6 @@ storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multim
     }
 }
 
-future<> storage_service::start_leaving() {
-    co_await _gossiper.add_local_application_state(application_state::STATUS, versioned_value::leaving(co_await _sys_ks.local().get_local_tokens()));
-    co_await mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
-        auto endpoint = get_broadcast_address();
-        tmptr->add_leaving_endpoint(endpoint);
-        return update_pending_ranges(std::move(tmptr), format("start_leaving {}", endpoint));
-    });
-}
-
 void storage_service::add_expire_time_if_found(inet_address endpoint, int64_t expire_time) {
     if (expire_time != 0L) {
         using clk = gms::gossiper::clk;
@@ -3286,10 +3247,10 @@ future<> storage_service::update_pending_ranges(mutable_token_metadata_ptr tmptr
         auto ks_erms = _db.local().get_non_local_strategy_keyspaces_erms();
         for (const auto& [keyspace_name, erm] : ks_erms) {
             auto& strategy = erm->get_replication_strategy();
-            slogger.debug("Updating pending ranges for keyspace={} starts", keyspace_name);
+            slogger.debug("Updating pending ranges for keyspace={} starts ({})", keyspace_name, reason);
             locator::dc_rack_fn get_dc_rack_from_gossiper([this] (inet_address ep) { return get_dc_rack_for(ep); });
             co_await tmptr->update_pending_ranges(strategy, keyspace_name, get_dc_rack_from_gossiper);
-            slogger.debug("Updating pending ranges for keyspace={} ends", keyspace_name);
+            slogger.debug("Updating pending ranges for keyspace={} ends ({})", keyspace_name, reason);
         }
     } catch (...) {
         auto ep = std::current_exception();

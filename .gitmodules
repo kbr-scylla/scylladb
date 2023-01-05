@@ -9,9 +9,6 @@
 [submodule "kmipc"]
 	path = kmipc
 	url = ../cryptsoft-kmipc
-[submodule "abseil"]
-	path = abseil
-	url = ../abseil-cpp
 [submodule "scylla-jmx"]
 	path = tools/jmx
 	url = ../scylla-enterprise-jmx

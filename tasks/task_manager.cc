@@ -193,6 +193,10 @@ void task_manager::task::unregister_task() noexcept {
     _impl->_module->unregister_task(id());
 }
 
+const task_manager::foreign_task_vector& task_manager::task::get_children() const noexcept {
+    return _impl->_children;
+}
+
 task_manager::module::module(task_manager& tm, std::string name) noexcept : _tm(tm), _name(std::move(name)) {}
 
 uint64_t task_manager::module::new_sequence_number() noexcept {
@@ -321,29 +325,6 @@ future<> task_manager::invoke_on_task(sharded<task_manager>& tm, task_id id, std
         co_await func(task);
         co_return true;
     }));
-}
-
-template<typename T>
-future<T> task_manager::invoke_on_task(sharded<task_manager>& tm, task_id id, std::function<future<T> (task_manager::task_ptr)> func) {
-    std::optional<T> res;
-    co_await coroutine::parallel_for_each(boost::irange(0u, smp::count), [&tm, id, &res, &func] (unsigned shard) -> future<> {
-        auto local_res = co_await tm.invoke_on(shard, [id, func] (const task_manager& local_tm) -> future<std::optional<T>> {
-            const auto& all_tasks = local_tm.get_all_tasks();
-            if (auto it = all_tasks.find(id); it != all_tasks.end()) {
-                co_return co_await func(it->second);
-            }
-            co_return std::nullopt;
-        });
-        if (!res) {
-            res = std::move(local_res);
-        } else if (local_res) {
-            on_internal_error(tmlogger, format("task_id {} found on more than one shard", id));
-        }
-    });
-    if (!res) {
-        co_await coroutine::return_exception(task_manager::task_not_found(id));
-    }
-    co_return std::move(res.value());
 }
 
 abort_source& task_manager::abort_source() noexcept {
