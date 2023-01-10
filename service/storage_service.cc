@@ -2422,6 +2422,9 @@ future<> storage_service::removenode(locator::host_id host_id, std::list<locator
                     });
                 }).get();
 
+                utils::get_local_injector().inject("removenode_fail_before_group0",
+                    [] { throw std::runtime_error("removenode failed before group0"); });
+
                 auto raft_id = raft::server_id{host_id.uuid()};
                 slogger.info("removenode[{}]: removing node {}/{} from group 0", uuid, endpoint, raft_id);
                 assert(ss._group0);
