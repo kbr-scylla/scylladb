@@ -38,16 +38,12 @@ distro_extra_cflags = ''
 distro_extra_ldflags = ''
 distro_extra_cmake_args = []
 employ_ld_trickery = True
-has_wasmtime = False
-use_wasmtime_as_library = False
 
 # distro-specific setup
 def distro_setup_nix():
-    global os_ids, employ_ld_trickery, has_wasmtime, use_wasmtime_as_library
+    global os_ids, employ_ld_trickery
     os_ids = ['linux']
     employ_ld_trickery = False
-    has_wasmtime = True
-    use_wasmtime_as_library = True
 
 if os.environ.get('NIX_CC'):
         distro_setup_nix()
@@ -484,6 +480,8 @@ scylla_tests = set([
     'test/boost/virtual_reader_test',
     'test/boost/virtual_table_mutation_source_test',
     'test/boost/virtual_table_test',
+    'test/boost/wasm_test',
+    'test/boost/wasm_alloc_test',
     'test/boost/bptree_test',
     'test/boost/btree_test',
     'test/boost/radix_tree_test',
@@ -1053,6 +1051,7 @@ scylla_core = (['message/messaging_service.cc',
                 'service/raft/raft_group0_client.cc',
                 'service/broadcast_tables/experimental/lang.cc',
                 'tasks/task_manager.cc',
+                'rust/wasmtime_bindings/src/lib.rs',
                 'reader_concurrency_semaphore_group.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
@@ -1171,10 +1170,6 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/experimental/broadcast_tables_lang.idl.hh',
         ]
 
-rusts = [
-    'rust/inc/src/lib.rs',
-]
-
 headers = find_headers('.', excluded_dirs=['idl', 'build', 'seastar', '.git'])
 
 scylla_tests_generic_dependencies = [
@@ -1198,7 +1193,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc', 'utils/error_injection.cc']
 
-scylla_tools = ['tools/scylla-types.cc', 'tools/scylla-sstable.cc', 'tools/schema_loader.cc', 'tools/utils.cc']
+scylla_tools = ['tools/scylla-types.cc', 'tools/scylla-sstable.cc', 'tools/schema_loader.cc', 'tools/utils.cc', 'tools/lua_sstable_consumer.cc']
 
 deps = {
     'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis + scylla_tools,
@@ -1328,7 +1323,7 @@ deps['test/boost/exceptions_fallback_test'] = ['test/boost/exceptions_fallback_t
 
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
-deps['test/boost/rust_test'] += rusts
+deps['test/boost/rust_test'] += ['rust/inc/src/lib.rs']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/raft_server_test'] = ['test/raft/raft_server_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
@@ -1394,7 +1389,7 @@ warnings = [w
 
 warnings = ' '.join(warnings + ['-Wno-error=deprecated-declarations'])
 
-def clang_inline_threshold():
+def get_clang_inline_threshold():
     if args.clang_inline_threshold != -1:
         return args.clang_inline_threshold
     elif platform.machine() == 'aarch64':
@@ -1415,7 +1410,7 @@ for mode in modes:
 
 optimization_flags = [
     '--param inline-unit-growth=300', # gcc
-    f'-mllvm -inline-threshold={clang_inline_threshold()}',  # clang
+    f'-mllvm -inline-threshold={get_clang_inline_threshold()}',  # clang
     # clang generates 16-byte loads that break store-to-load forwarding
     # gcc also has some trouble: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=103554
     '-fno-slp-vectorize',
@@ -1428,15 +1423,6 @@ modes['release']['cxxflags'] += ' ' + ' '.join(optimization_flags)
 if flag_supported(flag='-Wstack-usage=4096', compiler=args.cxx):
     for mode in modes:
         modes[mode]['cxxflags'] += f' -Wstack-usage={modes[mode]["stack-usage-threshold"]} -Wno-error=stack-usage='
-
-if not has_wasmtime:
-    has_wasmtime = os.path.isfile('/usr/lib64/libwasmtime.a') and os.path.isdir('/usr/local/include/wasmtime')
-
-if has_wasmtime:
-    for mode in modes:
-        modes[mode]['cxxflags'] += ' -DSCYLLA_ENABLE_WASMTIME'
-else:
-    print("wasmtime not found - WASM support will not be enabled in this build")
 
 linker_flags = linker_flags(compiler=args.cxx)
 
@@ -1604,11 +1590,14 @@ args.user_ldflags = forced_ldflags + ' ' + args.user_ldflags
 
 args.user_cflags += f" -ffile-prefix-map={curdir}=."
 
-seastar_cflags = args.user_cflags
-
 if args.target != '':
-    seastar_cflags += ' -march=' + args.target
-seastar_ldflags = args.user_ldflags
+    args.user_cflags += ' -march=' + args.target
+
+for mode in modes:
+    # Those flags are passed not only to Scylla objects, but also to libraries
+    # that we compile ourselves.
+    modes[mode]['lib_cflags'] = args.user_cflags
+    modes[mode]['lib_ldflags'] = args.user_ldflags + linker_flags
 
 # cmake likes to separate things with semicolons
 def semicolon_separated(*flags):
@@ -1628,8 +1617,8 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DCMAKE_C_COMPILER={}'.format(args.cc),
         '-DCMAKE_CXX_COMPILER={}'.format(args.cxx),
         '-DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON',
-        '-DSeastar_CXX_FLAGS={}'.format((seastar_cflags).replace(' ', ';')),
-        '-DSeastar_LD_FLAGS={}'.format(semicolon_separated(seastar_ldflags, modes[mode]['cxx_ld_flags'])),
+        '-DSeastar_CXX_FLAGS=SHELL:{}'.format(mode_config['lib_cflags']),
+        '-DSeastar_LD_FLAGS={}'.format(semicolon_separated(mode_config['lib_ldflags'], mode_config['cxx_ld_flags'])),
         '-DSeastar_CXX_DIALECT=gnu++20',
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
@@ -1690,6 +1679,7 @@ for mode in build_modes:
     seastar_pc_cflags, seastar_pc_libs = query_seastar_flags(pc[mode], link_static_cxx=args.staticcxx)
     modes[mode]['seastar_cflags'] = seastar_pc_cflags
     modes[mode]['seastar_libs'] = seastar_pc_libs
+    modes[mode]['seastar_testing_libs'] = pkg_config(pc[mode].replace('seastar.pc', 'seastar-testing.pc'), '--libs', '--static')
 
 abseil_pkgs = [
     'absl_raw_hash_set',
@@ -1699,7 +1689,6 @@ abseil_pkgs = [
 pkgs += abseil_pkgs
 
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
-args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  # Must link with static version of libzstd, since
@@ -1709,10 +1698,6 @@ libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-l
                  '-lxxhash',
                  '-ldeflate',
                 ])
-if has_wasmtime:
-    print("Found wasmtime dependency, linking with libwasmtime")
-    if use_wasmtime_as_library:
-        libs += " -lwasmtime"
 
 if not args.staticboost:
     args.user_cflags += ' -DBOOST_TEST_DYN_LINK'
@@ -1827,18 +1812,24 @@ with open(buildfile, 'w') as f:
         rule unified
             command = unified/build_unified.sh --mode $mode --unified-pkg $out
         rule rust_header
-            command = cxxbridge $in > $out
+            command = cxxbridge --include rust/cxx.h --header $in > $out
             description = RUST_HEADER $out
+        rule rust_source
+            command = cxxbridge --include rust/cxx.h $in > $out
+            description = RUST_SOURCE $out
+        rule cxxbridge_header
+            command = cxxbridge --header > $out
         ''').format(**globals()))
     for mode in build_modes:
         modeval = modes[mode]
         fmt_lib = 'fmt'
         f.write(textwrap.dedent('''\
             cxx_ld_flags_{mode} = {cxx_ld_flags}
-            ld_flags_{mode} = $cxx_ld_flags_{mode}
-            cxxflags_{mode} = $cxx_ld_flags_{mode} {cxxflags} -iquote. -iquote $builddir/{mode}/gen
+            ld_flags_{mode} = $cxx_ld_flags_{mode} {lib_ldflags}
+            cxxflags_{mode} = $cxx_ld_flags_{mode} {lib_cflags} {cxxflags} -iquote. -iquote $builddir/{mode}/gen
             libs_{mode} = -l{fmt_lib}
             seastar_libs_{mode} = {seastar_libs}
+            seastar_testing_libs_{mode} = {seastar_testing_libs}
             rule cxx.{mode}
               command = $cxx -MD -MT $out -MF $out.d {seastar_cflags} $cxxflags_{mode} $cxxflags $obj_cxxflags -c -o $out $in
               description = CXX $out
@@ -1888,7 +1879,8 @@ with open(buildfile, 'w') as f:
               pool = console
               description = TEST {mode}
             rule rust_lib.{mode}
-              command = CARGO_HOME=build/{mode}/rust/.cargo cargo build --release --manifest-path=rust/Cargo.toml --target-dir=build/{mode}/rust -p ${{pkg}}
+              command = CARGO_BUILD_DEP_INFO_BASEDIR='.' cargo build --locked --manifest-path=rust/Cargo.toml --target-dir=$builddir/{mode} --profile=rust-{mode} $
+                        && touch $out
               description = RUST_LIB $out
             ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, test_repeat=test_repeat, test_timeout=test_timeout, **modeval))
         f.write(
@@ -1907,7 +1899,6 @@ with open(buildfile, 'w') as f:
         ragels = {}
         antlr3_grammars = set()
         rust_headers = {}
-        rust_libs = {}
         seastar_dep = '$builddir/{}/seastar/libseastar.a'.format(mode)
         seastar_testing_dep = '$builddir/{}/seastar/libseastar_testing.a'.format(mode)
         for binary in sorted(build_artifacts):
@@ -1918,9 +1909,8 @@ with open(buildfile, 'w') as f:
                     for src in srcs
                     if src.endswith('.cc')]
             objs.append('$builddir/../utils/arch/powerpc/crc32-vpmsum/crc32.S')
-            if has_wasmtime and not use_wasmtime_as_library:
-                objs.append('/usr/lib64/libwasmtime.a')
             has_thrift = False
+            has_rust = False
             for dep in deps[binary]:
                 if isinstance(dep, Thrift):
                     has_thrift = True
@@ -1929,37 +1919,36 @@ with open(buildfile, 'w') as f:
                     objs += dep.objects('$builddir/' + mode + '/gen')
                 if isinstance(dep, Json2Code):
                     objs += dep.objects('$builddir/' + mode + '/gen')
-                if dep.endswith('/src/lib.rs'):
-                    lib = dep.replace('/src/lib.rs', '.a').replace('rust/','lib')
-                    objs.append('$builddir/' + mode + '/rust/release/' + lib)
-            if binary.endswith('.a'):
-                f.write('build $builddir/{}/{}: ar.{} {}\n'.format(mode, binary, mode, str.join(' ', objs)))
+                if dep.endswith('.rs'):
+                    has_rust = True
+                    idx = dep.rindex('/src/')
+                    obj = dep[:idx].replace('rust/','') + '.o'
+                    objs.append('$builddir/' + mode + '/gen/rust/' + obj)
+            if has_rust:
+                objs.append('$builddir/' + mode +'/rust-' + mode + '/librust_combined.a')
+            local_libs = '$seastar_libs_{} $libs'.format(mode)
+            if has_thrift:
+                local_libs += ' ' + thrift_libs + ' ' + maybe_static(args.staticboost, '-lboost_system')
+            if binary in tests:
+                if binary in pure_boost_tests:
+                    local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')
+                if binary not in tests_not_using_seastar_test_framework:
+                    local_libs += ' ' + "$seastar_testing_libs_{}".format(mode)
+                # Our code's debugging information is huge, and multiplied
+                # by many tests yields ridiculous amounts of disk space.
+                # So we strip the tests by default; The user can very
+                # quickly re-link the test unstripped by adding a "_g"
+                # to the test name, e.g., "ninja build/release/testname_g"
+                link_rule = perf_tests_link_rule if binary.startswith('test/perf/') else tests_link_rule
+                f.write('build $builddir/{}/{}: {}.{} {} | {} {}\n'.format(mode, binary, link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
+                f.write('   libs = {}\n'.format(local_libs))
+                f.write('build $builddir/{}/{}_g: {}.{} {} | {} {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
+                f.write('   libs = {}\n'.format(local_libs))
             else:
-                if binary in tests:
-                    local_libs = '$seastar_libs_{} $libs'.format(mode)
-                    if binary in pure_boost_tests:
-                        local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')
-                    if binary not in tests_not_using_seastar_test_framework:
-                        pc_path = pc[mode].replace('seastar.pc', 'seastar-testing.pc')
-                        local_libs += ' ' + pkg_config(pc_path, '--libs', '--static')
-                    if has_thrift:
-                        local_libs += ' ' + thrift_libs + ' ' + maybe_static(args.staticboost, '-lboost_system')
-                    # Our code's debugging information is huge, and multiplied
-                    # by many tests yields ridiculous amounts of disk space.
-                    # So we strip the tests by default; The user can very
-                    # quickly re-link the test unstripped by adding a "_g"
-                    # to the test name, e.g., "ninja build/release/testname_g"
-                    link_rule = perf_tests_link_rule if binary.startswith('test/perf/') else tests_link_rule
-                    f.write('build $builddir/{}/{}: {}.{} {} | {} {}\n'.format(mode, binary, link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
-                    f.write('   libs = {}\n'.format(local_libs))
-                    f.write('build $builddir/{}/{}_g: {}.{} {} | {} {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
-                    f.write('   libs = {}\n'.format(local_libs))
-                else:
-                    f.write('build $builddir/{}/{}: {}.{} {} | {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep))
-                    if has_thrift:
-                        f.write('   libs =  {} {} $seastar_libs_{} $libs\n'.format(thrift_libs, maybe_static(args.staticboost, '-lboost_system'), mode))
-                    f.write(f'build $builddir/{mode}/{binary}.stripped: strip $builddir/{mode}/{binary}\n')
-                    f.write(f'build $builddir/{mode}/{binary}.debug: phony $builddir/{mode}/{binary}.stripped\n')
+                f.write('build $builddir/{}/{}: {}.{} {} | {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep))
+                f.write('   libs = {}\n'.format(local_libs))
+                f.write(f'build $builddir/{mode}/{binary}.stripped: strip $builddir/{mode}/{binary}\n')
+                f.write(f'build $builddir/{mode}/{binary}.debug: phony $builddir/{mode}/{binary}.stripped\n')
             for src in srcs:
                 if src.endswith('.cc'):
                     obj = '$builddir/' + mode + '/' + src.replace('.cc', '.o')
@@ -1976,11 +1965,10 @@ with open(buildfile, 'w') as f:
                     thrifts.add(src)
                 elif src.endswith('.g'):
                     antlr3_grammars.add(src)
-                elif src.endswith('/src/lib.rs'):
-                    hh = '$builddir/' + mode + '/gen/' + src.replace('/src/lib.rs', '.hh')
+                elif src.endswith('.rs'):
+                    idx = src.rindex('/src/')
+                    hh = '$builddir/' + mode + '/gen/' + src[:idx] + '.hh'
                     rust_headers[hh] = src
-                    staticlib = src.replace('rust/', '$builddir/' + mode + '/rust/release/lib').replace('/src/lib.rs', '.a')
-                    rust_libs[staticlib] = src
                 else:
                     raise Exception('No rule for ' + src)
         f.write('   libs = $seastar_libs_{}\n'.format(mode))
@@ -2020,6 +2008,7 @@ with open(buildfile, 'w') as f:
         gen_headers += list(serializers.keys())
         gen_headers += list(ragels.keys())
         gen_headers += list(rust_headers.keys())
+        gen_headers.append('$builddir/{}/gen/rust/cxx.h'.format(mode))
         gen_headers_dep = ' '.join(gen_headers)
 
         for obj in compiles:
@@ -2043,10 +2032,13 @@ with open(buildfile, 'w') as f:
         for hh in rust_headers:
             src = rust_headers[hh]
             f.write('build {}: rust_header {}\n'.format(hh, src))
-        for lib in rust_libs:
-            src = rust_libs[lib]
-            package = src.replace('/src/lib.rs', '').replace('rust/','')
-            f.write('build {}: rust_lib.{} {}\n  pkg = {}\n'.format(lib, mode, src, package))
+            cc = hh.replace('.hh', '.cc')
+            f.write('build {}: rust_source {}\n'.format(cc, src))
+            obj = cc.replace('.cc', '.o')
+            f.write('build {}: cxx.{} {} || {}\n'.format(obj, mode, cc, gen_headers_dep))
+        f.write('build {}: cxxbridge_header\n'.format('$builddir/{}/gen/rust/cxx.h'.format(mode)))
+        librust = '$builddir/{}/rust-{}/librust_combined'.format(mode, mode)
+        f.write('build {}.a: rust_lib.{} rust/Cargo.lock\n  depfile={}.d\n'.format(librust, mode, librust))
         for thrift in thrifts:
             outs = ' '.join(thrift.generated('$builddir/{}/gen'.format(mode)))
             f.write('build {}: thrift.{} {}\n'.format(outs, mode, thrift.source))
