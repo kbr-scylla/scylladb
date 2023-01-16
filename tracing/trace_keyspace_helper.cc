@@ -374,7 +374,7 @@ std::vector<cql3::raw_value> trace_keyspace_helper::make_event_mutation_data(one
         cql3::raw_value::make_value(utf8_type->decompose(record.message)),
         cql3::raw_value::make_value(inet_addr_type->decompose(utils::fb_utilities::get_broadcast_address().addr())),
         cql3::raw_value::make_value(int32_type->decompose(elapsed_to_micros(record.elapsed))),
-        cql3::raw_value::make_value(utf8_type->decompose(_local_tracing.get_thread_name())),
+        cql3::raw_value::make_value(utf8_type->decompose(fmt::format("{}/{}", _local_tracing.get_thread_name(), record.scheduling_group_name))),
         cql3::raw_value::make_value(long_type->decompose(int64_t(session_records.parent_id.get_id()))),
         cql3::raw_value::make_value(long_type->decompose(int64_t(session_records.my_span_id.get_id()))),
         cql3::raw_value::make_value(int32_type->decompose((int32_t)(session_records.ttl.count())))
