@@ -38,6 +38,23 @@ class Pool(Generic[T]):
                 await pool.steal()
             else:
                 await pool.put(server)
+
+    To atomically free up space in the pool and use this space to obtain a new
+    object, you can use `steal_and_get`. This is different from a `steal` call
+    followed by a `get` call, where a concurrent waiter might take the space
+    freed up by `steal`.
+        server = await.pool.get()
+        dirty = False
+        try:
+            for _ in range(num_runs):
+                if dirty:
+                    server = await pool.steal_and_get()
+                dirty = await run_test(test, server)
+        finally:
+            if dirty:
+                await pool.steal()
+            else:
+                await pool.put(server)
     """
     def __init__(self, max_size: int, build: Callable[..., Awaitable[T]]):
         assert(max_size >= 0)
@@ -64,14 +81,7 @@ class Pool(Generic[T]):
             # No object in pool, but total < max_size so we can construct one
             self.total += 1
 
-        try:
-            obj = await self.build(*args, **kwargs)
-        except:
-            async with self.cond:
-                self.total -= 1
-                self.cond.notify()
-            raise
-        return obj
+        return await self._build_and_get(*args, **kwargs)
 
     async def steal(self) -> None:
         """Take ownership of a previously borrowed object.
@@ -80,6 +90,22 @@ class Pool(Generic[T]):
         async with self.cond:
             self.total -= 1
             self.cond.notify()
+
+    async def steal_and_get(self, *args, **kwargs) -> T:
+        """Atomically take ownership of a previously borrowed object
+           which frees up space in the pool, and borrow a new object.
+
+           *args and **kwargs are used as in `get`.
+        """
+        async with self.cond:
+            if self.pool:
+                self.total -= 1
+                return self.pool.pop()
+
+            # Need to construct a new object.
+            # The space for this object is already accounted for in self.total.
+
+        return await self._build_and_get(*args, **kwargs)
 
     async def put(self, obj: T):
         """Return a previously borrowed object to the pool."""
@@ -102,3 +128,16 @@ class Pool(Generic[T]):
                     self.obj = None
 
         return Instance(self)
+
+    async def _build_and_get(self, *args, **kwargs) -> T:
+        """Precondition: we allocated space for this object
+           (it's included in self.total).
+        """
+        try:
+            obj = await self.build(*args, **kwargs)
+        except:
+            async with self.cond:
+                self.total -= 1
+                self.cond.notify()
+            raise
+        return obj
