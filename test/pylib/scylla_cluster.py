@@ -545,6 +545,7 @@ class ScyllaCluster:
     async def install_and_start(self) -> None:
         """Setup initial servers and start them.
            Catch and save any startup exception"""
+        start_time = time.time()
         try:
             for _ in range(self.replicas):
                 await self.add_server()
@@ -554,7 +555,8 @@ class ScyllaCluster:
             # at test time.
             self.start_exception = exc
         self.is_running = True
-        self.logger.info("Created cluster %s", self)
+        duration = time.time() - start_time
+        self.logger.info(f"Created cluster %s in {duration}s.", self)
         self.is_dirty = False
 
     async def uninstall(self) -> None:
