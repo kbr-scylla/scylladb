@@ -75,8 +75,8 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
 
         'consistent_cluster_management': True,
 
-        'skip_wait_for_gossip_to_settle': 0,
-        'ring_delay_ms': 0,
+        #'skip_wait_for_gossip_to_settle': 0,
+        'ring_delay_ms': 3000,
         'num_tokens': 16,
         'flush_schema_tables_after_modification': False,
         'auto_snapshot': False,
