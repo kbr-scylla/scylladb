@@ -353,7 +353,7 @@ class PythonTestSuite(TestSuite):
                these if it came from a failed test.
             """
             await cluster.stop()
-            await cluster.release_ips()
+            #await cluster.release_ips()
 
         self.clusters = Pool(pool_size, self.create_cluster, recycle_cluster)
 
