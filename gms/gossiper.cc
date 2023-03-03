@@ -1300,6 +1300,20 @@ future<> gossiper::do_gossip_to_unreachable_member(gossip_digest_syn message) {
                     addrs.insert(x.first);
                 }
             }
+            // The unreachable endpoints may be reachable via seed
+            // nodes if their IP addresses have changed. Try them as well.
+            for (auto&& x : _seeds) {
+                if (_unreachable_endpoints.contains(x)) {
+                    // We are already contacting this endpoint
+                    continue;
+                }
+                auto es = get_endpoint_state_for_endpoint_ptr(x);
+                if (es && es->is_alive()) {
+                    // The endpoint is already live
+                    continue;
+                }
+                addrs.insert(x);
+            }
             logger.trace("do_gossip_to_unreachable_member: live_endpoint nr={} unreachable_endpoints nr={}",
                 live_endpoint_count, unreachable_endpoint_count);
             return send_gossip(message, addrs);
@@ -1313,7 +1327,7 @@ bool gossiper::is_gossip_only_member(inet_address endpoint) {
     if (!es) {
         return false;
     }
-    return !is_dead_state(*es) && !get_token_metadata_ptr()->is_normal_token_owner(endpoint);
+    return !is_dead_state(*es) && !get_token_metadata_ptr()->is_normal_token_owner(endpoint) && !is_seed(endpoint);
 }
 
 clk::time_point gossiper::get_expire_time_for_endpoint(inet_address endpoint) const noexcept {
