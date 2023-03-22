@@ -571,6 +571,8 @@ system_distributed_keyspace::insert_cdc_generation(
 
     auto ms = co_await get_cdc_generation_mutations(_qp.db().real_database(), id, ctx.num_token_owners, concurrency, desc);
     co_await max_concurrent_for_each(ms, concurrency, [&] (mutation& m) -> future<> {
+        dlogger.info("---- CDC write start");
+        auto start = db::timeout_clock::now();
         co_await _sp.mutate(
             { std::move(m) },
             db::consistency_level::ALL,
@@ -580,6 +582,9 @@ system_distributed_keyspace::insert_cdc_generation(
             db::allow_per_partition_rate_limit::no,
             false // raw_counters
         );
+        auto end = db::timeout_clock::now();
+        auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        dlogger.info("---- CDC write end, took {}", dur.count());
     });
 }
 

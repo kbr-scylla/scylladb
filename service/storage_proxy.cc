@@ -503,6 +503,7 @@ private:
         auto rate_limit_info = rate_limit_info_opt.value_or(std::monostate());
 
         auto schema_version = in.schema_version();
+        slogger.trace("receive mutation handler schema version {}", schema_version);
         return handle_write(src_addr, t, schema_version, std::move(in), std::move(forward), reply_to, shard, response_id,
                 trace_info ? *trace_info : std::nullopt,
                 /* apply_fn */ [smp_grp, rate_limit_info] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s, const frozen_mutation& m,
@@ -986,12 +987,14 @@ public:
     virtual future<> apply_locally(storage_proxy& sp, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state, db::per_partition_rate_limit::info rate_limit_info) override {
         tracing::trace(tr_state, "Executing a mutation locally");
+        slogger.trace("Executing a mutation locally");
         return sp.mutate_locally(_schema, *_mutation, std::move(tr_state), db::commitlog::force_sync::no, timeout, rate_limit_info);
     }
     virtual future<> apply_remotely(storage_proxy& sp, gms::inet_address ep, inet_address_vector_replica_set&& forward,
             storage_proxy::response_id_type response_id, storage_proxy::clock_type::time_point timeout,
             tracing::trace_state_ptr tr_state, db::per_partition_rate_limit::info rate_limit_info) override {
         tracing::trace(tr_state, "Sending a mutation to /{}", ep);
+        slogger.trace("Sending a mutation to {} schema ver {}", ep, _mutation->schema_version());
         return sp.remote().send_mutation(netw::messaging_service::msg_addr{ep, 0}, timeout, tracing::make_trace_info(tr_state),
                 *_mutation, std::move(forward), utils::fb_utilities::get_broadcast_address(), this_shard_id(),
                 response_id, rate_limit_info);
@@ -2787,8 +2790,10 @@ storage_proxy::mutate_locally(const schema_ptr& s, const frozen_mutation& m, tra
         smp_service_group smp_grp, db::per_partition_rate_limit::info rate_limit_info) {
     auto shard = m.shard_of(*s);
     get_stats().replica_cross_shard_ops += shard != this_shard_id();
+    slogger.trace("mutate_locally schema ver {} invoke on {}", m.schema_version(), shard);
     return _db.invoke_on(shard, {smp_grp, timeout},
             [&m, gs = global_schema_ptr(s), gtr = tracing::global_trace_state_ptr(std::move(tr_state)), timeout, sync, rate_limit_info] (replica::database& db) mutable -> future<> {
+        slogger.trace("mutate_locally db apply schema ver {}", m.schema_version());
         return db.apply(gs, m, gtr.get(), sync, timeout, rate_limit_info);
     });
 }
@@ -3320,7 +3325,7 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
                                std::optional<clock_type::time_point> timeout_opt, lw_shared_ptr<cdc::operation_result_tracker> cdc_tracker,
                                db::allow_per_partition_rate_limit allow_limit) {
     if (boost::empty(mutations)) {
-        return make_ready_future<result<>>(bo::success());
+        co_return bo::success();
     }
 
     slogger.trace("mutate cl={}", cl);
@@ -3335,13 +3340,22 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
     utils::latency_counter lc;
     lc.start();
 
-    return mutate_prepare(mutations, cl, type, tr_state, std::move(permit), allow_limit).then(utils::result_wrap([this, cl, timeout_opt, tracker = std::move(cdc_tracker),
+    std::vector<response_id_type> rids;
+    auto res = co_await mutate_prepare(mutations, cl, type, tr_state, std::move(permit), allow_limit).then(utils::result_wrap([this, &rids, cl, timeout_opt, tracker = std::move(cdc_tracker),
             tr_state] (storage_proxy::unique_response_handler_vector ids) mutable {
         register_cdc_operation_result_tracker(ids, tracker);
+        for (auto& id: ids) {
+            rids.push_back(id.id);
+        }
+        slogger.trace("mutate cl={} mutate_prepare done, ids = {}", cl, rids);
         return mutate_begin(std::move(ids), cl, tr_state, timeout_opt);
-    })).then_wrapped([this, p = shared_from_this(), lc, tr_state] (future<result<>> f) mutable {
+    })).then_wrapped([this, &rids, p = shared_from_this(), lc, tr_state] (future<result<>> f) mutable {
+        slogger.trace("mutate_begin done, ids = {}", rids);
         return p->mutate_end(std::move(f), lc, get_stats(), std::move(tr_state));
     });
+
+    slogger.trace("mutate_end done, ids = {}", rids);
+    co_return res;
 }
 
 future<result<>>
@@ -3760,8 +3774,10 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
 
     // lambda for applying mutation locally
     auto lmutate = [handler_ptr, response_id, this, my_address, timeout] () mutable {
+        slogger.trace("send_to_live_endpoints lmutate id {}", response_id);
         return handler_ptr->apply_locally(timeout, handler_ptr->get_trace_state())
                 .then([response_id, this, my_address, h = std::move(handler_ptr), p = shared_from_this()] {
+            slogger.trace("send_to_live_endpoints lmutate apply_locally finished id {}", response_id);
             // make mutation alive until it is processed locally, otherwise it
             // may disappear if write timeouts before this future is ready
             got_response(response_id, my_address, get_view_update_backlog());
@@ -3773,8 +3789,10 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
         auto msize = handler_ptr->get_mutation_size(); // can overestimate for repair writes
         global_stats.queued_write_bytes += msize;
 
+        slogger.trace("send_to_live_endpoints rmutate id {}", response_id);
         return handler_ptr->apply_remotely(coordinator, std::move(forward), response_id, timeout, handler_ptr->get_trace_state())
-                .finally([this, p = shared_from_this(), h = std::move(handler_ptr), msize, &global_stats] {
+                .finally([this, p = shared_from_this(), h = std::move(handler_ptr), msize, &global_stats, response_id] {
+            slogger.trace("send_to_live_endpoints rmutate apply_remotely finished id {}", response_id);
             global_stats.queued_write_bytes -= msize;
             unthrottle();
         });
