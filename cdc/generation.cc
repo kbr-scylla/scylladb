@@ -737,7 +737,7 @@ generation_service::~generation_service() {
     assert(_stopped);
 }
 
-future<> generation_service::after_join(std::optional<cdc::generation_id>&& startup_gen_id) {
+future<> generation_service::legacy_after_join(std::optional<cdc::generation_id>&& startup_gen_id) {
     assert_shard_zero(__PRETTY_FUNCTION__);
     assert(_sys_ks.local().bootstrap_complete());
 

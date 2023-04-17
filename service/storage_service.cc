@@ -1158,7 +1158,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
      * at the end of `join_token_ring`; the responsibility handling of CDC generations is passed
      * to cdc::generation_service.
      *
-     * DO NOT use this variable after `join_token_ring` (i.e. after we call `generation_service::after_join`
+     * DO NOT use this variable after `join_token_ring` (i.e. after we call `generation_service::legacy_after_join`
      * and pass it the ownership of the timestamp.
      */
     std::optional<cdc::generation_id> cdc_gen_id;
@@ -1538,7 +1538,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 
     assert(_group0);
     co_await _group0->finish_setup_after_join();
-    co_await cdc_gen_service.after_join(std::move(cdc_gen_id));
+    co_await cdc_gen_service.legacy_after_join(std::move(cdc_gen_id));
 }
 
 future<> storage_service::mark_existing_views_as_built(sharded<db::system_distributed_keyspace>& sys_dist_ks) {

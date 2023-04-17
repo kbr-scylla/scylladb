@@ -46,7 +46,7 @@ public:
 private:
     bool _stopped = false;
 
-    // The node has joined the token ring. Set to `true` on `after_join` call.
+    // The node has joined the token ring. Set to `true` on `legacy_after_join` call.
     bool _joined = false;
 
     config _cfg;
@@ -74,8 +74,11 @@ private:
      * will create the first generation and start gossiping it; it may be us, or it may be some
      * different node. In any case, eventually - after one of the nodes gossips the first timestamp
      * - we'll catch on and this variable will be updated with that generation.
+     *
+     * Legacy: used for gossiper-based topology changes.
      */
     std::optional<cdc::generation_id> _gen_id;
+
     future<> _cdc_streams_rewrite_complete = make_ready_future<>();
 public:
     generation_service(config cfg, gms::gossiper&,
@@ -93,11 +96,13 @@ public:
      * This passes the responsibility of managing generations from the node startup code to this service;
      * until then, the service remains dormant.
      * At the time of writing this comment, the startup code is in `storage_service::join_token_ring`, hence
-     * `after_join` should be called at the end of that function.
+     * `legacy_after_join` should be called at the end of that function.
      * Precondition: the node has completed bootstrapping and system_distributed_keyspace is initialized.
      * Must be called on shard 0 - that's where the generation management happens.
+     *
+     * Legacy: used for gossiper-based topology changes.
      */
-    future<> after_join(std::optional<cdc::generation_id>&& startup_gen_id);
+    future<> legacy_after_join(std::optional<cdc::generation_id>&& startup_gen_id);
 
     cdc::metadata& get_cdc_metadata() {
         return _cdc_metadata;
