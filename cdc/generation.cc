@@ -757,6 +757,15 @@ future<> generation_service::legacy_after_join(std::optional<cdc::generation_id>
     _cdc_streams_rewrite_complete = maybe_rewrite_streams_descriptions();
 }
 
+future<> generation_service::after_join() {
+    assert_shard_zero(__PRETTY_FUNCTION__);
+    assert(_sys_ks.local().bootstrap_complete());
+
+    _joined = true;
+
+    _cdc_streams_rewrite_complete = maybe_rewrite_streams_descriptions();
+}
+
 future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state ep_state) {
     assert_shard_zero(__PRETTY_FUNCTION__);
 

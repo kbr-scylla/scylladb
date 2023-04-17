@@ -1380,6 +1380,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         }
 
         co_await _group0->finish_setup_after_join();
+        co_await cdc_gen_service.after_join();
         co_return;
     }
 
