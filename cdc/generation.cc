@@ -606,12 +606,6 @@ future<> generation_service::maybe_rewrite_streams_descriptions() {
 
     auto get_num_token_owners = [tm = _token_metadata.get()] { return tm->count_normal_token_owners(); };
 
-    // This code is racing with node startup. At this point, we're most likely still waiting for gossip to settle
-    // and some nodes that are UP may still be marked as DOWN by us.
-    // Let's sleep a bit to increase the chance that the first attempt at rewriting succeeds (it's still ok if
-    // it doesn't - we'll retry - but it's nice if we succeed without any warnings).
-    co_await sleep_abortable(std::chrono::seconds(10), _abort_src);
-
     cdc_log.info("Rewriting stream tables in the background...");
     auto last_rewritten = co_await rewrite_streams_descriptions(
             std::move(times_and_ttls),
