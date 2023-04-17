@@ -97,6 +97,10 @@ public:
     ~cql_test_config();
 };
 
+struct cql_test_init_configurables {
+    db::extensions& extensions;
+};
+
 class cql_test_env {
 public:
     virtual ~cql_test_env() {};
@@ -177,8 +181,8 @@ public:
     virtual sharded<qos::service_level_controller>& service_level_controller_service() = 0;
 };
 
-future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_config = {});
-future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_test_config = {}, thread_attributes thread_attr = {});
+future<> do_with_cql_env(std::function<future<>(cql_test_env&)> func, cql_test_config = {}, std::optional<cql_test_init_configurables> = {});
+future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_test_config = {}, thread_attributes thread_attr = {}, std::optional<cql_test_init_configurables> = {});
 
 reader_permit make_reader_permit(cql_test_env&);
 
