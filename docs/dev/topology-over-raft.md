@@ -77,3 +77,5 @@ Each node has a row in the table where its host_id is the primary key. The row c
  replication_state  -  if set contains a state the state the token replication is now in
  replaced_id        -  if the node replacing or replaced another node here will be the id of that node
  rebuild_option     -  if the node is being rebuild contains datacenter name that is used as a rebuild source
+
+TODO replication_state
