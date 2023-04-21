@@ -579,6 +579,7 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
         const replica_state* rs;
         std::optional<topology_request> request;
         std::optional<request_param> req_param;
+        raft::server_id replaced_node;
     };
 
     // The topology coordinator takes guard before operation start, but it releases it during various
@@ -662,10 +663,10 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
         }
     };
 
-    auto exec_global_command = [my_id = raft.id(), &exec_global_command_helper, &release_node, &retake_node, &as] (node_to_work_on&& node, const raft_topology_cmd& cmd, bool include_local, raft::server_id exclude_node) -> future<std::pair<node_to_work_on, bool>> {
+    auto exec_global_command = [my_id = raft.id(), &exec_global_command_helper, &release_node, &retake_node, &as] (node_to_work_on&& node, const raft_topology_cmd& cmd, bool include_local) -> future<std::pair<node_to_work_on, bool>> {
         auto id = node.id;
         auto nodes = node.topology->normal_nodes
-                | boost::adaptors::filtered([my_id, include_local, exclude_node] (const std::pair<const raft::server_id, replica_state>& n)  {
+                | boost::adaptors::filtered([my_id, include_local, exclude_node = node.replaced_node] (const std::pair<const raft::server_id, replica_state>& n)  {
                     return (include_local || n.first != my_id) && n.first != exclude_node;
                 }) | boost::adaptors::map_keys;
         release_node(std::move(node));
@@ -673,169 +674,81 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
         co_return std::make_pair(co_await retake_node(id, as), res);
     };
 
-    auto handle_ring_transition = [&] (node_to_work_on&& node) -> future<> {
-        raft::server_id replaced_node;
-
-        if (node.rs->state == node_state::replacing) {
-            replaced_node = std::get<raft::server_id>(node.req_param.value());
-        }
-
-        bool res;
-        switch (node.topology->tstate) {
-            case topology::transition_state::commit_cdc_generation: {
-                // make sure all nodes know about new topology and have the new CDC generation data
-                // (we require all nodes to be alive for topo change for now)
-                std::tie(node, res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::barrier}, false, replaced_node);
-                if (!res) {
-                    break;
+    auto cleanup_group0_config_if_needed = [this, &as] (const service::topology& topo) -> future<> {
+        const raft::configuration& rconf = _group0->group0_server().get_configuration();
+        if (rconf.current.size() > topo.normal_nodes.size() + topo.new_nodes.size() + topo.transition_nodes.size()) {
+            // Raft config is larger than the sum of all nodes not in 'left' state.
+            // Find nodes that 'left' but still in the config and remove them
+            size_t found = 0;
+            co_await coroutine::parallel_for_each(topo.left_nodes
+                                                    | boost::adaptors::filtered([&rconf] (raft::server_id id) { return rconf.contains(id); }),
+            [&] (raft::server_id id) -> future<> {
+                found++;
+                // Remove from group 0 nodes that left. They may failed to do so by themselves
+                try {
+                    slogger.trace("raft topology: topology coordinator fiber removing {} from the raft since it is in `left` state", id);
+                    co_await _group0->group0_server().modify_config({}, {id}, &as);
+                } catch (const raft::commit_status_unknown&) {
+                    slogger.trace("raft topology: topology coordinator fiber got unknown status while removing {} from the raft", id);
                 }
-
-                // We don't need to add delay to the generation timestamp if this is the first generation.
-                bool add_ts_delay = bool(node.topology->current_cdc_generation_id);
-
-                // Begin the race.
-                // See the large FIXME below.
-                auto cdc_gen_ts = cdc::new_generation_timestamp(add_ts_delay, get_ring_delay());
-                auto cdc_gen_uuid = node.rs->ring.value().new_cdc_generation_data_uuid;
-                cdc::generation_id_v2 cdc_gen_id {
-                    .ts = cdc_gen_ts,
-                    .id = cdc_gen_uuid,
-                };
-
-                {
-                    // Sanity check.
-                    // This could happen if the topology coordinator's clock is broken.
-                    auto curr_gen_id = node.topology->current_cdc_generation_id;
-                    if (curr_gen_id && curr_gen_id->ts >= cdc_gen_ts) {
-                        on_internal_error(slogger, format(
-                            "raft topology: new CDC generation has smaller timestamp than the previous one."
-                            " Old generation ID: {}, new generation ID: {}", *curr_gen_id, cdc_gen_id));
-                    }
-                }
-
-                // Tell all nodes to start using the new CDC generation by updating the topology
-                // with the generation's ID and timestamp.
-                // At the same time move the topology change procedure to the next step.
-                //
-                // FIXME: as in previous implementation with gossiper and ring_delay, this assumes that all nodes
-                // will learn about the new CDC generation before their clocks reach the generation's timestamp.
-                // With this group 0 based implementation, it means that the command must be committed,
-                // replicated and applied on all nodes before their clocks reach the generation's timestamp
-                // (i.e. within 2 * ring_delay = 60 seconds by default if clocks are synchronized). If this
-                // doesn't hold some coordinators might use the wrong CDC streams for some time and CDC stream
-                // readers will miss some data. It's likely that Raft replication doesn't converge as quickly
-                // as gossiping does.
-                //
-                // We could use a two-phase algorithm instead: first tell all nodes to prepare for using
-                // the new generation, then tell all nodes to commit. If some nodes don't manage to prepare
-                // in time, we abort the generation switch. If all nodes prepare, we commit. If a node prepares
-                // but doesn't receive a commit in time, it stops coordinating CDC-enabled writes until it
-                // receives a commit or abort. This solution does not have a safety problem like the one
-                // above, but it has an availability problem when nodes get disconnected from group 0 majority
-                // in the middle of a CDC generation switch (when they are prepared to switch but not
-                // committed) - they won't coordinate CDC-enabled writes until they reconnect to the
-                // majority and commit.
-                topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
-                builder.set_transition_state(topology::transition_state::write_both_read_old)
-                       .set_current_cdc_generation_id(cdc_gen_id);
-                auto str = fmt::format("{}: committed new CDC generation, ID: {}", node.rs->state, cdc_gen_id);
-                co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
+            });
+            if (!found) {
+                slogger.warn("raft topology: raft config is larger then sum of all nodes in non left state but no nodes in left state were found");
             }
-                break;
-            case topology::transition_state::write_both_read_old: {
-                // make sure all nodes know about new topology (we require all nodes to be alive for topo change for now)
-                std::tie(node, res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::barrier}, false, replaced_node);
-                if (!res) {
-                    break;
-                }
-
-                // If a node is bootstrapping, we just committed a new CDC generation in the commit_cdc_generation step.
-                // Publish it to the user-facing distributed CDC description tables.
-                if (node.rs->state == node_state::bootstrapping) {
-                    auto curr_gen_id = node.topology->current_cdc_generation_id.value();
-                    auto gen_data = co_await _sys_ks.local().read_cdc_generation(curr_gen_id.id);
-
-                    co_await sys_dist_ks.local().create_cdc_desc(
-                        curr_gen_id.ts, gen_data, { get_token_metadata().count_normal_token_owners() });
-                }
-
-                raft_topology_cmd cmd{raft_topology_cmd::command::stream_ranges};
-                if (node.rs->state == node_state::removing) {
-                    // tell all nodes to stream data of the removed node to new range owners
-                    std::tie(node, res) = co_await exec_global_command(std::move(node), cmd, true, replaced_node);
-                    if (!res) {
-                        slogger.error("raft topology: send_raft_topology_cmd(stream_ranges) failed during removenode");
-                        break;
-                    }
-                } else {
-                    // Tell joining/leaving/replacing node to stream its ranges
-                    try {
-                        node = co_await exec_direct_command(std::move(node), cmd);
-                    } catch (term_changed_error&) {
-                        throw;
-                    } catch (...) {
-                        slogger.error("raft topology: send_raft_topology_cmd(stream_ranges) failed with exception (node state is {}): {}", node.rs->state, std::current_exception());
-                        break;
-                    }
-                }
-                // Streaming completed. We can now move tokens state to topology::transition_state::write_both_read_new
-                topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
-                builder.set_transition_state(topology::transition_state::write_both_read_new);
-                auto str = fmt::format("{}: streaming completed for node {}", node.rs->state, node.id);
-                co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
-            }
-                break;
-            case topology::transition_state::write_both_read_new:
-                // In this state writes goes to old and new replicas but reads start to be done from new replicas
-                // Before we stop writing to old replicas we need to wait for all previous reads to complete
-                std::tie(node, res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::fence_old_reads}, true, replaced_node);
-                if (!res) {
-                    break;
-                }
-                switch(node.rs->state) {
-                case node_state::bootstrapping: {
-                    topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
-                    builder.set_transition_state(topology::transition_state::normal)
-                           .set("node_state", node_state::normal);
-                    co_await update_replica_state(std::move(node), {builder.build()}, "bootstrap: read fence completed");
-                    }
-                    break;
-                case node_state::decommissioning:
-                case node_state::removing: {
-                    topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
-                    builder.del("tokens")
-                           .set("node_state", node_state::left)
-                           .set_transition_state(topology::transition_state::normal);
-                    auto str = fmt::format("{}: read fence completed", node.rs->state);
-                    co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
-                    }
-                    break;
-                case node_state::replacing: {
-                    topology_mutation_builder builder1(node.guard.write_timestamp(), node.id);
-                    // Move new node to 'normal'
-                    builder1.set_transition_state(topology::transition_state::normal)
-                            .set("node_state", node_state::normal);
-
-                    // Move old node to 'left'
-                    topology_mutation_builder builder2(node.guard.write_timestamp(), replaced_node);
-                    builder2.del("tokens")
-                            .set("node_state", node_state::left);
-                    co_await update_replica_state(std::move(node), {builder1.build(), builder2.build()}, "replace: read fence completed");
-                    }
-                    break;
-                default:
-                    on_fatal_internal_error(slogger, format("Ring state on node {} is write_both_read_new while the node is in state {}", node.id, node.rs->state));
-                }
-                // Reads are fenced. We can now move tokens state to topology::transition_state::normal and node to normal
-                break;
-            case topology::transition_state::normal:
-                // should not get here
-                on_fatal_internal_error(slogger, format("Tried to handle ring state transition on node {} while in 'normal' state", node.id));
-                break;
         }
     };
 
-    auto handle_node_transition = [&] (node_to_work_on&& node) -> future<> {
+    auto get_node_to_work_on_opt = [] (group0_guard guard, const service::topology& topo) -> std::optional<node_to_work_on> {
+        const std::pair<const raft::server_id, replica_state>* e = nullptr;
+
+        std::optional<topology_request> req;
+        if (topo.transition_nodes.size() != 0) {
+            // If there is a node that is the middle of topology operation continue with it
+            e = &*topo.transition_nodes.begin();
+        } else if (topo.new_nodes.size() != 0) {
+            // Otherwise check if there is a new node that wants to be joined
+            e = &*topo.new_nodes.begin();
+            auto it = topo.requests.find(e->first);
+            if (it == topo.requests.end()) {
+                on_internal_error(slogger, format(
+                    "raft topology: new node {} found in topology, but no corresponding request", e->first));
+            }
+            req = it->second;
+        } else if (!topo.requests.empty()) {
+            // If there is no new node but request queue is not empty there is a request for normal node
+            req = topo.requests.begin()->second;
+            e = &*topo.normal_nodes.find(topo.requests.begin()->first);
+        }
+
+        if (!e) {
+            return std::nullopt;
+        }
+
+        std::optional<request_param> req_param;
+        auto rit = topo.req_param.find(e->first);
+        if (rit != topo.req_param.end()) {
+            req_param = rit->second;
+        }
+
+        raft::server_id replaced_node;
+        if (e->second.state == node_state::replacing) {
+            replaced_node = std::get<raft::server_id>(req_param.value());
+        }
+
+        return node_to_work_on{std::move(guard), &topo, e->first, &e->second, std::move(req), std::move(req_param), replaced_node};
+    };
+
+    auto get_node_to_work_on = [&get_node_to_work_on_opt] (group0_guard guard, const service::topology& topo) {
+        auto node_opt = get_node_to_work_on_opt(std::move(guard), topo);
+        if (!node_opt) {
+            on_internal_error(slogger, format(
+                "raft topology: could not find node to work on"
+                " even though the state requires it (state: {})", topo.tstate));
+        }
+        return std::move(*node_opt);
+    };
+
+    auto handle_normal_topology_node_transition = [&] (node_to_work_on&& node) -> future<> {
         slogger.info("raft topology: coordinator fiber found a node to work on id={} state={}", node.id, node.rs->state);
 
         switch (node.rs->state) {
@@ -962,12 +875,6 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
                 }
                 break;
             }
-            case node_state::bootstrapping:
-            case node_state::decommissioning:
-            case node_state::removing:
-            case node_state::replacing:
-                co_await handle_ring_transition(std::move(node));
-                break;
             case node_state::rebuilding: {
                 node = co_await exec_direct_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::stream_ranges});
                 topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
@@ -976,6 +883,14 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
                 co_await update_replica_state(std::move(node), {builder.build()}, "rebuilding completed");
             }
                 break;
+            case node_state::bootstrapping:
+            case node_state::decommissioning:
+            case node_state::removing:
+            case node_state::replacing:
+                // Should not get here
+                on_fatal_internal_error(slogger, format(
+                    "Found node {} in state {} while topology transition state is 'normal'",
+                    node.id, node.rs->state));
             case node_state::left:
                 // Should not get here
                 on_fatal_internal_error(slogger, format("Topology coordinator is called for node {} in state 'left'", node.id));
@@ -983,60 +898,172 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
         }
     };
 
-    auto get_node_to_work_on = [this] (abort_source& as) -> future<std::optional<node_to_work_on>> {
-        auto guard = co_await _group0->client().start_operation(&as);
+    // Returns `true` iff there was work to do.
+    auto transition = [&] (group0_guard guard, const service::topology& topo) -> future<bool> {
+        bool exec_command_res;
+        switch (topo.tstate) {
+            case topology::transition_state::commit_cdc_generation: {
+                auto node = get_node_to_work_on(std::move(guard), topo);
 
-        auto& topo = _topology_state_machine._topology;
-
-        const raft::configuration& rconf = _group0->group0_server().get_configuration();
-
-        if (rconf.current.size() > topo.normal_nodes.size() + topo.new_nodes.size() + topo.transition_nodes.size()) {
-            // Raft config is larger than the sum of all nodes not in 'left' state.
-            // Find nodes that 'left' but still in the config and remove them
-            size_t found = 0;
-            co_await coroutine::parallel_for_each(topo.left_nodes
-                                                    | boost::adaptors::filtered([&rconf] (raft::server_id id) { return rconf.contains(id); }),
-            [&] (raft::server_id id) -> future<> {
-                found++;
-                // Remove from group 0 nodes that left. They may failed to do so by themselves
-                try {
-                    slogger.trace("raft topology: topology coordinator fiber removing {} from the raft since it is in `left` state", id);
-                    co_await _group0->group0_server().modify_config({}, {id}, &as);
-                } catch (const raft::commit_status_unknown&) {
-                    slogger.trace("raft topology: topology coordinator fiber got unknown status while removing {} from the raft", id);
+                // make sure all nodes know about new topology and have the new CDC generation data
+                // (we require all nodes to be alive for topo change for now)
+                std::tie(node, exec_command_res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::barrier}, false);
+                if (!exec_command_res) {
+                    co_return true;
                 }
-            });
-            if (!found) {
-                slogger.warn("raft topology: raft config is larger then sum of all nodes in non left state but no nodes in left state were found");
+
+                // We don't need to add delay to the generation timestamp if this is the first generation.
+                bool add_ts_delay = bool(node.topology->current_cdc_generation_id);
+
+                // Begin the race.
+                // See the large FIXME below.
+                auto cdc_gen_ts = cdc::new_generation_timestamp(add_ts_delay, get_ring_delay());
+                auto cdc_gen_uuid = node.rs->ring.value().new_cdc_generation_data_uuid;
+                cdc::generation_id_v2 cdc_gen_id {
+                    .ts = cdc_gen_ts,
+                    .id = cdc_gen_uuid,
+                };
+
+                {
+                    // Sanity check.
+                    // This could happen if the topology coordinator's clock is broken.
+                    auto curr_gen_id = node.topology->current_cdc_generation_id;
+                    if (curr_gen_id && curr_gen_id->ts >= cdc_gen_ts) {
+                        on_internal_error(slogger, format(
+                            "raft topology: new CDC generation has smaller timestamp than the previous one."
+                            " Old generation ID: {}, new generation ID: {}", *curr_gen_id, cdc_gen_id));
+                    }
+                }
+
+                // Tell all nodes to start using the new CDC generation by updating the topology
+                // with the generation's ID and timestamp.
+                // At the same time move the topology change procedure to the next step.
+                //
+                // FIXME: as in previous implementation with gossiper and ring_delay, this assumes that all nodes
+                // will learn about the new CDC generation before their clocks reach the generation's timestamp.
+                // With this group 0 based implementation, it means that the command must be committed,
+                // replicated and applied on all nodes before their clocks reach the generation's timestamp
+                // (i.e. within 2 * ring_delay = 60 seconds by default if clocks are synchronized). If this
+                // doesn't hold some coordinators might use the wrong CDC streams for some time and CDC stream
+                // readers will miss some data. It's likely that Raft replication doesn't converge as quickly
+                // as gossiping does.
+                //
+                // We could use a two-phase algorithm instead: first tell all nodes to prepare for using
+                // the new generation, then tell all nodes to commit. If some nodes don't manage to prepare
+                // in time, we abort the generation switch. If all nodes prepare, we commit. If a node prepares
+                // but doesn't receive a commit in time, it stops coordinating CDC-enabled writes until it
+                // receives a commit or abort. This solution does not have a safety problem like the one
+                // above, but it has an availability problem when nodes get disconnected from group 0 majority
+                // in the middle of a CDC generation switch (when they are prepared to switch but not
+                // committed) - they won't coordinate CDC-enabled writes until they reconnect to the
+                // majority and commit.
+                topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                builder.set_transition_state(topology::transition_state::write_both_read_old)
+                       .set_current_cdc_generation_id(cdc_gen_id);
+                auto str = fmt::format("{}: committed new CDC generation, ID: {}", node.rs->state, cdc_gen_id);
+                co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
+                co_return true;
+            }
+            case topology::transition_state::write_both_read_old: {
+                auto node = get_node_to_work_on(std::move(guard), topo);
+
+                // make sure all nodes know about new topology (we require all nodes to be alive for topo change for now)
+                std::tie(node, exec_command_res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::barrier}, false);
+                if (!exec_command_res) {
+                    co_return true;
+                }
+
+                // If a node is bootstrapping, we just committed a new CDC generation in the commit_cdc_generation step.
+                // Publish it to the user-facing distributed CDC description tables.
+                if (node.rs->state == node_state::bootstrapping) {
+                    auto curr_gen_id = node.topology->current_cdc_generation_id.value();
+                    auto gen_data = co_await _sys_ks.local().read_cdc_generation(curr_gen_id.id);
+
+                    co_await sys_dist_ks.local().create_cdc_desc(
+                        curr_gen_id.ts, gen_data, { get_token_metadata().count_normal_token_owners() });
+                }
+
+                raft_topology_cmd cmd{raft_topology_cmd::command::stream_ranges};
+                if (node.rs->state == node_state::removing) {
+                    // tell all nodes to stream data of the removed node to new range owners
+                    std::tie(node, exec_command_res) = co_await exec_global_command(std::move(node), cmd, true);
+                    if (!exec_command_res) {
+                        slogger.error("raft topology: send_raft_topology_cmd(stream_ranges) failed during removenode");
+                        co_return true;
+                    }
+                } else {
+                    // Tell joining/leaving/replacing node to stream its ranges
+                    try {
+                        node = co_await exec_direct_command(std::move(node), cmd);
+                    } catch (term_changed_error&) {
+                        throw;
+                    } catch (...) {
+                        slogger.error("raft topology: send_raft_topology_cmd(stream_ranges) failed with exception (node state is {}): {}", node.rs->state, std::current_exception());
+                        co_return true;
+                    }
+                }
+                // Streaming completed. We can now move tokens state to topology::transition_state::write_both_read_new
+                topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                builder.set_transition_state(topology::transition_state::write_both_read_new);
+                auto str = fmt::format("{}: streaming completed for node {}", node.rs->state, node.id);
+                co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
+                co_return true;
+            }
+            case topology::transition_state::write_both_read_new: {
+                auto node = get_node_to_work_on(std::move(guard), topo);
+
+                // In this state writes goes to old and new replicas but reads start to be done from new replicas
+                // Before we stop writing to old replicas we need to wait for all previous reads to complete
+                std::tie(node, exec_command_res) = co_await exec_global_command(std::move(node), raft_topology_cmd{raft_topology_cmd::command::fence_old_reads}, true);
+                if (!exec_command_res) {
+                    co_return true;
+                }
+                switch(node.rs->state) {
+                case node_state::bootstrapping: {
+                    topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                    builder.set_transition_state(topology::transition_state::normal)
+                           .set("node_state", node_state::normal);
+                    co_await update_replica_state(std::move(node), {builder.build()}, "bootstrap: read fence completed");
+                    }
+                    break;
+                case node_state::decommissioning:
+                case node_state::removing: {
+                    topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                    builder.del("tokens")
+                           .set("node_state", node_state::left)
+                           .set_transition_state(topology::transition_state::normal);
+                    auto str = fmt::format("{}: read fence completed", node.rs->state);
+                    co_await update_replica_state(std::move(node), {builder.build()}, std::move(str));
+                    }
+                    break;
+                case node_state::replacing: {
+                    topology_mutation_builder builder1(node.guard.write_timestamp(), node.id);
+                    // Move new node to 'normal'
+                    builder1.set_transition_state(topology::transition_state::normal)
+                            .set("node_state", node_state::normal);
+
+                    // Move old node to 'left'
+                    topology_mutation_builder builder2(node.guard.write_timestamp(), node.replaced_node);
+                    builder2.del("tokens")
+                            .set("node_state", node_state::left);
+                    co_await update_replica_state(std::move(node), {builder1.build(), builder2.build()}, "replace: read fence completed");
+                    }
+                    break;
+                default:
+                    on_fatal_internal_error(slogger, format("Ring state on node {} is write_both_read_new while the node is in state {}", node.id, node.rs->state));
+                }
+                // Reads are fenced. We can now move tokens state to topology::transition_state::normal and node to normal
+                co_return true;
+            }
+            case topology::transition_state::normal: {
+                auto node_opt = get_node_to_work_on_opt(std::move(guard), topo);
+                if (!node_opt) {
+                    co_return false;
+                }
+                co_await handle_normal_topology_node_transition(std::move(*node_opt));
+                co_return true;
             }
         }
-
-        const std::pair<const raft::server_id, replica_state>* e = nullptr;
-
-        std::optional<topology_request> req;
-        if (topo.transition_nodes.size() != 0) {
-            // If there is a node that is the middle of topology operation continue with it
-            e = &*topo.transition_nodes.begin();
-        } else if (topo.new_nodes.size() != 0) {
-            // Otherwise check if there is a new node that wants to be joined
-            e = &*topo.new_nodes.begin();
-            req = topo.requests[e->first];
-        } else if (!topo.requests.empty()) {
-            // If there is no new node but request queue is not empty there is a request for normal node
-            req = topo.requests.begin()->second;
-            e = &*topo.normal_nodes.find(topo.requests.begin()->first);
-        }
-
-        if (!e) {
-            co_return std::nullopt;
-        }
-
-        std::optional<request_param> req_param;
-        auto rit = topo.req_param.find(e->first);
-        if (rit != topo.req_param.end()) {
-            req_param = rit->second;
-        }
-        co_return node_to_work_on{std::move(guard), &topo, e->first, &e->second, std::move(req), std::move(req_param)};
     };
 
     bool wait_for_event = false;
@@ -1050,15 +1077,16 @@ future<> storage_service::topology_change_coordinator_fiber(raft::server& raft, 
                 wait_for_event = false;
             }
 
-            auto node = co_await get_node_to_work_on(as);
+            auto guard = co_await _group0->client().start_operation(&as);
+            auto& topo = _topology_state_machine._topology;
+            co_await cleanup_group0_config_if_needed(topo);
 
-            if (!node) {
-                // No nodes to work on. Wait for topology change event.
+            bool had_work = co_await transition(std::move(guard), topo);
+            if (!had_work) {
+                // Nothing to work on. Wait for topology change event.
                 wait_for_event = true;
                 continue;
             }
-
-            co_await handle_node_transition(std::move(*node));
         } catch (raft::request_aborted&) {
             slogger.debug("raft topology: topology change coordinator fiber aborted");
         } catch (group0_concurrent_modification&) {
