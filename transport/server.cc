@@ -71,6 +71,22 @@ namespace cql_transport {
 
 static logging::logger clogger("cql_server");
 
+/**
+ * Skip registering CQL metrics for these SGs - these are internal scheduling groups that are not supposed to handle CQL
+ * requests.
+ */
+static const std::vector<sstring> non_cql_scheduling_classes_names = {
+        "atexit",
+        "background_reclaim",
+        "compaction",
+        "gossip",
+        "main",
+        "mem_compaction",
+        "memtable",
+        "memtable_to_cache",
+        "streaming"
+};
+
 struct cql_frame_error : std::exception {
     const char* what() const throw () override {
         return "bad cql binary frame";
@@ -103,6 +119,29 @@ sstring to_string(const event::topology_change::change_type t) {
     case type::MOVED_NODE:   return "MOVED_NODE";
     }
     throw std::invalid_argument("unknown change type");
+}
+
+sstring to_string(cql_binary_opcode op) {
+    switch(op) {
+    case cql_binary_opcode::ERROR:          return "ERROR";
+    case cql_binary_opcode::STARTUP:        return "STARTUP";
+    case cql_binary_opcode::READY:          return "READY";
+    case cql_binary_opcode::AUTHENTICATE:   return "AUTHENTICATE";
+    case cql_binary_opcode::CREDENTIALS:    return "CREDENTIALS";
+    case cql_binary_opcode::OPTIONS:        return "OPTIONS";
+    case cql_binary_opcode::SUPPORTED:      return "SUPPORTED";
+    case cql_binary_opcode::QUERY:          return "QUERY";
+    case cql_binary_opcode::RESULT:         return "RESULT";
+    case cql_binary_opcode::PREPARE:        return "PREPARE";
+    case cql_binary_opcode::EXECUTE:        return "EXECUTE";
+    case cql_binary_opcode::REGISTER:       return "REGISTER";
+    case cql_binary_opcode::EVENT:          return "EVENT";
+    case cql_binary_opcode::BATCH:          return "BATCH";
+    case cql_binary_opcode::AUTH_CHALLENGE: return "AUTH_CHALLENGE";
+    case cql_binary_opcode::AUTH_RESPONSE:  return "AUTH_RESPONSE";
+    case cql_binary_opcode::AUTH_SUCCESS:   return "AUTH_SUCCESS";
+    case cql_binary_opcode::OPCODES_COUNT:  return "OPCODES_COUNT";
+    }
 }
 
 sstring to_string(const event::status_change::status_type t) {
@@ -147,9 +186,50 @@ event::event_type parse_event_type(const sstring& value)
     }
 }
 
+cql_sg_stats::cql_sg_stats()
+    : _cql_requests_stats(static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT))
+{
+    auto& vector_ref = non_cql_scheduling_classes_names;
+    if (std::find(vector_ref.begin(), vector_ref.end(), current_scheduling_group().name()) != vector_ref.end()) {
+        return;
+    }
+    register_metrics();
+}
+
+void cql_sg_stats::register_metrics()
+{
+    namespace sm = seastar::metrics;
+    std::vector<sm::metric_definition> transport_metrics;
+    auto& cur_sg_name = current_scheduling_group().name();
+
+    for (uint8_t i = 0; i < static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT); ++i) {
+        cql_binary_opcode opcode = cql_binary_opcode{i};
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_requests_count", [this, opcode] { return get_cql_opcode_stats(opcode).count; },
+                                 sm::description("Counts the total number of CQL messages of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_request_bytes", [this, opcode] { return get_cql_opcode_stats(opcode).request_size; },
+                                 sm::description("Counts the total number of received bytes in CQL messages of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_response_bytes", [this, opcode] { return get_cql_opcode_stats(opcode).response_size; },
+                                 sm::description("Counts the total number of sent response bytes for CQL requests of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+    }
+
+    _metrics.add_group("transport", std::move(transport_metrics));
+}
+
 cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
         service::memory_limiter& ml, cql_server_config config, const db::config& db_cfg,
-        qos::service_level_controller& sl_controller, gms::gossiper& g)
+        qos::service_level_controller& sl_controller, gms::gossiper& g, scheduling_group_key stats_key)
     : server("CQLServer", clogger)
     , _query_processor(qp)
     , _config(config)
@@ -160,34 +240,11 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     , _auth_service(auth_service)
     , _sl_controller(sl_controller)
     , _gossiper(g)
+    , _stats_key(stats_key)
 {
     namespace sm = seastar::metrics;
 
     auto ls = {
-        sm::make_counter("startups", _stats.startups,
-                        sm::description("Counts the total number of received CQL STARTUP messages.")),
-
-        sm::make_counter("auth_responses", _stats.auth_responses,
-                        sm::description("Counts the total number of received CQL AUTH messages.")),
-        
-        sm::make_counter("options_requests", _stats.options_requests,
-                        sm::description("Counts the total number of received CQL OPTIONS messages.")),
-
-        sm::make_counter("query_requests", _stats.query_requests,
-                        sm::description("Counts the total number of received CQL QUERY messages.")),
-
-        sm::make_counter("prepare_requests", _stats.prepare_requests,
-                        sm::description("Counts the total number of received CQL PREPARE messages.")),
-
-        sm::make_counter("execute_requests", _stats.execute_requests,
-                        sm::description("Counts the total number of received CQL EXECUTE messages.")),
-
-        sm::make_counter("batch_requests", _stats.batch_requests,
-                        sm::description("Counts the total number of received CQL BATCH messages.")),
-
-        sm::make_counter("register_requests", _stats.register_requests,
-                        sm::description("Counts the total number of received CQL REGISTER messages.")),
-
         sm::make_counter("cql-connections", _stats.connects,
                         sm::description("Counts a number of client connections.")),
 
@@ -359,7 +416,10 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         }
     }
 
+    cql_sg_stats::request_kind_stats& cql_stats = _server.get_cql_opcode_stats(cqlop);
     tracing::set_request_size(trace_state, fbuf.bytes_left());
+    cql_stats.request_size += fbuf.bytes_left();
+    ++cql_stats.count;
 
     auto linearization_buffer = std::make_unique<bytes_ostream>();
     auto linearization_buffer_ptr = linearization_buffer.get();
@@ -404,7 +464,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         case cql_binary_opcode::REGISTER:      return wrap_in_foreign(process_register(stream, std::move(in), client_state, trace_state));
         default:                               throw exceptions::protocol_exception(format("Unknown opcode {:d}", int(cqlop)));
         }
-    }).then_wrapped([this, cqlop, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
+    }).then_wrapped([this, cqlop, &cql_stats, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
         auto stop_trace = defer([&] {
             tracing::stop_foreground(trace_state);
         });
@@ -445,6 +505,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
             }
 
             tracing::set_response_size(trace_state, response->size());
+            cql_stats.response_size += response->size();
             return response;
         },  utils::result_catch<exceptions::unavailable_exception>([&] (const auto& ex) {
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
@@ -772,7 +833,6 @@ future<fragmented_temporary_buffer> cql_server::connection::read_and_decompress_
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_startup(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.startups;
     auto options = in.read_string_map();
     auto compression_opt = options.find("COMPRESSION");
     if (compression_opt != options.end()) {
@@ -815,7 +875,6 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_st
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_auth_response(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.auth_responses;
     auto sasl_challenge = client_state.get_auth_service()->underlying_authenticator().new_sasl_challenge();
     auto buf = in.read_raw_bytes_view(in.bytes_left());
     auto challenge = sasl_challenge->evaluate_response(buf);
@@ -843,7 +902,6 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_options(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.options_requests;
     return make_ready_future<std::unique_ptr<cql_server::response>>(make_supported(stream, std::move(trace_state)));
 }
 
@@ -940,13 +998,11 @@ process_query_internal(service::client_state& client_state, distributed<cql3::qu
 
 future<cql_server::result_with_foreign_response_ptr>
 cql_server::connection::process_query(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    ++_server._stats.query_requests;
     return process(stream, in, client_state, std::move(permit), std::move(trace_state), process_query_internal);
 }
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_prepare(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.prepare_requests;
 
     auto query = sstring(in.read_long_string_view());
 
@@ -1046,7 +1102,6 @@ process_execute_internal(service::client_state& client_state, distributed<cql3::
 
 future<cql_server::result_with_foreign_response_ptr> cql_server::connection::process_execute(uint16_t stream, request_reader in,
         service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    ++_server._stats.execute_requests;
     return process(stream, in, client_state, std::move(permit), std::move(trace_state), process_execute_internal);
 }
 
@@ -1168,14 +1223,12 @@ process_batch_internal(service::client_state& client_state, distributed<cql3::qu
 future<cql_server::result_with_foreign_response_ptr>
 cql_server::connection::process_batch(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.batch_requests;
     return process(stream, in, client_state, permit, std::move(trace_state), process_batch_internal);
 }
 
 future<std::unique_ptr<cql_server::response>>
 cql_server::connection::process_register(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.register_requests;
     std::vector<sstring> event_types;
     in.read_string_list(event_types);
     for (auto&& event_type : event_types) {
