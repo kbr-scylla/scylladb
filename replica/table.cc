@@ -997,17 +997,16 @@ void table::set_metrics() {
 }
 
 void table::rebuild_statistics() {
-    // zeroing live_disk_space_used and live_sstable_count because the
-    // sstable list was re-created
     _stats.live_disk_space_used = 0;
     _stats.live_sstable_count = 0;
+    _stats.total_disk_space_used = 0;
 
     _sstables->for_each_sstable([this] (const sstables::shared_sstable& tab) {
         update_stats_for_new_sstable(tab->bytes_on_disk());
     });
     for (const compaction_group_ptr& cg : compaction_groups()) {
         for (auto& tab: cg->compacted_undeleted_sstables()) {
-            update_stats_for_new_sstable(tab->bytes_on_disk());
+            _stats.total_disk_space_used += tab->bytes_on_disk();
         }
     }
 }
@@ -2670,9 +2669,11 @@ public:
     }
     future<> on_compaction_completion(sstables::compaction_completion_desc desc, sstables::offstrategy offstrategy) override {
         if (offstrategy) {
-            return _cg.update_sstable_lists_on_off_strategy_completion(std::move(desc));
+            co_await _cg.update_sstable_lists_on_off_strategy_completion(std::move(desc));
+            _cg.trigger_compaction();
+            co_return;
         }
-        return _cg.update_main_sstable_list_on_compaction_completion(std::move(desc));
+        co_await _cg.update_main_sstable_list_on_compaction_completion(std::move(desc));
     }
     bool is_auto_compaction_disabled_by_user() const noexcept override {
         return _t.is_auto_compaction_disabled_by_user();
