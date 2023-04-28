@@ -1108,6 +1108,7 @@ static future<schema_ptr> get_schema_definition(table_schema_version v, netw::me
 }
 
 future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms) {
+    mlogger.info("get schema for read v {} dst {}", v, dst);
     return get_schema_for_write(v, dst, ms);
 }
 

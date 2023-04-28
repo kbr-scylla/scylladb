@@ -40,6 +40,7 @@
 #include "db/config.hh"
 #include "db/extensions.hh"
 #include "utils/hashers.hh"
+#include "utils/error_injection.hh"
 
 #include <seastar/util/noncopyable_function.hh>
 #include <seastar/rpc/rpc_types.hh>
@@ -1328,6 +1329,8 @@ future<lw_shared_ptr<query::result_set>> extract_scylla_specific_keyspace_info(d
 
 future<std::set<sstring>> merge_keyspaces(distributed<service::storage_proxy>& proxy, schema_result&& before, schema_result&& after)
 {
+    co_await utils::get_local_injector().inject("merge_keyspaces_sleep", std::chrono::seconds{1});
+
     std::vector<schema_result_value_type> created;
     std::vector<sstring> altered;
     std::set<sstring> dropped;
@@ -1357,6 +1360,7 @@ future<std::set<sstring>> merge_keyspaces(distributed<service::storage_proxy>& p
         slogger.info("Altering keyspace {}", key);
         altered.emplace_back(key);
     }
+
     co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) -> future<> {
         for (auto&& val : created) {
             auto scylla_specific_rs = co_await extract_scylla_specific_keyspace_info(proxy, val);
