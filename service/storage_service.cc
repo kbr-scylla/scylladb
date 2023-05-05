@@ -2039,6 +2039,10 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
 
     slogger.debug("Node {} state normal, token {}", endpoint, tokens);
 
+        slogger.info(" ------ handle_state_normal sleep");
+        co_await utils::get_local_injector().inject("update_tokens_sleep", std::chrono::seconds{5});
+        slogger.info(" ------ handle_state_normal sleep done");
+
     auto tmlock = std::make_unique<token_metadata_lock>(co_await get_token_metadata_lock());
     auto tmptr = co_await get_mutable_token_metadata_ptr();
     if (tmptr->is_normal_token_owner(endpoint)) {
