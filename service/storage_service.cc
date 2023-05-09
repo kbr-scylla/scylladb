@@ -2028,6 +2028,8 @@ future<> storage_service::handle_state_bootstrap(inet_address endpoint) {
 }
 
 future<> storage_service::handle_state_normal(inet_address endpoint) {
+    co_await utils::get_local_injector().inject("hsn_sleep", std::chrono::seconds{5});
+
     slogger.debug("endpoint={} handle_state_normal", endpoint);
 
     if (_raft_topology_change_enabled) {
