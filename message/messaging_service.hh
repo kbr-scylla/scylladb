@@ -319,6 +319,7 @@ private:
 
     struct connection_ref;
     std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
+    std::unordered_set<locator::host_id> _banned_hosts;
 
     future<> stop_tls_server();
     future<> stop_nontls_server();
@@ -512,6 +513,9 @@ public:
     future<> send_replication_finished(msg_addr id, inet_address from);
 
     void foreach_server_connection_stats(std::function<void(const rpc::client_info&, const rpc::stats&)>&& f) const;
+
+    // Drops all connections from the given host and prevents further communication from it to happen.
+    future<> ban_host(locator::host_id);
 private:
     template <typename Fn>
     requires std::is_invocable_r_v<bool, Fn, const shard_info&>
@@ -521,6 +525,8 @@ private:
     bool topology_known_for(inet_address) const;
     bool is_same_dc(inet_address ep) const;
     bool is_same_rack(inet_address ep) const;
+
+    bool is_host_banned(locator::host_id);
 
 public:
     // Return rpc::protocol::client for a shard which is a ip + cpuid pair.

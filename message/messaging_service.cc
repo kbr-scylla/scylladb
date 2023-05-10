@@ -284,6 +284,32 @@ bool messaging_service::is_same_rack(inet_address addr) const {
     return topo.get_rack(addr) == topo.get_rack();
 }
 
+future<> messaging_service::ban_host(locator::host_id id) {
+    return container().invoke_on_all([id] (messaging_service& ms) -> future<> {
+        if (ms._banned_hosts.contains(id) || ms.is_shutting_down()) {
+            co_return;
+        }
+
+        auto [start, end] = ms._host_connections.equal_range(id);
+        std::vector<connection_ref> conns;
+        conns.reserve(std::distance(start, end));
+        for (auto it = start; it != end; ++it) {
+            conns.push_back(it->second);
+        }
+
+        ms._banned_hosts.insert(id);
+        ms._host_connections.erase(start, end);
+
+        co_await parallel_for_each(conns, [] (connection_ref& ref) {
+            return ref.server.drop_connection(ref.conn_id);
+        });
+    });
+}
+
+bool messaging_service::is_host_banned(locator::host_id id) {
+    return _banned_hosts.contains(id);
+}
+
 void messaging_service::do_start_listen() {
     bool listen_to_bc = _cfg.listen_on_broadcast_address && _cfg.ip != utils::fb_utilities::get_broadcast_address();
     rpc::server_options so;
@@ -395,6 +421,9 @@ messaging_service::messaging_service(config cfg, scheduling_config scfg, std::sh
     register_handler(this, messaging_verb::CLIENT_ID, [this] (rpc::client_info& ci, gms::inet_address broadcast_address, uint32_t src_cpu_id, rpc::optional<uint64_t> max_result_size, rpc::optional<utils::UUID> host_id) {
         if (host_id) {
             auto peer_host_id = locator::host_id(*host_id);
+            if (is_host_banned(peer_host_id)) {
+                return ci.server.drop_connection(ci.conn_id).then([] { return rpc::no_wait; });
+            }
             ci.attach_auxiliary("host_id", peer_host_id);
             _host_connections.emplace(peer_host_id, connection_ref {
                 .server = ci.server,
@@ -404,7 +433,7 @@ messaging_service::messaging_service(config cfg, scheduling_config scfg, std::sh
         ci.attach_auxiliary("baddr", broadcast_address);
         ci.attach_auxiliary("src_cpu_id", src_cpu_id);
         ci.attach_auxiliary("max_result_size", max_result_size.value_or(query::result_memory_limiter::maximum_result_size));
-        return rpc::no_wait;
+        return make_ready_future<rpc::no_wait_type>(rpc::no_wait);
     });
 }
 
