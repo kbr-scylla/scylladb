@@ -21,6 +21,7 @@
 #include "tracing/tracing.hh"
 #include "schema/schema_fwd.hh"
 #include "streaming/stream_fwd.hh"
+#include "locator/host_id.hh"
 
 #include <list>
 #include <vector>
@@ -314,6 +315,7 @@ private:
     scheduling_config _scheduling_config;
     std::vector<scheduling_info_for_connection_index> _scheduling_info_for_connection_index;
     std::vector<tenant_connection_index> _connection_index_for_tenant;
+    std::optional<locator::host_id> _my_host_id;
 
     future<> stop_tls_server();
     future<> stop_nontls_server();
@@ -325,6 +327,12 @@ public:
             uint16_t port = 7000);
     messaging_service(config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>);
     ~messaging_service();
+
+    // Call on each shard during initialization, before sending any messages or registering handlers.
+    void set_my_host_id(locator::host_id);
+
+    // Requires host ID to have been set earlier.
+    locator::host_id get_my_host_id();
 
     future<> start_listen(locator::shared_token_metadata& stm);
     uint16_t port();

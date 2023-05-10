@@ -604,6 +604,9 @@ public:
             // don't start listening so tests can be run in parallel
             ms.start(listen, std::move(7000)).get();
             auto stop_ms = defer([&ms] { ms.stop().get(); });
+            ms.invoke_on_all([host_id = cfg->host_id] (netw::messaging_service& ms) {
+                ms.set_my_host_id(host_id);
+            }).get();
 
             // Normally the auth server is already stopped in here,
             // but if there is an initialization failure we have to

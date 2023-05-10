@@ -1470,6 +1470,11 @@ future<> system_keyspace::setup(sharded<locator::snitch_ptr>& snitch, sharded<ne
             return ms.init_local_preferred_ip_cache(preferred_ips);
         });
     }
+
+    auto host_id = co_await load_local_host_id();
+    co_await ms.invoke_on_all([host_id] (netw::messaging_service& ms) {
+        ms.set_my_host_id(host_id);
+    });
 }
 
 struct truncation_record {

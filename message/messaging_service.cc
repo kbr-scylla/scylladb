@@ -401,6 +401,17 @@ msg_addr messaging_service::get_source(const rpc::client_info& cinfo) {
 
 messaging_service::~messaging_service() = default;
 
+void messaging_service::set_my_host_id(locator::host_id id) {
+    _my_host_id = id;
+}
+
+locator::host_id messaging_service::get_my_host_id() {
+    if (!_my_host_id) {
+        on_internal_error(mlogger, "messaging_service::get_my_host_id: host ID missing");
+    }
+    return *_my_host_id;
+}
+
 uint16_t messaging_service::port() {
     return _cfg.port;
 }
