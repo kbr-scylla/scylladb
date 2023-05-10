@@ -317,6 +317,9 @@ private:
     std::vector<tenant_connection_index> _connection_index_for_tenant;
     std::optional<locator::host_id> _my_host_id;
 
+    struct connection_ref;
+    std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
+
     future<> stop_tls_server();
     future<> stop_nontls_server();
     future<> stop_client();
