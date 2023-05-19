@@ -3639,7 +3639,7 @@ future<service::topology> system_keyspace::load_topology_state() {
             map = &ret.new_nodes;
         } else {
             map = &ret.transition_nodes;
-            if (!ring_slice) {
+            if (nstate != service::node_state::left_token_ring && !ring_slice) {
                 on_fatal_internal_error(slogger, format(
                     "load_topology_state: node {} in transitioning state but missing ring slice", host_id));
             }
@@ -3657,9 +3657,14 @@ future<service::topology> system_keyspace::load_topology_state() {
 
         if (some_row.has("transition_state")) {
             ret.tstate = service::transition_state_from_string(some_row.get_as<sstring>("transition_state"));
-        } else if (!ret.transition_nodes.empty()) {
-            on_internal_error(slogger,
-                "load_topology_state: topology not in transition state but transition nodes are present");
+        } else {
+            for (auto& [id, rs]: ret.transition_nodes) {
+                if (rs.state != service::node_state::left_token_ring) {
+                    on_internal_error(slogger, format(
+                        "load_topology_state: topology not in transition state"
+                        " but transition node {} in state {} is present", id, rs.state));
+                }
+            }
         }
 
         if (some_row.has("current_cdc_generation_uuid")) {

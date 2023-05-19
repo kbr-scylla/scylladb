@@ -413,6 +413,8 @@ future<> storage_service::topology_state_load(cdc::generation_service& cdc_gen_s
                 // Rebuilding node is normal
                 co_await add_normal_node(id, rs);
                 break;
+            case node_state::left_token_ring:
+                break;
             default:
                 on_fatal_internal_error(slogger, ::format("Unexpected state {} for node {}", rs.state, id));
             }
@@ -957,11 +959,11 @@ class topology_coordinator {
                 case node_state::removing: {
                     topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
                     builder.del("tokens")
-                           .set("node_state", node_state::left)
+                           .set("node_state", node_state::left_token_ring)
                            .del_transition_state();
                     auto str = ::format("{}: read fence completed", node.rs->state);
                     co_await update_topology_state(take_guard(std::move(node)), {builder.build()}, std::move(str));
-                    }
+                }
                     break;
                 case node_state::replacing: {
                     topology_mutation_builder builder1(node.guard.write_timestamp(), node.id);
@@ -1133,6 +1135,21 @@ class topology_coordinator {
                 builder.set("node_state", node_state::normal)
                        .del("rebuild_option");
                 co_await update_topology_state(take_guard(std::move(node)), {builder.build()}, "rebuilding completed");
+            }
+                break;
+            case node_state::left_token_ring: {
+                // Wait until other nodes observe the new token ring and stop sending writes to this node.
+                bool exec_command_res;
+                std::tie(node, exec_command_res) = co_await exec_global_command(
+                        std::move(node), raft_topology_cmd::command::barrier, false);
+                if (!exec_command_res) {
+                    break;
+                }
+
+                topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                builder.set("node_state", node_state::left);
+                auto str = ::format("finished decommissioning node {}", node.id);
+                co_await update_topology_state(take_guard(std::move(node)), {builder.build()}, std::move(str));
             }
                 break;
             case node_state::bootstrapping:
@@ -4964,6 +4981,7 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                         result.status = raft_topology_cmd_result::command_status::success;
                     }
                     break;
+                    case node_state::left_token_ring:
                     case node_state::left:
                     case node_state::none:
                     case node_state::removing:
