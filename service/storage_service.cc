@@ -806,6 +806,12 @@ class topology_coordinator {
         co_return std::make_pair(co_await retake_node(id), res);
     };
 
+    future<> remove_from_group0(const raft::server_id& id) {
+        slogger.info("raft topology: removing node {} from group 0 configuration...", id);
+        co_await _group0.remove_from_raft_config(id);
+        slogger.info("raft topology: node {} removed from group 0 configuration", id);
+    }
+
     // Returns `true` iff there was work to do.
     future<bool> handle_topology_transition(group0_guard guard) {
         auto tstate = _topo_sm._topology.tstate;
@@ -955,11 +961,14 @@ class topology_coordinator {
                                                    "bootstrap: read fence completed");
                     }
                     break;
-                case node_state::decommissioning:
-                case node_state::removing: {
+                case node_state::removing:
+                    co_await remove_from_group0(node.id);
+                case node_state::decommissioning: {
                     topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
+                    auto next_state = node.rs->state == node_state::decommissioning
+                                        ? node_state::left_token_ring : node_state::left;
                     builder.del("tokens")
-                           .set("node_state", node_state::left_token_ring)
+                           .set("node_state", next_state)
                            .del_transition_state();
                     auto str = ::format("{}: read fence completed", node.rs->state);
                     co_await update_topology_state(take_guard(std::move(node)), {builder.build()}, std::move(str));
@@ -1193,9 +1202,7 @@ class topology_coordinator {
 
                 // Remove the node from group0 here - in general, it won't be able to leave on its own
                 // because we'll ban it as soon as we tell it to shut down.
-                slogger.info("raft topology: removing node {} from group 0 configuration...", id);
-                co_await _group0.remove_from_raft_config(id);
-                slogger.info("raft topology: node {} removed from group 0 configuration", id);
+                co_await remove_from_group0(node.id);
 
                 topology_mutation_builder builder(node.guard.write_timestamp(), node.id);
                 builder.set("node_state", node_state::left);
