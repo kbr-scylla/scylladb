@@ -782,6 +782,9 @@ private:
     std::optional<shared_future<>> _rebuild_result;
     std::unordered_map<raft::server_id, std::optional<shared_future<>>> _remove_result;
 
+    // During decommission, the node waits for the coordinator to tell it to shut down.
+    std::optional<promise<>> _shutdown_request_promise;
+
     future<raft_topology_cmd_result> raft_topology_cmd_handler(sharded<db::system_distributed_keyspace>& sys_dist_ks, raft::term_t term, const raft_topology_cmd& cmd);
 
     future<> raft_bootstrap(raft::server&);

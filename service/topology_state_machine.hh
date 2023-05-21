@@ -125,7 +125,8 @@ struct raft_topology_cmd {
           barrier,         // request to wait for the latest topology
           stream_ranges,   // reqeust to stream data, return when streaming is
                            // done
-          fence_old_reads  // wait for all reads started before to complete
+          fence_old_reads, // wait for all reads started before to complete
+          shutdown         // a decommissioning node should shut down
       };
       command cmd;
 
