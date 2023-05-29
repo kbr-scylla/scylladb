@@ -77,6 +77,10 @@ private:
     friend class group0_state_machine; // needed for access to _messaging
     size_t _concurrent_ddl_retries;
 public:
+    bool sys_dist_ks = true;
+    bool pull = true;
+    condition_variable cv;
+
     migration_manager(migration_notifier&, gms::feature_service&, netw::messaging_service& ms, service::storage_proxy&, gms::gossiper& gossiper, service::raft_group0_client& group0_client, sharded<db::system_keyspace>& sysks);
 
     migration_notifier& get_notifier() { return _notifier; }

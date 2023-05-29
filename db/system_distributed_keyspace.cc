@@ -301,6 +301,11 @@ future<> system_distributed_keyspace::start() {
                     true /* durable_writes */);
             co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard),
                     "Create system_distributed_everywhere keyspace");
+            _mm.sys_dist_ks = true;
+            _mm.cv.broadcast();
+            dlogger.info("sys dist ks everywhere ready, waiting for pull");
+            co_await _mm.cv.wait([&mm=_mm] { return mm.pull; });
+            dlogger.info("pull done");
         } catch (exceptions::already_exists_exception&) {}
     } else {
         dlogger.info("{} keyspase is already present. Not creating", NAME_EVERYWHERE);
