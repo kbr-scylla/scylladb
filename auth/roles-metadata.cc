@@ -51,7 +51,8 @@ future<bool> default_role_row_satisfies(
             meta::roles_table::qualified_name,
             meta::roles_table::role_col_name);
 
-    return do_with(std::move(p), [&qp](const auto& p) {
+    co_await sleep(std::chrono::seconds{5});
+    co_return co_await do_with(std::move(p), [&qp](const auto& p) {
         return qp.execute_internal(
                 query,
                 db::consistency_level::ONE,

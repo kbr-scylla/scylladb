@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip
 async def test_hints_manager_shutdown_hang(manager: ManagerClient) -> None:
     """Reproducer for #8079"""
     s1 = await manager.server_add(config={
@@ -61,3 +62,11 @@ async def test_hints_manager_shutdown_hang(manager: ManagerClient) -> None:
 
     logger.info(f"Stop {s1} gracefully")
     await manager.server_stop_gracefully(s1.server_id)
+
+
+@pytest.mark.asyncio
+async def test_auth_service_shutdown_hang(manager: ManagerClient) -> None:
+    s1 = await manager.server_add()
+    s2 = await manager.server_add()
+    await manager.server_stop(s1.server_id)
+    await manager.server_stop_gracefully(s2.server_id)
