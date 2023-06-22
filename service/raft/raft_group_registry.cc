@@ -111,7 +111,17 @@ public:
 
     virtual future<>
     on_alive(gms::inet_address endpoint, gms::endpoint_state ep_state) override {
-        return on_endpoint_change(endpoint, ep_state);
+        auto app_state_ptr = ep_state.get_application_state_ptr(gms::application_state::HOST_ID);
+        if (app_state_ptr) {
+            raft::server_id id(utils::UUID(app_state_ptr->value()));
+            rslog.info("gossiper_state_change_subscriber_proxy::on_alive() {} {}", endpoint, id);
+            if (std::string{endpoint.to_sstring()}.ends_with(".2")) {
+                rslog.info("Sleeping before handling on_alive from .2");
+                co_await seastar::sleep(std::chrono::seconds{6});
+                rslog.info("Finished Sleeping before handling on_alive from .2");
+            }
+        }
+        co_await on_endpoint_change(endpoint, ep_state);
     }
 
     virtual future<>
