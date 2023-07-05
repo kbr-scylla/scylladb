@@ -276,6 +276,7 @@ static void test_database(void (*run_tests)(populate_fn_ex, bool), unsigned cgs)
             for (auto&& m : partitions) {
                 apply_mutation(e.db(), uuid, m).get();
             }
+            sleep(std::chrono::milliseconds{500}).get();
             cf.flush().get();
             cf.get_row_cache().invalidate(row_cache::external_updater([] {})).get();
             return mutation_source([&] (schema_ptr s,

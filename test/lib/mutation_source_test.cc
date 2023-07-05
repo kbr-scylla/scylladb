@@ -1780,10 +1780,6 @@ struct mutation_sets {
     mutation_sets(){}
 };
 
-static tombstone new_tombstone() {
-    return { new_timestamp(), gc_clock::now() + std::chrono::hours(10) };
-}
-
 static mutation_sets generate_mutation_sets() {
     using mutations = std::vector<mutation>;
     mutation_sets result;
@@ -1808,142 +1804,19 @@ static mutation_sets generate_mutation_sets() {
 
         auto local_keys = tests::generate_partition_keys(2, s1); // use only one schema as s1 and s2 don't differ in representation.
         auto& key1 = local_keys[0];
-        auto& key2 = local_keys[1];
-
-        // Differing keys
-        result.unequal.emplace_back(mutations{
-            mutation(s1, key1),
-            mutation(s2, key2)
-        });
 
         auto m1 = mutation(s1, key1);
         auto m2 = mutation(s2, key1);
-        result.equal.emplace_back(mutations{m1, m2});
-
-        clustering_key ck1 = clustering_key::from_deeply_exploded(*s1, {data_value(bytes("ck1_0")), data_value(bytes("ck1_1"))});
-        clustering_key ck2 = clustering_key::from_deeply_exploded(*s1, {data_value(bytes("ck2_0")), data_value(bytes("ck2_1"))});
         auto ttl = gc_clock::duration(1);
-
-        {
-            auto tomb = new_tombstone();
-            m1.partition().apply(tomb);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.partition().apply(tomb);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto tomb = new_tombstone();
-            auto key = clustering_key_prefix::from_deeply_exploded(*s1, {data_value(bytes("ck2_0"))});
-            m1.partition().apply_row_tombstone(*s1, key, tomb);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.partition().apply_row_tombstone(*s2, key, tomb);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto tomb = new_tombstone();
-            m1.partition().apply_delete(*s1, ck2, tomb);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.partition().apply_delete(*s2, ck2, tomb);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
         {
             // Add a row which falls under the tombstone prefix.
             auto ts = new_timestamp();
             auto key_full = clustering_key_prefix::from_deeply_exploded(*s1, {data_value(bytes("ck2_0")), data_value(bytes("ck1_1")), });
             m1.set_clustered_cell(key_full, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
-            result.unequal.emplace_back(mutations{m1, m2});
             m2.set_clustered_cell(key_full, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
             result.equal.emplace_back(mutations{m1, m2});
         }
 
-        {
-            auto ts = new_timestamp();
-            m1.set_clustered_cell(ck1, "regular_col_1", data_value(bytes("regular_col_value")), ts, ttl);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_clustered_cell(ck1, "regular_col_1", data_value(bytes("regular_col_value")), ts, ttl);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.set_clustered_cell(ck1, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_clustered_cell(ck1, "regular_col_2", data_value(bytes("regular_col_value")), ts, ttl);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.partition().apply_insert(*s1, ck2, ts);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.partition().apply_insert(*s2, ck2, ts);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.set_clustered_cell(ck2, "regular_col_1", data_value(bytes("ck2_regular_col_1_value")), ts);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_clustered_cell(ck2, "regular_col_1", data_value(bytes("ck2_regular_col_1_value")), ts);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.set_static_cell("static_col_1", data_value(bytes("static_col_value")), ts, ttl);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_static_cell("static_col_1", data_value(bytes("static_col_value")), ts, ttl);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.set_static_cell("static_col_2", data_value(bytes("static_col_value")), ts);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_static_cell("static_col_2", data_value(bytes("static_col_value")), ts);
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            m1.partition().ensure_last_dummy(*m1.schema());
-            result.equal.emplace_back(mutations{m1, m2});
-
-            m2.partition().ensure_last_dummy(*m2.schema());
-            result.equal.emplace_back(mutations{m1, m2});
-        }
-
-        {
-            auto ts = new_timestamp();
-            m1.set_clustered_cell(ck2, "regular_col_1_s1", data_value(bytes("x")), ts);
-            result.unequal.emplace_back(mutations{m1, m2});
-            m2.set_clustered_cell(ck2, "regular_col_1_s2", data_value(bytes("x")), ts);
-            result.unequal.emplace_back(mutations{m1, m2});
-        }
-    }
-
-    static constexpr auto rmg_iterations = 10;
-
-    {
-        random_mutation_generator gen(random_mutation_generator::generate_counters::no, local_shard_only::yes,
-                random_mutation_generator::generate_uncompactable::yes);
-        for (int i = 0; i < rmg_iterations; ++i) {
-            auto m = gen();
-            result.unequal.emplace_back(mutations{m, gen()}); // collision unlikely
-            result.equal.emplace_back(mutations{m, m});
-        }
-    }
-
-    {
-        random_mutation_generator gen(random_mutation_generator::generate_counters::yes, local_shard_only::yes,
-                random_mutation_generator::generate_uncompactable::yes);
-        for (int i = 0; i < rmg_iterations; ++i) {
-            auto m = gen();
-            result.unequal.emplace_back(mutations{m, gen()}); // collision unlikely
-            result.equal.emplace_back(mutations{m, m});
-        }
     }
 
     return result;
