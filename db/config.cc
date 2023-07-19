@@ -418,7 +418,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\tperiodic : Used with commitlog_sync_period_in_ms (Default: 10000 - 10 seconds ) to control how often the commit log is synchronized to disk. Periodic syncs are acknowledged immediately.\n"
         "\tbatch : Used with commitlog_sync_batch_window_in_ms (Default: disabled **) to control how long Scylla waits for other writes before performing a sync. When using this method, writes are not acknowledged until fsynced to disk.\n"
         "Related information: Durability")
-    , commitlog_segment_size_in_mb(this, "commitlog_segment_size_in_mb", value_status::Used, 64,
+    , commitlog_segment_size_in_mb(this, "commitlog_segment_size_in_mb", value_status::Used, 32,
         "Sets the size of the individual commitlog file segments. A commitlog segment may be archived, deleted, or recycled after all its data has been flushed to SSTables. This amount of data can potentially include commitlog segments from every table in the system. The default size is usually suitable for most commitlog archiving, but if you want a finer granularity, 8 or 16 MB is reasonable. See Commit log archive configuration.\n"
         "Related information: Commit log archive configuration")
     /* Note: does not exist on the listing page other than in above comment, wtf? */

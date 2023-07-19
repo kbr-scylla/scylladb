@@ -202,6 +202,7 @@ raft_server_for_group raft_group0::create_server_for_group0(raft::group_id gid, 
     auto& persistence_ref = *storage;
     auto* cl = _qp.proxy().get_db().local().commitlog();
     auto config = raft::server::configuration {
+        .snapshot_threshold = 10,
         .on_background_error = [gid, this](std::exception_ptr e) {
             _raft_gr.abort_server(gid, fmt::format("background error, {}", e));
             _status_for_monitoring = status_for_monitoring::aborted;

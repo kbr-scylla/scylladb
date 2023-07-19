@@ -76,7 +76,7 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
         'consistent_cluster_management': True,
 
         'skip_wait_for_gossip_to_settle': 0,
-        'ring_delay_ms': 0,
+        'ring_delay_ms': 1000,
         'num_tokens': 16,
         'flush_schema_tables_after_modification': False,
         'auto_snapshot': False,
@@ -99,6 +99,8 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
 
         'permissions_update_interval_in_ms': 100,
         'permissions_validity_in_ms': 100,
+
+        'commitlog_segment_size_in_mb': 2,
     }
 
 # Seastar options can not be passed through scylla.yaml, use command line
@@ -107,7 +109,7 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
 # Scylla refuses to boot.
 SCYLLA_CMDLINE_OPTIONS = [
     '--smp', '2',
-    '-m', '1G',
+    '-m', '4G',
     '--collectd', '0',
     '--overprovisioned',
     '--max-networking-io-control-blocks', '100',
@@ -117,7 +119,8 @@ SCYLLA_CMDLINE_OPTIONS = [
     '--abort-on-lsa-bad-alloc', '1',
     '--abort-on-seastar-bad-alloc',
     '--abort-on-internal-error', '1',
-    '--abort-on-ebadf', '1'
+    '--abort-on-ebadf', '1',
+    '--logger-log-level', 'group0_raft_sm=trace',
 ]
 
 # [--smp, 1], [--smp, 2] -> [--smp, 2]

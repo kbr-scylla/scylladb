@@ -142,6 +142,14 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
 
     auto read_apply_mutex_holder = co_await get_units(_client._read_apply_mutex, 1);
 
+    size_t total = 0;
+    for (auto& m: *cm) {
+        auto sz = m.representation().size();
+        slogger.info("transfer_snapshot schema mutations size {}", sz);
+        total += sz;
+    }
+    slogger.info("transfer_snapshot TOTAL schema mutations size {}", total);
+
     co_await _mm.merge_schema_from(addr, std::move(*cm));
 
     co_await _sp.mutate_locally({std::move(history_mut)}, nullptr);
