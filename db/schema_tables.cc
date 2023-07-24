@@ -1268,6 +1268,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
         delete_schema_version(mutation);
     }
 
+    auto before_ts = db_clock::now();
+
     // Resolve sel.all_in_keyspace == true to the actual list of tables and views.
     for (auto&& [keyspace_name, sel] : affected_tables) {
         if (sel.all_in_keyspace) {
@@ -1291,6 +1293,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     auto old_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
     auto old_scylla_aggregates = co_await read_schema_for_keyspaces(proxy, SCYLLA_AGGREGATES, keyspaces);
 
+    auto after_read_ts = db_clock::now();
+
     if (proxy.local().get_db().local().uses_schema_commitlog()) {
         co_await proxy.local().get_db().local().apply(freeze(mutations), db::no_timeout);
     } else {
@@ -1304,6 +1308,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
         }
     }
 
+    auto after_mutate_ts = db_clock::now();
+
     // with new data applied
     auto&& new_keyspaces = co_await read_schema_for_keyspaces(proxy, KEYSPACES, keyspaces);
     auto&& new_column_families = co_await read_tables_for_keyspaces(proxy, keyspaces, table_kind::table, affected_tables);
@@ -1312,6 +1318,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     auto new_functions = co_await read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces);
     auto new_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
     auto new_scylla_aggregates = co_await read_schema_for_keyspaces(proxy, SCYLLA_AGGREGATES, keyspaces);
+
+    auto after_read2_ts = db_clock::now();
 
     std::set<sstring> keyspaces_to_drop = co_await merge_keyspaces(proxy, std::move(old_keyspaces), std::move(new_keyspaces));
     auto types_to_drop = co_await merge_types(proxy, std::move(old_types), std::move(new_types));
@@ -1322,6 +1330,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     co_await merge_aggregates(proxy, std::move(old_aggregates), std::move(new_aggregates), std::move(old_scylla_aggregates), std::move(new_scylla_aggregates));
     co_await types_to_drop.drop();
 
+    auto after_merge_ts = db_clock::now();
+
     co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) -> future<> {
         // it is safe to drop a keyspace only when all nested ColumnFamilies where deleted
         for (auto keyspace_to_drop : keyspaces_to_drop) {
@@ -1329,6 +1339,17 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
             co_await db.get_notifier().drop_keyspace(keyspace_to_drop);
         }
     });
+
+    auto after_notifier_drop_ts = db_clock::now();
+
+    using millis = std::chrono::milliseconds;
+    slogger.info("---- total: {}, read: {}, mutate: {}, read2: {}, merge: {}, notifier: {}",
+                 millis{after_notifier_drop_ts - before_ts},
+                 millis{after_read_ts - before_ts},
+                 millis{after_mutate_ts - after_read_ts},
+                 millis{after_read2_ts - after_mutate_ts},
+                 millis{after_merge_ts - after_read2_ts},
+                 millis{after_notifier_drop_ts - after_merge_ts});
 }
 
 future<lw_shared_ptr<query::result_set>> extract_scylla_specific_keyspace_info(distributed<service::storage_proxy>& proxy, const schema_result_value_type& partition) {
