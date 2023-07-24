@@ -145,7 +145,6 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
     size_t total = 0;
     for (auto& m: *cm) {
         auto sz = m.representation().size();
-        slogger.info("transfer_snapshot schema mutations size {}", sz);
         total += sz;
     }
     slogger.info("transfer_snapshot TOTAL schema mutations size {}", total);

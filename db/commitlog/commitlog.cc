@@ -1139,6 +1139,7 @@ public:
         const auto s = size + writer.num_entries * entry_overhead_size + (writer.num_entries > 1 ? multi_entry_overhead_size : 0u); // total size
 
         _segment_manager->sanity_check_size(s);
+        clogger.info("allocate: sanity check passed, size {} max_size {}", s, _segment_manager->max_mutation_size);
 
         if (!is_still_allocating() || position() + s > _segment_manager->max_size) { // would we make the file too big?
             return write_result::no_space;
@@ -1308,6 +1309,7 @@ future<R> db::commitlog::segment_manager::allocate_when_possible(T writer, db::t
     // if we are too big at this moment we'll never reach allocate() to actually throw at that
     // point.
     sanity_check_size(size);
+    clogger.info("allocate_when_possible: sanity check passed, size {} max_size {}", size, max_mutation_size);
 
     auto fut = get_units(_request_controller, size, timeout);
     if (_request_controller.waiters()) {

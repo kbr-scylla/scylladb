@@ -48,11 +48,12 @@ async def test_snapshot_too_large_mutation_repro(manager: ManagerClient) -> None
         logger.info(f"Created index {i}, time: {dur}")
 
     times = []
-    for i in range(65):
-        tasks = [asyncio.create_task(task(j)) for j in range(i*10, (i+1)*10)]
+    batch_size = 100
+    for i in range(1000 // batch_size):
+        tasks = [asyncio.create_task(task(j)) for j in range(i*batch_size, (i+1)*batch_size)]
         await asyncio.gather(*tasks)
 
     logger.info(f"times: {times}")
     await manager.server_add()
 
-    await cql.run_async("DROP KEYSPACE feeds;")
+    #await cql.run_async("DROP KEYSPACE feeds;")

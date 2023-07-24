@@ -333,7 +333,7 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
     try {
         for (const auto& cm : canonical_mutations) {
             auto& tbl = db.find_column_family(cm.column_family_id());
-            mlogger.info("merging schema mut into table {}", tbl.schema()->cf_name());
+            mlogger.info("merging schema mut into table {} size {}", tbl.schema()->cf_name(), cm.representation().size());
             mutations.emplace_back(cm.to_mutation(
                     tbl.schema()));
         }

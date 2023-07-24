@@ -100,7 +100,8 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
         'permissions_update_interval_in_ms': 100,
         'permissions_validity_in_ms': 100,
 
-        'commitlog_segment_size_in_mb': 2,
+        'commitlog_segment_size_in_mb': 8,
+
     }
 
 # Seastar options can not be passed through scylla.yaml, use command line
