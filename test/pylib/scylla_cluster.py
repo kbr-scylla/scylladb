@@ -102,6 +102,8 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
 
         'commitlog_segment_size_in_mb': 8,
 
+        'force_schema_commit_log': True,
+
     }
 
 # Seastar options can not be passed through scylla.yaml, use command line
