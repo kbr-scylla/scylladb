@@ -1297,9 +1297,26 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     auto after_read_ts = db_clock::now();
 
     if (proxy.local().get_db().local().uses_schema_commitlog()) {
-        co_await proxy.local().get_db().local().apply(freeze(mutations), db::no_timeout);
+        auto frozen = freeze(mutations);
+        std::vector<size_t> sizes;
+        for (auto& m: frozen) {
+            sizes.push_back(m.representation().size());
+        }
+        slogger.info("------ do_merge_schema Frozen mutation sizes: {}", sizes);
+        try {
+        co_await proxy.local().get_db().local().apply(std::move(frozen), db::no_timeout);
+        } catch (...) {
+            slogger.info("---- do_merge_schema 1 Failed to merge mutations {}: {}", mutations, std::current_exception());
+            throw;
+        }
     } else {
+        slogger.info("------ do_merge_schema doesn't use schema commitlog");
+        try {
         co_await proxy.local().mutate_locally(std::move(mutations), tracing::trace_state_ptr());
+        } catch (...) {
+            slogger.info("---- do_merge_schema 2 Failed to merge mutations {}: {}", mutations, std::current_exception());
+            throw;
+        }
 
         if (do_flush) {
             auto& db = proxy.local().get_db();

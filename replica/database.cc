@@ -1944,7 +1944,14 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
         on_internal_error(dblog, "Cannot apply atomically without commitlog");
     }
 
-    std::vector<rp_handle> handles = co_await cl->add_entries(std::move(writers), timeout);
+    std::vector<rp_handle> handles;
+    try {
+    dblog.info("do_apply_many: batch of {} writers", writers.size());
+    handles = co_await cl->add_entries(std::move(writers), timeout);
+    } catch(...) {
+        dblog.info("do_apply_many failed to cl->add_entries: {}", std::current_exception());
+        throw;
+    }
 
     // FIXME: Memtable application is not atomic so reads may observe mutations partially applied until restart.
     for (size_t i = 0; i < muts.size(); ++i) {
@@ -2010,6 +2017,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             }
         } catch (...) {
             ex = std::current_exception();
+            dblog.info("do_apply failed to cl->add_entry: {}", ex);
         }
         if (ex) {
             if (is_timeout_exception(ex)) {
