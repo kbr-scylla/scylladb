@@ -435,7 +435,7 @@ public:
     // Wait for nodes to be alive on all shards
     future<> wait_alive(std::vector<gms::inet_address> nodes, std::chrono::milliseconds timeout);
 
-    future<> apply_state_locally(std::map<inet_address, endpoint_state> map);
+    future<> apply_state_locally(std::map<inet_address, endpoint_state> map, sstring source);
 
 private:
     future<> do_apply_state_locally(gms::inet_address node, const endpoint_state& remote_state, bool listener_notification);
