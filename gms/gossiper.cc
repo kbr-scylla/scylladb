@@ -66,7 +66,7 @@ const std::set<inet_address>& gossiper::get_seeds() const noexcept {
 }
 
 std::chrono::milliseconds gossiper::quarantine_delay() const noexcept {
-    auto delay = std::max(unsigned(30000), _gcfg.ring_delay_ms);
+    auto delay = std::max(unsigned(5000), _gcfg.ring_delay_ms);
     auto ring_delay = std::chrono::milliseconds(delay);
     return ring_delay * 2;
 }
@@ -278,7 +278,7 @@ future<> gossiper::handle_ack_msg(msg_addr id, gossip_digest_ack ack_msg) {
     auto f = make_ready_future<>();
     if (ep_state_map.size() > 0) {
         update_timestamp_for_nodes(ep_state_map);
-        f = this->apply_state_locally(std::move(ep_state_map));
+        f = this->apply_state_locally(std::move(ep_state_map), format("ack from {}", id));
     }
 
     return f.then([this, from = id, ack_msg_digest = std::move(g_digest_list), mp = std::move(mp), g = this->shared_from_this()] () mutable {
@@ -389,7 +389,7 @@ future<> gossiper::handle_ack2_msg(msg_addr from, gossip_digest_ack2 msg) {
         }
     });
 
-    return apply_state_locally(std::move(remote_ep_state_map)).finally([mp = std::move(mp)] {});
+    return apply_state_locally(std::move(remote_ep_state_map), format("ack2 from {}", from)).finally([mp = std::move(mp)] {});
 }
 
 future<> gossiper::handle_echo_msg(gms::inet_address from, std::optional<int64_t> generation_number_opt) {
@@ -619,7 +619,7 @@ future<> gossiper::apply_state_locally_without_listener_notification(std::unorde
     }
 }
 
-future<> gossiper::apply_state_locally(std::map<inet_address, endpoint_state> map) {
+future<> gossiper::apply_state_locally(std::map<inet_address, endpoint_state> map, sstring source) {
     auto start = std::chrono::steady_clock::now();
     auto endpoints = boost::copy_range<utils::chunked_vector<inet_address>>(map | boost::adaptors::map_keys);
     std::shuffle(endpoints.begin(), endpoints.end(), _random_engine);
@@ -627,13 +627,16 @@ future<> gossiper::apply_state_locally(std::map<inet_address, endpoint_state> ma
     boost::partition(endpoints, node_is_seed);
     logger.debug("apply_state_locally_endpoints={}", endpoints);
 
-    co_await coroutine::parallel_for_each(endpoints, [this, &map] (auto&& ep) -> future<> {
+    co_await coroutine::parallel_for_each(endpoints, [this, &map, &source] (auto&& ep) -> future<> {
         if (ep == this->get_broadcast_address() && !this->is_in_shadow_round()) {
             return make_ready_future<>();
         }
         if (_just_removed_endpoints.contains(ep)) {
-            logger.trace("Ignoring gossip for {} because it is quarantined", ep);
+            logger.info("Ignoring gossip for {} because it is quarantined; source: {}", ep, source);
             return make_ready_future<>();
+        }
+        if (_previously_quarantined.contains(ep)) {
+            logger.info("Handling gossip for {} (previously quarantined but no longer); source: {}", ep, source);
         }
         return seastar::with_semaphore(_apply_state_locally_semaphore, 1, [this, &ep, &map] () mutable {
             return do_apply_state_locally(ep, map[ep], true);
@@ -686,7 +689,7 @@ future<> gossiper::remove_endpoint(inet_address endpoint, permit_id pid) {
     _syn_handlers.erase(endpoint);
     _ack_handlers.erase(endpoint);
     quarantine_endpoint(endpoint);
-    logger.debug("removing endpoint {}", endpoint);
+    logger.info("removing endpoint {}", endpoint);
 }
 
 future<> gossiper::do_status_check() {
@@ -1165,7 +1168,7 @@ future<> gossiper::evict_from_membership(inet_address endpoint, permit_id pid) {
     });
     _expire_time_endpoint_map.erase(endpoint);
     quarantine_endpoint(endpoint);
-    logger.debug("evicting {} from gossip", endpoint);
+    logger.info("evicting {} from gossip", endpoint);
 }
 
 void gossiper::quarantine_endpoint(inet_address endpoint) {
@@ -1174,6 +1177,7 @@ void gossiper::quarantine_endpoint(inet_address endpoint) {
 
 void gossiper::quarantine_endpoint(inet_address endpoint, clk::time_point quarantine_start) {
     _just_removed_endpoints[endpoint] = quarantine_start;
+    _previously_quarantined.insert(endpoint);
 }
 
 void gossiper::make_random_gossip_digest(utils::chunked_vector<gossip_digest>& g_digests) {

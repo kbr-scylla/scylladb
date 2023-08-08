@@ -232,6 +232,7 @@ private:
      * after removal to prevent nodes from falsely reincarnating during the time when removal
      * gossip gets propagated to all nodes */
     std::map<inet_address, clk::time_point> _just_removed_endpoints;
+    std::unordered_set<inet_address> _previously_quarantined;
 
     std::map<inet_address, clk::time_point> _expire_time_endpoint_map;
 
@@ -448,7 +449,7 @@ public:
     // Get live members synchronized to all shards
     future<std::set<inet_address>> get_live_members_synchronized();
 
-    future<> apply_state_locally(std::map<inet_address, endpoint_state> map);
+    future<> apply_state_locally(std::map<inet_address, endpoint_state> map, sstring source);
 
 private:
     future<> do_apply_state_locally(gms::inet_address node, const endpoint_state& remote_state, bool listener_notification);
