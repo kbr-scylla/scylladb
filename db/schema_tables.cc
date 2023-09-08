@@ -330,12 +330,13 @@ schema_ptr tables() {
 
 // Holds Scylla-specific table metadata.
 schema_ptr scylla_tables(schema_features features) {
-    static thread_local schema_ptr schemas[2][2]{};
+    static thread_local schema_ptr schemas[2][2][2]{};
 
     bool has_cdc_options = features.contains(schema_feature::CDC_OPTIONS);
     bool has_per_table_partitioners = features.contains(schema_feature::PER_TABLE_PARTITIONERS);
+    bool has_group0_schema_versioning = features.contains(schema_feature::GROUP0_SCHEMA_VERSIONING);
 
-    schema_ptr& s = schemas[has_cdc_options][has_per_table_partitioners];
+    schema_ptr& s = schemas[has_cdc_options][has_per_table_partitioners][has_group0_schema_versioning];
     if (!s) {
         auto id = generate_legacy_id(NAME, SCYLLA_TABLES);
         auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id))
@@ -353,6 +354,10 @@ schema_ptr scylla_tables(schema_features features) {
         if (has_per_table_partitioners) {
             sb.with_column("partitioner", utf8_type);
             offset |= 0b10;
+        }
+        if (has_group0_schema_versioning) {
+            sb.with_column("originated_from_group0", boolean_type);
+            offset |= 0b100;
         }
         sb.with_version(system_keyspace::generate_schema_version(id, offset));
         s = sb.build();
