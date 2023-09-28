@@ -521,7 +521,7 @@ future<::shared_ptr<cql_transport::messages::result_message>> query_processor::e
     size_t retries = remote_.get().mm.get_concurrent_ddl_retries();
     while (true)  {
         try {
-            auto guard = co_await remote_.get().mm.start_group0_operation();
+            auto guard = co_await remote_.get().mm.start_group0_operation(format("statement {}", statement->raw_cql_statement));
             co_return co_await fn(query_state, statement, options, std::move(guard));
         } catch (const service::group0_concurrent_modification& ex) {
             log.warn("Failed to execute statement \"{}\" due to guard conflict.{}.",

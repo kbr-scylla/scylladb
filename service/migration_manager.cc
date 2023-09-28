@@ -33,6 +33,7 @@
 #include "cql3/functions/user_aggregate.hh"
 #include "cql3/functions/user_function.hh"
 #include "cql3/functions/function_name.hh"
+#include "utils/recent_entries_map.hh"
 
 namespace service {
 
@@ -48,13 +49,18 @@ migration_manager::migration_manager(migration_notifier& notifier, gms::feature_
           _notifier(notifier)
         , _group0_barrier(this_shard_id() == 0 ?
             std::function<future<>()>([this] () -> future<> {
+                mlogger.trace("starting barrier in serialized action");
                 // This will run raft barrier and will sync schema with the leader
-                (void)co_await start_group0_operation();
+                (void)co_await start_group0_operation("migration manager barrier");
+                mlogger.trace("finished barrier in serialized action");
             }) :
             std::function<future<>()>([this] () -> future<> {
-                co_await container().invoke_on(0, [] (migration_manager& mm) -> future<> {
+                co_await container().invoke_on(0, [src = this_shard_id()] (migration_manager& mm) -> future<> {
+                    auto src_ = src;
+                    mlogger.trace("triggering barrier from shard {} in serialized action", src_);
                     // batch group0 raft barriers
                     co_await mm._group0_barrier.trigger();
+                    mlogger.trace("finished barrier from shard {} in serialized action", src_);
                 });
             })
         )
@@ -1020,9 +1026,9 @@ future<> migration_manager::announce(std::vector<mutation> schema, group0_guard 
     }
 }
 
-future<group0_guard> migration_manager::start_group0_operation() {
+future<group0_guard> migration_manager::start_group0_operation(std::optional<sstring> source) {
     assert(this_shard_id() == 0);
-    return _group0_client.start_operation(&_as);
+    return _group0_client.start_operation(&_as, source);
 }
 
 /**
@@ -1199,10 +1205,15 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     // `_enable_schema_pulls` may change concurrently with this function (but only from `true` to `false`).
     bool use_raft = !_enable_schema_pulls;
 
+    using rate_limits = utils::recent_entries_map<table_schema_version, logger::rate_limit>;
+    static thread_local rate_limits rlimits1;
+    static thread_local rate_limits rlimits2;
+
     if (use_raft) {
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
         // Batch the barriers so we don't invoke them redundantly.
-        mlogger.trace("Performing raft read barrier because schema is not synced, version: {}", v);
+        auto& rlimit = rlimits1.try_get_recent_entry(v, std::chrono::milliseconds{10});
+        mlogger.log(log_level::trace, rlimit, "Performing raft read barrier because schema is not synced, version: {}", v);
         co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
     }
 
@@ -1210,11 +1221,15 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
-        mlogger.trace("Mark schema {} as synced", v);
+        auto& rlimit = rlimits2.try_get_recent_entry(v, std::chrono::milliseconds{10});
+        mlogger.log(log_level::trace, rlimit, "Mark schema {} as synced", v);
         co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
     } else {
         co_await maybe_sync(s, dst);
     }
+
+    rlimits1.remove_least_recent_entries(std::chrono::minutes{5});
+    rlimits2.remove_least_recent_entries(std::chrono::minutes{5});
 
     co_return s;
 }

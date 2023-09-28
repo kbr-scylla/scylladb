@@ -234,24 +234,32 @@ static utils::UUID generate_group0_state_id(utils::UUID prev_state_id) {
     return utils::UUID_gen::get_random_time_UUID_from_micros(std::chrono::microseconds{ts});
 }
 
-future<group0_guard> raft_group0_client::start_operation(seastar::abort_source* as) {
+future<group0_guard> raft_group0_client::start_operation(seastar::abort_source* as, std::optional<sstring> source) {
     if (this_shard_id() != 0) {
         on_internal_error(logger, "start_group0_operation: must run on shard 0");
     }
 
+    static thread_local int counter = 0;
+    auto id = counter++;
+
     auto [upgrade_lock_holder, upgrade_state] = co_await get_group0_upgrade_state();
     switch (upgrade_state) {
         case group0_upgrade_state::use_post_raft_procedures: {
+            logger.info("start_operation {} {} operation mutex barrier", id, source);
             auto operation_holder = co_await get_units(_operation_mutex, 1);
+            logger.info("start_operation {} {} read barrier", id, source);
             co_await _raft_gr.group0().read_barrier(as);
 
             // Take `_group0_read_apply_mutex` *after* read barrier.
             // Read barrier may wait for `group0_state_machine::apply` which also takes this mutex.
+            logger.info("start_operation {} {} hold read apply mutex", id, source);
             auto read_apply_holder = co_await hold_read_apply_mutex();
 
+            logger.info("start_operation {} {} read from disk", id, source);
             auto observed_group0_state_id = co_await _sys_ks.get_last_group0_state_id();
             auto new_group0_state_id = generate_group0_state_id(observed_group0_state_id);
 
+            logger.info("start_operation {} {} return guard", id, source);
             co_return group0_guard {
                 std::make_unique<group0_guard::impl>(
                     std::move(operation_holder),

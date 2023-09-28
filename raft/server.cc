@@ -1194,6 +1194,8 @@ future<> server_impl::applier_fiber() {
                 term_t last_term = batch.back()->term;
                 assert(last_idx == _applied_idx + batch.size());
 
+                logger.trace("[{}] applying entries, first idx {} last idx {}", _id, batch.front()->idx, last_idx);
+
                 boost::range::copy(
                        batch |
                        boost::adaptors::filtered([] (log_entry_ptr& entry) { return std::holds_alternative<command>(entry->data); }) |
@@ -1212,6 +1214,8 @@ future<> server_impl::applier_fiber() {
                     }
                     _stats.applied_entries += size;
                 }
+
+                logger.trace("[{}] done applying entries, new apply index {}", _id, last_idx);
 
                _applied_idx = last_idx;
                _applied_index_changed.broadcast();
@@ -1372,7 +1376,8 @@ future<> server_impl::read_barrier(seastar::abort_source* as) {
     });
 
     logger.trace("[{}] read_barrier read index {}, applied index {}", _id, read_idx, _applied_idx);
-    co_return co_await wait_for_apply(read_idx, as);
+    co_await wait_for_apply(read_idx, as);
+    logger.trace("[{}] read_barrier finished wait_for_apply (read index {}, applied index {})", _id, read_idx, _applied_idx);
 }
 
 void server_impl::abort_snapshot_transfer(server_id id) {

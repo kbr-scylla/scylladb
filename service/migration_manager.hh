@@ -141,7 +141,7 @@ public:
     //
     // Call ONLY on shard 0.
     // Requires a quorum of nodes to be available in order to finish.
-    future<group0_guard> start_group0_operation();
+    future<group0_guard> start_group0_operation(std::optional<sstring> source = std::nullopt);
 
     // Apply a group 0 change.
     // The future resolves after the change is applied locally.
