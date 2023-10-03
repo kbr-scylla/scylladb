@@ -1188,10 +1188,10 @@ static future<schema_ptr> get_schema_definition(table_schema_version v, netw::me
 }
 
 future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as) {
-    return get_schema_for_write(v, dst, ms, as);
+    return get_schema_for_write(v, dst, ms, as, true);
 }
 
-future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as) {
+future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as, bool read) {
     if (_as.abort_requested()) {
         co_return coroutine::exception(std::make_exception_ptr(abort_requested_exception()));
     }
@@ -1208,6 +1208,12 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     using rate_limits = utils::recent_entries_map<table_schema_version, logger::rate_limit>;
     static thread_local rate_limits rlimits1;
     static thread_local rate_limits rlimits2;
+    static thread_local rate_limits timeout_rlimits;
+
+    int step = 0;
+    auto start = db_clock::now();
+
+    try {
 
     if (use_raft) {
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
@@ -1217,7 +1223,11 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
     }
 
+    ++step;
+
     s = co_await get_schema_definition(v, dst, ms, _storage_proxy);
+
+    ++step;
 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
@@ -1228,8 +1238,17 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         co_await maybe_sync(s, dst);
     }
 
+    } catch (abort_requested_exception&) {
+        auto& rlimit = timeout_rlimits.try_get_recent_entry(v, std::chrono::milliseconds{10});
+        auto end = db_clock::now();
+        auto dur = end - start;
+        mlogger.log(log_level::trace, rlimit, "Timed out schema sync after {} ms, v {}, read {}, step {}", dur, v, read, step);
+        throw;
+    }
+
     rlimits1.remove_least_recent_entries(std::chrono::minutes{5});
     rlimits2.remove_least_recent_entries(std::chrono::minutes{5});
+    timeout_rlimits.remove_least_recent_entries(std::chrono::minutes{5});
 
     co_return s;
 }

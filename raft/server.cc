@@ -974,7 +974,9 @@ static rpc_config_diff diff_address_sets(const server_address_set& prev, const c
 future<> server_impl::io_fiber(index_t last_stable) {
     logger.trace("[{}] io_fiber start", _id);
     try {
+        int it = 0;
         while (true) {
+            logger.trace("[{}] io_fiber starting iteration {}", _id, it);
             auto batch = co_await _fsm->poll_output();
             _stats.polls++;
 
@@ -983,7 +985,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
                 // together. A vote may change independently of
                 // term, but it's safe to update both in this
                 // case.
+                logger.trace("[{}] io_fiber storing term and vote", _id);
                 co_await _persistence->store_term_and_vote(batch.term_and_vote->first, batch.term_and_vote->second);
+                logger.trace("[{}] io_fiber stored term and vote", _id);
                 _stats.store_term_and_vote++;
             }
 
@@ -992,11 +996,14 @@ future<> server_impl::io_fiber(index_t last_stable) {
                 logger.trace("[{}] io_fiber storing snapshot {}", _id, snp.id);
                 // Persist the snapshot
                 co_await _persistence->store_snapshot_descriptor(snp, is_local ? _config.snapshot_trailing : 0);
+                logger.trace("[{}] io_fiber stored snapshot", _id);
                 _stats.store_snapshot++;
                 // If this is locally generated snapshot there is no need to
                 // load it.
                 if (!is_local) {
+                    logger.trace("[{}] io_fiber pushing snap to queue, queue size {}", _id, _apply_entries.size());
                     co_await _apply_entries.push_eventually(std::move(snp));
+                    logger.trace("[{}] io_fiber pushed snap to queue, queue size {}", _id, _apply_entries.size());
                 }
             }
 
@@ -1008,7 +1015,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
                 auto& entries = batch.log_entries;
 
                 if (last_stable >= entries[0]->idx) {
+                    logger.trace("[{}] io_fiber truncating log", _id);
                     co_await _persistence->truncate_log(entries[0]->idx);
+                    logger.trace("[{}] io_fiber truncated log", _id);
                     _stats.truncate_persisted_log++;
                 }
 
@@ -1017,7 +1026,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
 
                 // Combine saving and truncating into one call?
                 // will require persistence to keep track of last idx
+                logger.trace("[{}] io_fiber storing log entries {}", _id, entries.size());
                 co_await _persistence->store_log_entries(entries);
+                logger.trace("[{}] io_fiber stored log entries", _id);
 
                 last_stable = (*entries.crbegin())->idx;
                 _stats.persisted_log_entries += entries.size();
@@ -1040,6 +1051,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
             }
 
              // After entries are persisted we can send messages.
+            logger.trace("[{}] io_fiber sending {} messages", _id, batch.messages.size());
             for (auto&& m : batch.messages) {
                 try {
                     send_message(m.first, std::move(m.second));
@@ -1048,6 +1060,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
                     logger.debug("[{}] io_fiber failed to send a message to {}: {}", _id, m.first, std::current_exception());
                 }
             }
+            logger.trace("[{}] io_fiber sent {} messages", _id, batch.messages.size());
 
             if (batch.configuration) {
                 for (const auto& addr: rpc_diff.leaving) {
@@ -1068,16 +1081,25 @@ future<> server_impl::io_fiber(index_t last_stable) {
                         }
                     }
                 }
+                logger.trace("[{}] io_fiber got {} committed entries storing commit idx {}", _id,
+                             batch.committed.size(), batch.committed.back()->idx);
                 co_await _persistence->store_commit_idx(batch.committed.back()->idx);
+                logger.trace("[{}] io_fiber stored commit idx", _id);
                 _stats.queue_entries_for_apply += batch.committed.size();
+                logger.trace("[{}] io_fiber pushing {} committed entries, queue size {} max size {}", _id, batch.committed.size(), _apply_entries.size(), _apply_entries.max_size());
                 co_await _apply_entries.push_eventually(std::move(batch.committed));
+                logger.trace("[{}] io_fiber pushed committed entries, queue size {}", _id, _apply_entries.size());
             }
 
             if (batch.max_read_id_with_quorum) {
+                logger.trace("[{}] io_fiber max_read_id_with_quorum {}", _id, batch.max_read_id_with_quorum);
+                int popped = 0;
                 while (!_reads.empty() && _reads.front().id <= batch.max_read_id_with_quorum) {
                     _reads.front().promise.set_value(_reads.front().idx);
                     _reads.pop_front();
+                    ++popped;
                 }
+                logger.trace("[{}] io_fiber popped {} reads", _id, popped);
             }
             if (!_fsm->is_leader()) {
                 if (_stepdown_promise) {
@@ -1090,7 +1112,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
                     // - This may happen multiple times if `io_fiber` gets multiple batches when
                     // we're outside the configuration, but it should eventually (and generally
                     // quickly) stop happening (we're outside the config after all).
+                    logger.trace("[{}] io_fiber pushing removed_from_config", _id);
                     co_await _apply_entries.push_eventually(removed_from_config{});
+                    logger.trace("[{}] io_fiber pushed removed_from_config", _id);
                 }
                 // request aborts of snapshot transfers
                 abort_snapshot_transfers();
@@ -1110,6 +1134,7 @@ future<> server_impl::io_fiber(index_t last_stable) {
             if (_state_change_promise && batch.state_changed) {
                 std::exchange(_state_change_promise, std::nullopt)->set_value();
             }
+            logger.trace("[{}] io_fiber finished iteration {}", _id, it++);
         }
     } catch (seastar::broken_condition_variable&) {
         // Log fiber is stopped explicitly.
@@ -1171,7 +1196,9 @@ future<> server_impl::applier_fiber() {
 
     try {
         while (true) {
+            logger.trace("[{}] applier fiber waiting for batch, queue size {}", _id, _apply_entries.size());
             auto v = co_await _apply_entries.pop_eventually();
+            logger.trace("[{}] applier fiber got batch, queue size {}", _id, _apply_entries.size());
 
             co_await std::visit(make_visitor(
             [this] (std::vector<log_entry_ptr>& batch) -> future<> {
@@ -1179,6 +1206,8 @@ future<> server_impl::applier_fiber() {
                     logger.trace("[{}] applier fiber: received empty batch", _id);
                     co_return;
                 }
+
+                logger.trace("[{}] applier fiber got batch of {} entries", _id, batch.size());
 
                 // Completion notification code assumes that previous snapshot is applied
                 // before new entries are committed, otherwise it asserts that some
