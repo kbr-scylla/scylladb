@@ -22,6 +22,8 @@
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/range/adaptor/uniqued.hpp>
 
+extern const int log_threshold;
+
 template<typename T = void>
 using coordinator_result = exceptions::coordinator_result<T>;
 
@@ -242,8 +244,19 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::exe
 future<shared_ptr<cql_transport::messages::result_message>> batch_statement::execute_without_checking_exception_message(
         query_processor& qp, service::query_state& state, const query_options& options, std::optional<service::group0_guard> guard) const {
     cql3::util::validate_timestamp(qp.db().get_config(), options, _attrs);
-    return batch_stage(this, seastar::ref(qp), seastar::ref(state),
+    auto start = db_clock::now();
+    auto res = co_await batch_stage(this, seastar::ref(qp), seastar::ref(state),
                        seastar::cref(options), false, options.get_timestamp(state));
+    auto end = db_clock::now();
+    auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    if (dur.count() >= log_threshold) {
+        std::vector<sstring_view> views;
+        for (auto& s: _statements) {
+            views.emplace_back(s.statement->raw_cql_statement);
+        }
+        _logger.warn("stmt batch stage {} took {}", views, dur);
+    }
+    co_return std::move(res);
 }
 
 future<shared_ptr<cql_transport::messages::result_message>> batch_statement::do_execute(
@@ -272,10 +285,23 @@ future<shared_ptr<cql_transport::messages::result_message>> batch_statement::do_
     _stats.statements_in_batches += _statements.size();
 
     auto timeout = db::timeout_clock::now() + get_timeout(query_state.get_client_state(), options);
-    return get_mutations(qp, options, timeout, local, now, query_state).then([this, &qp, &options, timeout, tr_state = query_state.get_trace_state(),
+    auto start = db_clock::now();
+    lw_shared_ptr<db_clock::time_point> end1 = make_lw_shared<db_clock::time_point>();
+    return get_mutations(qp, options, timeout, local, now, query_state).then([end1, this, &qp, &options, timeout, tr_state = query_state.get_trace_state(),
                                                                                                                                permit = query_state.get_permit()] (std::vector<mutation> ms) mutable {
+                                                                                                                                  *end1 = db_clock::now();
         return execute_without_conditions(qp, std::move(ms), options.get_consistency(), timeout, std::move(tr_state), std::move(permit));
-    }).then([] (coordinator_result<> res) {
+    }).then([start, end1, this] (coordinator_result<> res) {
+        auto end2 = db_clock::now();
+        auto dur1 = std::chrono::duration_cast<std::chrono::milliseconds>(*end1 - start);
+        auto dur2 = std::chrono::duration_cast<std::chrono::milliseconds>(end2 - start);
+        if (dur2.count() >= log_threshold) {
+            std::vector<sstring_view> views;
+            for (auto& s: _statements) {
+                views.emplace_back(s.statement->raw_cql_statement);
+            }
+            _logger.warn("stmt batch do_execute {} took {}, get mutations took {}", views, dur2, dur1);
+        }
         if (!res) {
             return make_ready_future<shared_ptr<cql_transport::messages::result_message>>(
                     seastar::make_shared<cql_transport::messages::result_message::exception>(std::move(res).assume_error()));

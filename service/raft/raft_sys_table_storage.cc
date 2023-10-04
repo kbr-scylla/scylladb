@@ -26,6 +26,10 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 
+extern const int log_threshold = 3000;
+
+extern logging::logger dblog;
+
 namespace service {
 
 raft_sys_table_storage::raft_sys_table_storage(cql3::query_processor& qp, raft::group_id gid, raft::server_id server_id)
@@ -280,10 +284,19 @@ future<> raft_sys_table_storage::do_store_log_entries(const std::vector<raft::lo
         co_return;
     }
 
+    auto last_idx = entries.back()->idx;
+
+    auto start = db_clock::now();
     size_t idx = 0;
     do {
         idx = co_await do_store_log_entries_one_batch(entries, idx);
     } while (idx != 0);
+    auto end = db_clock::now();
+    auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    if (dur.count() >= log_threshold) {
+        dblog.warn("raft storage - persisting {} entries (last idx {}) took {}", entries.size(), last_idx, dur);
+    }
 }
 
 future<> raft_sys_table_storage::store_log_entries(const std::vector<raft::log_entry_ptr>& entries) {

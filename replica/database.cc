@@ -75,6 +75,8 @@
 #include "readers/multi_range.hh"
 #include "readers/multishard.hh"
 
+extern const int log_threshold;
+
 using namespace std::chrono_literals;
 using namespace db;
 
@@ -2129,6 +2131,8 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     auto uuid = m.column_family_id();
     auto& cf = find_column_family(uuid);
 
+    auto start = db_clock::now();
+
     if (!std::holds_alternative<std::monostate>(rate_limit_info) && can_apply_per_partition_rate_limit(*s, db::operation_type::write)) {
         auto table_limit = *s->per_partition_rate_limit_options().get_max_writes_per_second();
         auto& write_label = cf.get_rate_limiter_label_for_writes();
@@ -2189,7 +2193,25 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::exception(std::move(ex));
         }
     }
+
+    auto end1 = db_clock::now();
+    auto dur1 = std::chrono::duration_cast<std::chrono::milliseconds>(end1 - start);
+
+    if (dur1.count() >= log_threshold) {
+        auto s = cf.schema();
+        dblog.warn("write to commitlog cf {}.{} took {}", s->ks_name(), s->cf_name(), dur1);
+    }
+
     auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
+
+    auto end2 = db_clock::now();
+    auto dur2 = std::chrono::duration_cast<std::chrono::milliseconds>(end2 - start);
+
+    if (dur2.count() >= log_threshold) {
+        auto s = cf.schema();
+        dblog.warn("write to memory cf {}.{} took {}, to commitlog {}", s->ks_name(), s->cf_name(), dur2, dur1);
+    }
+
     if (f.failed()) {
       auto ex = f.get_exception();
       if (try_catch<mutation_reordered_with_truncate_exception>(ex)) {
