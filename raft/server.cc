@@ -23,6 +23,8 @@
 #include <seastar/rpc/rpc_types.hh>
 #include <absl/container/flat_hash_map.h>
 
+#include "db_clock.hh"
+
 #include "fsm.hh"
 #include "log.hh"
 #include "raft.hh"
@@ -977,7 +979,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
         int it = 0;
         while (true) {
             logger.trace("[{}] io_fiber starting iteration {}", _id, it);
+            auto start0 = db_clock::now();
             auto batch = co_await _fsm->poll_output();
+            auto start = db_clock::now();
             _stats.polls++;
 
             if (batch.term_and_vote) {
@@ -1134,7 +1138,10 @@ future<> server_impl::io_fiber(index_t last_stable) {
             if (_state_change_promise && batch.state_changed) {
                 std::exchange(_state_change_promise, std::nullopt)->set_value();
             }
-            logger.trace("[{}] io_fiber finished iteration {}", _id, it++);
+            auto end = db_clock::now();
+            auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            auto poll_dur = std::chrono::duration_cast<std::chrono::milliseconds>(start - start0);
+            logger.trace("[{}] io_fiber finished iteration {}, took {} after poll, polled for {}", _id, it++, dur, poll_dur);
         }
     } catch (seastar::broken_condition_variable&) {
         // Log fiber is stopped explicitly.
