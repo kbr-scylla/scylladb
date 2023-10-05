@@ -318,7 +318,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _cl_stats(std::make_unique<cell_locker_stats>())
     , _cfg(cfg)
     // Allow system tables a pool of 10 MB memory to write, but never block on other regions.
-    , _system_dirty_memory_manager(*this, 10 << 20, cfg.unspooled_dirty_soft_limit(), default_scheduling_group())
+    , _system_dirty_memory_manager(*this, dbcfg.system_memory_mb << 20, cfg.unspooled_dirty_soft_limit(), default_scheduling_group())
     , _dirty_memory_manager(*this, dbcfg.available_memory * 0.50, cfg.unspooled_dirty_soft_limit(), dbcfg.statement_scheduling_group)
     , _dbcfg(dbcfg)
     , _flush_sg(dbcfg.memtable_scheduling_group)
@@ -398,6 +398,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     if (this_shard_id() != 0) {
         _uses_schema_commitlog = false;
     }
+
+    dblog.info("System memory MB: {}", _dbcfg.system_memory_mb);
 }
 
 const db::extensions& database::extensions() const {

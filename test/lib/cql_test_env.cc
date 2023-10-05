@@ -527,6 +527,7 @@ private:
             dbcfg.memtable_to_cache_scheduling_group = scheduling_groups.memtable_to_cache_scheduling_group;
             dbcfg.gossip_scheduling_group = scheduling_groups.gossip_scheduling_group;
             dbcfg.sstables_format = sstables::version_from_string(cfg->sstable_format());
+            dbcfg.system_memory_mb = 10;
 
             auto get_tm_cfg = sharded_parameter([&] {
                 return tasks::task_manager::config {

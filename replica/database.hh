@@ -1277,6 +1277,7 @@ struct database_config {
     seastar::scheduling_group commitlog_scheduling_group;
     size_t available_memory;
     std::optional<sstables::sstable_version_types> sstables_format;
+    uint32_t system_memory_mb;
 };
 
 struct string_pair_eq {

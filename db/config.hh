@@ -464,6 +464,8 @@ public:
 
     named_value<std::vector<error_injection_at_startup>> error_injections_at_startup;
 
+    named_value<uint32_t> system_memory_mb;
+
     static const sstring default_tls_priority;
 private:
     template<typename T>

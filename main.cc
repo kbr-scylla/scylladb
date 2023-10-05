@@ -966,6 +966,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             dbcfg.gossip_scheduling_group = make_sched_group("gossip", 1000);
             dbcfg.commitlog_scheduling_group = make_sched_group("commitlog", 1000);
             dbcfg.available_memory = memory::stats().total_memory();
+            dbcfg.system_memory_mb = cfg->system_memory_mb();
 
             supervisor::notify("starting compaction_manager");
             // get_cm_cfg is called on each shard when starting a sharded<compaction_manager>
