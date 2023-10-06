@@ -2113,12 +2113,31 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
         on_internal_error(dblog, "Cannot apply atomically without commitlog");
     }
 
+    auto start = db_clock::now();
+
     std::vector<rp_handle> handles = co_await cl->add_entries(std::move(writers), timeout);
+
+    auto end1 = db_clock::now();
+    auto dur_cl = std::chrono::duration_cast<std::chrono::milliseconds>(end1 - start);
 
     // FIXME: Memtable application is not atomic so reads may observe mutations partially applied until restart.
     for (size_t i = 0; i < muts.size(); ++i) {
+        auto end2 = db_clock::now();
+
         auto s = local_schema_registry().get(muts[i].schema_version());
-        co_await apply_in_memory(muts[i], s, std::move(handles[i]), timeout);
+        auto f = co_await coroutine::as_future(apply_in_memory(muts[i], s, std::move(handles[i]), timeout));
+
+        auto end3 = db_clock::now();
+
+        auto dur_mem = std::chrono::duration_cast<std::chrono::milliseconds>(end3 - end2);
+        auto dur_total = std::chrono::duration_cast<std::chrono::milliseconds>(end3 - start);
+
+        if (dur_total.count() >= log_threshold) {
+            dblog.warn("do_apply_many write memory cf {}.{} took {}, cl {}, total {}",
+                       s->ks_name(), s->cf_name(), dur_mem, dur_cl, dur_total);
+        }
+
+        co_await std::move(f);
     }
 }
 
@@ -2201,7 +2220,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
 
     if (dur1.count() >= log_threshold) {
         auto s = cf.schema();
-        dblog.warn("write to commitlog cf {}.{} took {}", s->ks_name(), s->cf_name(), dur1);
+        dblog.warn("do_apply write to commitlog cf {}.{} took {}", s->ks_name(), s->cf_name(), dur1);
     }
 
     auto f = co_await coroutine::as_future(this->apply_in_memory(m, s, std::move(h), timeout));
@@ -2211,7 +2230,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
 
     if (dur2.count() >= log_threshold) {
         auto s = cf.schema();
-        dblog.warn("write to memory cf {}.{} took {}, to commitlog {}", s->ks_name(), s->cf_name(), dur2, dur1);
+        dblog.warn("do_apply write to memory cf {}.{} took {}, to commitlog {}", s->ks_name(), s->cf_name(), dur2, dur1);
     }
 
     if (f.failed()) {
