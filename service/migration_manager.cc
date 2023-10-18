@@ -347,12 +347,13 @@ future<> migration_manager::do_merge_schema_from(netw::messaging_service::msg_ad
 {
     mlogger.info("Pulling schema from {}", id);
     auto frozen_and_canonical_mutations = co_await _messaging.send_migration_request(id, netw::schema_pull_options{});
-    auto&& [mutations, canonical_mutations] = frozen_and_canonical_mutations;
-    if (canonical_mutations) {
-        co_await merge_schema_from(id, *canonical_mutations);
-    } else {
-        co_await merge_schema_from(id, mutations);
+    auto&& [_, canonical_mutations] = frozen_and_canonical_mutations;
+    if (!canonical_mutations) {
+        on_internal_error(mlogger, format(
+            "do_merge_schema_from: {} returned frozen_mutations instead of canonical_mutations", id));
     }
+
+    co_await merge_schema_from(id, *canonical_mutations);
     mlogger.info("Schema merge with {} completed", id);
 }
 
