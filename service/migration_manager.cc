@@ -376,11 +376,12 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
     const auto& db = proxy.get_db().local();
 
     if (_as.abort_requested()) {
-        return make_exception_future<>(abort_requested_exception());
+        co_await coroutine::return_exception(abort_requested_exception());
     }
 
     std::vector<mutation> mutations;
     mutations.reserve(canonical_mutations.size());
+    std::exception_ptr ex;
     try {
         for (const auto& cm : canonical_mutations) {
             auto& tbl = db.find_column_family(cm.column_family_id());
@@ -389,10 +390,13 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
         }
     } catch (replica::no_such_column_family& e) {
         mlogger.error("Error while applying schema mutations from {}: {}", src, e);
-        return make_exception_future<>(std::make_exception_ptr<std::runtime_error>(
-                    std::runtime_error(fmt::format("Error while applying schema mutations: {}", e))));
+        ex = std::make_exception_ptr<std::runtime_error>(
+                std::runtime_error(fmt::format("Error while applying schema mutations: {}", e)));
     }
-    return db::schema_tables::merge_schema(_sys_ks, proxy.container(), _feat, std::move(mutations), false);
+    if (ex) {
+        co_await coroutine::return_exception_ptr(std::move(ex));
+    }
+    co_await db::schema_tables::merge_schema(_sys_ks, proxy.container(), _feat, std::move(mutations), false);
 }
 
 future<> migration_manager::reload_schema() {
