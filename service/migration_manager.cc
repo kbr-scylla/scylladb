@@ -126,20 +126,16 @@ void migration_manager::init_messaging_service()
         }
     }
 
-    _messaging.register_definitions_update([this] (const rpc::client_info& cinfo, std::vector<frozen_mutation> fm, rpc::optional<std::vector<canonical_mutation>> cm) {
+    _messaging.register_definitions_update([this] (const rpc::client_info& cinfo, std::vector<frozen_mutation>, rpc::optional<std::vector<canonical_mutation>> cm) {
         auto src = netw::messaging_service::get_source(cinfo);
-        auto f = make_ready_future<>();
-        if (cm) {
-            f = do_with(std::move(*cm), [this, src] (const std::vector<canonical_mutation>& mutations) {
-                return merge_schema_in_background(src, mutations);
-            });
-        } else {
-            f = do_with(std::move(fm), [this, src] (const std::vector<frozen_mutation>& mutations) {
-                return merge_schema_in_background(src, mutations);
-            });
+        if (!cm) {
+            on_internal_error(mlogger, format(
+                "definitions_update handler: canonical mutations not supported by {}", src));
         }
         // Start a new fiber.
-        (void)f.then_wrapped([src] (auto&& f) {
+        (void)do_with(std::move(*cm), [this, src] (const std::vector<canonical_mutation>& mutations) {
+            return merge_schema_in_background(src, mutations);
+        }).then_wrapped([src] (auto&& f) {
             if (f.failed()) {
                 mlogger.error("Failed to update definitions from {}: {}", src, f.get_exception());
             } else {
@@ -936,9 +932,8 @@ future<> migration_manager::push_schema_mutation(const gms::inet_address& endpoi
     netw::messaging_service::msg_addr id{endpoint, 0};
     auto schema_features = _feat.cluster_schema_features();
     auto adjusted_schema = db::schema_tables::adjust_schema_for_schema_features(schema, schema_features);
-    auto fm = std::vector<frozen_mutation>(adjusted_schema.begin(), adjusted_schema.end());
     auto cm = std::vector<canonical_mutation>(adjusted_schema.begin(), adjusted_schema.end());
-    return _messaging.send_definitions_update(id, std::move(fm), std::move(cm));
+    return _messaging.send_definitions_update(id, std::vector<frozen_mutation>{}, std::move(cm));
 }
 
 future<> migration_manager::announce_with_raft(std::vector<mutation> schema, group0_guard guard, std::string_view description) {
