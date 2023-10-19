@@ -397,6 +397,9 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
         co_await coroutine::return_exception_ptr(std::move(ex));
     }
     co_await db::schema_tables::merge_schema(_sys_ks, proxy.container(), _feat, std::move(mutations), false);
+    co_await container().invoke_on_all([] (migration_manager& mm) {
+        mm._schema_merge_cv.broadcast();
+    });
 }
 
 future<> migration_manager::reload_schema() {
@@ -953,7 +956,10 @@ future<> migration_manager::announce_without_raft(std::vector<mutation> schema, 
         mlogger.error("failed to announce migration to all nodes: {}", std::current_exception());
     }
 
-    co_return co_await std::move(f);
+    co_await std::move(f);
+    co_await container().invoke_on_all([] (migration_manager& mm) {
+        mm._schema_merge_cv.broadcast();
+    });
 }
 
 static mutation make_group0_schema_version_mutation(const data_dictionary::database db, const group0_guard& guard) {
