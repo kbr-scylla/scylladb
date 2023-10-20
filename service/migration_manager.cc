@@ -1174,11 +1174,11 @@ static future<schema_ptr> get_schema_definition(table_schema_version v, netw::me
     });
 }
 
-future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as) {
+future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source& as) {
     return get_schema_for_write(v, dst, ms, as, true);
 }
 
-future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as, bool read) {
+future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source& as, bool read) {
     if (_as.abort_requested()) {
         co_return coroutine::exception(std::make_exception_ptr(abort_requested_exception()));
     }
@@ -1207,7 +1207,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         // Batch the barriers so we don't invoke them redundantly.
         auto& rlimit = rlimits1.try_get_recent_entry(v, std::chrono::milliseconds{10});
         mlogger.log(log_level::trace, rlimit, "Performing raft read barrier because schema is not synced, version: {}", v);
-        co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
+        co_await _group0_barrier.trigger(as);
     }
 
     ++step;
