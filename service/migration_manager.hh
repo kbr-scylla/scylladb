@@ -72,7 +72,6 @@ private:
     table_schema_version _schema_version_to_publish;
 
     // Notified on every shard after new schema is merged.
-    // May be notified 
     condition_variable _schema_merge_cv;
 
     // If `false`, schema is synchronized only through Raft.

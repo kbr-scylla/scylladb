@@ -10,6 +10,7 @@
 
 #include <seastar/core/sleep.hh>
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/when_any.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "auth/resource.hh"
@@ -1179,7 +1180,7 @@ future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v
 }
 
 future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source& as, bool read) {
-    if (_as.abort_requested()) {
+    if (_as.abort_requested() || as.abort_requested()) {
         co_return coroutine::exception(std::make_exception_ptr(abort_requested_exception()));
     }
 
@@ -1202,12 +1203,23 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
 
     try {
 
+    auto wait_for_sync = make_ready_future<>();
+
     if (use_raft) {
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
         // Batch the barriers so we don't invoke them redundantly.
+        // TODO
         auto& rlimit = rlimits1.try_get_recent_entry(v, std::chrono::milliseconds{10});
-        mlogger.log(log_level::trace, rlimit, "Performing raft read barrier because schema is not synced, version: {}", v);
-        co_await _group0_barrier.trigger(as);
+        mlogger.log(log_level::trace, rlimit, "Raft waiting for {} to sync", v);
+        auto [_, futs] = co_await when_any(
+            _group0_barrier.trigger(as),
+            _schema_merge_cv.wait(as, [&] {
+                s = local_schema_registry().get_or_null(v);
+                return s && s->is_synced();
+            }));
+        auto [f1, f2] = std::move(futs);
+        f1.ignore_ready_future();
+        wait_for_sync = std::move(f2);
     }
 
     ++step;
@@ -1219,8 +1231,21 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
         auto& rlimit = rlimits2.try_get_recent_entry(v, std::chrono::milliseconds{10});
-        mlogger.log(log_level::trace, rlimit, "Mark schema {} as synced", v);
+        mlogger.log(log_level::trace, rlimit, "Mark schema {} as synced, wait_for_sync.available() == {}", v, wait_for_sync.available());
         co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
+        if (!wait_for_sync.available()) {
+            // This should be extremely rare -- happening only in the case where the group 0 barrier trigger
+            // above has finished, but that didn't sync the schema version `v`, which means that `v`
+            // is a very old schema version we had to fetch directly through RPC from the coordinator (in `get_schema_definition`).
+            //
+            // So while `broadcast()`ing the schema merge condition variable is in general not desired here
+            // (it may in theory lead to N^2 condition variable waiter wake ups, where N is the number of `get_schema_for_write` calls
+            // running at this moment, all waiting on this old schema version), for this case it should not cause a performance problem
+            // in practice.
+            // TODO
+            _schema_merge_cv.broadcast();
+            co_await std::move(wait_for_sync);
+        }
     } else {
         co_await maybe_sync(s, dst);
     }
