@@ -1212,14 +1212,14 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         auto& rlimit = rlimits1.try_get_recent_entry(v, std::chrono::milliseconds{10});
         mlogger.log(log_level::trace, rlimit, "Raft waiting for {} to sync", v);
         auto [_, futs] = co_await when_any(
-            _group0_barrier.trigger(as),
+            _group0_barrier.trigger(as).handle_exception([] (auto) {}),
             _schema_merge_cv.wait(as, [&] {
                 s = local_schema_registry().get_or_null(v);
                 return s && s->is_synced();
             }));
         auto [f1, f2] = std::move(futs);
-        f1.ignore_ready_future();
         wait_for_sync = std::move(f2);
+        (void)f1;
     }
 
     ++step;
