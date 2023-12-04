@@ -17,8 +17,8 @@ from cassandra.pool import Host # type: ignore
 from test.pylib.manager_client import ManagerClient, ServerInfo
 from test.pylib.util import wait_for_cql_and_get_hosts
 from test.pylib.log_browsing import ScyllaLogFile
-from test.topology.util import wait_for_token_ring_and_group0_consistency, reconnect_driver
-from test.topology_raft_disabled.util import delete_raft_data, wait_until_upgrade_finishes, enable_raft_and_restart
+from test.topology.util import wait_for_token_ring_and_group0_consistency, reconnect_driver, \
+        restart, wait_until_upgrade_finishes, enter_recovery_state, delete_raft_data_and_upgrade_state
 
 
 logger = logging.getLogger(__name__)
@@ -246,8 +246,7 @@ async def test_schema_versioning_with_recovery(manager: ManagerClient):
     await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
     for h in [h1, h2, h3]:
-        await delete_raft_data(cql, h)
-        await cql.run_async("delete from system.scylla_local where key = 'group0_upgrade_state'", host=h)
+        await delete_raft_data_and_upgrade_state(cql, h)
 
     logger.info("Restarting servers")
     await asyncio.gather(*(manager.server_restart(srv.server_id) for srv in servers))
@@ -287,57 +286,37 @@ async def test_upgrade(manager: ManagerClient):
     While Raft is disabled, we use digest-based schema versioning.
     Once Raft upgrade is complete, we use persisted versions committed through group 0.
     """
+    # Raft upgrade tests had to be replaced with recovery tests (scylladb/scylladb#16192)
+    # as prerequisite for getting rid of `consistent_cluster_management` flag.
+    # So we do the same here: start a cluster in Raft mode, then enter recovery
+    # to simulate a non-Raft cluster.
     cfg = {'enable_user_defined_functions': False,
-           'experimental_features': list[str](),
-           'consistent_cluster_management': False}
+           'experimental_features': list[str]()}
     logger.info("Booting cluster")
     servers = [await manager.server_add(config=cfg) for _ in range(2)]
     cql = manager.get_cql()
+
+    logging.info("Waiting until driver connects to every server")
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+
+    logging.info(f"Setting recovery state on {hosts} and restarting")
+    await asyncio.gather(*(enter_recovery_state(cql, h) for h in hosts))
+    await asyncio.gather(*(restart(manager, srv) for srv in servers))
+    cql = await reconnect_driver(manager)
+
+    logging.info("Waiting until driver connects to every server")
+    await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
     logger.info("Creating keyspace and table")
     await cql.run_async("create keyspace ks with replication = "
                         "{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}")
     await cql.run_async("create table ks.t (pk int primary key)")
 
-    logger.info("Waiting for driver")
-    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+    logging.info(f"Deleting Raft data and upgrade state on {hosts}")
+    await asyncio.gather(*(delete_raft_data_and_upgrade_state(cql, h) for h in hosts))
 
-    logger.info(f"Upgrading {servers[0]}")
-    await enable_raft_and_restart(manager, servers[0])
-    cql = await reconnect_driver(manager)
-
-    logger.info("Waiting for driver")
-    await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
-
-    # We ignore system tables in this partially upgraded state.
-    # Indeed, the upgraded node already has some new tables that we only
-    # create when `consistent_cluster_management` is enabled.
-    await verify_table_versions_synced(cql, hosts, ignore_system_tables=True)
-
-    logs = [await manager.server_open_log(srv.server_id) for srv in servers]
-
-    marks = [await log.mark() for log in logs]
-    logger.info("Altering table")
-    await cql.run_async("alter table ks.t with comment = ''")
-
-    await verify_table_versions_synced(cql, hosts, ignore_system_tables=True)
-    await verify_in_memory_table_versions(servers, logs, marks)
-
-    # `group0_schema_version` key in system.scylla_local should be absent,
-    # version column in `system_schema.scylla_tables` for distributed tables should be null.
-    for h in hosts:
-        logger.info(f"Checking that `group0_schema_version` is missing on {h}")
-        assert (await get_group0_schema_version(cql, h)) is None
-
-    for h in hosts:
-        logger.info(f"Checking that `version` column for `ks.t` is null on {h}")
-        versions = await get_scylla_tables_versions(cql, h)
-        for ks, _, v in versions:
-            if ks in ["system_distributed", "system_distributed_everywhere", "ks"]:
-                assert v is None
-
-    logging.info(f"Upgrading {servers[1]}")
-    await enable_raft_and_restart(manager, servers[1])
+    logging.info(f"Restarting {servers}")
+    await asyncio.gather(*(restart(manager, srv) for srv in servers))
     cql = await reconnect_driver(manager)
 
     logger.info("Waiting for driver")
@@ -345,6 +324,8 @@ async def test_upgrade(manager: ManagerClient):
 
     logging.info(f"Waiting until Raft upgrade procedure finishes")
     await asyncio.gather(*(wait_until_upgrade_finishes(cql, h, time.time() + 60) for h in hosts))
+
+    logs = [await manager.server_open_log(srv.server_id) for srv in servers]
 
     marks = [await log.mark() for log in logs]
     logger.info("Altering table")
