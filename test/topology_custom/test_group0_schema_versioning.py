@@ -127,8 +127,8 @@ async def test_schema_versioning_with_recovery(manager: ManagerClient):
            'experimental_features': list[str]()}
     logger.info("Booting cluster")
     servers = [await manager.server_add(config=cfg) for _ in range(3)]
-    hosts = await wait_for_token_ring_and_group0_consistency(manager, time.time() + 60)
     cql = manager.get_cql()
+    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
     logger.info("Creating keyspace and table")
     await cql.run_async("create keyspace ks with replication = "
