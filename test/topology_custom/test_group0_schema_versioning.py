@@ -52,7 +52,7 @@ async def get_scylla_tables_version(cql: Session, h: Host, keyspace_name: str, t
     return rs[0].version
 
 
-async def verify_local_schema_verions_synced(cql: Session, hs: list[Host]) -> None:
+async def verify_local_schema_versions_synced(cql: Session, hs: list[Host]) -> None:
     versions = {h: await get_local_schema_version(cql, h) for h in hs}
     logger.info(f"system.local schema_versions: {versions}")
     h1, v1 = next(iter(versions.items()))
@@ -84,8 +84,8 @@ async def verify_scylla_tables_versions_synced(cql: Session, hs: list[Host], ign
 
 async def verify_table_versions_synced(cql: Session, hs: list[Host], ignore_system_tables: bool = False) -> None:
     logger.info("Verifying that versions stored in tables are in sync")
-    await verify_local_schema_verions_synced(cql, hs)
     await verify_group0_schema_versions_synced(cql, hs)
+    await verify_local_schema_versions_synced(cql, hs)
     await verify_scylla_tables_versions_synced(cql, hs, ignore_system_tables)
 
 
@@ -127,16 +127,17 @@ async def test_schema_versioning_with_recovery(manager: ManagerClient):
            'experimental_features': list[str]()}
     logger.info("Booting cluster")
     servers = [await manager.server_add(config=cfg) for _ in range(3)]
-    await wait_for_token_ring_and_group0_consistency(manager, time.time() + 60)
+    hosts = await wait_for_token_ring_and_group0_consistency(manager, time.time() + 60)
     cql = manager.get_cql()
 
     logger.info("Creating keyspace and table")
     await cql.run_async("create keyspace ks with replication = "
                         "{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}")
+    await verify_table_versions_synced(cql, hosts)
     await cql.run_async("create table ks.t (pk int primary key)")
 
     logger.info("Waiting for driver")
-    hosts = await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+    await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
     await verify_table_versions_synced(cql, hosts)
     ks_t_version = await get_scylla_tables_version(cql, hosts[0], 'ks', 't')
@@ -310,6 +311,7 @@ async def test_upgrade(manager: ManagerClient):
     logger.info("Creating keyspace and table")
     await cql.run_async("create keyspace ks with replication = "
                         "{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}")
+    await verify_table_versions_synced(cql, hosts)
     await cql.run_async("create table ks.t (pk int primary key)")
 
     logging.info(f"Deleting Raft data and upgrade state on {hosts}")

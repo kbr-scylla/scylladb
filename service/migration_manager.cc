@@ -983,7 +983,9 @@ static mutation make_group0_schema_version_mutation(const data_dictionary::datab
     auto cell = guard.with_raft()
         ? atomic_cell::make_live(*cdef->type, guard.write_timestamp(),
                                  cdef->type->decompose(guard.new_group0_state_id().to_sstring()))
-        : atomic_cell::make_dead(guard.write_timestamp(), gc_clock::now());
+        // Use gc_clock::time_point::max() for deletion time so the tombstone is not GCd
+        // (so that snapshot transfers / schema pulls observe it)
+        : atomic_cell::make_dead(guard.write_timestamp(), gc_clock::time_point::max());
     m.set_clustered_cell(clustering_key::make_empty(), *cdef, std::move(cell));
     return m;
 }
