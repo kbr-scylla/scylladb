@@ -690,14 +690,15 @@ class ScyllaCluster:
 
     async def stop_gracefully(self) -> None:
         """Stop all running servers in a clean way"""
-        if self.is_running:
-            self.is_running = False
-            self.logger.info("Cluster %s stopping gracefully", self)
-            self.is_dirty = True
-            # If self.running is empty, no-op
-            await asyncio.gather(*(server.stop_gracefully() for server in self.running.values()))
-            self.stopped.update(self.running)
-            self.running.clear()
+        async with self.stop_lock:
+            if self.is_running:
+                self.is_running = False
+                self.logger.info("Cluster %s stopping gracefully", self)
+                self.is_dirty = True
+                # If self.running is empty, no-op
+                await asyncio.gather(*(server.stop_gracefully() for server in self.running.values()))
+                self.stopped.update(self.running)
+                self.running.clear()
 
     def _seeds(self) -> List[str]:
         # If the cluster is empty, all servers must use self.initial_seed to not start separate clusters.
