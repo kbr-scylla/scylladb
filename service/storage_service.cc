@@ -2374,6 +2374,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
 
         switch (*tstate) {
             case topology::transition_state::join_group0: {
+                rtlogger.info("entered `join_group0` transition state");
                 auto [node, accepted] = co_await finish_accepting_node(get_node_to_work_on(std::move(guard)));
 
                 // If responding to the joining node failed, move the node to the left state and
@@ -2444,6 +2445,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::commit_cdc_generation: {
+                rtlogger.info("entered `commit_cdc_generation` transition state");
                 // make sure all nodes know about new topology and have the new CDC generation data
                 // (we require all nodes to be alive for topo change for now)
                 // Note: if there was a replace or removenode going on, we'd need to put the replaced/removed
@@ -2528,6 +2530,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::tablet_draining:
+                rtlogger.info("entered `tablet_draining` transition state");
                 try {
                     co_await handle_tablet_migration(std::move(guard), true);
                 } catch (term_changed_error&) {
@@ -2540,6 +2543,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 }
                 break;
             case topology::transition_state::write_both_read_old: {
+                rtlogger.info("entered `write_both_read_old` transition state");
                 auto node = get_node_to_work_on(std::move(guard));
 
                 // make sure all nodes know about new topology (we require all nodes to be alive for topo change for now)
@@ -2621,6 +2625,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::write_both_read_new: {
+                rtlogger.info("entered `write_both_read_new` transition state");
                 auto node = get_node_to_work_on(std::move(guard));
                 bool barrier_failed = false;
                 // In this state writes goes to old and new replicas but reads start to be done from new replicas
@@ -2714,6 +2719,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::tablet_migration:
+                rtlogger.info("entered `tablet_migration` transition state");
                 co_await handle_tablet_migration(std::move(guard), false);
                 break;
         }
