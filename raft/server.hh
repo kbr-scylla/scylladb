@@ -254,6 +254,31 @@ public:
     // It it passes nullptr, the function is unabortable.
     virtual future<> wait_for_state_change(seastar::abort_source* as) = 0;
 
+    enum class trigger_snapshot_result {
+        // In this case it's guaranteed that the snapshot descriptor was persisted
+        // and that the snapshot was loaded to the state machine.
+        satisfied_by_local_snapshot,
+
+        // In this case it's guaranteed that the snapshot descriptor was persisted
+        // but the snapshot might not have been loaded to the state machine yet
+        // (it will be eventually).
+        satisfied_by_remote_snapshot,
+    };
+
+    // Manually trigger snapshot creation and log truncation.
+    // Can only be done if the current apply index is greater than the last snapshot index.
+    //
+    // When the future resolves, the guarantees are given by the returned value,
+    // described in the definition of `trigger_snapshot_result`.
+    //
+    // The request may be resolved by the regular snapshotting mechanisms (e.g. a snapshot
+    // is created because the Raft log grows too large). In this case there is no guarantee
+    // how many trailing entries will be left trailing behind the snapshot. However,
+    // if there are no operations running on the server concurrently with the request and all
+    // committed entries are already applied, the created snapshot is guaranteed to leave
+    // zero trailing entries.
+    virtual future<trigger_snapshot_result> trigger_snapshot(seastar::abort_source& as) = 0;
+
     // Ad hoc functions for testing
     virtual void wait_until_candidate() = 0;
     virtual future<> wait_election_done() = 0;
