@@ -105,7 +105,9 @@ public:
     void register_metrics() override;
     size_t max_command_size() const override;
 private:
-    seastar::condition_variable _sm_events;
+    // Signaled when new fsm output appears
+    // or on API requests to the Raft server (e.g. to trigger snapshot creation).
+    seastar::condition_variable _events;
 
     std::unique_ptr<rpc> _rpc;
     std::unique_ptr<state_machine> _state_machine;
@@ -214,6 +216,14 @@ private:
     };
     absl::flat_hash_map<server_id, append_request_queue> _append_request_status;
 
+    struct api_requests {
+        bool empty() const {
+            return true;
+        }
+    };
+
+    api_requests _new_api_requests;
+
     // Called to commit entries (on a leader or otherwise).
     void notify_waiters(std::map<index_t, op_status>& waiters, const std::vector<log_entry_ptr>& entries);
 
@@ -225,11 +235,15 @@ private:
     // to be applied.
     void signal_applied();
 
-    // This fiber processes FSM output by doing the following steps in order:
+    // Processes FSM output by doing the following steps in order:
     //  - persist the current term and vote
     //  - persist unstable log entries on disk.
     //  - send out messages
     future<> process_fsm_output(index_t& stable_idx, fsm_output&&);
+
+    future<> process_api_requests(api_requests&&);
+
+    // Processes new FSM outputs and API requests to the server as they appear.
     future<> io_fiber(index_t stable_idx);
 
     // This fiber runs in the background and applies committed entries.
@@ -356,7 +370,7 @@ future<> server_impl::start() {
                                      .max_log_size = _config.max_log_size,
                                      .enable_prevoting = _config.enable_prevoting
                                  },
-                                 _sm_events);
+                                 _events);
 
     _applied_idx = index_t{0};
     if (snapshot.id) {
@@ -1125,20 +1139,36 @@ future<> server_impl::process_fsm_output(index_t& last_stable, fsm_output&& batc
     }
 }
 
+future<> server_impl::process_api_requests(api_requests&& requests) {
+}
+
 future<> server_impl::io_fiber(index_t last_stable) {
     logger.trace("[{}] io_fiber start", _id);
     try {
         while (true) {
-            co_await _sm_events.when(std::bind_front(&fsm::has_output, _fsm.get()));
+            bool has_fsm_output = false;
+            bool has_api_request = false;
+            co_await _events.when([this, &has_fsm_output, &has_api_request] {
+                has_fsm_output = _fsm->has_output();
+                has_api_request = !_new_api_requests.empty();
+                return has_fsm_output || has_api_request;
+            });
 
             while (utils::get_local_injector().enter("poll_fsm_output/pause")) {
                 co_await seastar::sleep(std::chrono::milliseconds(100));
             }
 
-            auto batch = _fsm->get_output();
             _stats.polls++;
 
-            co_await process_fsm_output(last_stable, std::move(batch));
+            if (has_fsm_output) {
+                auto batch = _fsm->get_output();
+                co_await process_fsm_output(last_stable, std::move(batch));
+            }
+
+            if (has_api_request) {
+                auto requests = std::exchange(_new_api_requests, api_requests{});
+                co_await process_api_requests(std::move(requests));
+            }
         }
     } catch (seastar::broken_condition_variable&) {
         // Log fiber is stopped explicitly.
@@ -1451,7 +1481,7 @@ future<> server_impl::abort(sstring reason) {
     _aborted = std::move(reason);
     logger.trace("[{}]: abort() called", _id);
     _fsm->stop();
-    _sm_events.broken();
+    _events.broken();
 
     // IO and applier fibers may update waiters and start new snapshot
     // transfers, so abort them first
