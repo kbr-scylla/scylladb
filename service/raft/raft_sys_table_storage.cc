@@ -10,6 +10,7 @@
 #include "cql3/untyped_result_set.hh"
 #include "db/system_keyspace.hh"
 #include "utils/UUID.hh"
+#include "utils/error_injection.hh"
 
 #include "serializer.hh"
 #include "idl/raft_storage.dist.hh"

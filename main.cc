@@ -1178,6 +1178,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
 
+            api::set_server_raft(ctx, raft_gr).get();
+            auto stop_raft_api = defer_verbose_shutdown("Raft API", [&ctx] {
+                api::unset_server_raft(ctx).get();
+            });
+
             group0_client.init().get();
 
             db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db);
