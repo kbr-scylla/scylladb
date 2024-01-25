@@ -418,7 +418,7 @@ class ScyllaServer:
         env = os.environ.copy()
         env.clear()     # pass empty env to make user user's SCYLLA_HOME has no impact
         env.update(self.append_env)
-        self.cmd = await asyncio.create_subprocess_exec(
+        tmp = await asyncio.create_subprocess_exec(
             self.exe,
             *self.cmdline_options,
             cwd=self.workdir,
@@ -427,6 +427,10 @@ class ScyllaServer:
             env=env,
             preexec_fn=os.setsid,
         )
+        self.logger.info("start sleep")
+        await asyncio.sleep(0.2)
+        self.logger.info("start sleep end")
+        self.cmd = tmp
 
         self.start_time = time.time()
         sleep_interval = 0.1
@@ -506,6 +510,7 @@ class ScyllaServer:
         stop, so is not graceful. Waits for the process to exit before return."""
         self.logger.info("stopping %s in %s", self, self.workdir.name)
         if not self.cmd:
+            self.logger.info("stopping %s in %s saw self.cmd == None", self, self.workdir.name)
             return
 
         # Dump the profile if exists and supported by the API.
