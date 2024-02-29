@@ -14,6 +14,7 @@ import socket
 import os
 import collections
 import ssl
+import logging
 from contextlib import contextmanager
 
 from cassandra.auth import PlainTextAuthProvider
@@ -129,7 +130,13 @@ def new_test_table(cql, keyspace, schema, extra=""):
     try:
         yield table
     finally:
-        cql.execute("DROP TABLE " + table)
+        try:
+            logging.info(f"DROPPING TABLE {table}")
+            cql.execute("DROP TABLE " + table)
+            logging.info(f"DROPPED TABLE {table}")
+        except:
+            logging.info(f"EXCEPTION WHEN DROPPING TABLE {table}")
+            raise
         previously_used_table_names.append(table_name)
 
 # A utility function for creating a new temporary user-defined type.

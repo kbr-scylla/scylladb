@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import time
 import random
+import logging
 
 from util import unique_name, new_test_keyspace, keyspace_has_tablets, cql_session, local_process_id, is_scylla
 
@@ -97,7 +98,13 @@ def test_keyspace_tablets(cql, this_dc, has_tablets):
     name = unique_name()
     cql.execute("CREATE KEYSPACE " + name + " WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1 } AND TABLETS = {'enabled': true}")
     yield name
-    cql.execute("DROP KEYSPACE " + name)
+    try:
+        logging.info(f"DROPPING KEYSPACE {name}")
+        cql.execute("DROP KEYSPACE " + name)
+        logging.info(f"DROPPED KEYSPACE {name}")
+    except:
+        logging.info(f"EXCEPTION WHEN DROPPING KEYSPACE {name}")
+        raise
 
 @pytest.fixture(scope="session")
 def test_keyspace_vnodes(cql, this_dc, has_tablets):
@@ -108,7 +115,13 @@ def test_keyspace_vnodes(cql, this_dc, has_tablets):
         # If tablets are not available or not enabled, we just create a regular keyspace
         cql.execute("CREATE KEYSPACE " + name + " WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1 }")
     yield name
-    cql.execute("DROP KEYSPACE " + name)
+    try:
+        logging.info(f"DROPPING KEYSPACE {name}")
+        cql.execute("DROP KEYSPACE " + name)
+        logging.info(f"DROPPED KEYSPACE {name}")
+    except:
+        logging.info(f"EXCEPTION WHEN DROPPING KEYSPACE {name}")
+        raise
 
 # "test_keyspace" fixture: Creates and returns a temporary keyspace to be
 # used in tests that need a keyspace. The keyspace is created with RF=1,
@@ -129,7 +142,13 @@ def test_keyspace(request, test_keyspace_vnodes, test_keyspace_tablets, cql, thi
         name = unique_name()
         cql.execute("CREATE KEYSPACE " + name + " WITH REPLICATION = { 'class' : 'NetworkTopologyStrategy', '" + this_dc + "' : 1 }")
         yield name
-        cql.execute("DROP KEYSPACE " + name)
+        try:
+            logging.info(f"DROPPING KEYSPACE {name}")
+            cql.execute("DROP KEYSPACE " + name)
+            logging.info(f"DROPPED KEYSPACE {name}")
+        except:
+            logging.info(f"EXCEPTION WHEN DROPPING KEYSPACE {name}")
+            raise
 
 # The "scylla_only" fixture can be used by tests for Scylla-only features,
 # which do not exist on Apache Cassandra. A test using this fixture will be
