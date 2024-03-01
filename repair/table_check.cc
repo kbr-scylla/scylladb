@@ -10,6 +10,8 @@
 #include "repair/table_check.hh"
 #include "service/migration_manager.hh"
 
+static logging::logger tclogger("table_check");
+
 namespace repair {
 
 future<table_dropped> table_sync_and_check(replica::database& db, service::migration_manager& mm, const table_id& uuid) {
@@ -23,7 +25,9 @@ future<table_dropped> table_sync_and_check(replica::database& db, service::migra
         });
 
         // Trigger read barrier to synchronize schema.
+        tclogger.info("table sync and check {} barrier", uuid);
         co_await mm.get_group0_barrier().trigger(as);
+        tclogger.info("table sync and check {} finished barrier", uuid);
     }
 
     co_return !db.column_family_exists(uuid);
@@ -46,6 +50,7 @@ future<table_dropped> with_table_drop_silenced(replica::database& db, service::m
         // of the failure cannot be determined. Synchronize schema to see the latest
         // changes and determine whether the table was dropped.
         ex = std::current_exception();
+        tclogger.info("with table drop silenced {} ex {}", uuid, ex);
     }
 
     if (ex) {
