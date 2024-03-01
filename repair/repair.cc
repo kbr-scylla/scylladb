@@ -1035,10 +1035,14 @@ future<> repair::shard_repair_task_impl::do_repair_ranges() {
             co_await coroutine::maybe_yield();
 
             // Get the system range parallelism
+            rlogger.info("repair[{}] ks {} t {} range {} taking parallelism semaphore", global_repair_id.uuid(), _status.keyspace, table_info.name, range);
             auto permit = co_await seastar::get_units(rs.get_repair_module().range_parallelism_semaphore(), 1);
+            rlogger.info("repair[{}] ks {} t {} range {} took parallelism semaphore", global_repair_id.uuid(), _status.keyspace, table_info.name, range);
             // Get the range parallelism specified by user
             auto user_permit = _user_ranges_parallelism ? co_await seastar::get_units(*_user_ranges_parallelism, 1) : semaphore_units<>();
+            rlogger.info("repair[{}] ks {} t {} range {} took user permit", global_repair_id.uuid(), _status.keyspace, table_info.name, range);
             co_await repair_range(range, table_info);
+            rlogger.info("repair[{}] ks {} t {} range {} repaired range", global_repair_id.uuid(), _status.keyspace, table_info.name, range);
             ++_ranges_complete;
             if (_reason == streaming::stream_reason::bootstrap) {
                 rs.get_metrics().bootstrap_finished_ranges++;
