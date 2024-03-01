@@ -1255,13 +1255,20 @@ future<> migration_manager::sync_schema(const replica::database& db, const std::
             schema_map[remote_version].emplace_back(node);
         }
     });
+    if (!schema_map.empty()) {
+        mlogger.info("sync_schema: my version {}, schema_map {}", db.get_version(), schema_map);
+    }
     co_await coroutine::parallel_for_each(schema_map, [this] (auto& x) -> future<> {
         auto& [schema, hosts] = x;
         const auto& src = hosts.front();
-        mlogger.debug("Pulling schema {} from {}", schema, src);
+        mlogger.info("Pulling schema {} from {}", schema, src);
         bool can_ignore_down_node = false;
-        return submit_migration_task(src, can_ignore_down_node);
+        co_await submit_migration_task(src, can_ignore_down_node);
+        mlogger.info("Finished pulling schema {} from {}", schema, src);
     });
+    if (!schema_map.empty()) {
+        mlogger.info("synced schema");
+    }
 }
 
 future<column_mapping> get_column_mapping(db::system_keyspace& sys_ks, table_id table_id, table_schema_version v) {
