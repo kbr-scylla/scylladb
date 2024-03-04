@@ -3296,7 +3296,7 @@ repair_service::insert_repair_meta(
         auto& db = get_db();
         auto& cf = db.local().find_column_family(s->id());
         rlogger.trace("insert_repair_meta id {} from {} got schema for write", repair_meta_id, from);
-        return db.local().obtain_reader_permit(cf, "repair-meta", db::no_timeout, {}).then([s = std::move(s),
+        return db.local().obtain_reader_permit(cf, "repair-meta", db::timeout_clock::now() + std::chrono::minutes{2}, {}).then([s = std::move(s),
                 &cf,
                 this,
                 from,
