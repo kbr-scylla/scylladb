@@ -3295,7 +3295,7 @@ repair_service::insert_repair_meta(
             compaction_time] (schema_ptr s) {
         auto& db = get_db();
         auto& cf = db.local().find_column_family(s->id());
-        return db.local().obtain_reader_permit(cf, "repair-meta", db::no_timeout, {}).then([s = std::move(s),
+        return db.local().obtain_reader_permit(cf, "repair-meta", db::timeout_clock::now() + std::chrono::seconds{10}, {}).then([s = std::move(s),
                 &cf,
                 this,
                 from,

@@ -121,7 +121,7 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
 # Scylla refuses to boot.
 SCYLLA_CMDLINE_OPTIONS = [
     '--smp', '2',
-    '-m', '1G',
+    #'-m', '1G',
     '--collectd', '0',
     '--overprovisioned',
     '--max-networking-io-control-blocks', '1000',
