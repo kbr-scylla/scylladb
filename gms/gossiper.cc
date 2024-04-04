@@ -165,8 +165,8 @@ void gossiper::do_sort(utils::chunked_vector<gossip_digest>& g_digest_list) cons
 // Depends on
 // - no external dependency
 future<> gossiper::handle_syn_msg(msg_addr from, gossip_digest_syn syn_msg) {
-    logger.trace("handle_syn_msg():from={},cluster_name:peer={},local={},group0_id:peer={},local={},partitioner_name:peer={},local={}",
-        from, syn_msg.cluster_id(), get_cluster_name(), syn_msg.group0_id(), get_group0_id(), syn_msg.partioner(), get_partitioner_name());
+    logger.info("handle_syn_msg():from={},cluster_name:peer={},local={},group0_id:peer={},local={},partitioner_name:peer={},local={},syn_msg={}",
+        from, syn_msg.cluster_id(), get_cluster_name(), syn_msg.group0_id(), get_group0_id(), syn_msg.partioner(), get_partitioner_name(), syn_msg);
     if (!this->is_enabled()) {
         co_return;
     }
@@ -274,7 +274,7 @@ static bool should_count_as_msg_processing(const std::map<inet_address, endpoint
 // - on_join callbacks
 // - on_alive
 future<> gossiper::handle_ack_msg(msg_addr id, gossip_digest_ack ack_msg) {
-    logger.trace("handle_ack_msg():from={},msg={}", id, ack_msg);
+    logger.info("handle_ack_msg():from={},msg={}", id, ack_msg);
 
     if (!this->is_enabled() && !this->is_in_shadow_round()) {
         co_return;
@@ -387,7 +387,7 @@ future<> gossiper::do_send_ack2_msg(msg_addr from, utils::chunked_vector<gossip_
 // - on_join callbacks
 // - on_alive callbacks
 future<> gossiper::handle_ack2_msg(msg_addr from, gossip_digest_ack2 msg) {
-    logger.trace("handle_ack2_msg():msg={}", msg);
+    logger.info("handle_ack2_msg():from={},msg={}", from, msg);
     if (!is_enabled()) {
         co_return;
     }
@@ -592,6 +592,7 @@ future<> gossiper::do_apply_state_locally(gms::inet_address node, endpoint_state
                 auto remote_max_version = this->get_max_endpoint_state_version(remote_state);
                 if (remote_max_version > local_max_version) {
                     // apply states, but do not notify since there is no major change
+                    logger.info("apply_new_states node {} remote {} > local {}, remote_state {} local_state {}", node, remote_max_version, local_max_version, remote_state, local_state);
                     co_await this->apply_new_states(node, std::move(local_state), remote_state, permit.id());
                 } else {
                     logger.debug("Ignoring remote version {} <= {} for {}", remote_max_version, local_max_version, node);
@@ -2218,6 +2219,8 @@ future<> gossiper::add_local_application_state(application_state_map states) {
                 // Add to local application state
                 local_state.add_application_state(state, value);
             }
+
+            logger.info("local_state after add_local_app_state({}): {}", states, local_state);
 
             // It is OK to replicate the new endpoint_state
             // after all application states were modified as a batch.
