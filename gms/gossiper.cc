@@ -1298,6 +1298,9 @@ future<> gossiper::replicate(inet_address ep, endpoint_state es, permit_id pid) 
             });
         }
      });
+
+    co_await sleep_abortable(std::chrono::milliseconds{1000});
+
     // Second pass: set replicated endpoint_state on all shards
     // Must not throw
     try {
