@@ -398,7 +398,9 @@ future<> view_update_generator::generate_and_propagate_view_updates(const replic
     while (true) {
         std::optional<utils::chunked_vector<frozen_mutation_and_schema>> updates;
         try {
+            co_await seastar::sleep(std::chrono::milliseconds{100});
             updates = co_await builder.build_some();
+            co_await seastar::sleep(std::chrono::milliseconds{100});
         } catch (...) {
             err = std::current_exception();
             break;

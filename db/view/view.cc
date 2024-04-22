@@ -1714,7 +1714,8 @@ future<> view_update_generator::mutate_MV(
         wait_for_all_updates wait_for_all)
 {
     auto base_ermp = base->table().get_effective_replication_map();
-    static constexpr size_t max_concurrent_updates = 128;
+    static constexpr size_t max_concurrent_updates = 2;
+    co_await seastar::sleep(std::chrono::milliseconds{100});
     co_await max_concurrent_for_each(view_updates, max_concurrent_updates,
             [this, base_token, &stats, &cf_stats, tr_state, &pending_view_updates, allow_hints, wait_for_all, base_ermp] (frozen_mutation_and_schema mut) mutable -> future<> {
         auto view_token = dht::get_token(*mut.s, mut.fm.key());

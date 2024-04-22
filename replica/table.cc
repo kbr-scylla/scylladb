@@ -3134,7 +3134,9 @@ future<row_locker::lock_holder> table::do_push_view_replica_updates(shared_ptr<d
     if (views.empty()) {
         co_return row_locker::lock_holder();
     }
+    co_await seastar::sleep(std::chrono::milliseconds{100});
     auto cr_ranges = co_await db::view::calculate_affected_clustering_ranges(gen->get_db().as_data_dictionary(), *base, m.decorated_key(), m.partition(), views);
+    co_await seastar::sleep(std::chrono::milliseconds{100});
     const bool need_regular = !cr_ranges.empty();
     const bool need_static = db::view::needs_static_row(m.partition(), views);
     if (!need_regular && !need_static) {
