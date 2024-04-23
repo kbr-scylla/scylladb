@@ -218,6 +218,7 @@ class mutation_by_size_splitter {
         const auto fragment_size = fragment.memory_usage(*_schema);
         if (_state->size && _state->size + _state->empty_partition_size + fragment_size > _max_size) {
             _target.emplace_back(_state->builder.flush());
+            mlog.info("--- flushed {}", _target.back());
             // We could end up with an empty mutation if we consumed a range_tombstone_change
             // and the next fragment exceeds the limit. The tombstone range may not have been
             // closed yet and range_tombstone will not be created.
@@ -243,20 +244,25 @@ public:
         _state->empty_partition_size = _state->builder.consume_new_partition(dk).memory_usage(*_schema);
     }
     void consume(tombstone t) {
+        mlog.info("--- consuming tomb {}", t);
         _state->builder.consume(t);
     }
     stop_iteration consume(static_row&& sr) {
+        mlog.info("--- consuming {}", static_row::printer(*_schema, sr));
         return consume_fragment(std::move(sr));
     }
     stop_iteration consume(clustering_row&& cr) {
+        mlog.info("--- consuming {}", clustering_row::printer(*_schema, cr));
         return consume_fragment(std::move(cr));
     }
     stop_iteration consume(range_tombstone_change&& rtc) {
+        mlog.info("--- consuming rtc {}", rtc);
         return consume_fragment(std::move(rtc));
     }
     stop_iteration consume_end_of_partition() {
         _state->builder.consume_end_of_partition();
         if (auto mut_opt = _state->builder.consume_end_of_stream(); mut_opt) {
+            mlog.info("--- end of partition {}", mut_opt);
             // This final mutation could be empty if the last consumed fragment was a range_tombstone_change
             // with no timestamp (i.e. a closing rtc), but a range_tombstone ending at this position
             // was already emitted in the previous mutation (because the previous mutation was flushed

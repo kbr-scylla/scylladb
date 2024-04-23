@@ -1154,6 +1154,7 @@ SEASTAR_THREAD_TEST_CASE(test_split_mutations) {
         auto& mut_gen = (i & 1) == 0 ? mut_gen1 : mut_gen2;
         auto s = mut_gen.schema();
         auto mut = mut_gen();
+        testlog.info("--- mut: {}", mut);
         const auto mut_size = mut.memory_usage(*s);
         for (const auto frac: fracs) {
             const auto max_size = size_t(double(mut_size) * frac);
@@ -1162,6 +1163,10 @@ SEASTAR_THREAD_TEST_CASE(test_split_mutations) {
             }
             std::vector<mutation> splitted;
             split_mutation(mut, splitted, max_size / 2).get();
+            testlog.info("--- frac {} mut_size {} max_size / 2 {}", frac, mut_size, max_size / 2);
+            for (auto& m: splitted) {
+                testlog.info("--- split mut: {}", m);
+            }
             BOOST_REQUIRE(!splitted.empty());
             for (const auto& m: splitted) {
                 BOOST_REQUIRE_EQUAL(m.schema(), s);
