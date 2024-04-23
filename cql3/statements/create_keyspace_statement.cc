@@ -267,13 +267,12 @@ std::vector<sstring> check_against_restricted_replication_strategies(
 future<::shared_ptr<messages::result_message>>
 create_keyspace_statement::execute(query_processor& qp, service::query_state& state, const query_options& options, std::optional<service::group0_guard> guard) const {
     std::vector<sstring> warnings = check_against_restricted_replication_strategies(qp, keyspace(), *_attrs, qp.get_cql_stats());
-        return schema_altering_statement::execute(qp, state, options, std::move(guard)).then([warnings = std::move(warnings)] (::shared_ptr<messages::result_message> msg) {
-        for (const auto& warning : warnings) {
-            msg->add_warning(warning);
-            mylogger.warn("{}", warning);
-        }
-        return msg;
-    });
+    auto msg = co_await schema_altering_statement::execute(qp, state, options, std::move(guard));
+    for (const auto& warning : warnings) {
+        msg->add_warning(warning);
+        mylogger.warn("{}", warning);
+    }
+    co_return std::move(msg);
 }
 
 lw_shared_ptr<data_dictionary::keyspace_metadata> create_keyspace_statement::get_keyspace_metadata(const locator::token_metadata& tm, const gms::feature_service& feat) {
