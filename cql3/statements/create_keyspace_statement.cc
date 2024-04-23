@@ -272,6 +272,9 @@ create_keyspace_statement::execute(query_processor& qp, service::query_state& st
         msg->add_warning(warning);
         mylogger.warn("{}", warning);
     }
+    mylogger.info("sleep before returning create keyspace message");
+    co_await seastar::sleep(std::chrono::seconds{2});
+    mylogger.info("return create keyspace message");
     co_return std::move(msg);
 }
 
