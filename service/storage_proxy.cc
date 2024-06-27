@@ -3946,7 +3946,7 @@ future<> storage_proxy::send_to_endpoint(
     if (type == db::write_type::VIEW) {
         // View updates have a near-infinite timeout to avoid incurring the extra work of writing hints
         // and to apply backpressure.
-        timeout = clock_type::now() + 5min;
+        timeout = clock_type::now() + 10s;
     }
     return mutate_prepare(std::array{std::move(m)}, cl, type, /* does view building should hold a real permit */ empty_service_permit(),
             [this, tr_state, erm = std::move(ermp), target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats, cancellable] (

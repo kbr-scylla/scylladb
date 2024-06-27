@@ -1659,7 +1659,18 @@ get_view_natural_endpoint(
         return {};
     }
     auto replica = view_endpoints[base_it - base_endpoints.begin()];
-    return view_topology.get_node(replica).endpoint();
+    auto ret = view_topology.get_node(replica).endpoint();
+    if (ret == gms::inet_address{}) {
+        vlogger.error("base replicas for token {}: {}, view replicas for token {}: {}, index {}, no IP", base_token, base_endpoints, view_token, view_endpoints, base_it - base_endpoints.begin());
+        auto base_node = topology.find_node(replica);
+        if (base_node) {
+            vlogger.info("{} present in base, IP: {}", replica, base_node->endpoint());
+        } else {
+            vlogger.info("{} not present in base", replica);
+        }
+        assert(false);
+    }
+    return ret;
 }
 
 static future<> apply_to_remote_endpoints(service::storage_proxy& proxy, locator::effective_replication_map_ptr ermp,
