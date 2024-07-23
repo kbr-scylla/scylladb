@@ -963,6 +963,9 @@ future<> migration_manager::announce_without_raft(std::vector<mutation> schema, 
                 _messaging.knows_version(endpoint) &&
                 _messaging.get_raw_version(endpoint) == netw::messaging_service::current_version;
         });
+        mlogger.info("--- Sleeping before announcing schema change to {}", live_members);
+        co_await seastar::sleep(std::chrono::milliseconds{500});
+        mlogger.info("--- Done sleeping before announcing schema change to {}", live_members);
         co_await coroutine::parallel_for_each(live_members.begin(), live_members.end(),
             std::bind(std::mem_fn(&migration_manager::push_schema_mutation), this, std::placeholders::_1, schema));
     } catch (...) {
@@ -1146,6 +1149,7 @@ future<schema_ptr> migration_manager::get_schema_for_read(table_schema_version v
 }
 
 future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version v, netw::messaging_service::msg_addr dst, netw::messaging_service& ms, abort_source* as) {
+    mlogger.info("--- get schema for write {}", v);
     if (_as.abort_requested()) {
         co_return coroutine::exception(std::make_exception_ptr(abort_requested_exception()));
     }
@@ -1161,7 +1165,14 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     }
 
     if (!s) {
-        s = co_await get_schema_definition(v, dst, ms, _storage_proxy);
+        mlogger.info("--- get schema definition {} from {}", v, dst);
+        try {
+            s = co_await get_schema_definition(v, dst, ms, _storage_proxy);
+        } catch (...) {
+            mlogger.info("--- failed to get schema definition {} from {}: {}", v, dst, std::current_exception());
+            throw;
+        }
+        mlogger.info("--- got schema definition {} from {}", v, dst);
     }
 
     if (!s->is_synced()) {
@@ -1170,7 +1181,9 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
             mlogger.trace("Mark schema {} as synced", v);
             co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
         } else {
+            mlogger.info("--- maybe sync {}", v);
             co_await maybe_sync(s, dst);
+            mlogger.info("--- done maybe sync {}", v);
         }
     }
     // here s is guaranteed to be valid and synced
@@ -1227,6 +1240,9 @@ future<> migration_manager::on_join(gms::inet_address endpoint, gms::endpoint_st
 
 future<> migration_manager::on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value, gms::permit_id) {
     if (state == gms::application_state::SCHEMA) {
+        mlogger.info("--- Sleeping before handling SCHEMA from {}", endpoint);
+        return seastar::sleep(std::chrono::milliseconds{500}).then([this, endpoint] {
+        mlogger.info("--- Done sleeping before handling SCHEMA from {}", endpoint);
         auto ep_state = _gossiper.get_endpoint_state_ptr(endpoint);
         if (!ep_state || _gossiper.is_dead_state(*ep_state)) {
             mlogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
@@ -1235,6 +1251,8 @@ future<> migration_manager::on_change(gms::inet_address endpoint, gms::applicati
         if (_storage_proxy.get_token_metadata_ptr()->is_normal_token_owner(endpoint)) {
             schedule_schema_pull(endpoint, *ep_state);
         }
+            return make_ready_future();
+        });
     }
     return make_ready_future();
 }
