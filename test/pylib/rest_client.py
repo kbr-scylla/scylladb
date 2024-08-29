@@ -57,7 +57,7 @@ class RESTClient(metaclass=ABCMeta):
         port_str = f":{port}" if port else ""
         assert host is not None or hasattr(self, "default_host"), "_fetch: missing host for " \
                 "{method} {resource}"
-        host_str = host if host is not None else self.default_host
+        host_str = "[" + host + "]" if host is not None else self.default_host
         uri = self.uri_scheme + "://" + host_str + port_str + resource
         logging.debug(f"RESTClient fetching {method} {uri}")
 

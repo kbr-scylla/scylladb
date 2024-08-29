@@ -90,6 +90,7 @@ def make_scylla_conf(mode: str, workdir: pathlib.Path, host_addr: str, seed_addr
                 'seeds': '{}'.format(','.join(seed_addrs))
                 }]
             }],
+        'enable_ipv6_dns_lookup': True,
 
         'developer_mode': True,
 

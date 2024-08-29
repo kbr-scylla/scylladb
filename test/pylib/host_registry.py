@@ -70,7 +70,7 @@ class HostRegistry:
 
         async def create_host() -> Host:
             self.next_host_id += 1
-            return Host(self.subnet.format(self.next_host_id))
+            return Host(f'::{self.next_host_id}')
 
         async def destroy_host(h: Host) -> None:
             # Doesn't matter, we never return hosts to the pool as 'dirty'.
