@@ -178,7 +178,7 @@ def main() -> None:
 
     run_git_command(["push", "-u", remote, new_branch])
 
-    new_pr = create_pr(repo, base_branch, new_branch, new_title, new_description, token)
+    new_pr = create_pr(repo, base_branch, f"{author}:{new_branch}", new_title, new_description, token)
     logging.info(f"New PR created: {new_pr['html_url']}. Closing old PR...")
 
     close_pr(repo, old_pr_number, token)
